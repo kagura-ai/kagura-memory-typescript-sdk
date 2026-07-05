@@ -410,6 +410,23 @@ describe("createContext quota pre-check", () => {
     );
   });
 
+  it("treats a present can_create:null as 'cannot create' (matches Python not-get)", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: null, count: 5, limit: 5 };
+    const client = makeClient(server);
+    await expect(client.createContext({ name: "new" })).rejects.toThrow(KaguraQuotaError);
+    // The create_context tool must NOT have been called after the quota block.
+    expect(server.requests.some((r) => (r.body?.params as { name?: string })?.name === "create_context")).toBe(false);
+  });
+
+  it("allows creation when can_create is absent (defaults to true)", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { contexts: [] }; // no can_create key
+    server.toolResults.create_context = { status: "success", id: "ctx-9" };
+    const client = makeClient(server);
+    await expect(client.createContext({ name: "ok" })).resolves.toMatchObject({ id: "ctx-9" });
+  });
+
   it("creates when allowed, defaulting is_private to true", async () => {
     const server = new FakeServer();
     server.toolResults.list_contexts = { can_create: true, contexts: [] };

@@ -838,11 +838,13 @@ export class KaguraClient {
    */
   async createContext(options: CreateContextOptions): Promise<ToolResult> {
     // Pre-check quota. Match the Python falsy check `not
-    // contexts.get("can_create", True)`: default to true when the key is
-    // absent, but treat null/0/"" (server schema drift, #183) as "cannot
-    // create" rather than falling through to a doomed create call.
+    // contexts.get("can_create", True)` exactly: `dict.get` substitutes the
+    // default ONLY when the key is absent, so a present null/0/""/false
+    // (server schema drift, #183) must pass through and be negated as
+    // "cannot create" — a nullish-coalescing `?? true` would wrongly treat
+    // a present `null` as "can create".
     const contexts = await this.listContexts();
-    const canCreate = contexts.can_create ?? true;
+    const canCreate = "can_create" in contexts ? contexts.can_create : true;
     if (!canCreate) {
       // Coerce missing/null count/limit to "?" so schema drift never
       // produces "null/null" in the message; a real 0 is preserved.
