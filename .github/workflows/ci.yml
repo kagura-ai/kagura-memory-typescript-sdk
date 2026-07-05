@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Pack and install smoke test
+        shell: bash
+        run: |
+          npm pack
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/kagura-memory-*.tgz
+          node -e "const { KaguraClient } = require('kagura-memory'); if (typeof KaguraClient !== 'function') process.exit(1);"
+          node --input-type=module -e "import { KaguraClient } from 'kagura-memory'; if (typeof KaguraClient !== 'function') process.exit(1);"
