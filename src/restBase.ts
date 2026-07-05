@@ -275,10 +275,6 @@ export class KaguraRestClient {
     // No-op by design; subclasses with real resources override.
   }
 
-  async [Symbol.asyncDispose](): Promise<void> {
-    await this.close();
-  }
-
   // -------------------------------------------------------------------
   // Request spine
   // -------------------------------------------------------------------

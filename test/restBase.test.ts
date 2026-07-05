@@ -424,7 +424,7 @@ describe("fromMcpUrl", () => {
 });
 
 describe("lifecycle", () => {
-  it("close() resolves and asyncDispose delegates to close()", async () => {
+  it("close() resolves and subclasses can override it", async () => {
     let closed = 0;
     class TrackingClient extends KaguraRestClient {
       override async close(): Promise<void> {
@@ -434,7 +434,7 @@ describe("lifecycle", () => {
     }
     const client = new TrackingClient({ apiKey: "k" });
     await client.close();
-    await client[Symbol.asyncDispose]();
+    await client.close();
     expect(closed).toBe(2);
   });
 });

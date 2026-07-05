@@ -1,6 +1,15 @@
 /** Custom errors for the Kagura Memory SDK (port of exceptions.py). */
 
 /**
+ * Subset of the standard DOM/Node `ErrorOptions`. Declared locally so the
+ * published `.d.ts` does not force consumers onto an ES2022 `lib` just to
+ * reference our error constructors.
+ */
+export interface KaguraErrorOptions {
+  cause?: unknown;
+}
+
+/**
  * Return `String(e)` when non-empty, otherwise the constructor name.
  *
  * Defensive fallback so an unmessaged error still produces a non-empty
@@ -16,7 +25,7 @@ export function excMessage(e: unknown): string {
 
 /** Base error for the Kagura SDK. */
 export class KaguraError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: KaguraErrorOptions) {
     super(message, options);
     this.name = new.target.name;
   }
@@ -35,7 +44,7 @@ export class KaguraAuthError extends KaguraError {}
 export class KaguraAuthExpiredError extends KaguraAuthError {
   readonly expiresAt: Date | null;
 
-  constructor(message: string, expiresAt: Date | null = null, options?: ErrorOptions) {
+  constructor(message: string, expiresAt: Date | null = null, options?: KaguraErrorOptions) {
     super(message, options);
     this.expiresAt = expiresAt;
   }
@@ -54,7 +63,7 @@ export class KaguraNotFoundError extends KaguraError {}
 export class KaguraRateLimitError extends KaguraError {
   readonly retryAfter: number | null;
 
-  constructor(message: string, retryAfter: number | null = null, options?: ErrorOptions) {
+  constructor(message: string, retryAfter: number | null = null, options?: KaguraErrorOptions) {
     super(message, options);
     this.retryAfter = retryAfter;
   }
@@ -70,7 +79,7 @@ export class KaguraContextError extends KaguraError {}
 export class KaguraQuotaError extends KaguraError {
   readonly retryAfter: number | null;
 
-  constructor(message: string, retryAfter: number | null = null, options?: ErrorOptions) {
+  constructor(message: string, retryAfter: number | null = null, options?: KaguraErrorOptions) {
     super(message, options);
     this.retryAfter = retryAfter;
   }
@@ -95,7 +104,7 @@ export class KaguraIntegrityError extends KaguraError {}
 export class KaguraFetchError extends KaguraError {
   readonly url: string | null;
 
-  constructor(message: string, url: string | null = null, options?: ErrorOptions) {
+  constructor(message: string, url: string | null = null, options?: KaguraErrorOptions) {
     super(message, options);
     this.url = url;
   }

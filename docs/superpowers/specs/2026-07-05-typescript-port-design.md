@@ -69,8 +69,11 @@ Out of scope for v0.1.0 (deliberate, revisit later):
    via an in-process mutex keyed by credentials path. Cross-process
    locking uses a lockfile like the Python `_filelock.py`.
 7. **Construction is synchronous** (sync fs reads for config/credentials,
-   like Python). All network methods are async. `close()` +
-   `Symbol.asyncDispose` for lifecycle ( ~ `async with`).
+   like Python). All network methods are async. Lifecycle is `close()`
+   only — `Symbol.asyncDispose`/`await using` was dropped so the published
+   `.d.ts` doesn't force consumers onto the `esnext.disposable` lib.
+   Error constructors take a local `KaguraErrorOptions` (`{cause?}`) rather
+   than the global `ErrorOptions` for the same reason (no forced ES2022 lib).
 8. **Testability**: every client accepts an optional `fetch`
    implementation in its options (default `globalThis.fetch`) — the TS
    analogue of httpx `MockTransport` used throughout the Python tests.

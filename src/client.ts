@@ -1313,8 +1313,4 @@ export class KaguraClient {
   async close(): Promise<void> {
     this.sessionId = null;
   }
-
-  async [Symbol.asyncDispose](): Promise<void> {
-    await this.close();
-  }
 }
