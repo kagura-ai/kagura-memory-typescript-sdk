@@ -138,14 +138,15 @@ export function throwForKaguraStatus(
   if (status === 401) {
     throw new KaguraAuthError("Authentication failed. Check your API key.");
   }
-  const detail = extractDetail(bodyText) || fallbackMessage || `HTTP ${status}`;
+  const detail = extractDetail(bodyText) || fallbackMessage || "";
   if (status === 429) {
     throw new KaguraRateLimitError(
-      `Rate limit exceeded (HTTP 429): ${detail}`,
+      `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       retryAfterSeconds(headers),
     );
   }
-  throw new KaguraConnectionError(`HTTP ${status}: ${detail}`);
+  // Avoid a doubled "HTTP 500: HTTP 500" when the body carries no detail.
+  throw new KaguraConnectionError(detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`);
 }
 
 // Plain-HTTP is permitted only for genuine loopback hosts. The host token must

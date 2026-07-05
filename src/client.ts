@@ -837,9 +837,13 @@ export class KaguraClient {
    * @throws KaguraQuotaError when the workspace context limit is reached.
    */
   async createContext(options: CreateContextOptions): Promise<ToolResult> {
-    // Pre-check quota
+    // Pre-check quota. Match the Python falsy check `not
+    // contexts.get("can_create", True)`: default to true when the key is
+    // absent, but treat null/0/"" (server schema drift, #183) as "cannot
+    // create" rather than falling through to a doomed create call.
     const contexts = await this.listContexts();
-    if (contexts.can_create === false) {
+    const canCreate = contexts.can_create ?? true;
+    if (!canCreate) {
       // Coerce missing/null count/limit to "?" so schema drift never
       // produces "null/null" in the message; a real 0 is preserved.
       const count = contexts.count ?? null;
@@ -1127,10 +1131,15 @@ export class KaguraClient {
    */
   async checkServerVersion(): Promise<ServerInfo> {
     const info = await this.getServerInfo();
-    const parts = info.version.split(".").slice(0, 3).map(Number);
-    if (parts.length === 0 || parts.some((p) => Number.isNaN(p))) {
+    const components = info.version.split(".").slice(0, 3);
+    // Match Python's `int(x)`: a non-integer component (empty string,
+    // "0x1", "1e2") makes the parse fail and we return without warning.
+    // Number("") is 0 and Number("1e2") is 100, so guard with a strict
+    // integer-digit test rather than relying on NaN.
+    if (components.length === 0 || !components.every((c) => /^\d+$/.test(c))) {
       return info;
     }
+    const parts = components.map(Number);
     for (let i = 0; i < MIN_SERVER_VERSION_TUPLE.length; i++) {
       const server = parts[i] ?? 0;
       const min = MIN_SERVER_VERSION_TUPLE[i] ?? 0;
@@ -1239,8 +1248,15 @@ export class KaguraClient {
       context_id: options.contextId,
       limit: options.limit ?? 10,
     });
+    // Match Python's `result["reports"]`: a missing/malformed key is a
+    // contract violation, surfaced loudly rather than as an empty success.
     const reports = result.reports;
-    return Array.isArray(reports) ? (reports as unknown as SleepReport[]) : [];
+    if (!Array.isArray(reports)) {
+      throw new KaguraConnectionError(
+        "Unexpected get_sleep_history response: missing 'reports' array.",
+      );
+    }
+    return reports as unknown as SleepReport[];
   }
 
   /**
@@ -1257,9 +1273,16 @@ export class KaguraClient {
     });
     // The MCP tool wraps the report fields under a "report" key; flatten
     // so SleepReportDetail reads naturally without an extra `.report.`.
-    const report = (result.report ?? {}) as Record<string, unknown>;
+    // Match Python's `result["report"]`: a missing envelope is a contract
+    // violation, surfaced loudly rather than as a partial object.
+    const report = result.report;
+    if (typeof report !== "object" || report === null || Array.isArray(report)) {
+      throw new KaguraConnectionError(
+        "Unexpected get_sleep_report response: missing 'report' envelope.",
+      );
+    }
     return {
-      ...report,
+      ...(report as Record<string, unknown>),
       actions: result.actions,
       action_count: result.action_count,
     } as unknown as SleepReportDetail;

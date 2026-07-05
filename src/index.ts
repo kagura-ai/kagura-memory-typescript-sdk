@@ -39,6 +39,42 @@ export {
 
 export { SDK_VERSION } from "./version.js";
 
+export {
+  DEFAULT_REST_BASE_URL,
+  KaguraRestClient,
+} from "./restBase.js";
+export type {
+  FromMcpUrlOptions,
+  HttpMethod,
+  KaguraRestClientOptions,
+} from "./restBase.js";
+
+export { FilesClient } from "./filesClient.js";
+export type { FilesClientOptions, UploadOptions } from "./filesClient.js";
+
+export {
+  ResourceClient,
+  SETUP_OAUTH_NOT_SUPPORTED_MSG,
+} from "./resourceClient.js";
+export type {
+  CreateTokenOptions,
+  ListResourceEventsOptions,
+  ListTokensOptions,
+  ResourceEventInput,
+  ResourceSetupOptions,
+  UpdateTokenOptions,
+} from "./resourceClient.js";
+
+export {
+  VALID_ASSIGNABLE_ROLES,
+  VALID_INVITE_EXPIRES,
+  WorkspaceClient,
+} from "./workspaceClient.js";
+export type {
+  CreateInvitationOptions,
+  ListInvitationsOptions,
+} from "./workspaceClient.js";
+
 export { DEFAULT_MCP_URL, resolveAuth } from "./auth/resolve.js";
 export type { ResolveAuthOptions } from "./auth/resolve.js";
 export type {
