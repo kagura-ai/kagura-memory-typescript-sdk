@@ -102,8 +102,8 @@ models). Not yet ported: the `kagura` CLI, `KaguraAgent` (LLM-driven
 memory), the document-ingestion pipeline (`FileIngestor`), and the
 zero-knowledge secrets client. Use the Python SDK for those; both SDKs
 share the same credential files and server APIs. See
-`docs/superpowers/specs/2026-07-05-typescript-port-design.md` for the
-scope decisions.
+[`docs/design/2026-07-05-typescript-port-design.md`](docs/design/2026-07-05-typescript-port-design.md)
+for the scope decisions.
 
 ## Development
 

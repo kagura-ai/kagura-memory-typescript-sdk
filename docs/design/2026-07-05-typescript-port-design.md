@@ -1,11 +1,10 @@
 # kagura-memory TypeScript SDK — v0.1.0 port design
 
 Date: 2026-07-05
-Source: `~/works/kagura-memory-python-sdk` (kagura-memory v0.36.0, ~18k lines)
+Source: [kagura-memory-python-sdk](https://github.com/kagura-ai/kagura-memory-python-sdk) (kagura-memory v0.36.0, ~18k lines)
 Goal: TypeScript port of the SDK, installable via `npm install kagura-memory`.
 
-Authored autonomously under a /goal directive; open questions are resolved
-here as explicit scope decisions rather than user Q&A.
+Open questions are resolved here as explicit scope decisions.
 
 ## Scope — v0.1.0 (this port)
 

@@ -14,7 +14,7 @@
     "vector-search"
   ],
   "license": "MIT",
-  "author": "Fumikazu Kiyota <dev@kagura-ai.com>",
+  "author": "Kagura AI <dev@kagura-ai.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kagura-ai/kagura-memory-typescript-sdk.git"
