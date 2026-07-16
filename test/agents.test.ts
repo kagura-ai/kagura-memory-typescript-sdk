@@ -198,3 +198,161 @@ describe("deleteAgent", () => {
     await expect(client.deleteAgent(AGENT.id)).rejects.toThrow(KaguraNotFoundError);
   });
 });
+
+const CONTEXT_ID = "9c8b7a6d-5e4f-4321-a0b9-c8d7e6f5a4b3";
+
+const BINDING = {
+  id: "1b2c3d4e-5f60-4718-92a3-b4c5d6e7f809",
+  agent_id: AGENT.id,
+  context_id: CONTEXT_ID,
+  can_read: true,
+  write_policy: "deny",
+  is_default: false,
+  allowed_memory_types: null,
+  allowed_source_types: null,
+  created_by: "user-1",
+  created_at: "2026-07-16T00:00:00Z",
+  updated_at: "2026-07-16T00:00:00Z",
+};
+
+describe("bindAgentContext", () => {
+  it("sends only the required ids by default and returns the binding", async () => {
+    const server = new FakeServer();
+    server.toolResults.bind_agent_context = { status: "success", binding: BINDING };
+    const client = makeClient(server);
+
+    const binding = await client.bindAgentContext({
+      agentId: AGENT.id,
+      contextId: CONTEXT_ID,
+    });
+
+    expect(server.toolCallArgs()).toEqual({ agent_id: AGENT.id, context_id: CONTEXT_ID });
+    expect(binding.id).toBe(BINDING.id);
+    expect(binding.write_policy).toBe("deny");
+  });
+
+  it("sends the scope trio when provided, including canRead=false", async () => {
+    const server = new FakeServer();
+    server.toolResults.bind_agent_context = { status: "success", binding: BINDING };
+    const client = makeClient(server);
+
+    await client.bindAgentContext({
+      agentId: AGENT.id,
+      contextId: CONTEXT_ID,
+      canRead: false,
+      writePolicy: "direct",
+      isDefault: true,
+    });
+
+    expect(server.toolCallArgs()).toEqual({
+      agent_id: AGENT.id,
+      context_id: CONTEXT_ID,
+      can_read: false,
+      write_policy: "direct",
+      is_default: true,
+    });
+  });
+
+  it("throws KaguraConnectionError when the binding envelope is missing", async () => {
+    const server = new FakeServer();
+    server.toolResults.bind_agent_context = { status: "success" };
+    const client = makeClient(server);
+
+    await expect(
+      client.bindAgentContext({ agentId: AGENT.id, contextId: CONTEXT_ID }),
+    ).rejects.toThrow(KaguraConnectionError);
+  });
+});
+
+describe("listAgentBindings", () => {
+  it("passes agent_id and returns the bindings array", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_agent_bindings = { status: "success", bindings: [BINDING] };
+    const client = makeClient(server);
+
+    const bindings = await client.listAgentBindings(AGENT.id);
+
+    expect(server.toolCallArgs()).toEqual({ agent_id: AGENT.id });
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]!.context_id).toBe(CONTEXT_ID);
+  });
+
+  it("returns [] when the bindings key is missing", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_agent_bindings = { status: "success" };
+    const client = makeClient(server);
+
+    expect(await client.listAgentBindings(AGENT.id)).toEqual([]);
+  });
+});
+
+describe("updateAgentBinding", () => {
+  it("sends only the provided scope fields", async () => {
+    const server = new FakeServer();
+    server.toolResults.update_agent_binding = {
+      status: "success",
+      binding: { ...BINDING, is_default: true },
+    };
+    const client = makeClient(server);
+
+    const binding = await client.updateAgentBinding({
+      agentId: AGENT.id,
+      bindingId: BINDING.id,
+      isDefault: true,
+    });
+
+    expect(server.toolCallArgs()).toEqual({
+      agent_id: AGENT.id,
+      binding_id: BINDING.id,
+      is_default: true,
+    });
+    expect(binding.is_default).toBe(true);
+  });
+
+  it("throws when no scope field is provided", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+
+    await expect(
+      client.updateAgentBinding({ agentId: AGENT.id, bindingId: BINDING.id }),
+    ).rejects.toThrow(/at least one of/);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("maps binding_not_found to KaguraNotFoundError", async () => {
+    const server = new FakeServer();
+    server.toolResults.update_agent_binding = {
+      status: "error",
+      error: "binding_not_found",
+      message: "Binding not found",
+    };
+    const client = makeClient(server);
+
+    await expect(
+      client.updateAgentBinding({ agentId: AGENT.id, bindingId: BINDING.id, canRead: false }),
+    ).rejects.toThrow(KaguraNotFoundError);
+  });
+});
+
+describe("unbindAgentContext", () => {
+  it("returns true when the server confirms without a deleted key", async () => {
+    const server = new FakeServer();
+    server.toolResults.unbind_agent_context = { status: "success" };
+    const client = makeClient(server);
+
+    expect(
+      await client.unbindAgentContext({ agentId: AGENT.id, bindingId: BINDING.id }),
+    ).toBe(true);
+    expect(server.toolCallArgs()).toEqual({ agent_id: AGENT.id, binding_id: BINDING.id });
+  });
+
+  it("passes through an explicit deleted flag", async () => {
+    const server = new FakeServer();
+    server.toolResults.unbind_agent_context = { status: "success", deleted: false };
+    const client = makeClient(server);
+
+    expect(
+      await client.unbindAgentContext({ agentId: AGENT.id, bindingId: BINDING.id }),
+    ).toBe(false);
+  });
+});

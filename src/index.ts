@@ -4,6 +4,8 @@ export { KaguraClient, MIN_SERVER_VERSION } from "./client.js";
 export type {
   AgentEnforcementMode,
   AgentStatus,
+  AgentWritePolicy,
+  BindAgentContextOptions,
   CreateContextOptions,
   DeliveryMode,
   KaguraClientOptions,
@@ -16,6 +18,7 @@ export type {
   SetupResourceOptions,
   SourceType,
   ToolResult,
+  UpdateAgentBindingOptions,
   UpdateAgentOptions,
   UpdateContextOptions,
   UpdateMemoryOptions,

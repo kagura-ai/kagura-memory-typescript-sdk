@@ -12,6 +12,7 @@ import {
 import { baseUrlFromMcp, SDK_VERSION, throwForKaguraStatus, validateHttpsUrl } from "./http.js";
 import type {
   Agent,
+  AgentBinding,
   ContextInfo,
   DuplicatesResponse,
   Edge,
@@ -51,6 +52,11 @@ export type SourceType = "file" | "url" | "vault" | "api" | "manual";
 export type AgentStatus = "active" | "suspended" | "retired";
 /** Binding enforcement ramp: `enforce` denies, `shadow` only logs. */
 export type AgentEnforcementMode = "shadow" | "enforce";
+/**
+ * Per-binding write gate: `"deny"` (server default) or `"direct"`.
+ * `"staged"` is reserved for a later server phase.
+ */
+export type AgentWritePolicy = "deny" | "direct";
 
 export interface KaguraClientOptions {
   /** Explicit Kagura API key. When omitted, the resolution chain runs. */
@@ -246,6 +252,34 @@ export interface UpdateAgentOptions {
    * are only logged).
    */
   enforcementMode?: AgentEnforcementMode;
+}
+
+export interface BindAgentContextOptions {
+  agentId: string;
+  /** Context to bind (must belong to the agent's workspace). */
+  contextId: string;
+  /** Whether the agent may read this context (server default: true). */
+  canRead?: boolean;
+  /** Write gate (server default: `"deny"`). */
+  writePolicy?: AgentWritePolicy;
+  /** Mark as the agent's bootstrap default binding (max one per agent). */
+  isDefault?: boolean;
+  // allowedMemoryTypes / allowedSourceTypes are RESERVED (memory-cloud
+  // #1286): the server accepts only null until per-memory enforcement
+  // ships. They are deliberately not declared yet — adding them later to
+  // this options object is non-breaking.
+}
+
+export interface UpdateAgentBindingOptions {
+  agentId: string;
+  /** Binding UUID from {@link KaguraClient.listAgentBindings}. */
+  bindingId: string;
+  /** New read gate. */
+  canRead?: boolean;
+  /** New write gate — `"deny"` | `"direct"`. */
+  writePolicy?: AgentWritePolicy;
+  /** New bootstrap-default flag (max one per agent). */
+  isDefault?: boolean;
 }
 
 export interface UpdateSearchConfigOptions {
@@ -527,7 +561,8 @@ export class KaguraClient {
       code === "report_not_found" ||
       code === "context_not_found" ||
       code === "memory_not_found" ||
-      code === "agent_not_found"
+      code === "agent_not_found" ||
+      code === "binding_not_found"
     ) {
       throw new KaguraNotFoundError(`${operation}: ${message}`);
     }
@@ -868,6 +903,115 @@ export class KaguraClient {
    */
   async deleteAgent(agentId: string): Promise<boolean> {
     const result = await this.callToolChecked("delete_agent", { agent_id: agentId });
+    return result.deleted === undefined ? true : Boolean(result.deleted);
+  }
+
+  /**
+   * Unwrap the `binding` envelope the binding tools return.
+   *
+   * Same contract-violation stance as {@link expectAgentEnvelope}.
+   */
+  private static expectBindingEnvelope(result: ToolResult, operation: string): AgentBinding {
+    const binding = result.binding;
+    if (typeof binding !== "object" || binding === null || Array.isArray(binding)) {
+      throw new KaguraConnectionError(
+        `Unexpected ${operation} response: missing 'binding' envelope.`,
+      );
+    }
+    return binding as unknown as AgentBinding;
+  }
+
+  /**
+   * Build the omit-when-undefined binding scope trio shared by
+   * {@link bindAgentContext} and {@link updateAgentBinding} — the port of
+   * the Python SDK's `_binding_scope_payload`. When memory-cloud #1286
+   * ships the reserved `allowed_memory_types`/`allowed_source_types`
+   * filters, this is the ONE place to add them.
+   */
+  private static bindingScopeArgs(options: {
+    canRead?: boolean;
+    writePolicy?: AgentWritePolicy;
+    isDefault?: boolean;
+  }): Record<string, unknown> {
+    const args: Record<string, unknown> = {};
+    if (options.canRead !== undefined) {
+      args.can_read = options.canRead;
+    }
+    if (options.writePolicy !== undefined) {
+      args.write_policy = options.writePolicy;
+    }
+    if (options.isDefault !== undefined) {
+      args.is_default = options.isDefault;
+    }
+    return args;
+  }
+
+  /**
+   * Bind an agent to a context — purely subtractive scoping.
+   *
+   * Calls the `bind_agent_context` MCP tool (server v0.49.0+, RFC-0002
+   * P0-2, memory-cloud #1275) — owner/admin only. The effective
+   * permission for an agent-bound request is the existing RBAC decision
+   * ∩ binding. Under `enforcement_mode="enforce"`, contexts WITHOUT a
+   * binding row are denied for the agent (default-deny); under
+   * `"shadow"`, violations are only logged.
+   *
+   * @throws KaguraNotFoundError when the agent or context is not found.
+   * @throws KaguraError on duplicate binding or other server-side error.
+   */
+  async bindAgentContext(options: BindAgentContextOptions): Promise<AgentBinding> {
+    const result = await this.callToolChecked("bind_agent_context", {
+      agent_id: options.agentId,
+      context_id: options.contextId,
+      ...KaguraClient.bindingScopeArgs(options),
+    });
+    return KaguraClient.expectBindingEnvelope(result, "bind_agent_context");
+  }
+
+  /** List an agent's context bindings (owner/admin only). */
+  async listAgentBindings(agentId: string): Promise<AgentBinding[]> {
+    const result = await this.callToolChecked("list_agent_bindings", { agent_id: agentId });
+    const bindings = result.bindings;
+    return Array.isArray(bindings) ? (bindings as unknown as AgentBinding[]) : [];
+  }
+
+  /**
+   * Update a binding's scoping fields (owner/admin only).
+   *
+   * `context_id` is immutable — {@link unbindAgentContext} and re-
+   * {@link bindAgentContext} to re-target. Changes are audited with
+   * old→new values.
+   *
+   * @throws Error when no scoping field is provided (the call would be
+   *   an empty no-op request).
+   */
+  async updateAgentBinding(options: UpdateAgentBindingOptions): Promise<AgentBinding> {
+    const changes = KaguraClient.bindingScopeArgs(options);
+    if (Object.keys(changes).length === 0) {
+      throw new Error(
+        "updateAgentBinding requires at least one of canRead, writePolicy, or isDefault",
+      );
+    }
+    const result = await this.callToolChecked("update_agent_binding", {
+      agent_id: options.agentId,
+      binding_id: options.bindingId,
+      ...changes,
+    });
+    return KaguraClient.expectBindingEnvelope(result, "update_agent_binding");
+  }
+
+  /**
+   * Delete a binding — the agent loses that context (owner/admin only).
+   * Returns true once the server confirms deletion.
+   *
+   * Under `enforcement_mode="enforce"` the agent's requests against the
+   * unbound context are denied afterwards (uniform `context_not_found`).
+   */
+  async unbindAgentContext(options: { agentId: string; bindingId: string }): Promise<boolean> {
+    const result = await this.callToolChecked("unbind_agent_context", {
+      agent_id: options.agentId,
+      binding_id: options.bindingId,
+    });
     return result.deleted === undefined ? true : Boolean(result.deleted);
   }
 

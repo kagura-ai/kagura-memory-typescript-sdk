@@ -991,3 +991,34 @@ export interface Agent {
   /** ISO 8601 datetime string. */
   updated_at: string;
 }
+
+/**
+ * An agent→context binding row (memory-cloud #1275).
+ *
+ * Bindings are **purely subtractive scoping**: the effective permission
+ * for an agent-bound request is the existing RBAC decision ∩ binding —
+ * `can_read` gates reads, `write_policy` (`deny` | `direct`) gates
+ * writes. Under `enforcement_mode="enforce"` contexts WITHOUT a binding
+ * row are denied for the agent (default-deny); under `"shadow"`
+ * violations are only logged. `is_default` marks the agent's bootstrap
+ * default binding (max one per agent).
+ *
+ * `allowed_memory_types` / `allowed_source_types` are reserved for
+ * memory-cloud #1286 (per-memory enforcement) and arrive as `null`
+ * today.
+ */
+export interface AgentBinding {
+  id: string;
+  agent_id: string;
+  context_id: string;
+  can_read: boolean;
+  write_policy: string;
+  is_default: boolean;
+  allowed_memory_types?: string[] | null;
+  allowed_source_types?: string[] | null;
+  created_by: string;
+  /** ISO 8601 datetime string. */
+  created_at: string;
+  /** ISO 8601 datetime string. */
+  updated_at: string;
+}
