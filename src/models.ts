@@ -954,3 +954,154 @@ export interface MemberAPIKey {
   expires_at?: string | null;
   bound_context_id?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Agent control plane (server v0.49.0+, RFC-0002 P0; SDK issues #1/#2/#3)
+// ---------------------------------------------------------------------------
+
+/**
+ * A workspace-scoped Agent Registry row (memory-cloud #1274).
+ *
+ * An agent is a registry entry that anchors context bindings, agent-bound
+ * credentials, bootstrap, and audit correlation — it is a resource, NOT a
+ * principal (it never authenticates by itself).
+ *
+ * `status` (`active` | `suspended` | `retired`) is the fail-closed kill
+ * switch: suspended/retired agents cause every key bound to them to be
+ * rejected at verify time. `enforcement_mode` (`shadow` | `enforce`) is
+ * the binding enforcement ramp. Both are typed `string` (not a literal
+ * union) for forward compatibility — the server is the authority;
+ * request-side options use the closed enums.
+ */
+export interface Agent {
+  id: string;
+  workspace_id: string;
+  name: string;
+  owner_user_id: string;
+  status: string;
+  enforcement_mode: string;
+  description?: string | null;
+  framework?: string | null;
+  environment?: string | null;
+  version?: string | null;
+  /** ISO 8601 datetime string. */
+  last_seen_at?: string | null;
+  /** ISO 8601 datetime string. */
+  created_at: string;
+  /** ISO 8601 datetime string. */
+  updated_at: string;
+}
+
+/**
+ * An agent→context binding row (memory-cloud #1275).
+ *
+ * Bindings are **purely subtractive scoping**: the effective permission
+ * for an agent-bound request is the existing RBAC decision ∩ binding —
+ * `can_read` gates reads, `write_policy` (`deny` | `direct`) gates
+ * writes. Under `enforcement_mode="enforce"` contexts WITHOUT a binding
+ * row are denied for the agent (default-deny); under `"shadow"`
+ * violations are only logged. `is_default` marks the agent's bootstrap
+ * default binding (max one per agent).
+ *
+ * `allowed_memory_types` / `allowed_source_types` are reserved for
+ * memory-cloud #1286 (per-memory enforcement) and arrive as `null`
+ * today.
+ */
+export interface AgentBinding {
+  id: string;
+  agent_id: string;
+  context_id: string;
+  can_read: boolean;
+  write_policy: string;
+  is_default: boolean;
+  allowed_memory_types?: string[] | null;
+  allowed_source_types?: string[] | null;
+  created_by: string;
+  /** ISO 8601 datetime string. */
+  created_at: string;
+  /** ISO 8601 datetime string. */
+  updated_at: string;
+}
+
+/**
+ * Valid values for `getAgentBootstrap`'s `include` component selector.
+ *
+ * Mirrors the server's closed component set; the server rejects unknown
+ * names with `invalid_arguments`.
+ */
+export type AgentBootstrapComponentName = "pinned" | "recall" | "upcoming" | "state" | "policy";
+
+/**
+ * The context binding a bootstrap resolved (`agent.binding`).
+ *
+ * `is_default` is true when the context came from the agent's default
+ * binding (no explicit `context_id` was passed).
+ */
+export interface AgentBootstrapBinding {
+  context_id: string;
+  /** @default false */
+  is_default?: boolean;
+}
+
+/** Agent identity block in the bootstrap envelope. */
+export interface AgentBootstrapAgent {
+  agent_id: string;
+  name: string;
+  binding?: AgentBootstrapBinding | null;
+}
+
+/**
+ * Correlation block (RFC-0002 P0-4) — session/run/trace identifiers.
+ *
+ * `session_id` echoes the bootstrap argument when given, else the
+ * server's baggage-derived session id. `run_id`/`trace_id`/`span_id` are
+ * populated from the per-request correlation context when present.
+ */
+export interface AgentBootstrapCorrelation {
+  agent_id?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  trace_id?: string | null;
+  span_id?: string | null;
+}
+
+/**
+ * One fail-soft component payload in the bootstrap envelope.
+ *
+ * `status` is `"ok"` (payload inherited from the standalone tool),
+ * `"skipped"` (e.g. recall without a `query`, with a `reason`), or
+ * `"error"` (that component failed; the rest still return). The rest of
+ * the shape belongs to the standalone tools (`load_pinned`, `recall`,
+ * `recall_upcoming`, `get_state`) and evolves with them — hence the open
+ * index signature.
+ */
+export interface AgentBootstrapComponent {
+  status?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Composed envelope from `get_agent_bootstrap` (server v0.49.0+).
+ *
+ * One session-start call that rehydrates an agent's cognitive state by
+ * composing existing primitives. Components are **fail-soft**: a failing
+ * component reports `status="error"` under `components` while the rest
+ * still return, with the top-level `degraded` flag set.
+ *
+ * `context` reuses {@link ContextDetail} — the server emits the block
+ * byte-compatible with `get_context_info` (`search_config` is not
+ * included in bootstrap).
+ */
+export interface AgentBootstrapResponse {
+  /** @default "success" */
+  status?: string;
+  /** @default false */
+  degraded?: boolean;
+  agent: AgentBootstrapAgent;
+  context?: ContextDetail | null;
+  instructions?: string | null;
+  components?: Record<string, AgentBootstrapComponent>;
+  correlation?: AgentBootstrapCorrelation | null;
+  /** ISO 8601 datetime string. */
+  generated_at?: string | null;
+}

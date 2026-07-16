@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Agent control plane** (RFC-0002 P0, memory-cloud **v0.49.0+**;
+  [#1](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/1)/
+  [#2](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/2)/
+  [#3](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/3)):
+  - Agent Registry wrappers on `KaguraClient` — `registerAgent`,
+    `listAgents`, `getAgent`, `updateAgent` (with the `status`
+    kill-switch and `enforcementMode` ramp), `deleteAgent`
+    (owner/admin-gated; delete cascades agent-bound API keys).
+  - Subtractive context bindings — `bindAgentContext`,
+    `listAgentBindings`, `updateAgentBinding`, `unbindAgentContext`
+    (`canRead` / `writePolicy` `deny|direct` / `isDefault`;
+    `allowedMemoryTypes`/`allowedSourceTypes` reserved for
+    memory-cloud#1286).
+  - `KaguraClient.getAgentBootstrap()` — one session-start call composing
+    context guide + pinned + trusted-only recall + upcoming time memories
+    + agent state, fail-soft per component with a `degraded` flag.
+  - `AgentsClient` — REST bootstrap fallback
+    (`POST /api/v1/agents/{agent_id}/bootstrap`) for API-key-only callers
+    such as agent-bound member keys.
+  - `Agent`, `AgentBinding`, and `AgentBootstrap*` wire models;
+    `agent_not_found`/`binding_not_found` now map to
+    `KaguraNotFoundError`. `MIN_SERVER_VERSION` stays 0.17.1 — only this
+    surface needs the newer server.
+
 ## [0.1.0] - 2026-07-05
 
 Initial release — a TypeScript port of the
