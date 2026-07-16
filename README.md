@@ -141,10 +141,12 @@ working against `MIN_SERVER_VERSION`.
 ## Relationship to the Python SDK
 
 This package ports the Python SDK's core (client, auth, REST clients,
-models). Not yet ported: the `kagura` CLI, `KaguraAgent` (LLM-driven
-memory), the document-ingestion pipeline (`FileIngestor`), and the
-zero-knowledge secrets client. Use the Python SDK for those; both SDKs
-share the same credential files and server APIs. See
+models). Not yet ported: the `kagura` CLI, the document-ingestion
+pipeline (`FileIngestor`), and the zero-knowledge secrets client.
+(`KaguraAgent` was removed from the Python SDK in v0.37.0 — the actor
+role lives in the [kagura-agent](https://pypi.org/project/kagura-agent/)
+package, so it will not be ported here.) Use the Python SDK for those;
+both SDKs share the same credential files and server APIs. See
 [`docs/design/2026-07-05-typescript-port-design.md`](docs/design/2026-07-05-typescript-port-design.md)
 for the scope decisions.
 
