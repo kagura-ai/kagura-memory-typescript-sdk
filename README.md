@@ -12,6 +12,7 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
 | **`WorkspaceClient`** | REST API | Workspace member, invitation, and API key management |
+| **`AgentsClient`** | REST API | Agent bootstrap for API-key-only callers (no MCP session) |
 
 ## Installation
 
@@ -92,8 +93,50 @@ try {
 ```
 
 Server-side domain errors (`{"status": "error", ...}`) are translated into
-exceptions — `KaguraNotFoundError` for missing contexts/memories/reports,
-`KaguraError` otherwise — so you never need to inspect `result.status`.
+exceptions — `KaguraNotFoundError` for missing contexts/memories/reports/
+agents/bindings, `KaguraError` otherwise — so you never need to inspect
+`result.status`.
+
+## Agent control plane (memory-cloud v0.49.0+)
+
+`KaguraClient` wraps the RFC-0002 agent platform: the **Agent Registry**
+(`registerAgent` / `listAgents` / `getAgent` / `updateAgent` /
+`deleteAgent`), subtractive **context bindings** (`bindAgentContext` /
+`listAgentBindings` / `updateAgentBinding` / `unbindAgentContext`), and
+the session-start **bootstrap** call. Registry and binding methods are
+**owner/admin-gated** server-side; `deleteAgent` is permanent and
+cascades every API key bound to the agent (prefer
+`updateAgent({ status: "retired" })` for operational retirement).
+
+```ts
+// One-time provisioning (owner/admin): register the agent, bind its context
+const agent = await client.registerAgent({ name: "ci-agent", framework: "claude-code" });
+await client.bindAgentContext({ agentId: agent.id, contextId: "ctx-uuid", isDefault: true });
+
+// Session start: rehydrate cognitive state in one call
+const bootstrap = await client.getAgentBootstrap({
+  agentId: agent.id,          // contextId omitted → default binding
+  sessionId: "run-42",        // echoed in the correlation block
+  query: "session summary",   // enables the trusted-only recall component
+});
+if (bootstrap.degraded) {
+  // some component failed fail-soft; inspect bootstrap.components
+}
+```
+
+Deployed agents holding only an API key (e.g. an agent-bound member key)
+can bootstrap over REST without an MCP session:
+
+```ts
+import { AgentsClient } from "kagura-memory";
+
+const agents = AgentsClient.fromMcpUrl();
+const bootstrap = await agents.bootstrap({ agentId: "agent-uuid" });
+```
+
+Requires memory-cloud **v0.49.0+** — older servers return MCP "tool not
+found" / REST 404 on this surface; everything else in the SDK keeps
+working against `MIN_SERVER_VERSION`.
 
 ## Relationship to the Python SDK
 
