@@ -1,5 +1,7 @@
 /** Low-level client for Kagura Memory Cloud MCP tools (port of client.py). */
 
+import { buildBootstrapPayload } from "./agentBootstrap.js";
+import type { GetAgentBootstrapOptions } from "./agentBootstrap.js";
 import { resolveAuth } from "./auth/resolve.js";
 import type { AuthProvider } from "./auth/types.js";
 import {
@@ -13,7 +15,6 @@ import { baseUrlFromMcp, SDK_VERSION, throwForKaguraStatus, validateHttpsUrl } f
 import type {
   Agent,
   AgentBinding,
-  AgentBootstrapComponentName,
   AgentBootstrapResponse,
   ContextInfo,
   DuplicatesResponse,
@@ -256,103 +257,33 @@ export interface UpdateAgentOptions {
   enforcementMode?: AgentEnforcementMode;
 }
 
-export interface BindAgentContextOptions {
-  agentId: string;
-  /** Context to bind (must belong to the agent's workspace). */
-  contextId: string;
+/**
+ * The subtractive scope trio shared by {@link BindAgentContextOptions}
+ * and {@link UpdateAgentBindingOptions} — the ONE type to extend when
+ * memory-cloud #1286 ships the reserved `allowedMemoryTypes` /
+ * `allowedSourceTypes` filters (the server accepts only null for them
+ * until per-memory enforcement lands, so they are deliberately not
+ * declared yet; adding them later is non-breaking).
+ */
+export interface AgentBindingScopeOptions {
   /** Whether the agent may read this context (server default: true). */
   canRead?: boolean;
   /** Write gate (server default: `"deny"`). */
   writePolicy?: AgentWritePolicy;
   /** Mark as the agent's bootstrap default binding (max one per agent). */
   isDefault?: boolean;
-  // allowedMemoryTypes / allowedSourceTypes are RESERVED (memory-cloud
-  // #1286): the server accepts only null until per-memory enforcement
-  // ships. They are deliberately not declared yet — adding them later to
-  // this options object is non-breaking.
 }
 
-export interface UpdateAgentBindingOptions {
+export interface BindAgentContextOptions extends AgentBindingScopeOptions {
+  agentId: string;
+  /** Context to bind (must belong to the agent's workspace). */
+  contextId: string;
+}
+
+export interface UpdateAgentBindingOptions extends AgentBindingScopeOptions {
   agentId: string;
   /** Binding UUID from {@link KaguraClient.listAgentBindings}. */
   bindingId: string;
-  /** New read gate. */
-  canRead?: boolean;
-  /** New write gate — `"deny"` | `"direct"`. */
-  writePolicy?: AgentWritePolicy;
-  /** New bootstrap-default flag (max one per agent). */
-  isDefault?: boolean;
-}
-
-export interface GetAgentBootstrapOptions {
-  /** Agent UUID from the registry (required). */
-  agentId: string;
-  /** Target context UUID. Omit to use the agent's default binding. */
-  contextId?: string;
-  /**
-   * Opaque correlation id (max 128 chars, `[A-Za-z0-9._-]`); echoed in
-   * the `correlation` block.
-   */
-  sessionId?: string;
-  /**
-   * Recall query (max 1024 chars). Supplying it enables the trusted-only
-   * recall component; omit to skip recall — the server never fabricates
-   * a query, so the component reports `status="skipped"` even when
-   * `include` names it.
-   */
-  query?: string;
-  /** Number of recall results; forwarded to recall's `k` validation. */
-  recallK?: number;
-  /** Override for the pinned-set cap; clamped server-side to [1, 1000]. */
-  pinnedCap?: number;
-  /**
-   * ISO upper bound for upcoming time memories (the lower bound is
-   * always now).
-   */
-  upcomingUntil?: string;
-  /**
-   * Component selector — a subset of `"pinned"`, `"recall"`,
-   * `"upcoming"`, `"state"`, `"policy"`. Omit for all components.
-   */
-  include?: AgentBootstrapComponentName[];
-}
-
-/**
- * Build the omit-when-undefined bootstrap payload shared by both
- * surfaces — the port of the Python SDK's `_bootstrap_payload`.
- *
- * {@link KaguraClient.getAgentBootstrap} (MCP tool arguments) and
- * `AgentsClient.bootstrap` (REST JSON body) carry the same seven
- * optional keys; a single builder keeps the two surfaces in lockstep.
- * `agentId` stays transport-specific (MCP argument vs URL path).
- * Internal — not part of the public API surface.
- */
-export function buildBootstrapPayload(
-  options: Omit<GetAgentBootstrapOptions, "agentId">,
-): Record<string, unknown> {
-  const payload: Record<string, unknown> = {};
-  if (options.contextId !== undefined) {
-    payload.context_id = options.contextId;
-  }
-  if (options.sessionId !== undefined) {
-    payload.session_id = options.sessionId;
-  }
-  if (options.query !== undefined) {
-    payload.query = options.query;
-  }
-  if (options.recallK !== undefined) {
-    payload.recall_k = options.recallK;
-  }
-  if (options.pinnedCap !== undefined) {
-    payload.pinned_cap = options.pinnedCap;
-  }
-  if (options.upcomingUntil !== undefined) {
-    payload.upcoming_until = options.upcomingUntil;
-  }
-  if (options.include !== undefined) {
-    payload.include = options.include;
-  }
-  return payload;
 }
 
 export interface UpdateSearchConfigOptions {
@@ -847,19 +778,24 @@ export class KaguraClient {
   // -------------------------------------------------------------------
 
   /**
-   * Unwrap the `agent` envelope the registry tools return.
+   * Unwrap an object envelope (`agent`, `binding`, `report`, …) from a
+   * tool result.
    *
-   * Match the Python port's `result["agent"]`: a missing envelope is a
+   * Match the Python port's `result["<key>"]`: a missing envelope is a
    * contract violation, surfaced loudly rather than as a partial object.
    */
-  private static expectAgentEnvelope(result: ToolResult, operation: string): Agent {
-    const agent = result.agent;
-    if (typeof agent !== "object" || agent === null || Array.isArray(agent)) {
+  private static expectEnvelope(
+    result: ToolResult,
+    key: string,
+    operation: string,
+  ): Record<string, unknown> {
+    const envelope = result[key];
+    if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
       throw new KaguraConnectionError(
-        `Unexpected ${operation} response: missing 'agent' envelope.`,
+        `Unexpected ${operation} response: missing '${key}' envelope.`,
       );
     }
-    return agent as unknown as Agent;
+    return envelope as Record<string, unknown>;
   }
 
   /**
@@ -895,7 +831,7 @@ export class KaguraClient {
       args.version = options.version;
     }
     const result = await this.callToolChecked("register_agent", args);
-    return KaguraClient.expectAgentEnvelope(result, "register_agent");
+    return KaguraClient.expectEnvelope(result, "agent", "register_agent") as unknown as Agent;
   }
 
   /**
@@ -907,7 +843,7 @@ export class KaguraClient {
    */
   async getAgent(agentId: string): Promise<Agent> {
     const result = await this.callToolChecked("get_agent", { agent_id: agentId });
-    return KaguraClient.expectAgentEnvelope(result, "get_agent");
+    return KaguraClient.expectEnvelope(result, "agent", "get_agent") as unknown as Agent;
   }
 
   /** List the workspace's registered agents, newest first (owner/admin only). */
@@ -963,7 +899,7 @@ export class KaguraClient {
       agent_id: options.agentId,
       ...changes,
     });
-    return KaguraClient.expectAgentEnvelope(result, "update_agent");
+    return KaguraClient.expectEnvelope(result, "agent", "update_agent") as unknown as Agent;
   }
 
   /**
@@ -980,32 +916,13 @@ export class KaguraClient {
   }
 
   /**
-   * Unwrap the `binding` envelope the binding tools return.
-   *
-   * Same contract-violation stance as {@link expectAgentEnvelope}.
-   */
-  private static expectBindingEnvelope(result: ToolResult, operation: string): AgentBinding {
-    const binding = result.binding;
-    if (typeof binding !== "object" || binding === null || Array.isArray(binding)) {
-      throw new KaguraConnectionError(
-        `Unexpected ${operation} response: missing 'binding' envelope.`,
-      );
-    }
-    return binding as unknown as AgentBinding;
-  }
-
-  /**
    * Build the omit-when-undefined binding scope trio shared by
    * {@link bindAgentContext} and {@link updateAgentBinding} — the port of
    * the Python SDK's `_binding_scope_payload`. When memory-cloud #1286
-   * ships the reserved `allowed_memory_types`/`allowed_source_types`
-   * filters, this is the ONE place to add them.
+   * ships the reserved filters, extend {@link AgentBindingScopeOptions}
+   * and map the new fields here.
    */
-  private static bindingScopeArgs(options: {
-    canRead?: boolean;
-    writePolicy?: AgentWritePolicy;
-    isDefault?: boolean;
-  }): Record<string, unknown> {
+  private static bindingScopeArgs(options: AgentBindingScopeOptions): Record<string, unknown> {
     const args: Record<string, unknown> = {};
     if (options.canRead !== undefined) {
       args.can_read = options.canRead;
@@ -1038,7 +955,7 @@ export class KaguraClient {
       context_id: options.contextId,
       ...KaguraClient.bindingScopeArgs(options),
     });
-    return KaguraClient.expectBindingEnvelope(result, "bind_agent_context");
+    return KaguraClient.expectEnvelope(result, "binding", "bind_agent_context") as unknown as AgentBinding;
   }
 
   /** List an agent's context bindings (owner/admin only). */
@@ -1070,7 +987,7 @@ export class KaguraClient {
       binding_id: options.bindingId,
       ...changes,
     });
-    return KaguraClient.expectBindingEnvelope(result, "update_agent_binding");
+    return KaguraClient.expectEnvelope(result, "binding", "update_agent_binding") as unknown as AgentBinding;
   }
 
   /**
@@ -1712,16 +1629,9 @@ export class KaguraClient {
     });
     // The MCP tool wraps the report fields under a "report" key; flatten
     // so SleepReportDetail reads naturally without an extra `.report.`.
-    // Match Python's `result["report"]`: a missing envelope is a contract
-    // violation, surfaced loudly rather than as a partial object.
-    const report = result.report;
-    if (typeof report !== "object" || report === null || Array.isArray(report)) {
-      throw new KaguraConnectionError(
-        "Unexpected get_sleep_report response: missing 'report' envelope.",
-      );
-    }
+    const report = KaguraClient.expectEnvelope(result, "report", "get_sleep_report");
     return {
-      ...(report as Record<string, unknown>),
+      ...report,
       actions: result.actions,
       action_count: result.action_count,
     } as unknown as SleepReportDetail;

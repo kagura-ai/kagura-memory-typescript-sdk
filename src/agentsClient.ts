@@ -16,8 +16,8 @@
  * session available.
  */
 
-import type { GetAgentBootstrapOptions } from "./client.js";
-import { buildBootstrapPayload } from "./client.js";
+import { buildBootstrapPayload } from "./agentBootstrap.js";
+import type { GetAgentBootstrapOptions } from "./agentBootstrap.js";
 import type { AgentBootstrapResponse } from "./models.js";
 import { KaguraRestClient } from "./restBase.js";
 import { parseUuid } from "./uuid.js";

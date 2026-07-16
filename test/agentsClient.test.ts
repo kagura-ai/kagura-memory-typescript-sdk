@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import { AgentsClient } from "../src/agentsClient.js";
+import { FakeRest } from "./fakeServer.js";
 import { KaguraNotFoundError } from "../src/errors.js";
 
 const AGENT_ID = "6f0d9c2e-8a11-4b3e-9c55-1a2b3c4d5e6f";
@@ -24,32 +25,11 @@ const BOOTSTRAP_BODY = {
   correlation: { agent_id: AGENT_ID, session_id: "run-42" },
 };
 
-interface Recorded {
-  url: string;
-  method: string;
-  headers: Record<string, string>;
-  body: string | undefined;
-}
-
-/** Scripted fetch stub — the TS analogue of the Python httpx MockTransport. */
-class FakeRest {
-  requests: Recorded[] = [];
-  status = 200;
-  body = JSON.stringify(BOOTSTRAP_BODY);
-
-  fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
-      headers[k.toLowerCase()] = v;
-    }
-    this.requests.push({
-      url: String(input),
-      method: init?.method ?? "GET",
-      headers,
-      body: typeof init?.body === "string" ? init.body : undefined,
-    });
-    return new Response(this.body, { status: this.status });
-  };
+/** A FakeRest pre-loaded with a valid bootstrap envelope. */
+function makeServer(): FakeRest {
+  const server = new FakeRest();
+  server.body = JSON.stringify(BOOTSTRAP_BODY);
+  return server;
 }
 
 function makeClient(server: FakeRest): AgentsClient {
@@ -70,7 +50,7 @@ describe("construction", () => {
 
 describe("bootstrap", () => {
   it("POSTs the bootstrap path with an empty JSON body by default", async () => {
-    const server = new FakeRest();
+    const server = makeServer();
     const client = makeClient(server);
 
     const bootstrap = await client.bootstrap({ agentId: AGENT_ID });
@@ -85,7 +65,7 @@ describe("bootstrap", () => {
   });
 
   it("normalizes non-canonical agent UUID spellings into the path", async () => {
-    const server = new FakeRest();
+    const server = makeServer();
     const client = makeClient(server);
 
     await client.bootstrap({ agentId: AGENT_ID.toUpperCase().replace(/-/g, "") });
@@ -94,7 +74,7 @@ describe("bootstrap", () => {
   });
 
   it("rejects a non-UUID agentId before any request is sent", async () => {
-    const server = new FakeRest();
+    const server = makeServer();
     const client = makeClient(server);
 
     await expect(client.bootstrap({ agentId: "../../evil" })).rejects.toThrow(/UUID/i);
@@ -102,7 +82,7 @@ describe("bootstrap", () => {
   });
 
   it("sends every optional argument under its snake_case wire name", async () => {
-    const server = new FakeRest();
+    const server = makeServer();
     const client = makeClient(server);
 
     await client.bootstrap({
@@ -128,7 +108,7 @@ describe("bootstrap", () => {
   });
 
   it("maps a 404 to KaguraNotFoundError", async () => {
-    const server = new FakeRest();
+    const server = makeServer();
     server.status = 404;
     server.body = JSON.stringify({ detail: "Agent not found" });
     const client = makeClient(server);

@@ -2,13 +2,13 @@
 
 export { KaguraClient, MIN_SERVER_VERSION } from "./client.js";
 export type {
+  AgentBindingScopeOptions,
   AgentEnforcementMode,
   AgentStatus,
   AgentWritePolicy,
   BindAgentContextOptions,
   CreateContextOptions,
   DeliveryMode,
-  GetAgentBootstrapOptions,
   KaguraClientOptions,
   ListMemoriesOptions,
   ListTagsOptions,
@@ -57,6 +57,7 @@ export type {
   KaguraRestClientOptions,
 } from "./restBase.js";
 
+export type { GetAgentBootstrapOptions } from "./agentBootstrap.js";
 export { AgentsClient } from "./agentsClient.js";
 
 export { FilesClient } from "./filesClient.js";

@@ -87,3 +87,47 @@ export function makeClient(server: FakeServer, options: Record<string, unknown> 
     ...options,
   });
 }
+
+export interface RecordedRest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string | undefined;
+}
+
+/**
+ * Scripted REST fetch stub — the TS analogue of the Python httpx
+ * MockTransport. Shared superset of the per-file FakeRest stubs so new
+ * REST-client test files stop growing their own copies.
+ */
+export class FakeRest {
+  requests: RecordedRest[] = [];
+  status = 200;
+  body = "{}";
+  responseHeaders: Record<string, string> = {};
+  /** When set, fetch throws this instead of responding. */
+  error: unknown = null;
+
+  fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
+      headers[k.toLowerCase()] = v;
+    }
+    this.requests.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      headers,
+      body: typeof init?.body === "string" ? init.body : undefined,
+    });
+    if (this.error !== null) {
+      throw this.error;
+    }
+    // The WHATWG Response constructor forbids a body on null-body statuses
+    // (204/205/304); real servers send an empty body there too.
+    const nullBodyStatus = this.status === 204 || this.status === 205 || this.status === 304;
+    return new Response(nullBodyStatus ? null : this.body, {
+      status: this.status,
+      headers: this.responseHeaders,
+    });
+  };
+}
