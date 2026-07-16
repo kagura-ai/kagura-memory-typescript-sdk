@@ -13,6 +13,8 @@ import { baseUrlFromMcp, SDK_VERSION, throwForKaguraStatus, validateHttpsUrl } f
 import type {
   Agent,
   AgentBinding,
+  AgentBootstrapComponentName,
+  AgentBootstrapResponse,
   ContextInfo,
   DuplicatesResponse,
   Edge,
@@ -280,6 +282,77 @@ export interface UpdateAgentBindingOptions {
   writePolicy?: AgentWritePolicy;
   /** New bootstrap-default flag (max one per agent). */
   isDefault?: boolean;
+}
+
+export interface GetAgentBootstrapOptions {
+  /** Agent UUID from the registry (required). */
+  agentId: string;
+  /** Target context UUID. Omit to use the agent's default binding. */
+  contextId?: string;
+  /**
+   * Opaque correlation id (max 128 chars, `[A-Za-z0-9._-]`); echoed in
+   * the `correlation` block.
+   */
+  sessionId?: string;
+  /**
+   * Recall query (max 1024 chars). Supplying it enables the trusted-only
+   * recall component; omit to skip recall — the server never fabricates
+   * a query, so the component reports `status="skipped"` even when
+   * `include` names it.
+   */
+  query?: string;
+  /** Number of recall results; forwarded to recall's `k` validation. */
+  recallK?: number;
+  /** Override for the pinned-set cap; clamped server-side to [1, 1000]. */
+  pinnedCap?: number;
+  /**
+   * ISO upper bound for upcoming time memories (the lower bound is
+   * always now).
+   */
+  upcomingUntil?: string;
+  /**
+   * Component selector — a subset of `"pinned"`, `"recall"`,
+   * `"upcoming"`, `"state"`, `"policy"`. Omit for all components.
+   */
+  include?: AgentBootstrapComponentName[];
+}
+
+/**
+ * Build the omit-when-undefined bootstrap payload shared by both
+ * surfaces — the port of the Python SDK's `_bootstrap_payload`.
+ *
+ * {@link KaguraClient.getAgentBootstrap} (MCP tool arguments) and
+ * `AgentsClient.bootstrap` (REST JSON body) carry the same seven
+ * optional keys; a single builder keeps the two surfaces in lockstep.
+ * `agentId` stays transport-specific (MCP argument vs URL path).
+ * Internal — not part of the public API surface.
+ */
+export function buildBootstrapPayload(
+  options: Omit<GetAgentBootstrapOptions, "agentId">,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  if (options.contextId !== undefined) {
+    payload.context_id = options.contextId;
+  }
+  if (options.sessionId !== undefined) {
+    payload.session_id = options.sessionId;
+  }
+  if (options.query !== undefined) {
+    payload.query = options.query;
+  }
+  if (options.recallK !== undefined) {
+    payload.recall_k = options.recallK;
+  }
+  if (options.pinnedCap !== undefined) {
+    payload.pinned_cap = options.pinnedCap;
+  }
+  if (options.upcomingUntil !== undefined) {
+    payload.upcoming_until = options.upcomingUntil;
+  }
+  if (options.include !== undefined) {
+    payload.include = options.include;
+  }
+  return payload;
 }
 
 export interface UpdateSearchConfigOptions {
@@ -1013,6 +1086,39 @@ export class KaguraClient {
       binding_id: options.bindingId,
     });
     return result.deleted === undefined ? true : Boolean(result.deleted);
+  }
+
+  /**
+   * Rehydrate an agent's cognitive state in one session-start call.
+   *
+   * Calls the `get_agent_bootstrap` MCP tool (server v0.49.0+, RFC-0002
+   * P0-3, memory-cloud #1276). The server composes existing primitives —
+   * context guide + pinned memories ({@link loadPinned}) + a trusted-only
+   * {@link recall} (only when `query` is supplied) + upcoming time
+   * memories ({@link recallUpcoming}) + the agent-state lane
+   * ({@link getState}) — with bounds, ordering, and trust filtering
+   * inherited from those standalone tools, not re-specified.
+   *
+   * Components are **fail-soft**: a failing component reports
+   * `{"status": "error", ...}` under `components` while the rest still
+   * return, with the top-level `degraded` flag set. Identity and
+   * authorization failures are total and throw instead.
+   *
+   * The REST companion (`POST /api/v1/agents/{agent_id}/bootstrap`) is
+   * available via `AgentsClient` for API-key-only callers such as
+   * agent-bound member keys.
+   *
+   * @throws KaguraNotFoundError when the agent or context is not found
+   *   (uniform 404 — nonexistent and not-yours are indistinguishable by
+   *   design).
+   * @throws KaguraError on invalid arguments or other server-side error.
+   */
+  async getAgentBootstrap(options: GetAgentBootstrapOptions): Promise<AgentBootstrapResponse> {
+    const result = await this.callToolChecked("get_agent_bootstrap", {
+      agent_id: options.agentId,
+      ...buildBootstrapPayload(options),
+    });
+    return result as unknown as AgentBootstrapResponse;
   }
 
   /** List available contexts. */

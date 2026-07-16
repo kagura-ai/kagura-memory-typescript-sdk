@@ -1022,3 +1022,86 @@ export interface AgentBinding {
   /** ISO 8601 datetime string. */
   updated_at: string;
 }
+
+/**
+ * Valid values for `getAgentBootstrap`'s `include` component selector.
+ *
+ * Mirrors the server's closed component set; the server rejects unknown
+ * names with `invalid_arguments`.
+ */
+export type AgentBootstrapComponentName = "pinned" | "recall" | "upcoming" | "state" | "policy";
+
+/**
+ * The context binding a bootstrap resolved (`agent.binding`).
+ *
+ * `is_default` is true when the context came from the agent's default
+ * binding (no explicit `context_id` was passed).
+ */
+export interface AgentBootstrapBinding {
+  context_id: string;
+  /** @default false */
+  is_default?: boolean;
+}
+
+/** Agent identity block in the bootstrap envelope. */
+export interface AgentBootstrapAgent {
+  agent_id: string;
+  name: string;
+  binding?: AgentBootstrapBinding | null;
+}
+
+/**
+ * Correlation block (RFC-0002 P0-4) — session/run/trace identifiers.
+ *
+ * `session_id` echoes the bootstrap argument when given, else the
+ * server's baggage-derived session id. `run_id`/`trace_id`/`span_id` are
+ * populated from the per-request correlation context when present.
+ */
+export interface AgentBootstrapCorrelation {
+  agent_id?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  trace_id?: string | null;
+  span_id?: string | null;
+}
+
+/**
+ * One fail-soft component payload in the bootstrap envelope.
+ *
+ * `status` is `"ok"` (payload inherited from the standalone tool),
+ * `"skipped"` (e.g. recall without a `query`, with a `reason`), or
+ * `"error"` (that component failed; the rest still return). The rest of
+ * the shape belongs to the standalone tools (`load_pinned`, `recall`,
+ * `recall_upcoming`, `get_state`) and evolves with them — hence the open
+ * index signature.
+ */
+export interface AgentBootstrapComponent {
+  status?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Composed envelope from `get_agent_bootstrap` (server v0.49.0+).
+ *
+ * One session-start call that rehydrates an agent's cognitive state by
+ * composing existing primitives. Components are **fail-soft**: a failing
+ * component reports `status="error"` under `components` while the rest
+ * still return, with the top-level `degraded` flag set.
+ *
+ * `context` reuses {@link ContextDetail} — the server emits the block
+ * byte-compatible with `get_context_info` (`search_config` is not
+ * included in bootstrap).
+ */
+export interface AgentBootstrapResponse {
+  /** @default "success" */
+  status?: string;
+  /** @default false */
+  degraded?: boolean;
+  agent: AgentBootstrapAgent;
+  context?: ContextDetail | null;
+  instructions?: string | null;
+  components?: Record<string, AgentBootstrapComponent>;
+  correlation?: AgentBootstrapCorrelation | null;
+  /** ISO 8601 datetime string. */
+  generated_at?: string | null;
+}

@@ -8,6 +8,7 @@ export type {
   BindAgentContextOptions,
   CreateContextOptions,
   DeliveryMode,
+  GetAgentBootstrapOptions,
   KaguraClientOptions,
   ListMemoriesOptions,
   ListTagsOptions,
@@ -55,6 +56,8 @@ export type {
   HttpMethod,
   KaguraRestClientOptions,
 } from "./restBase.js";
+
+export { AgentsClient } from "./agentsClient.js";
 
 export { FilesClient } from "./filesClient.js";
 export type { FilesClientOptions, UploadOptions } from "./filesClient.js";

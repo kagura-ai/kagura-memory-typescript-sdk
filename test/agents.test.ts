@@ -356,3 +356,94 @@ describe("unbindAgentContext", () => {
     ).toBe(false);
   });
 });
+
+const BOOTSTRAP = {
+  status: "success",
+  degraded: false,
+  agent: {
+    agent_id: AGENT.id,
+    name: "ci-agent",
+    binding: { context_id: CONTEXT_ID, is_default: true },
+  },
+  context: { id: CONTEXT_ID, name: "kagura-dev" },
+  instructions: "Use recall before answering.",
+  components: {
+    pinned: { status: "ok", memories: [] },
+    recall: { status: "skipped", reason: "no query" },
+  },
+  correlation: { agent_id: AGENT.id, session_id: "run-42" },
+  generated_at: "2026-07-16T00:00:00Z",
+};
+
+describe("getAgentBootstrap", () => {
+  it("sends only agent_id by default and returns the composed envelope", async () => {
+    const server = new FakeServer();
+    server.toolResults.get_agent_bootstrap = BOOTSTRAP;
+    const client = makeClient(server);
+
+    const bootstrap = await client.getAgentBootstrap({ agentId: AGENT.id });
+
+    expect(server.toolCallArgs()).toEqual({ agent_id: AGENT.id });
+    expect(bootstrap.agent.agent_id).toBe(AGENT.id);
+    expect(bootstrap.agent.binding?.context_id).toBe(CONTEXT_ID);
+    expect(bootstrap.components?.recall?.status).toBe("skipped");
+    expect(bootstrap.degraded).toBe(false);
+  });
+
+  it("maps every optional argument to its snake_case wire name", async () => {
+    const server = new FakeServer();
+    server.toolResults.get_agent_bootstrap = BOOTSTRAP;
+    const client = makeClient(server);
+
+    await client.getAgentBootstrap({
+      agentId: AGENT.id,
+      contextId: CONTEXT_ID,
+      sessionId: "run-42",
+      query: "session summary",
+      recallK: 7,
+      pinnedCap: 50,
+      upcomingUntil: "2026-08-01T00:00:00",
+      include: ["pinned", "recall"],
+    });
+
+    expect(server.toolCallArgs()).toEqual({
+      agent_id: AGENT.id,
+      context_id: CONTEXT_ID,
+      session_id: "run-42",
+      query: "session summary",
+      recall_k: 7,
+      pinned_cap: 50,
+      upcoming_until: "2026-08-01T00:00:00",
+      include: ["pinned", "recall"],
+    });
+  });
+
+  it("passes a degraded envelope through untouched", async () => {
+    const server = new FakeServer();
+    server.toolResults.get_agent_bootstrap = {
+      ...BOOTSTRAP,
+      degraded: true,
+      components: { pinned: { status: "error", error: "timeout" } },
+    };
+    const client = makeClient(server);
+
+    const bootstrap = await client.getAgentBootstrap({ agentId: AGENT.id });
+
+    expect(bootstrap.degraded).toBe(true);
+    expect(bootstrap.components?.pinned?.status).toBe("error");
+  });
+
+  it("maps agent_not_found to KaguraNotFoundError", async () => {
+    const server = new FakeServer();
+    server.toolResults.get_agent_bootstrap = {
+      status: "error",
+      error: "agent_not_found",
+      message: "Agent not found",
+    };
+    const client = makeClient(server);
+
+    await expect(client.getAgentBootstrap({ agentId: AGENT.id })).rejects.toThrow(
+      KaguraNotFoundError,
+    );
+  });
+});
