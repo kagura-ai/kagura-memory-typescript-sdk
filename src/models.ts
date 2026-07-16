@@ -954,3 +954,40 @@ export interface MemberAPIKey {
   expires_at?: string | null;
   bound_context_id?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Agent control plane (server v0.49.0+, RFC-0002 P0; SDK issues #1/#2/#3)
+// ---------------------------------------------------------------------------
+
+/**
+ * A workspace-scoped Agent Registry row (memory-cloud #1274).
+ *
+ * An agent is a registry entry that anchors context bindings, agent-bound
+ * credentials, bootstrap, and audit correlation — it is a resource, NOT a
+ * principal (it never authenticates by itself).
+ *
+ * `status` (`active` | `suspended` | `retired`) is the fail-closed kill
+ * switch: suspended/retired agents cause every key bound to them to be
+ * rejected at verify time. `enforcement_mode` (`shadow` | `enforce`) is
+ * the binding enforcement ramp. Both are typed `string` (not a literal
+ * union) for forward compatibility — the server is the authority;
+ * request-side options use the closed enums.
+ */
+export interface Agent {
+  id: string;
+  workspace_id: string;
+  name: string;
+  owner_user_id: string;
+  status: string;
+  enforcement_mode: string;
+  description?: string | null;
+  framework?: string | null;
+  environment?: string | null;
+  version?: string | null;
+  /** ISO 8601 datetime string. */
+  last_seen_at?: string | null;
+  /** ISO 8601 datetime string. */
+  created_at: string;
+  /** ISO 8601 datetime string. */
+  updated_at: string;
+}

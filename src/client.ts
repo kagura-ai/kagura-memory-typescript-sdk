@@ -11,6 +11,7 @@ import {
 } from "./errors.js";
 import { baseUrlFromMcp, SDK_VERSION, throwForKaguraStatus, validateHttpsUrl } from "./http.js";
 import type {
+  Agent,
   ContextInfo,
   DuplicatesResponse,
   Edge,
@@ -45,6 +46,11 @@ export type ToolResult = Record<string, unknown>;
 export type DeliveryMode = "always" | "on_recall" | "on_trigger";
 export type SearchMode = "hybrid" | "semantic" | "keyword";
 export type SourceType = "file" | "url" | "vault" | "api" | "manual";
+
+/** Agent lifecycle state — `updateAgent`'s fail-closed kill switch. */
+export type AgentStatus = "active" | "suspended" | "retired";
+/** Binding enforcement ramp: `enforce` denies, `shadow` only logs. */
+export type AgentEnforcementMode = "shadow" | "enforce";
 
 export interface KaguraClientOptions {
   /** Explicit Kagura API key. When omitted, the resolution chain runs. */
@@ -201,6 +207,45 @@ export interface ListMemoriesOptions {
   triggerUntil?: string;
   /** "created_at" (default, newest-first) or "trigger_from" (soonest first). */
   orderBy?: "created_at" | "trigger_from";
+}
+
+export interface RegisterAgentOptions {
+  /** Workspace-unique agent name (max 255 chars). */
+  name: string;
+  /** Free-text description (max 10000 chars). */
+  description?: string;
+  /** Framework tag, e.g. `"claude-code"`, `"langgraph"` (max 100 chars). */
+  framework?: string;
+  /** Deployment environment, e.g. `"production"` (max 100 chars). */
+  environment?: string;
+  /** Agent build/prompt version (max 100 chars). */
+  version?: string;
+}
+
+export interface UpdateAgentOptions {
+  agentId: string;
+  /** New workspace-unique name (max 255 chars). */
+  name?: string;
+  /** New description (max 10000 chars). */
+  description?: string;
+  /** New framework tag (max 100 chars). */
+  framework?: string;
+  /** New environment (max 100 chars). */
+  environment?: string;
+  /** New version (max 100 chars). */
+  version?: string;
+  /**
+   * Lifecycle state — the fail-closed kill switch: `"suspended"` /
+   * `"retired"` agents get every key bound to them rejected at verify
+   * time.
+   */
+  status?: AgentStatus;
+  /**
+   * Binding enforcement ramp. Setting `"enforce"` → `"shadow"` is an
+   * audited privilege-widening event (bindings stop being enforced and
+   * are only logged).
+   */
+  enforcementMode?: AgentEnforcementMode;
 }
 
 export interface UpdateSearchConfigOptions {
@@ -478,7 +523,12 @@ export class KaguraClient {
     }
     const code = typeof result.error === "string" ? result.error : "unknown";
     const message = typeof result.message === "string" ? result.message : "Unknown error";
-    if (code === "report_not_found" || code === "context_not_found" || code === "memory_not_found") {
+    if (
+      code === "report_not_found" ||
+      code === "context_not_found" ||
+      code === "memory_not_found" ||
+      code === "agent_not_found"
+    ) {
       throw new KaguraNotFoundError(`${operation}: ${message}`);
     }
     throw new KaguraError(`${operation} failed (${code}): ${message}`);
@@ -682,6 +732,143 @@ export class KaguraClient {
       args.key = options.key;
     }
     return this.callToolChecked("get_state", args);
+  }
+
+  // -------------------------------------------------------------------
+  // Agent control plane (server v0.49.0+, RFC-0002; issues #1/#2/#3)
+  // -------------------------------------------------------------------
+
+  /**
+   * Unwrap the `agent` envelope the registry tools return.
+   *
+   * Match the Python port's `result["agent"]`: a missing envelope is a
+   * contract violation, surfaced loudly rather than as a partial object.
+   */
+  private static expectAgentEnvelope(result: ToolResult, operation: string): Agent {
+    const agent = result.agent;
+    if (typeof agent !== "object" || agent === null || Array.isArray(agent)) {
+      throw new KaguraConnectionError(
+        `Unexpected ${operation} response: missing 'agent' envelope.`,
+      );
+    }
+    return agent as unknown as Agent;
+  }
+
+  /**
+   * Register an AI agent in the workspace Agent Registry.
+   *
+   * Calls the `register_agent` MCP tool (server v0.49.0+, RFC-0002 P0-1,
+   * memory-cloud #1274) — owner/admin only. An agent is a
+   * workspace-scoped registry entry (name unique per workspace) that
+   * anchors context bindings, agent-bound credentials,
+   * {@link getAgentBootstrap}, and audit correlation — it is a resource,
+   * NOT a principal. New agents start with `status="active"` and
+   * `enforcement_mode="enforce"`.
+   *
+   * Requires memory-cloud v0.49.0+ — older servers return an MCP
+   * "tool not found" error ({@link MIN_SERVER_VERSION} is deliberately
+   * not bumped; only the agent control plane needs the newer server).
+   *
+   * @throws KaguraError on name conflict, agent quota, or insufficient
+   *   role (owner/admin required).
+   */
+  async registerAgent(options: RegisterAgentOptions): Promise<Agent> {
+    const args: Record<string, unknown> = { name: options.name };
+    if (options.description !== undefined) {
+      args.description = options.description;
+    }
+    if (options.framework !== undefined) {
+      args.framework = options.framework;
+    }
+    if (options.environment !== undefined) {
+      args.environment = options.environment;
+    }
+    if (options.version !== undefined) {
+      args.version = options.version;
+    }
+    const result = await this.callToolChecked("register_agent", args);
+    return KaguraClient.expectAgentEnvelope(result, "register_agent");
+  }
+
+  /**
+   * Fetch one registered agent by id (owner/admin only).
+   *
+   * @throws KaguraNotFoundError when the agent does not exist. The 404 is
+   *   uniform (CWE-639) — nonexistent and not-yours are indistinguishable
+   *   by design, so it does NOT prove the agent is absent.
+   */
+  async getAgent(agentId: string): Promise<Agent> {
+    const result = await this.callToolChecked("get_agent", { agent_id: agentId });
+    return KaguraClient.expectAgentEnvelope(result, "get_agent");
+  }
+
+  /** List the workspace's registered agents, newest first (owner/admin only). */
+  async listAgents(): Promise<Agent[]> {
+    const result = await this.callToolChecked("list_agents", {});
+    const agents = result.agents;
+    return Array.isArray(agents) ? (agents as unknown as Agent[]) : [];
+  }
+
+  /**
+   * Update a registered agent, including lifecycle transitions
+   * (owner/admin only).
+   *
+   * `status` is the **fail-closed kill switch**: `"suspended"` /
+   * `"retired"` agents cause every key bound to them to be rejected at
+   * verify time. Setting `enforcementMode` from `"enforce"` to
+   * `"shadow"` is an audited privilege-widening event.
+   *
+   * Set-only wrapper: omitted fields are left untouched. The server's
+   * null-clears-a-metadata-field semantics is not expressible through
+   * this wrapper — clear fields via the web UI or the raw API.
+   *
+   * @throws Error when no update field is provided (the call would be an
+   *   empty no-op request).
+   */
+  async updateAgent(options: UpdateAgentOptions): Promise<Agent> {
+    const changes: Record<string, unknown> = {};
+    if (options.name !== undefined) {
+      changes.name = options.name;
+    }
+    if (options.description !== undefined) {
+      changes.description = options.description;
+    }
+    if (options.framework !== undefined) {
+      changes.framework = options.framework;
+    }
+    if (options.environment !== undefined) {
+      changes.environment = options.environment;
+    }
+    if (options.version !== undefined) {
+      changes.version = options.version;
+    }
+    if (options.status !== undefined) {
+      changes.status = options.status;
+    }
+    if (options.enforcementMode !== undefined) {
+      changes.enforcement_mode = options.enforcementMode;
+    }
+    if (Object.keys(changes).length === 0) {
+      throw new Error("updateAgent requires at least one field to update");
+    }
+    const result = await this.callToolChecked("update_agent", {
+      agent_id: options.agentId,
+      ...changes,
+    });
+    return KaguraClient.expectAgentEnvelope(result, "update_agent");
+  }
+
+  /**
+   * Hard-delete an Agent Registry row (owner/admin only). Returns true
+   * once the server confirms deletion.
+   *
+   * Permanent, and cascades every API key bound to the agent
+   * (fail-closed). Prefer `updateAgent({status: "retired"})` for
+   * operational retirement.
+   */
+  async deleteAgent(agentId: string): Promise<boolean> {
+    const result = await this.callToolChecked("delete_agent", { agent_id: agentId });
+    return result.deleted === undefined ? true : Boolean(result.deleted);
   }
 
   /** List available contexts. */
