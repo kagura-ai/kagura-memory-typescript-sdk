@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** the v0.36-era `KaguraAgent` session-analysis model types
+  (`Message`, `Artifact`, `Session`, `MemoryInfo`, `Memory`, `LLMUsage`,
+  `MemoryToStore`, `RecallQuery`, `AnalysisResult`, `ExploredMemory`,
+  `ProcessResult`). The Python SDK removed the actor and its models in
+  v0.37.0 (python-sdk#233 — the actor role lives in the
+  [kagura-agent](https://pypi.org/project/kagura-agent/) package); this
+  SDK never ported the actor, so the types were dead exports with no
+  consumers.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added

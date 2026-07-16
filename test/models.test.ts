@@ -4,18 +4,11 @@ import type {
   ContextInfo,
   Edge,
   ListTagsResponse,
-  Memory,
   SleepReportDetail,
 } from "../src/models.js";
 
 // Compile-focused tests: the value here is that realistic wire payloads
 // type-check against the interfaces. The runtime assertions are minimal.
-
-const memory: Memory = {
-  memory_id: "mem_01J8ZK3T",
-  summary: "Prefer limit/cursor pagination for resource events",
-  score: 0.87,
-};
 
 const contextInfo: ContextInfo = {
   status: "success",
@@ -104,11 +97,6 @@ const sleepReport: SleepReportDetail = {
 };
 
 describe("models", () => {
-  it("Memory payload compiles and reads", () => {
-    expect(memory.memory_id).toBe("mem_01J8ZK3T");
-    expect(memory.score).toBeCloseTo(0.87);
-  });
-
   it("ContextInfo with nested SearchConfig/ContextStats compiles and reads", () => {
     expect(contextInfo.context.search_config?.semantic_weight).toBe(0.6);
     expect(contextInfo.stats?.total_memories).toBe(128);
