@@ -6,39 +6,12 @@
  * real process exit.
  */
 
-import { spawn } from "node:child_process";
 import * as readline from "node:readline/promises";
 
 import { login } from "./auth/login.js";
 import { refresh } from "./auth/refresh.js";
+import { openBrowser } from "./cli/openBrowser.js";
 import { runCli } from "./cli/run.js";
-
-/**
- * Best-effort browser launch. Never throws and never blocks: the URL has
- * already been printed, so a failure here is cosmetic.
- */
-async function openBrowser(url: string): Promise<boolean> {
-  const [command, args] =
-    process.platform === "win32"
-      ? // `start` is a cmd builtin, and its first quoted argument is the
-        // window title — hence the empty "" before the URL.
-        (["cmd", ["/c", "start", "", url]] as const)
-      : process.platform === "darwin"
-        ? (["open", [url]] as const)
-        : (["xdg-open", [url]] as const);
-
-  return new Promise((resolve) => {
-    try {
-      const child = spawn(command, [...args], { stdio: "ignore", detached: true });
-      child.on("error", () => resolve(false));
-      // Don't hold the event loop open waiting for the browser to close.
-      child.unref();
-      resolve(true);
-    } catch {
-      resolve(false);
-    }
-  });
-}
 
 async function confirm(question: string): Promise<boolean> {
   // A non-interactive stdin (CI, a pipe) must not hang waiting for input

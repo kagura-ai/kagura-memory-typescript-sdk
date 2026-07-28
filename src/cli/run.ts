@@ -223,12 +223,22 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const args = parseArgs(argv);
 
-  if (args.unknown.length > 0 || args.missingValue.length > 0) {
+  // An empty value is almost always a typo (`--profile=`), and it is not
+  // harmless: "" is a usable profile name, so it would create a nameless
+  // profile, and an empty scope would be sent to the server verbatim.
+  const empty = Object.entries(args.values)
+    .filter(([, value]) => value !== undefined && value.trim() === "")
+    .map(([name]) => `--${name}`);
+
+  if (args.unknown.length > 0 || args.missingValue.length > 0 || empty.length > 0) {
     for (const flag of args.unknown) {
       deps.writeError(`Unknown option: ${flag}`);
     }
     for (const flag of args.missingValue) {
       deps.writeError(`Option ${flag} needs a value.`);
+    }
+    for (const flag of empty) {
+      deps.writeError(`Option ${flag} needs a non-empty value.`);
     }
     deps.writeError(USAGE);
     return 2;

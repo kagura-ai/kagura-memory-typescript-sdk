@@ -118,6 +118,25 @@ describe("cli: usage and dispatch", () => {
     expect(h.out.join("\n")).toMatch(/No profiles/);
   });
 
+  it.each([
+    [["login", "--profile="], "--profile"],
+    [["login", "--scope="], "--scope"],
+    [["login", "--profile=   "], "--profile"],
+  ])("rejects an empty value in %j", async (argv, flag) => {
+    const h = harness();
+    // "" is a usable profile name, so this would otherwise create a
+    // nameless profile; an empty scope would go to the server verbatim.
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err.join("\n")).toMatch(new RegExp(`${flag} needs a non-empty value`));
+    expect(h.loginCalls).toEqual([]);
+  });
+
+  it("reports --json as unknown rather than silently ignoring it", async () => {
+    const h = harness();
+    expect(await runCli(["login", "--json"], h.deps)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/Unknown option: --json/);
+  });
+
   it("rejects an unknown command and an unknown flag", async () => {
     const a = harness();
     expect(await runCli(["frobnicate"], a.deps)).toBe(2);

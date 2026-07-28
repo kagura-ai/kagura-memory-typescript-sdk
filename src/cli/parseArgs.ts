@@ -14,8 +14,14 @@
 /** Flags that take a value; everything else is a boolean switch. */
 const VALUE_FLAGS = new Set(["profile", "server", "scope"]);
 
-/** Boolean switches, so a following token is never mistaken for a value. */
-const SWITCHES = new Set(["read-only", "no-browser", "all", "yes", "help", "json"]);
+/**
+ * Boolean switches, so a following token is never mistaken for a value.
+ *
+ * Only flags a command actually reads belong here: an entry with no
+ * implementation is accepted and silently ignored, which is worse than
+ * being reported as unknown.
+ */
+const SWITCHES = new Set(["read-only", "no-browser", "all", "yes", "help"]);
 
 export interface ParsedArgs {
   /** First non-flag token, or `""` when absent. */
