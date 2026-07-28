@@ -164,4 +164,22 @@ describe("validateHttpsUrl", () => {
   ])("rejects %s", (url) => {
     expect(() => validateHttpsUrl(url, "MCP URL")).toThrow(/MCP URL must use HTTPS/);
   });
+
+  // URL parsing lower-cases the scheme, so `fetch` sends these over
+  // plaintext all the same — a case-sensitive check waves them through.
+  it.each([
+    "HTTP://example.com/mcp",
+    "Http://example.com/mcp",
+    "hTTp://localhost.evil.com/mcp",
+  ])("rejects %s regardless of scheme case", (url) => {
+    expect(new URL(url).protocol).toBe("http:");
+    expect(() => validateHttpsUrl(url, "MCP URL")).toThrow(/MCP URL must use HTTPS/);
+  });
+
+  it.each(["HTTP://localhost:8080/mcp", "Http://127.0.0.1:8080"])(
+    "still accepts loopback %s in any scheme case",
+    (url) => {
+      expect(() => validateHttpsUrl(url)).not.toThrow();
+    },
+  );
 });
