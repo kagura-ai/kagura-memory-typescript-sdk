@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`npx kagura-memory auth …` — an `auth`-only CLI**
+  ([#17](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/17)):
+  `login`, `refresh`, `status`, `use`, `logout`, with the same flag names
+  as the Python CLI's `kagura auth …` and writing the same
+  `~/.kagura/credentials.json`. A TypeScript-only team no longer needs a
+  Python install just to authenticate a machine.
+
+  Scope is deliberately `auth` only — memory operations stay library-only.
+  The credentials file is the artifact both SDKs share, so converging
+  there is the point; duplicating the rest of the CLI surface would only
+  multiply parity drift.
+
+  Zero runtime dependencies is preserved: argv parsing is hand-rolled, and
+  the browser launch shells out to the platform opener. The device code
+  and URL are printed unconditionally *before* any launch attempt, so a
+  silent or failed browser never leaves the user stuck. `--no-browser`
+  suppresses the launch; a non-interactive stdin declines destructive
+  prompts rather than hanging, with `--yes` as the explicit opt-in.
+
 - **`refresh()` — explicit profile refresh**
   ([#16](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/16)):
   clients already auto-refresh near expiry, but nothing reachable could
