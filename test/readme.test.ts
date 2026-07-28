@@ -87,6 +87,34 @@ function publicClientMethods(): string[] {
   return names;
 }
 
+/**
+ * Method names listed in the first column of the reference tables.
+ *
+ * A row's first cell holds one or more backticked method names (some rows
+ * group siblings, e.g. `createEdge` / `updateEdge` / `deleteEdge`). Later
+ * columns are prose that mentions option names, so only the first cell is
+ * a reliable source of method identifiers.
+ */
+function referenceTableMethods(): string[] {
+  const section = readme.split("## `KaguraClient` method reference")[1];
+  if (section === undefined) {
+    throw new Error("README is missing the `KaguraClient` method reference section");
+  }
+  const tables = section.split("## Agent control plane")[0] ?? "";
+
+  const names: string[] = [];
+  for (const row of tables.split(/\r?\n/)) {
+    if (!row.startsWith("|")) {
+      continue;
+    }
+    const firstCell = row.split("|")[1] ?? "";
+    for (const match of firstCell.matchAll(/`([a-zA-Z][\w]*)`/g)) {
+      names.push(match[1]!);
+    }
+  }
+  return [...new Set(names)];
+}
+
 /** GitHub's heading→anchor slug: lowercase, drop punctuation, spaces→dashes. */
 function slugify(heading: string): string {
   return heading
@@ -132,15 +160,14 @@ describe("README method reference", () => {
   });
 
   it("does not name methods that no longer exist", () => {
-    const section = readme.split("## `KaguraClient` method reference")[1] ?? "";
-    const table = section.split("## Agent control plane")[0] ?? "";
-    const known = new Set(publicClientMethods());
+    // Read the tables' first column only. Prose and later columns mention
+    // option names (`details`, `withTags`) that are not methods, so
+    // scanning the whole section would produce false failures.
+    const listed = referenceTableMethods();
+    expect(listed.length).toBeGreaterThan(30);
 
-    // Only check identifiers followed by `()` — those are unambiguously
-    // method references, unlike bare backticked option names.
-    const referenced = [...table.matchAll(/`([a-zA-Z][a-zA-Z0-9_]*)\(\)`/g)].map((m) => m[1]!);
-    const stale = [...new Set(referenced)].filter((name) => !known.has(name));
-    expect(stale).toEqual([]);
+    const known = new Set(publicClientMethods());
+    expect(listed.filter((name) => !known.has(name))).toEqual([]);
   });
 });
 
