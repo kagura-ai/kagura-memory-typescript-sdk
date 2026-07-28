@@ -166,9 +166,14 @@ const LOCALHOST_HTTP_RE = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?
  * @throws Error if the URL uses HTTP and is not a loopback host.
  */
 export function validateHttpsUrl(url: string, label = "URL"): void {
-  if (PLAIN_HTTP_RE.test(url) && !LOCALHOST_HTTP_RE.test(url)) {
+  // WHATWG URL parsing strips surrounding whitespace, so `" http://x"`
+  // reaches the network as plain HTTP. Both patterns are anchored, so
+  // without trimming first they would never match it and the guard would
+  // pass. Trim here rather than relying on callers to have done it.
+  const candidate = url.trim();
+  if (PLAIN_HTTP_RE.test(candidate) && !LOCALHOST_HTTP_RE.test(candidate)) {
     throw new Error(
-      `${label} must use HTTPS for security (got: ${url}). ` +
+      `${label} must use HTTPS for security (got: ${candidate}). ` +
         "HTTP is only allowed for localhost development.",
     );
   }
