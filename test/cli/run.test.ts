@@ -182,7 +182,17 @@ describe("cli: login", () => {
   });
 
   it("prints the code and URL before attempting a browser", async () => {
-    const h = harness();
+    // Record the launch into the same stream as the output, so ordering
+    // is observable rather than asserted by eye.
+    const events: string[] = [];
+    const h = harness({
+      write: (l: string) => events.push(`out: ${l}`),
+      openBrowser: async () => {
+        events.push("BROWSER LAUNCH");
+        return true;
+      },
+    });
+
     await runCli(["login"], h.deps);
     const onUserCode = (h.loginCalls[0] as { onUserCode: (a: unknown) => Promise<void> })
       .onUserCode;
@@ -192,12 +202,16 @@ describe("cli: login", () => {
       verificationUriComplete: "https://x.test/activate?user_code=WDJB-MJHT",
     });
 
-    const text = h.out.join("\n");
-    expect(text).toMatch(/WDJB-MJHT/);
-    expect(text).toMatch(/https:\/\/x\.test\/activate\?user_code=WDJB-MJHT/);
-    // The code must be visible even if the launch fails or opens silently.
-    expect(text.indexOf("WDJB-MJHT")).toBeLessThan(text.length);
-    expect(h.opened).toEqual(["https://x.test/activate?user_code=WDJB-MJHT"]);
+    const codeAt = events.findIndex((e) => e.includes("WDJB-MJHT"));
+    const urlAt = events.findIndex((e) => e.includes("user_code=WDJB-MJHT"));
+    const launchAt = events.indexOf("BROWSER LAUNCH");
+
+    expect(codeAt).toBeGreaterThanOrEqual(0);
+    expect(launchAt).toBeGreaterThanOrEqual(0);
+    // A browser that opens silently, or fails to open, must never leave
+    // the operator without the code.
+    expect(codeAt).toBeLessThan(launchAt);
+    expect(urlAt).toBeLessThan(launchAt);
   });
 
   it("does not open a browser with --no-browser", async () => {

@@ -9,6 +9,8 @@
 
 import { spawn } from "node:child_process";
 
+import { validateHttpsUrl } from "../http.js";
+
 type SpawnLike = typeof spawn;
 
 /** The platform's URL opener and its arguments. */
@@ -31,14 +33,24 @@ export function browserCommand(platform: NodeJS.Platform, url: string): [string,
 /**
  * Whether this URL may be handed to a system opener.
  *
- * The URL comes from the OAuth server, so it is untrusted input. Openers
- * happily dispatch `file:` and script schemes to whatever is registered
- * for them; only web URLs have any business here.
+ * The URL comes from the OAuth server, so it is untrusted input — and
+ * `--server` / `KAGURA_MCP_URL` decide which server that is. Two gates:
+ *
+ * 1. Scheme must be web. Openers dispatch `file:` and script schemes to
+ *    whatever is registered for them.
+ * 2. The same HTTPS policy the SDK applies to every other endpoint, via
+ *    {@link validateHttpsUrl} rather than a second copy of the rule —
+ *    plain HTTP only for loopback. Auto-opening a downgraded non-loopback
+ *    URL would undercut the guard the rest of the SDK enforces.
  */
 function isOpenableUrl(url: string): boolean {
   try {
     const protocol = new URL(url).protocol;
-    return protocol === "https:" || protocol === "http:";
+    if (protocol !== "https:" && protocol !== "http:") {
+      return false;
+    }
+    validateHttpsUrl(url, "Verification URL");
+    return true;
   } catch {
     return false;
   }

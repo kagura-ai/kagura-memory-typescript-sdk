@@ -48,14 +48,23 @@ describe("openBrowser: URL vetting", () => {
     expect(spawned).toBe(false);
   });
 
-  it.each(["https://x.test/a?b=1&c=2", "http://localhost:8080/activate"])(
-    "opens %j",
-    async (url) => {
-      await expect(
-        openBrowser(url, () => fakeChild("spawn") as never),
-      ).resolves.toBe(true);
-    },
-  );
+  it.each([
+    "http://example.com/activate",
+    "http://localhost.evil.com/activate",
+  ])("refuses to auto-open downgraded non-loopback %j", async (url) => {
+    // Same policy validateHttpsUrl applies to every other endpoint,
+    // reused rather than reimplemented: auto-opening a plain-HTTP URL a
+    // server chose would undercut the guard the rest of the SDK enforces.
+    await expect(openBrowser(url, () => fakeChild("spawn") as never)).resolves.toBe(false);
+  });
+
+  it.each([
+    "https://x.test/a?b=1&c=2",
+    "http://localhost:8080/activate",
+    "http://127.0.0.1:8080/activate",
+  ])("opens %j", async (url) => {
+    await expect(openBrowser(url, () => fakeChild("spawn") as never)).resolves.toBe(true);
+  });
 });
 
 describe("openBrowser", () => {
