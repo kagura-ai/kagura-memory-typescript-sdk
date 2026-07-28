@@ -88,6 +88,46 @@ export type {
 
 export { DEFAULT_MCP_URL, resolveAuth } from "./auth/resolve.js";
 export type { ResolveAuthOptions } from "./auth/resolve.js";
+
+// Interactive login (#9) — obtaining credentials, not just reading and
+// refreshing them. `login()` is the one-call path; the RFC 8628 primitives
+// and the credentials store are exported too so a host app can drive the
+// flow itself (e.g. its own polling UI) or manage profiles.
+export { login } from "./auth/login.js";
+export type { LoginOptions } from "./auth/login.js";
+
+export {
+  authorizeDevice,
+  pollForToken,
+  refreshAccessToken,
+  revokeToken,
+  DEFAULT_CLIENT_ID,
+  DEVICE_FLOW_GRANT_TYPE,
+  REFRESH_TOKEN_GRANT_TYPE,
+} from "./auth/deviceFlow.js";
+export type {
+  DeviceAuthorizationResponse,
+  OAuthHttpOptions,
+  PollForTokenOptions,
+  RefreshAccessTokenOptions,
+  TokenResponse,
+} from "./auth/deviceFlow.js";
+
+export {
+  defaultCredentialsPath,
+  deleteCredentialsFile,
+  deleteProfile,
+  emptyCredentialsFile,
+  getProfile,
+  isExpired,
+  loadCredentialsFile,
+  removeProfile,
+  saveCredentialsFile,
+  setDefaultProfile,
+  setProfile,
+  updateProfile,
+} from "./auth/credentials.js";
+export type { CredentialsFile, OAuthCredentials } from "./auth/credentials.js";
 export type {
   AuthProvider,
   AuthSource,

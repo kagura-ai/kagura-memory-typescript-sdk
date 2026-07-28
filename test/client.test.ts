@@ -199,6 +199,21 @@ describe("remember", () => {
       linked_source_uris: ["file:///x"],
     });
   });
+
+  it("forwards supersedes as-is and omits it when unset (#7)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.remember({
+      contextId: "ctx",
+      summary: "s",
+      content: "c",
+      supersedes: "11111111-2222-3333-4444-555555555555",
+    });
+    await client.remember({ contextId: "ctx", summary: "s", content: "c" });
+
+    expect(server.toolCallArgs(0).supersedes).toBe("11111111-2222-3333-4444-555555555555");
+    expect(server.toolCallArgs(1)).not.toHaveProperty("supersedes");
+  });
 });
 
 describe("recall", () => {
@@ -275,6 +290,31 @@ describe("memory mutation guards", () => {
     await expect(
       client.updateMemory({ contextId: "c", memoryId: "m", externalId: "e" }),
     ).rejects.toThrow(/exactly one/);
+  });
+
+  it("updateMemory forwards details and omits the key when unset (#6)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateMemory({
+      contextId: "c",
+      memoryId: "m1",
+      details: { location: { lat: 35.68, lon: 139.76 } },
+    });
+    await client.updateMemory({ contextId: "c", memoryId: "m1", summary: "s" });
+
+    expect(server.toolCallArgs(0)).toEqual({
+      context_id: "c",
+      memory_id: "m1",
+      details: { location: { lat: 35.68, lon: 139.76 } },
+    });
+    expect(server.toolCallArgs(1)).not.toHaveProperty("details");
+  });
+
+  it("updateMemory sends an explicitly empty details object (#6)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateMemory({ contextId: "c", memoryId: "m1", details: {} });
+    expect(server.toolCallArgs(0)).toHaveProperty("details", {});
   });
 
   it("forget requires memoryId or query, and only query mode sends k", async () => {
@@ -395,6 +435,78 @@ describe("listTags validation", () => {
     const client = makeClient(server);
     await client.listTags({ contextId: "c" });
     expect(server.toolCallArgs()).toEqual({ context_id: "c", limit: 50, min_count: 1, sort: "count" });
+  });
+
+  it("maps withTags to with_tags and omits it when unset or empty (#8)", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_tags = { context_id: "c", tags: [], total: 0 };
+    const client = makeClient(server);
+
+    await client.listTags({ contextId: "c", prefix: "when:", withTags: ["client:acme"] });
+    await client.listTags({ contextId: "c" });
+    // An empty drill-down is a no-op filter server-side; omit it rather
+    // than sending `tags @> '{}'`, mirroring how `prefix: ""` is dropped.
+    await client.listTags({ contextId: "c", withTags: [] });
+
+    expect(server.toolCallArgs(0)).toMatchObject({
+      prefix: "when:",
+      with_tags: ["client:acme"],
+    });
+    expect(server.toolCallArgs(1)).not.toHaveProperty("with_tags");
+    expect(server.toolCallArgs(2)).not.toHaveProperty("with_tags");
+  });
+});
+
+describe("recallNearby (#5)", () => {
+  it("sends the WHERE-axis args with defaults and returns the typed response", async () => {
+    const server = new FakeServer();
+    server.toolResults.recall_nearby = {
+      status: "success",
+      context_id: "ctx",
+      context_name: "demo",
+      results: [
+        { memory_id: "m1", summary: "s", type: "note", details: {}, distance_m: 42.5 },
+      ],
+    };
+    const client = makeClient(server);
+    const result = await client.recallNearby({ contextId: "ctx", lat: 35.68, lon: 139.76 });
+
+    expect(result.status).toBe("success");
+    expect(result.results[0]!.distance_m).toBe(42.5);
+    expect(server.toolCallArgs()).toEqual({
+      context_id: "ctx",
+      lat: 35.68,
+      lon: 139.76,
+      radius_m: 1000,
+      k: 20,
+    });
+  });
+
+  it("forwards explicit radiusM and k", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.recallNearby({ contextId: "ctx", lat: 0, lon: 0, radiusM: 250, k: 5 });
+    expect(server.toolCallArgs()).toMatchObject({ radius_m: 250, k: 5 });
+  });
+
+  it.each([
+    [{ lat: 90.1, lon: 0 }, /lat must be a finite number between -90 and 90/],
+    [{ lat: -90.1, lon: 0 }, /lat must be a finite number between -90 and 90/],
+    [{ lat: Number.NaN, lon: 0 }, /lat must be a finite number between -90 and 90/],
+    [{ lat: 0, lon: 180.1 }, /lon must be a finite number between -180 and 180/],
+    [{ lat: 0, lon: -180.1 }, /lon must be a finite number between -180 and 180/],
+    [{ lat: 0, lon: Number.POSITIVE_INFINITY }, /lon must be a finite number between -180 and 180/],
+  ])("rejects out-of-range coordinates %o", async (coords, pattern) => {
+    const client = makeClient(new FakeServer());
+    await expect(client.recallNearby({ contextId: "c", ...coords })).rejects.toThrow(pattern);
+  });
+
+  it("accepts the exact range boundaries", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(
+      client.recallNearby({ contextId: "c", lat: -90, lon: 180 }),
+    ).resolves.toBeDefined();
   });
 });
 
