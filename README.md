@@ -141,10 +141,13 @@ agents/bindings, `KaguraError` otherwise — so you never need to inspect
 
 ## `KaguraClient` method reference
 
-Every method takes a single camelCase options object (a few single-argument
-ones take the id directly) and returns the parsed server response. The wire
-stays snake_case; optional fields are omitted from the request when
-`undefined`.
+Methods return the parsed server response. Most take a single camelCase
+options object; `getAgent`, `deleteAgent`, `listAgentBindings` and
+`deleteContext` take the id directly, and the workspace-wide calls
+(`listContexts`, `listAgents`, `getUsage`, `getServerInfo`,
+`checkServerVersion`, `getEmbeddingStatus`, `listEmbeddingModels`,
+`getToolDefinitions`, `close`) take no arguments. The wire stays
+snake_case; optional fields are omitted from the request when `undefined`.
 
 ### Memories
 
