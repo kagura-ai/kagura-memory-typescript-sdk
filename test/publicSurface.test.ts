@@ -27,6 +27,15 @@ describe("public surface: interactive login (#9)", () => {
     expect(typeof (sdk as unknown as Record<string, unknown>)[name]).toBe("function");
   });
 
+  it("exports the profile refresh surface (#16)", () => {
+    // refreshAccessToken alone is the stateless RFC call — it writes
+    // nothing. Reaching a *stored* profile needs these.
+    expect(typeof sdk.refresh).toBe("function");
+    expect(typeof sdk.KaguraOAuth).toBe("function");
+    expect(typeof sdk.withRefreshed).toBe("function");
+    expect(typeof sdk.REFRESH_SKEW_SEC).toBe("number");
+  });
+
   it("exports the OAuth client constants", () => {
     expect(sdk.DEFAULT_CLIENT_ID).toBe("kagura-cli");
     expect(sdk.DEVICE_FLOW_GRANT_TYPE).toBe("urn:ietf:params:oauth:grant-type:device_code");
