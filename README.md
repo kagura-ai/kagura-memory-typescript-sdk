@@ -61,10 +61,11 @@ Three ways to authenticate, in resolution order:
 
 1. **Explicit key** — `new KaguraClient({ apiKey: "kagura_..." })`
 2. **Environment** — `KAGURA_API_KEY` (+ optional `KAGURA_MCP_URL`)
-3. **OAuth profile** — `~/.kagura/credentials.json`, written by the Python
-   CLI's `kagura auth login`. Profiles (`KAGURA_PROFILE` env or
-   `{ profile: "name" }`) and auto-refresh work exactly like the Python SDK;
-   the credentials file is shared between both SDKs.
+3. **OAuth profile** — `~/.kagura/credentials.json`, written by `login()`
+   (below) or the Python CLI's `kagura auth login`. Profiles
+   (`KAGURA_PROFILE` env or `{ profile: "name" }`) and auto-refresh work
+   exactly like the Python SDK; the credentials file is shared between both
+   SDKs.
 4. **Config file** — `.kagura.json` in the working directory or home:
 
 ```json
@@ -73,6 +74,43 @@ Three ways to authenticate, in resolution order:
   "mcp_url": "https://memory.kagura-ai.com/mcp"
 }
 ```
+
+#### Logging in from TypeScript
+
+`login()` runs the OAuth 2.0 Device Authorization Grant (RFC 8628) and
+writes `~/.kagura/credentials.json` in exactly the format the Python CLI
+writes — no Python install needed, and the profile stays interchangeable
+between both SDKs.
+
+```ts
+import { login, KaguraClient } from "kagura-memory";
+
+const creds = await login({
+  // Read-only by default; ask for writes explicitly.
+  scope: "memory:read memory:write",
+  onUserCode: ({ userCode, verificationUri, verificationUriComplete }) => {
+    console.log(`Open ${verificationUri} and enter ${userCode}`);
+    // Or, in a desktop app: shell.openExternal(verificationUriComplete)
+  },
+});
+
+console.log(`Logged in as ${creds.userEmail} (${creds.workspaceName})`);
+
+// Subsequent clients pick the profile up automatically.
+const client = new KaguraClient();
+```
+
+There is no terminal IO and no browser launching inside the SDK —
+`onUserCode` hands the code back and the host app decides how to show it.
+Nothing is written unless the token exchange succeeds; a denial throws
+`KaguraAuthDeniedError` and an unapproved expiry throws
+`KaguraAuthExpiredError`.
+
+For a custom flow (your own polling UI, multi-profile management), the
+primitives are exported too: `authorizeDevice`, `pollForToken`,
+`refreshAccessToken`, `revokeToken`, plus the credentials store
+(`loadCredentialsFile`, `updateProfile`, `setDefaultProfile`,
+`deleteProfile`, …).
 
 ### Error handling
 
@@ -137,6 +175,32 @@ const bootstrap = await agents.bootstrap({ agentId: "agent-uuid" });
 Requires memory-cloud **v0.49.0+** — older servers return MCP "tool not
 found" / REST 404 on this surface; everything else in the SDK keeps
 working against `MIN_SERVER_VERSION`.
+
+## The WHERE axis — geospatial memories
+
+Any memory can carry a location under `details.location`, which makes it
+reachable from `recallNearby()` — a deterministic spatial query (nearest
+first, each result carrying `distance_m`), not semantic search.
+
+```ts
+await client.remember({
+  contextId,
+  summary: "Coffee shop with reliable wifi",
+  content: "...",
+  details: { location: { lat: 35.6812, lon: 139.7671, label: "Tokyo Station" } },
+});
+
+const near = await client.recallNearby({ contextId, lat: 35.68, lon: 139.76, radiusM: 500 });
+```
+
+`lat`/`lon` must be JSON **numbers** — argument coercion does not recurse
+into `details`, so `"35.68"` is rejected server-side with HTTP 422. The
+`MemoryLocation`, `NearbyMemory`, and `RecallNearbyResponse` types are
+exported.
+
+> **Gotcha:** `updateMemory()` replaces `details` **wholesale** — the
+> server does not deep-merge. Round-trip `location` when updating details
+> or the memory silently drops off the spatial axis.
 
 ## Relationship to the Python SDK
 
