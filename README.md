@@ -102,10 +102,16 @@ There is no terminal IO and no browser launching inside the SDK —
 `onUserCode` hands the code back and the host app decides how to show it.
 
 Scope defaults to `DEFAULT_SCOPE` (`"memory:read memory:write"`) — the same
-default as the CLI's `kagura auth login`. Pass `scope: READ_ONLY_SCOPE` for
-the CLI's `--read-only` behaviour. The two SDKs share the credentials file,
-so a profile should not end up with different authority depending on which
-one created it.
+default as the CLI's `kagura auth login`, and exactly what the server's
+pre-registered `kagura-cli` client is seeded with. Pass
+`scope: READ_ONLY_SCOPE` for the CLI's `--read-only` behaviour. The two SDKs
+share the credentials file, so a profile should not end up with different
+authority depending on which one created it.
+
+The server is resolved as `mcpUrl` > `KAGURA_MCP_URL` > the public default,
+matching the CLI's `--server` chain — so a self-hosted deployment is picked
+up from the environment. Plain HTTP is rejected for non-loopback hosts: the
+flow carries a bearer token.
 
 Nothing is written unless the exchange succeeds, so a failed login never
 disturbs an existing profile: a denial throws `KaguraAuthDeniedError` and an

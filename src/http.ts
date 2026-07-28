@@ -154,7 +154,11 @@ export function throwForKaguraStatus(
 // or end-of-string — so a prefix-match attack like http://localhost.evil.com
 // or a userinfo trick like http://localhost@evil.com cannot smuggle an
 // external host past the check (#189).
-const LOCALHOST_HTTP_RE = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/;
+// Both patterns are case-insensitive: URL parsing lower-cases the scheme
+// and host, so `HTTP://EVIL.TEST` is fetched over plaintext exactly like
+// `http://evil.test`. A case-sensitive guard would wave it through.
+const PLAIN_HTTP_RE = /^http:\/\//i;
+const LOCALHOST_HTTP_RE = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
 
 /**
  * Enforce HTTPS except for localhost development.
@@ -162,9 +166,14 @@ const LOCALHOST_HTTP_RE = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?
  * @throws Error if the URL uses HTTP and is not a loopback host.
  */
 export function validateHttpsUrl(url: string, label = "URL"): void {
-  if (url.startsWith("http://") && !LOCALHOST_HTTP_RE.test(url)) {
+  // WHATWG URL parsing strips surrounding whitespace, so `" http://x"`
+  // reaches the network as plain HTTP. Both patterns are anchored, so
+  // without trimming first they would never match it and the guard would
+  // pass. Trim here rather than relying on callers to have done it.
+  const candidate = url.trim();
+  if (PLAIN_HTTP_RE.test(candidate) && !LOCALHOST_HTTP_RE.test(candidate)) {
     throw new Error(
-      `${label} must use HTTPS for security (got: ${url}). ` +
+      `${label} must use HTTPS for security (got: ${candidate}). ` +
         "HTTP is only allowed for localhost development.",
     );
   }
