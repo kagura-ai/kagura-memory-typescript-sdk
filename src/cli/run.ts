@@ -87,6 +87,17 @@ function devicePrompt(deps: CliDeps, openBrowserFlag: boolean) {
   };
 }
 
+/**
+ * A human label for the workspace.
+ *
+ * `workspace_name` is optional in the token response and parses to `""`
+ * when absent, so printing it bare yields "workspace ." — fall back to the
+ * id, which the response does carry.
+ */
+function workspaceLabel(creds: OAuthCredentials): string {
+  return creds.workspaceName || creds.workspaceId || "(unknown)";
+}
+
 function describeProfile(name: string, creds: OAuthCredentials, isDefault: boolean): string[] {
   const expired = isExpired(creds);
   const refreshable = Boolean(creds.refreshToken);
@@ -96,7 +107,7 @@ function describeProfile(name: string, creds: OAuthCredentials, isDefault: boole
   return [
     `${isDefault ? "*" : " "} ${name}`,
     `    account:    ${creds.userEmail || "(unknown)"}`,
-    `    workspace:  ${creds.workspaceName || creds.workspaceId || "(unknown)"}`,
+    `    workspace:  ${workspaceLabel(creds)}`,
     `    server:     ${creds.server}`,
     `    scope:      ${creds.scope || "(unknown)"}`,
     `    expires:    ${creds.expiresAt.toISOString()}`,
@@ -123,7 +134,9 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
 
   const creds = await deps.login(options);
-  deps.write(`Logged in as ${creds.userEmail || "(unknown)"} — workspace ${creds.workspaceName}.`);
+  deps.write(
+    `Logged in as ${creds.userEmail || "(unknown)"} — workspace ${workspaceLabel(creds)}.`,
+  );
   deps.write(`Profile '${args.values.profile ?? "default"}' saved. Scope: ${creds.scope}`);
   return 0;
 }

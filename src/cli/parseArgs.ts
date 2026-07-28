@@ -67,9 +67,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
         continue;
       }
       const next = argv[i + 1];
-      // A following flag means the value was omitted, not that the flag
-      // is the value — `--profile --yes` should not set profile="--yes".
-      if (next === undefined || next.startsWith("--")) {
+      // Any following flag means the value was omitted, not that the flag
+      // is the value — `--profile --yes` must not set profile="--yes",
+      // and `--profile -h` is a request for help, not a profile named
+      // "-h". Short flags count: checking only "--" swallowed them.
+      if (next === undefined || next.startsWith("-")) {
         missingValue.push(token);
         continue;
       }

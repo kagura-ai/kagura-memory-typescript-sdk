@@ -220,6 +220,15 @@ describe("cli: login", () => {
     expect(h.out.join("\n")).toMatch(/Could not open a browser/);
   });
 
+  it("falls back to the workspace id when the name is absent", async () => {
+    // workspace_name is optional in the token response and parses to "",
+    // so interpolating it bare printed "workspace .".
+    const h = harness({ login: async () => creds({ workspaceName: "" }) });
+    await runCli(["login"], h.deps);
+    expect(h.out.join("\n")).toMatch(/workspace ws-1\./);
+    expect(h.out.join("\n")).not.toMatch(/workspace \./);
+  });
+
   it("reports an auth failure with its guidance and exits 1", async () => {
     const h = harness({
       login: async () => {

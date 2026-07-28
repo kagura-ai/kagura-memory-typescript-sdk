@@ -55,6 +55,21 @@ describe("parseArgs", () => {
     expect(parseArgs(["login", "--profile"]).missingValue).toEqual(["--profile"]);
   });
 
+  it.each([
+    [["login", "--profile", "-h"], "-h"],
+    [["login", "--scope", "-x"], "-x"],
+  ])("does not swallow a short flag as a value (%j)", (argv, following) => {
+    // `--profile -h` means the value was omitted and help was asked for,
+    // not that the profile is named "-h".
+    const parsed = parseArgs(argv);
+    expect(parsed.missingValue).toHaveLength(1);
+    expect(parsed.values.profile).toBeUndefined();
+    expect(parsed.values.scope).toBeUndefined();
+    if (following === "-h") {
+      expect(parsed.flags.has("help")).toBe(true);
+    }
+  });
+
   it("recognizes -h and --help", () => {
     expect(parseArgs(["--help"]).flags.has("help")).toBe(true);
     expect(parseArgs(["login", "-h"]).flags.has("help")).toBe(true);
