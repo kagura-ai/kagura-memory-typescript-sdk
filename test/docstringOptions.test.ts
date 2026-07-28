@@ -31,11 +31,63 @@ interface Promised {
  *
  * Backticks are the discriminator: real code never wraps a call in them,
  * so this only ever reads prose.
+ *
+ * Walks the literal rather than matching one identifier, for two reasons.
+ * Reading only the first key would silently skip the rest of
+ * `recall({ contextId, includeSuperseded: true })` — under-matching is how
+ * a guard turns vacuous. And only depth-1 keys are option names: the
+ * `location`/`lat` in `remember({ details: { location: { lat } } })`
+ * belong to the value's type, not to `RememberOptions`.
  */
 function promisedOptions(source: string): Promised[] {
   const found: Promised[] = [];
-  for (const match of source.matchAll(/`([a-zA-Z_]\w*)\(\{\s*([a-zA-Z_]\w*)/g)) {
-    found.push({ method: match[1]!, option: match[2]! });
+  // The literal lives in an inline code span, so the closing backtick ends
+  // the scan; the cap is a safety valve against an unterminated one.
+  const maxSpan = 400;
+  for (const match of source.matchAll(/`([a-zA-Z_]\w*)\(\{/g)) {
+    const method = match[1]!;
+    const start = match.index + match[0].length;
+    let depth = 1;
+    let key = "";
+    let expectKey = true; // false between a `:` and the next `,`
+
+    for (let i = start; i < source.length && i - start < maxSpan && depth > 0; i++) {
+      const ch = source[i]!;
+      if (ch === "`") {
+        break;
+      }
+      if (ch === "{") {
+        depth++;
+        key = "";
+        continue;
+      }
+      if (ch === "}") {
+        if (depth === 1 && expectKey && key) {
+          found.push({ method, option: key }); // shorthand: `{ contextId }`
+        }
+        depth--;
+        key = "";
+        continue;
+      }
+      if (depth !== 1) {
+        continue;
+      }
+      if (/[\w$]/.test(ch)) {
+        key += ch;
+        continue;
+      }
+      // Whitespace must not clear the key, or `{ contextId }` is lost.
+      if (/\s/.test(ch)) {
+        continue;
+      }
+      if ((ch === ":" || ch === ",") && expectKey && key) {
+        found.push({ method, option: key });
+      }
+      if (ch === ":" || ch === ",") {
+        expectKey = ch === ",";
+      }
+      key = "";
+    }
   }
   return found;
 }
@@ -85,6 +137,33 @@ describe("the extractors these assertions rest on", () => {
     const promises = promisedOptions(clientSource);
     expect(promises).toContainEqual({ method: "recall", option: "includeSuperseded" });
     expect(promises).toContainEqual({ method: "remember", option: "details" });
+  });
+
+  it("reads every top-level option, not only the first", () => {
+    // Synthetic input on purpose: these shapes are legal in a docstring
+    // today even if client.ts happens not to contain them, and a guard
+    // that only handles the shapes already present is a guard that stops
+    // working the moment someone writes a normal sentence.
+    const sample = [
+      "* `recall({ contextId, includeSuperseded: true })` returns history.",
+      "* `remember({ details: { location: { lat, lon, label } } })`; see below.",
+      "* `forget({ memoryId })` soft-deletes.",
+    ].join("\n");
+
+    expect(promisedOptions(sample)).toEqual([
+      { method: "recall", option: "contextId" },
+      { method: "recall", option: "includeSuperseded" },
+      // `location`/`lat`/`lon`/`label` are the value's shape, not options.
+      { method: "remember", option: "details" },
+      { method: "forget", option: "memoryId" },
+    ]);
+  });
+
+  it("does not mistake a value for an option name", () => {
+    // `true` sits after the colon; only keys count.
+    expect(promisedOptions("`recall({ useRerank: true })`")).toEqual([
+      { method: "recall", option: "useRerank" },
+    ]);
   });
 
   it("resolves a method to its option interface", () => {
