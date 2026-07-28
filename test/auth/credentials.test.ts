@@ -450,6 +450,52 @@ function independentState(p: string, creds: OAuthCredentials): SharedCredentials
   };
 }
 
+describe("KaguraOAuth: profiles that cannot refresh (#14)", () => {
+  const neverFetch = (async () => {
+    throw new Error("fetch must not be called");
+  }) as unknown as typeof fetch;
+
+  it("fails without a network call when the stored refresh token is empty", async () => {
+    const p = path.join(dir, "creds.json");
+    writeProfile(
+      p,
+      sampleCreds({ refreshToken: "", expiresAt: new Date(Date.now() - 1000) }),
+    );
+
+    // Posting refresh_token="" can only ever earn an invalid_grant, and
+    // the resulting "no longer valid" message describes a token that
+    // never existed.
+    const auth = new KaguraOAuth(mustState(p), { fetch: neverFetch });
+    await expect(auth.getAuthHeader()).rejects.toBeInstanceOf(KaguraAuthExpiredError);
+  });
+
+  it("names the real cause rather than reporting an expired token", async () => {
+    const p = path.join(dir, "creds.json");
+    writeProfile(p, sampleCreds({ refreshToken: "", expiresAt: new Date(Date.now() - 1000) }));
+
+    const auth = new KaguraOAuth(mustState(p), { fetch: neverFetch });
+    await expect(auth.getAuthHeader()).rejects.toThrow(/without a refresh token/i);
+    await expect(auth.getAuthHeader()).rejects.toThrow(/log in again|auth login/i);
+  });
+
+  it("still refuses on an explicit forceRefresh", async () => {
+    const p = path.join(dir, "creds.json");
+    writeProfile(p, sampleCreds({ refreshToken: "" }));
+
+    const auth = new KaguraOAuth(mustState(p), { fetch: neverFetch });
+    await expect(auth.forceRefresh()).rejects.toBeInstanceOf(KaguraAuthExpiredError);
+  });
+
+  it("leaves a refreshable profile alone", async () => {
+    const p = path.join(dir, "creds.json");
+    writeProfile(p, sampleCreds({ accessToken: "fresh", refreshToken: "rtok-1" }));
+
+    // The guard must key on the refresh token, not merely on expiry.
+    const auth = new KaguraOAuth(mustState(p), { fetch: neverFetch });
+    expect(await auth.getAuthHeader()).toBe("Bearer fresh");
+  });
+});
+
 describe("KaguraOAuth", () => {
   it("returns the current token without refreshing when far from expiry", async () => {
     const p = path.join(dir, "creds.json");

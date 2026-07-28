@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refreshing a profile with no refresh token no longer round-trips**
+  ([#14](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/14)):
+  such a profile cannot be refreshed, but the SDK went to the network
+  anyway and surfaced the server's `invalid_grant` as "refresh token is no
+  longer valid" — describing a token that never existed. Now raises
+  `KaguraAuthExpiredError` before the request, naming the real cause.
+  Fixed in lockstep with the Python SDK, which shares this credentials
+  file and had the same defect (python-sdk#249).
+
 ### Added
 
 - **`npx kagura-memory auth …` — an `auth`-only CLI**

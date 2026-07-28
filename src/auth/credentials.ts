@@ -29,6 +29,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { KaguraAuthExpiredError } from "../errors.js";
 import { refreshAccessToken } from "./deviceFlow.js";
 import { withFileLock } from "./filelock.js";
 import type { AuthProvider } from "./types.js";
@@ -687,6 +688,20 @@ export class KaguraOAuth implements AuthProvider {
     profileName: string,
     scope?: string,
   ): Promise<void> {
+    // A profile stored without a refresh token cannot be refreshed. Going
+    // to the network first only earns an `invalid_grant`, whose message
+    // ("refresh token is no longer valid") describes a token that never
+    // existed — the actual cause is that the grant never carried offline
+    // access. Fail here instead, naming that.
+    if (!base.refreshToken) {
+      throw new KaguraAuthExpiredError(
+        "This profile was stored without a refresh token, so it cannot be " +
+          "refreshed — log in again to get one.\n" +
+          "  Run: kagura auth login (or `npx kagura-memory auth login`)",
+        base.expiresAt,
+      );
+    }
+
     const token = await refreshAccessToken(base.server, {
       clientId: base.clientId,
       refreshToken: base.refreshToken,
