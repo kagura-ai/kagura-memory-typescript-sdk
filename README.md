@@ -139,13 +139,100 @@ exceptions — `KaguraNotFoundError` for missing contexts/memories/reports/
 agents/bindings, `KaguraError` otherwise — so you never need to inspect
 `result.status`.
 
+## `KaguraClient` method reference
+
+Methods return the parsed server response. Most take a single camelCase
+options object; `getAgent`, `deleteAgent`, `listAgentBindings` and
+`deleteContext` take the id directly, and the workspace-wide calls
+(`listContexts`, `listAgents`, `getUsage`, `getServerInfo`,
+`checkServerVersion`, `getEmbeddingStatus`, `listEmbeddingModels`,
+`getToolDefinitions`, `close`) take no arguments. The wire stays
+snake_case; optional fields are omitted from the request when `undefined`.
+
+### Memories
+
+| Method | What it does |
+|--------|--------------|
+| `remember` | Store a memory. `details` accepts arbitrary JSON (including `location`, see below); `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, and `contextIds` for 2–20-context search. |
+| `reference` | Full detail for one memory, under `result.memory`. |
+| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep. |
+| `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. |
+| `listMemories` | Browse with substring, facet, and time-window filters. Omit `contextId` for the caller's cross-context view. |
+
+### Deterministic lanes
+
+These bypass ranking entirely — same inputs, same rows, every call. They are
+the counterpart to `recall`'s probabilistic search.
+
+| Method | Axis |
+|--------|------|
+| `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. |
+| `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. |
+| `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. See [the WHERE axis](#the-where-axis--geospatial-memories). |
+
+### Tags and the neural graph
+
+| Method | What it does |
+|--------|--------------|
+| `listTags` | Tag vocabulary with counts and recency. `prefix` narrows by spelling; `withTags` is a multi-tag AND drill-down that also excludes those tags from the result — the two compose into server-side faceted browsing with no local index. |
+| `explore` | Graph traversal from a seed memory (`depth` 1–5, `minWeight`). |
+| `listEdges` | Edges touching a memory, incoming and outgoing, deduplicated. |
+| `createEdge` / `updateEdge` / `deleteEdge` | Manual edge curation. `(sourceId, targetId)` is the identity; self-loops are rejected. |
+| `findDuplicates` | Near-duplicate pairs above `threshold` (0.5–1.0, default 0.90). |
+| `feedback` | Record whether a recalled memory was useful — an append-only signal in its own lane, not a memory edit. |
+
+### Contexts
+
+| Method | What it does |
+|--------|--------------|
+| `listContexts` | All contexts, with the workspace's `can_create` quota flag. |
+| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached. `embeddingModel` is immutable afterwards. |
+| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. |
+| `updateContext` | Change display name, summary, usage guide, visibility, lock. |
+| `deleteContext` | Delete by id. Locked contexts are refused. |
+| `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01). Owner/editor only. |
+| `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. |
+
+### Agent run-state
+
+Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
+
+| Method | What it does |
+|--------|--------------|
+| `setState` / `getState` | Key/value at `(contextId, key)`. Omit `key` on read to list all live keys. |
+
+### Sleep maintenance
+
+| Method | What it does |
+|--------|--------------|
+| `getSleepHistory` | Recent runs, newest first. |
+| `getSleepReport` | One run in detail, including the per-action audit log. |
+| `rollbackSleepRun` | Reverse a completed run. The server commits per step, so a partial rollback is possible — read the returned summary. |
+
+### Workspace and server
+
+| Method | What it does |
+|--------|--------------|
+| `getServerInfo` | Version and capabilities. |
+| `checkServerVersion` | Compare against `MIN_SERVER_VERSION`. Advisory: logs, never throws. |
+| `getUsage` | Workspace quota and usage. |
+| `getMemoryStats` | Per-memory usage stats, sortable and paged. |
+| `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. |
+| `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
+| `close` | Drop the MCP session. The next call re-initializes automatically. |
+
+Agent Registry and binding methods are covered in
+[Agent control plane](#agent-control-plane-memory-cloud-v0490) below.
+
 ## Agent control plane (memory-cloud v0.49.0+)
 
 `KaguraClient` wraps the RFC-0002 agent platform: the **Agent Registry**
 (`registerAgent` / `listAgents` / `getAgent` / `updateAgent` /
 `deleteAgent`), subtractive **context bindings** (`bindAgentContext` /
 `listAgentBindings` / `updateAgentBinding` / `unbindAgentContext`), and
-the session-start **bootstrap** call. Registry and binding methods are
+the session-start `getAgentBootstrap` call. Registry and binding methods are
 **owner/admin-gated** server-side; `deleteAgent` is permanent and
 cascades every API key bound to the agent (prefer
 `updateAgent({ status: "retired" })` for operational retirement).
