@@ -224,7 +224,7 @@ snake_case; optional fields are omitted from the request when `undefined`.
 | Method | What it does |
 |--------|--------------|
 | `remember` | Store a memory. `details` accepts arbitrary JSON (including `location`, see below); `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
-| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, and `contextIds` for 2–20-context search. |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep. |
 | `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. |

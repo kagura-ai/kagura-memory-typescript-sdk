@@ -263,6 +263,7 @@ describe("recall", () => {
       filters: { type: "code" },
       searchMode: "semantic",
       includeExploreHints: true,
+      includeSuperseded: true,
     });
     expect(server.toolCallArgs(1)).toEqual({
       query: "q",
@@ -272,7 +273,48 @@ describe("recall", () => {
       filters: { type: "code" },
       search_mode: "semantic",
       include_explore_hints: true,
+      include_superseded: true,
     });
+  });
+
+  it("reads back what supersedes shadowed, and only when asked (#25)", async () => {
+    const server = new FakeServer();
+    const superseded = {
+      memory_id: "old-1",
+      summary: "prod colour is green",
+      superseded_by: "new-1",
+    };
+    const current = { memory_id: "new-1", summary: "prod colour is blue" };
+    const client = makeClient(server);
+
+    server.toolResults.recall = { status: "success", results: [current] };
+    const defaultRecall = await client.recall({ contextId: "c", query: "prod colour" });
+
+    server.toolResults.recall = { status: "success", results: [current, superseded] };
+    const withHistory = await client.recall({
+      contextId: "c",
+      query: "prod colour",
+      includeSuperseded: true,
+    });
+
+    // The property RememberOptions.supersedes documents: the old version is
+    // shadowed out of default recall, not destroyed.
+    expect(server.toolCallArgs(0)).not.toHaveProperty("include_superseded");
+    expect(server.toolCallArgs(1).include_superseded).toBe(true);
+    expect((defaultRecall.results as Array<{ memory_id: string }>).map((r) => r.memory_id)).toEqual([
+      "new-1",
+    ]);
+    expect((withHistory.results as Array<{ memory_id: string }>).map((r) => r.memory_id)).toEqual([
+      "new-1",
+      "old-1",
+    ]);
+  });
+
+  it("omits include_superseded when explicitly false (#25)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.recall({ contextId: "c", query: "q", includeSuperseded: false });
+    expect(server.toolCallArgs()).not.toHaveProperty("include_superseded");
   });
 
   it("omits empty filters like the Python truthiness check", async () => {

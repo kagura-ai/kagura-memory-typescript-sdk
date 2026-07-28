@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`RecallOptions.includeSuperseded`**
+  ([#25](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/25)):
+  `remember({ supersedes })` shipped in 0.5.0 without its read side. The
+  whole argument for a supersede edge over `forget()` + `remember()` is
+  that history survives — but nothing could ask for it back, so it was
+  reachable only by a caller who had kept the old `memoryId`, which is the
+  bookkeeping the edge exists to remove. `RememberOptions.supersedes` even
+  documented `recall({ includeSuperseded: true })`, an option that did not
+  exist; `recall()` builds its arguments from an allowlist, so not even a
+  cast got through. Same flag name as the Python SDK's `include_superseded`.
+
+  A guard test now resolves every `` `method({ option })` `` promised in a
+  `src/client.ts` doc comment against the option interface that method
+  actually takes, so the next such promise fails the build instead of a
+  release.
+
 ## [0.5.0] - 2026-07-28
 
 > Supersedes 0.4.0, which reached `main` but was never tagged or published
