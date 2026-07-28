@@ -13,8 +13,13 @@
 
 import { KaguraAuthError } from "../errors.js";
 import type { OAuthCredentials } from "./credentials.js";
-import { loadCredentialsFile, updateProfile, withRefreshed } from "./credentials.js";
-import { authorizeDevice, pollForToken, refreshAccessToken } from "./deviceFlow.js";
+import {
+  KaguraOAuth,
+  getSharedState,
+  loadCredentialsFile,
+  updateProfile,
+} from "./credentials.js";
+import { authorizeDevice, pollForToken } from "./deviceFlow.js";
 import type { DeviceAuthorizationResponse } from "./deviceFlow.js";
 
 export interface RefreshOptions {
@@ -71,24 +76,20 @@ export async function refresh(options: RefreshOptions = {}): Promise<OAuthCreden
 
   const httpOptions = options.fetch !== undefined ? { fetch: options.fetch } : {};
 
-  let next: OAuthCredentials;
+  // Delegate to KaguraOAuth rather than driving refreshAccessToken here:
+  // it holds the cross-process file lock across the whole
+  // read-check-refresh-persist sequence, so a peer that rotated while we
+  // waited is adopted instead of racing us into an `invalid_grant` on a
+  // token that is already stale on disk.
+  const state = getSharedState(options.credentialsPath, target);
+  if (state === null) {
+    throw new Error(`No profile named '${target}'. Run a login first.`);
+  }
+  const provider = new KaguraOAuth(state, httpOptions);
+
   try {
-    const token = await refreshAccessToken(stored.server, {
-      clientId: stored.clientId,
-      refreshToken: stored.refreshToken,
-      ...(options.scope !== undefined ? { scope: options.scope } : {}),
-      ...httpOptions,
-    });
-    // withRefreshed preserves the stored refresh token when the server
-    // omits a new one (RFC 6749 §10.4) and the prior scope when the
-    // server omits that — along with workspace/user identity, which a
-    // refresh response is not required to repeat.
-    next = withRefreshed(stored, {
-      accessToken: token.accessToken,
-      refreshToken: token.refreshToken || null,
-      expiresAt: token.expiresAt,
-      scope: token.scope || null,
-    });
+    await provider.forceRefresh(options.scope !== undefined ? { scope: options.scope } : {});
+    return state.credentials;
   } catch (e) {
     // A rejection only means "widen" when the caller actually asked for a
     // different scope; otherwise re-consent would be the wrong response
@@ -96,11 +97,13 @@ export async function refresh(options: RefreshOptions = {}): Promise<OAuthCreden
     if (options.scope === undefined || !isScopeRejection(e)) {
       throw e;
     }
-    next = await consentToWiderScope(stored, options.scope, options, httpOptions);
+    // Runs outside the lock — forceRefresh released it on the way out, and
+    // updateProfile below re-acquires it, so there is no deadlock.
+    const next = await consentToWiderScope(state.credentials, options.scope, options, httpOptions);
+    await updateProfile(target, next, options.credentialsPath);
+    state.credentials = next;
+    return next;
   }
-
-  await updateProfile(target, next, options.credentialsPath);
-  return next;
 }
 
 /**
@@ -117,13 +120,23 @@ async function consentToWiderScope(
   options: RefreshOptions,
   httpOptions: { fetch?: typeof globalThis.fetch },
 ): Promise<OAuthCredentials> {
+  // Without a way to show the code, polling would just run until the
+  // device code expires. Fail now, while the cause is still legible.
+  if (options.onUserCode === undefined) {
+    throw new KaguraAuthError(
+      `Widening the scope to '${scope}' needs fresh consent, which requires ` +
+        "showing the user a device code — pass onUserCode to refresh(). " +
+        "Narrowing a scope does not need consent and works without it.",
+    );
+  }
+
   const authorization = await authorizeDevice(stored.server, {
     clientId: stored.clientId,
     scope,
     ...httpOptions,
   });
 
-  await options.onUserCode?.(authorization);
+  await options.onUserCode(authorization);
 
   const token = await pollForToken(stored.server, {
     clientId: stored.clientId,

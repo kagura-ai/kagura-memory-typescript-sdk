@@ -4,7 +4,11 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { loadCredentialsFile, resetStateCache } from "../../src/auth/credentials.js";
+import {
+  loadCredentialsFile,
+  resetStateCache,
+  saveCredentialsFile,
+} from "../../src/auth/credentials.js";
 import { login } from "../../src/auth/login.js";
 import { refresh } from "../../src/auth/refresh.js";
 import { KaguraAuthError, KaguraAuthExpiredError } from "../../src/errors.js";
@@ -214,6 +218,65 @@ describe("refresh (#16)", () => {
     const cf = loadCredentialsFile(credentialsPath);
     expect(cf.profiles.work!.accessToken).toBe("at-work");
     expect(cf.profiles.default!.accessToken).toBe("at-1");
+  });
+
+  it("deduplicates concurrent refreshes into one network call", async () => {
+    await seedProfile();
+
+    const server = new FakeOAuthServer();
+    // Exactly one queued reply. A second network call throws "unexpected
+    // extra token request", so this fails loudly if the read-check-refresh
+    // -persist sequence is not serialized: both callers would send the
+    // same rt-1, and the loser would be answered on a token the winner
+    // had already rotated away.
+    server.tokenResponses = [
+      { status: 200, body: tokenBody({ access_token: "at-2", refresh_token: "rt-2" }) },
+    ];
+
+    const [a, b] = await Promise.all([
+      refresh({ credentialsPath, fetch: server.fetch }),
+      refresh({ credentialsPath, fetch: server.fetch }),
+    ]);
+
+    expect(server.urls).toHaveLength(1);
+    // The loser adopts the winner's result rather than keeping a stale token.
+    expect(a.accessToken).toBe("at-2");
+    expect(b.accessToken).toBe("at-2");
+    expect(loadCredentialsFile(credentialsPath).profiles.default!.accessToken).toBe("at-2");
+  });
+
+  it("refreshes from the token currently on disk, not a stale snapshot", async () => {
+    await seedProfile();
+
+    // Another process rotated the profile since login.
+    const cf = loadCredentialsFile(credentialsPath);
+    cf.profiles.default = { ...cf.profiles.default!, refreshToken: "rt-peer" };
+    saveCredentialsFile(cf, credentialsPath);
+
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [
+      { status: 200, body: tokenBody({ access_token: "at-3", refresh_token: "rt-3" }) },
+    ];
+    await refresh({ credentialsPath, fetch: server.fetch });
+
+    // Sending the pre-rotation rt-1 would earn an invalid_grant on a
+    // profile that is actually healthy.
+    expect(new URLSearchParams(server.bodies[0]!).get("refresh_token")).toBe("rt-peer");
+  });
+
+  it("refuses the widening fallback without a way to show the code", async () => {
+    await seedProfile();
+
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [{ status: 400, body: { error: "insufficient_scope" } }];
+
+    // Entering the device flow with no onUserCode would poll silently
+    // until the device code expired.
+    await expect(
+      refresh({ credentialsPath, scope: "memory:read memory:write profile:read", fetch: server.fetch }),
+    ).rejects.toThrow(/requires showing the user a device code/);
+
+    expect(server.urls.some((u) => u.includes("/device/authorize"))).toBe(false);
   });
 
   it("throws a directive error when the profile does not exist", async () => {

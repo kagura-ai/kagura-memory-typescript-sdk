@@ -623,13 +623,15 @@ export class KaguraOAuth implements AuthProvider {
    * Cross-process dedup is handled in `refreshLocked` via the
    * rejected-token identity check.
    */
-  async forceRefresh(): Promise<void> {
+  async forceRefresh(options: { scope?: string } = {}): Promise<void> {
     // Capture the rejected token BEFORE the in-process mutex: if a peer
     // already rotated it while we waited, we must still compare against
     // the token that actually got the 401, otherwise the rotated token
     // would compare equal to disk and force a redundant refresh.
     const rejectedToken = this.state.credentials.accessToken;
-    await this.state.mutex.runExclusive(() => this.refreshLocked(rejectedToken));
+    await this.state.mutex.runExclusive(() =>
+      this.refreshLocked(rejectedToken, options.scope),
+    );
   }
 
   /**
@@ -647,17 +649,23 @@ export class KaguraOAuth implements AuthProvider {
    * on-disk token *differs* from the rejected one (a 401 is independent of
    * `expiresAt`).
    */
-  private async refreshLocked(expectedStaleToken: string | null): Promise<void> {
+  private async refreshLocked(
+    expectedStaleToken: string | null,
+    scope?: string,
+  ): Promise<void> {
     const credPath = this.state.path;
     const profileName = this.state.profileName;
     await withFileLock(credPath, async () => {
       const disk = getProfile(loadCredentialsFile(credPath), profileName);
-      if (disk !== null && this.alreadyRotated(disk, expectedStaleToken)) {
+      // A scope change must never adopt a peer's rotation: that token was
+      // issued for the *old* scope, so treating it as "already done" would
+      // silently drop the change the caller asked for.
+      if (scope === undefined && disk !== null && this.alreadyRotated(disk, expectedStaleToken)) {
         this.state.credentials = disk;
         return;
       }
       const base = disk ?? this.state.credentials;
-      await this.networkRefreshAndSave(base, credPath, profileName);
+      await this.networkRefreshAndSave(base, credPath, profileName, scope);
     });
   }
 
@@ -677,10 +685,12 @@ export class KaguraOAuth implements AuthProvider {
     base: OAuthCredentials,
     credPath: string,
     profileName: string,
+    scope?: string,
   ): Promise<void> {
     const token = await refreshAccessToken(base.server, {
       clientId: base.clientId,
       refreshToken: base.refreshToken,
+      ...(scope !== undefined ? { scope } : {}),
       ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
     });
     // Pass `null` when the server omits `refresh_token` so the stored token
@@ -691,7 +701,10 @@ export class KaguraOAuth implements AuthProvider {
       accessToken: token.accessToken,
       refreshToken: token.refreshToken || null,
       expiresAt: token.expiresAt,
-      scope: token.scope,
+      // `||` not `??`: TokenResponse.scope defaults to "" when the server
+      // omits it, and withRefreshed's `?? creds.scope` only catches
+      // null/undefined — so an omitted scope used to blank the stored one.
+      scope: token.scope || null,
     });
     // We already hold the cross-process lock; write directly rather than
     // via updateProfile (which would re-acquire the same lock and
