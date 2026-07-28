@@ -20,8 +20,12 @@ export default defineConfig({
     // isolation, so it is contention across many concurrent workers
     // rather than any single test.
     //
-    // The suite takes ~1s of actual test time, so the extra process
-    // startup costs little next to a run that silently drops a file.
+    // The run itself fails loudly — an unhandled error and a non-zero
+    // exit — so this was never a green-over-partial-suite risk. What
+    // disappears quietly is the file's *results*: the totals shrink while
+    // everything that did run still reads as passed. The suite takes ~1s
+    // of actual test time, so the extra process startup costs little next
+    // to re-running by hand every other attempt.
     pool: "forks",
     poolOptions: { forks: { maxForks: 4, minForks: 1 } },
   },
