@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadCredentialsFile, resetStateCache } from "../../src/auth/credentials.js";
 import { login } from "../../src/auth/login.js";
 import type { DeviceAuthorizationResponse } from "../../src/auth/deviceFlow.js";
-import { KaguraAuthDeniedError } from "../../src/errors.js";
+import { KaguraAuthDeniedError, KaguraAuthError } from "../../src/errors.js";
 
 let dir: string;
 let credentialsPath: string;
@@ -205,6 +205,37 @@ describe("login (#9)", () => {
     ).rejects.toBeInstanceOf(KaguraAuthDeniedError);
 
     expect(fs.existsSync(credentialsPath)).toBe(false);
+  });
+
+  it.each([
+    ["omitted", { access_token: "at-1", expires_in: 3600 }],
+    ["empty", { access_token: "at-1", refresh_token: "", expires_in: 3600 }],
+  ])("refuses to persist a profile when refresh_token is %s", async (_label, body) => {
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [{ status: 200, body }];
+
+    // A profile with no refresh token can never auto-refresh: it would look
+    // like a successful login and then silently expire an hour later.
+    await expect(
+      login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: server.fetch }),
+    ).rejects.toBeInstanceOf(KaguraAuthError);
+
+    expect(fs.existsSync(credentialsPath)).toBe(false);
+  });
+
+  it("leaves an existing profile untouched when the new login has no refresh token", async () => {
+    const good = new FakeOAuthServer();
+    await login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: good.fetch });
+
+    const bad = new FakeOAuthServer();
+    bad.tokenResponses = [{ status: 200, body: { access_token: "at-9", expires_in: 60 } }];
+    await expect(
+      login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: bad.fetch }),
+    ).rejects.toBeInstanceOf(KaguraAuthError);
+
+    const cf = loadCredentialsFile(credentialsPath);
+    expect(cf.profiles.default!.accessToken).toBe("at-1");
+    expect(cf.profiles.default!.refreshToken).toBe("rt-1");
   });
 
   it("propagates a throwing onUserCode without polling or writing", async () => {

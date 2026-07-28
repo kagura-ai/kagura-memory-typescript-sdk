@@ -17,8 +17,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   poll → persist) and writes `~/.kagura/credentials.json` in exactly the
   format the Python CLI writes, so profiles stay interchangeable. A
   TypeScript-only consumer no longer needs the Python CLI to obtain
-  credentials. No terminal IO and no browser launching inside the SDK;
-  nothing is written unless the token exchange succeeds.
+  credentials. No terminal IO and no browser launching inside the SDK.
+  Nothing is written unless the exchange succeeds *and* returns a refresh
+  token — a response without one throws `KaguraAuthError` instead of
+  persisting a profile that could never auto-refresh — so a failed login
+  never disturbs an existing profile.
 
   The underlying primitives — `authorizeDevice`, `pollForToken`,
   `refreshAccessToken`, `revokeToken`, `DEFAULT_CLIENT_ID`, the grant-type

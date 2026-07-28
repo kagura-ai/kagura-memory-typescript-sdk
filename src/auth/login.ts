@@ -13,6 +13,7 @@
  * is displayed. The only side effect is the credentials file write.
  */
 
+import { KaguraAuthError } from "../errors.js";
 import { baseUrlFromMcp } from "../http.js";
 import type { OAuthCredentials } from "./credentials.js";
 import { setDefaultProfile, updateProfile } from "./credentials.js";
@@ -68,10 +69,13 @@ export interface LoginOptions {
  * @returns the credentials that were written.
  * @throws KaguraAuthDeniedError the user denied at the consent screen.
  * @throws KaguraAuthExpiredError the device code expired before approval.
- * @throws KaguraAuthError protocol/response failures.
+ * @throws KaguraAuthError the token response carried no refresh token, or
+ *   (propagated from the device-flow primitives) a protocol/response
+ *   failure.
  * @throws KaguraConnectionError the server was unreachable.
  *
- * Nothing is written unless the token exchange succeeds.
+ * Nothing is written unless the token exchange succeeds AND yields a
+ * refresh token; a failed login never disturbs an existing profile.
  */
 export async function login(options: LoginOptions = {}): Promise<OAuthCredentials> {
   const mcpUrl = options.mcpUrl ?? DEFAULT_MCP_URL;
@@ -95,6 +99,18 @@ export async function login(options: LoginOptions = {}): Promise<OAuthCredential
     ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
+
+  // pollForToken defaults a missing refresh_token to "". Persisting that
+  // would write a profile this SDK can never auto-refresh: the login looks
+  // like it succeeded, then dies at the first expiry with a bare
+  // "your login expired". Fail here, while the cause is still visible.
+  if (!token.refreshToken) {
+    throw new KaguraAuthError(
+      "Login succeeded but the token response carried no refresh_token, so " +
+        "the profile could not auto-refresh. Nothing was written. Verify the " +
+        `'${clientId}' client is allowed offline access on ${server}.`,
+    );
+  }
 
   const credentials: OAuthCredentials = {
     server,

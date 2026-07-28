@@ -57,7 +57,7 @@ await client.close();
 
 ### Authentication
 
-Three ways to authenticate, in resolution order:
+Four ways to authenticate, in resolution order:
 
 1. **Explicit key** — `new KaguraClient({ apiKey: "kagura_..." })`
 2. **Environment** — `KAGURA_API_KEY` (+ optional `KAGURA_MCP_URL`)
@@ -102,9 +102,13 @@ const client = new KaguraClient();
 
 There is no terminal IO and no browser launching inside the SDK —
 `onUserCode` hands the code back and the host app decides how to show it.
-Nothing is written unless the token exchange succeeds; a denial throws
-`KaguraAuthDeniedError` and an unapproved expiry throws
-`KaguraAuthExpiredError`.
+
+Nothing is written unless the exchange succeeds *and* yields a refresh
+token, so a failed login never disturbs an existing profile: a denial
+throws `KaguraAuthDeniedError`, an unapproved expiry throws
+`KaguraAuthExpiredError`, and a response without a `refresh_token` throws
+`KaguraAuthError` rather than persisting a profile that could never
+auto-refresh.
 
 For a custom flow (your own polling UI, multi-profile management), the
 primitives are exported too: `authorizeDevice`, `pollForToken`,
