@@ -75,6 +75,34 @@ Four ways to authenticate, in resolution order:
 }
 ```
 
+#### Logging in from the terminal
+
+To authenticate a machine without writing any code:
+
+```bash
+npx kagura-memory auth login
+```
+
+`login` / `refresh` / `status` / `use` / `logout`, with the same flag names
+as the Python CLI's `kagura auth …`, writing the same
+`~/.kagura/credentials.json`. Either tool can create a profile the other
+then uses.
+
+```bash
+npx kagura-memory auth login --profile work --read-only
+npx kagura-memory auth status
+npx kagura-memory auth use work
+npx kagura-memory auth refresh --scope "memory:read"
+npx kagura-memory auth logout --profile work
+```
+
+`status` reports whether each profile is `active`, `expired (refreshable)`,
+or `expired` — a profile whose access token lapsed is still usable when it
+can refresh.
+
+This bin covers **authentication only**. Memory operations stay
+library-only; use the Python CLI or write TypeScript.
+
 #### Logging in from TypeScript
 
 `login()` runs the OAuth 2.0 Device Authorization Grant (RFC 8628) and
@@ -339,8 +367,10 @@ too. Out-of-range coordinates throw locally rather than round-tripping.
 ## Relationship to the Python SDK
 
 This package ports the Python SDK's core (client, auth, REST clients,
-models). Not yet ported: the `kagura` CLI, the document-ingestion
-pipeline (`FileIngestor`), and the zero-knowledge secrets client.
+models). Of the `kagura` CLI only the `auth` subcommands are provided
+(`npx kagura-memory auth …`, above); the memory, context, and ingestion
+commands are not ported, nor are the document-ingestion pipeline
+(`FileIngestor`) and the zero-knowledge secrets client.
 (`KaguraAgent` was removed from the Python SDK in v0.37.0 — the actor
 role lives in the [kagura-agent](https://pypi.org/project/kagura-agent/)
 package, so it will not be ported here.) Use the Python SDK for those;

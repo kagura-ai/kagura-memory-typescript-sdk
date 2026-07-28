@@ -42,6 +42,9 @@
       }
     }
   },
+  "bin": {
+    "kagura-memory": "./dist/cli.js"
+  },
   "files": [
     "dist",
     "README.md",
