@@ -86,8 +86,6 @@ between both SDKs.
 import { login, KaguraClient } from "kagura-memory";
 
 const creds = await login({
-  // Read-only by default; ask for writes explicitly.
-  scope: "memory:read memory:write",
   onUserCode: ({ userCode, verificationUri, verificationUriComplete }) => {
     console.log(`Open ${verificationUri} and enter ${userCode}`);
     // Or, in a desktop app: shell.openExternal(verificationUriComplete)
@@ -103,12 +101,19 @@ const client = new KaguraClient();
 There is no terminal IO and no browser launching inside the SDK —
 `onUserCode` hands the code back and the host app decides how to show it.
 
-Nothing is written unless the exchange succeeds *and* yields a refresh
-token, so a failed login never disturbs an existing profile: a denial
-throws `KaguraAuthDeniedError`, an unapproved expiry throws
-`KaguraAuthExpiredError`, and a response without a `refresh_token` throws
-`KaguraAuthError` rather than persisting a profile that could never
-auto-refresh.
+Scope defaults to `DEFAULT_SCOPE` (`"memory:read memory:write"`) — the same
+default as the CLI's `kagura auth login`. Pass `scope: READ_ONLY_SCOPE` for
+the CLI's `--read-only` behaviour. The two SDKs share the credentials file,
+so a profile should not end up with different authority depending on which
+one created it.
+
+Nothing is written unless the exchange succeeds, so a failed login never
+disturbs an existing profile: a denial throws `KaguraAuthDeniedError` and an
+unapproved expiry throws `KaguraAuthExpiredError`. A response with no
+`refresh_token` warns and still persists — the Python CLI treats a
+non-refreshable profile as a valid degraded state, and the shared file must
+mean the same thing to both SDKs. Check the returned `refreshToken` if you
+need to react.
 
 For a custom flow (your own polling UI, multi-profile management), the
 primitives are exported too: `authorizeDevice`, `pollForToken`,

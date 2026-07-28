@@ -18,10 +18,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   format the Python CLI writes, so profiles stay interchangeable. A
   TypeScript-only consumer no longer needs the Python CLI to obtain
   credentials. No terminal IO and no browser launching inside the SDK.
-  Nothing is written unless the exchange succeeds *and* returns a refresh
-  token — a response without one throws `KaguraAuthError` instead of
-  persisting a profile that could never auto-refresh — so a failed login
-  never disturbs an existing profile.
+  Nothing is written unless the exchange succeeds, so a failed login never
+  disturbs an existing profile.
+
+  Behaviour is aligned with `kagura auth login`, since both SDKs read and
+  write the same file: scope defaults to `DEFAULT_SCOPE`
+  (`"memory:read memory:write"`) with `READ_ONLY_SCOPE` as the opt-down,
+  the new profile does not steal an existing default, and a response with
+  no `refresh_token` warns and still persists rather than failing — the
+  Python CLI models a non-refreshable profile as a valid degraded state.
 
   The underlying primitives — `authorizeDevice`, `pollForToken`,
   `refreshAccessToken`, `revokeToken`, `DEFAULT_CLIENT_ID`, the grant-type
