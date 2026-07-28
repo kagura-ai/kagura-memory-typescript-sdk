@@ -96,6 +96,9 @@ export type { ResolveAuthOptions } from "./auth/resolve.js";
 export { DEFAULT_SCOPE, READ_ONLY_SCOPE, login } from "./auth/login.js";
 export type { LoginOptions } from "./auth/login.js";
 
+export { refresh } from "./auth/refresh.js";
+export type { RefreshOptions } from "./auth/refresh.js";
+
 export {
   authorizeDevice,
   pollForToken,
@@ -126,8 +129,18 @@ export {
   setDefaultProfile,
   setProfile,
   updateProfile,
+  // Rotation primitives (#16): KaguraOAuth is what actually refreshes and
+  // persists under the cross-process lock, so a caller holding its own
+  // provider — a proxy recovering from an upstream 401, say — needs it.
+  KaguraOAuth,
+  withRefreshed,
+  REFRESH_SKEW_SEC,
 } from "./auth/credentials.js";
-export type { CredentialsFile, OAuthCredentials } from "./auth/credentials.js";
+export type {
+  CredentialsFile,
+  OAuthCredentials,
+  SharedCredentialsState,
+} from "./auth/credentials.js";
 export type {
   AuthProvider,
   AuthSource,

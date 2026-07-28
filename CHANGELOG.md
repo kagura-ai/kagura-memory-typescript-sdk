@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`refresh()` — explicit profile refresh**
+  ([#16](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/16)):
+  clients already auto-refresh near expiry, but nothing reachable could
+  force a rotation, change scope, or refresh ahead of a long batch.
+  `refreshAccessToken` (exported in 0.4.0) is the stateless RFC call and
+  writes nothing, and `KaguraOAuth` — which refreshes *and* persists under
+  the cross-process lock — was not exported at all. Same shape of gap as
+  the login surface in 0.4.0.
+
+  Scope narrowing goes through the refresh grant silently; widening is
+  rejected by the server, so `refresh()` falls back to a full device flow
+  for consent, matching the Python CLI's `kagura auth refresh --scope`.
+  Diverging there would make scope changes behave differently between the
+  two SDKs on the credentials file they share.
+
+  Also exports `KaguraOAuth`, `withRefreshed`, `REFRESH_SKEW_SEC`, and the
+  `SharedCredentialsState` type.
+
 ## [0.4.0] - 2026-07-28
 
 ### Added

@@ -127,6 +127,37 @@ primitives are exported too: `authorizeDevice`, `pollForToken`,
 (`loadCredentialsFile`, `updateProfile`, `setDefaultProfile`,
 `deleteProfile`, …).
 
+#### Refreshing
+
+Clients auto-refresh as tokens near expiry, so most code never calls this.
+`refresh()` covers what skew-driven rotation cannot:
+
+```ts
+import { refresh, READ_ONLY_SCOPE } from "kagura-memory";
+
+// Forced rotation — e.g. after an upstream 401, when the token was
+// revoked out-of-band and is not yet inside the skew window.
+await refresh();
+
+// Narrow an existing grant, no re-consent needed.
+await refresh({ scope: READ_ONLY_SCOPE });
+
+// Widening needs fresh consent, so it re-runs the device flow.
+await refresh({
+  scope: "memory:read memory:write profile:read",
+  onUserCode: ({ userCode, verificationUri }) =>
+    console.log(`Open ${verificationUri} and enter ${userCode}`),
+});
+```
+
+The stored refresh token, scope, and workspace identity are preserved when
+the server omits them. An expired refresh token throws
+`KaguraAuthExpiredError` and leaves the stored profile untouched.
+
+Callers holding their own provider can use `KaguraOAuth` directly — its
+`forceRefresh()` is what `refresh()` builds on, including the
+cross-process lock and the "another process already rotated" dedup.
+
 ### Error handling
 
 All errors extend `KaguraError`:
