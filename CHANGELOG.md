@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-28
+
+> Supersedes 0.4.0, which reached `main` but was never tagged or published
+> to npm. Everything that would have been 0.4.0 ships here, so the jump
+> from 0.3.0 is a single release.
+
 ### Fixed
 
 - **Refreshing a profile with no refresh token no longer round-trips**
@@ -55,10 +61,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Also exports `KaguraOAuth`, `withRefreshed`, `REFRESH_SKEW_SEC`, and the
   `SharedCredentialsState` type.
-
-## [0.4.0] - 2026-07-28
-
-### Added
 
 - **Interactive OAuth login**
   ([#9](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/9)):
@@ -179,8 +181,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.3.0...v0.4.0
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.3.0...v0.5.0
 [0.3.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/releases/tag/v0.1.0
