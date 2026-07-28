@@ -70,6 +70,22 @@ describe("parseArgs", () => {
     }
   });
 
+  it.each([["-p"], ["-x"], ["-abc"]])(
+    "reports an unsupported short flag %j rather than treating it as a positional",
+    (flag) => {
+      // Silently demoting `-p work` to positionals means the flag is
+      // ignored and the command runs with defaults — the same failure
+      // mode as an accepted-but-unread switch.
+      const parsed = parseArgs(["login", flag, "work"]);
+      expect(parsed.unknown).toEqual([flag]);
+      expect(parsed.positionals).toEqual(["work"]);
+    },
+  );
+
+  it("still treats a bare '-' as a positional", () => {
+    expect(parseArgs(["use", "-"]).positionals).toEqual(["-"]);
+  });
+
   it("recognizes -h and --help", () => {
     expect(parseArgs(["--help"]).flags.has("help")).toBe(true);
     expect(parseArgs(["login", "-h"]).flags.has("help")).toBe(true);

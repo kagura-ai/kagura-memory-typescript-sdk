@@ -205,6 +205,18 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
   }
 
   const cf = loadCredentialsFile(deps.credentialsPath);
+
+  // emptyCredentialsFile() names a default profile even when none are
+  // stored, so an untargeted logout would otherwise report "No profile
+  // named 'default'" and exit 1 on a fresh machine — breaking
+  // `logout --yes` in idempotent setup scripts. Nothing to remove is the
+  // desired end state, not a failure. An explicitly named profile is
+  // still a real mismatch and reported below.
+  if (!all && target === undefined && Object.keys(cf.profiles).length === 0) {
+    deps.write("No profiles stored; nothing to do.");
+    return 0;
+  }
+
   const name = target ?? cf.defaultProfile;
   const question = all
     ? "Remove ALL stored profiles?"

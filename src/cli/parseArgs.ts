@@ -53,6 +53,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (!token.startsWith("--")) {
+      // A single-dash token is an attempted short flag, not a value.
+      // Letting it fall through to positionals means most subcommands
+      // ignore it and run with defaults — silently, which is the same
+      // failure mode as a switch that is accepted but never read.
+      if (token.startsWith("-") && token.length > 1) {
+        unknown.push(token);
+        continue;
+      }
       positionals.push(token);
       continue;
     }

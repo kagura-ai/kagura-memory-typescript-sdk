@@ -354,6 +354,23 @@ describe("cli: logout", () => {
     expect(fs.existsSync(credentialsPath)).toBe(true);
   });
 
+  it("is a successful no-op when there is nothing stored", async () => {
+    // emptyCredentialsFile() names a default profile even with none
+    // stored, so an untargeted logout used to report "No profile named
+    // 'default'" and exit 1 — breaking `logout --yes` in idempotent
+    // setup scripts on a fresh machine.
+    const h = harness();
+    expect(await runCli(["logout", "--yes"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toMatch(/[Nn]othing to do|No profiles/);
+  });
+
+  it("still reports an explicitly named profile that is absent", async () => {
+    const h = harness();
+    // Naming something specific that is not there is a real mismatch,
+    // unlike an untargeted logout on an empty file.
+    expect(await runCli(["logout", "--profile", "work", "--yes"], h.deps)).toBe(1);
+  });
+
   it("reports an absent profile instead of claiming a removal", async () => {
     seed({ default: creds() });
     const h = harness();
