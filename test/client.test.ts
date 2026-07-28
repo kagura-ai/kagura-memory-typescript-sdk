@@ -458,13 +458,21 @@ describe("listTags validation", () => {
 });
 
 describe("recallNearby (#5)", () => {
-  it("sends the WHERE-axis args with defaults", async () => {
+  it("sends the WHERE-axis args with defaults and returns the typed response", async () => {
     const server = new FakeServer();
-    server.toolResults.recall_nearby = { status: "success", results: [] };
+    server.toolResults.recall_nearby = {
+      status: "success",
+      context_id: "ctx",
+      context_name: "demo",
+      results: [
+        { memory_id: "m1", summary: "s", type: "note", details: {}, distance_m: 42.5 },
+      ],
+    };
     const client = makeClient(server);
     const result = await client.recallNearby({ contextId: "ctx", lat: 35.68, lon: 139.76 });
 
     expect(result.status).toBe("success");
+    expect(result.results[0]!.distance_m).toBe(42.5);
     expect(server.toolCallArgs()).toEqual({
       context_id: "ctx",
       lat: 35.68,

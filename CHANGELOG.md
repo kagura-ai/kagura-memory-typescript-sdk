@@ -36,8 +36,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `details.location`, nearest first with `distance_m`, mirroring
   `recallUpcoming`. Args `contextId, lat, lon, radiusM = 1000, k = 20`.
   Out-of-range or non-finite coordinates throw locally rather than
-  round-tripping to an HTTP 422. New model types `MemoryLocation`,
-  `NearbyMemory`, `RecallNearbyResponse`.
+  round-tripping to an HTTP 422. Returns a typed `RecallNearbyResponse`
+  (following `listTags`, not `recallUpcoming`'s bare `ToolResult`, so
+  `distance_m` is reachable without a cast). New model types
+  `MemoryLocation`, `NearbyMemory`, `RecallNearbyResponse`.
 
 - **`RememberOptions.supersedes`**
   ([#7](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/7)):

@@ -24,6 +24,7 @@ import type {
   ListTagsResponse,
   MemoryListResponse,
   MemoryStatsResponse,
+  RecallNearbyResponse,
   RollbackResult,
   ServerInfo,
   SleepReport,
@@ -754,9 +755,9 @@ export class KaguraClient {
     lon: number;
     /** Search radius in meters (default 1000). */
     radiusM?: number;
-    /** Maximum results (default 20, server max 100). */
+    /** Maximum results (default 20; the server clamps to 1-100). */
     k?: number;
-  }): Promise<ToolResult> {
+  }): Promise<RecallNearbyResponse> {
     const { lat, lon } = options;
     if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
       throw new Error(`lat must be a finite number between -90 and 90, got ${lat}`);
@@ -764,13 +765,14 @@ export class KaguraClient {
     if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
       throw new Error(`lon must be a finite number between -180 and 180, got ${lon}`);
     }
-    return this.callToolChecked("recall_nearby", {
+    const result = await this.callToolChecked("recall_nearby", {
       context_id: options.contextId,
       lat,
       lon,
       radius_m: options.radiusM ?? 1000,
       k: options.k ?? 20,
     });
+    return result as unknown as RecallNearbyResponse;
   }
 
   /**

@@ -194,9 +194,10 @@ const near = await client.recallNearby({ contextId, lat: 35.68, lon: 139.76, rad
 ```
 
 `lat`/`lon` must be JSON **numbers** — argument coercion does not recurse
-into `details`, so `"35.68"` is rejected server-side with HTTP 422. The
-`MemoryLocation`, `NearbyMemory`, and `RecallNearbyResponse` types are
-exported.
+into `details`, so `"35.68"` is rejected server-side with HTTP 422.
+`recallNearby()` returns a typed `RecallNearbyResponse`
+(`results[].distance_m`); `MemoryLocation` and `NearbyMemory` are exported
+too. Out-of-range coordinates throw locally rather than round-tripping.
 
 > **Gotcha:** `updateMemory()` replaces `details` **wholesale** — the
 > server does not deep-merge. Round-trip `location` when updating details
