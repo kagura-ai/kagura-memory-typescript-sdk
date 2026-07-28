@@ -43,7 +43,7 @@
     }
   },
   "bin": {
-    "kagura-memory": "./dist/cli.js"
+    "kagura-memory": "dist/cli.js"
   },
   "files": [
     "dist",
