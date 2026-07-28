@@ -14,14 +14,34 @@ type SpawnLike = typeof spawn;
 /** The platform's URL opener and its arguments. */
 export function browserCommand(platform: NodeJS.Platform, url: string): [string, string[]] {
   if (platform === "win32") {
-    // `start` is a cmd builtin, and its first quoted argument is taken as
-    // the window title — hence the empty "" before the URL.
-    return ["cmd", ["/c", "start", "", url]];
+    // Deliberately NOT `cmd /c start "" <url>`: spawning cmd hands the
+    // URL to a shell that reinterprets & | < > ^, which breaks any
+    // verification_uri_complete carrying a query string and lets a
+    // hostile OAuth server smuggle a command into the URL it returns.
+    // explorer.exe receives the URL as a plain argument and opens the
+    // default browser without any shell in between.
+    return ["explorer.exe", [url]];
   }
   if (platform === "darwin") {
     return ["open", [url]];
   }
   return ["xdg-open", [url]];
+}
+
+/**
+ * Whether this URL may be handed to a system opener.
+ *
+ * The URL comes from the OAuth server, so it is untrusted input. Openers
+ * happily dispatch `file:` and script schemes to whatever is registered
+ * for them; only web URLs have any business here.
+ */
+function isOpenableUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -32,6 +52,9 @@ export function browserCommand(platform: NodeJS.Platform, url: string): [string,
  *   `spawn`/`error` rather than assuming the call succeeded.
  */
 export async function openBrowser(url: string, spawnImpl: SpawnLike = spawn): Promise<boolean> {
+  if (!isOpenableUrl(url)) {
+    return false;
+  }
   const [command, args] = browserCommand(process.platform, url);
 
   return new Promise<boolean>((resolve) => {

@@ -18,14 +18,44 @@ describe("browserCommand", () => {
     expect(browserCommand("linux", "https://x.test")).toEqual(["xdg-open", ["https://x.test"]]);
   });
 
-  it("passes an empty title before the URL on Windows", () => {
-    // `start` is a cmd builtin whose first quoted argument is the window
-    // title; without the empty "" a quoted URL would be eaten as the title.
-    expect(browserCommand("win32", "https://x.test")).toEqual([
-      "cmd",
-      ["/c", "start", "", "https://x.test"],
-    ]);
+  it("never routes through cmd.exe on Windows", () => {
+    // `cmd /c start "" <url>` lets cmd.exe reinterpret & | < > ^ in the
+    // URL. That breaks any verification_uri_complete carrying a query
+    // string, and a hostile OAuth server could append `& calc.exe`.
+    // explorer.exe takes the URL as a plain argument — no shell parsing.
+    const [command, args] = browserCommand("win32", "https://x.test/a?b=1&c=2");
+    expect(command).toBe("explorer.exe");
+    expect(args).toEqual(["https://x.test/a?b=1&c=2"]);
+    expect(command).not.toMatch(/cmd/i);
   });
+});
+
+describe("openBrowser: URL vetting", () => {
+  it.each([
+    "javascript:alert(1)",
+    "file:///C:/Windows/System32/calc.exe",
+    "vbscript:msgbox",
+    "not a url",
+    "",
+  ])("refuses to hand %j to the opener", async (url) => {
+    let spawned = false;
+    const result = await openBrowser(url, (() => {
+      spawned = true;
+      return fakeChild("spawn") as never;
+    }) as never);
+
+    expect(result).toBe(false);
+    expect(spawned).toBe(false);
+  });
+
+  it.each(["https://x.test/a?b=1&c=2", "http://localhost:8080/activate"])(
+    "opens %j",
+    async (url) => {
+      await expect(
+        openBrowser(url, () => fakeChild("spawn") as never),
+      ).resolves.toBe(true);
+    },
+  );
 });
 
 describe("openBrowser", () => {
