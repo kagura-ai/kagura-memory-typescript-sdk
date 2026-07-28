@@ -23,6 +23,8 @@ import type {
   EmbeddingStatus,
   ListTagsResponse,
   MemoryListResponse,
+  // Referenced only from JSDoc {@link} on the details/recallNearby options.
+  MemoryLocation,
   MemoryStatsResponse,
   RecallNearbyResponse,
   RollbackResult,
