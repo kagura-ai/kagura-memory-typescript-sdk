@@ -13,7 +13,7 @@
  * is displayed. The only side effect is the credentials file write.
  */
 
-import { baseUrlFromMcp } from "../http.js";
+import { baseUrlFromMcp, validateHttpsUrl } from "../http.js";
 import type { OAuthCredentials } from "./credentials.js";
 import { setDefaultProfile, updateProfile } from "./credentials.js";
 import { authorizeDevice, pollForToken, DEFAULT_CLIENT_ID } from "./deviceFlow.js";
@@ -35,11 +35,16 @@ export const READ_ONLY_SCOPE = "memory:read";
 
 export interface LoginOptions {
   /**
-   * MCP endpoint to log into (default {@link DEFAULT_MCP_URL}). The OAuth
-   * endpoints are derived from it, and both URLs are stored on the profile
-   * so the pair can never drift apart.
+   * MCP endpoint to log into. The OAuth endpoints are derived from it, and
+   * both URLs are stored on the profile so the pair can never drift apart.
+   *
+   * Resolution mirrors the Python CLI's `--server` chain: this option,
+   * then `KAGURA_MCP_URL`, then {@link DEFAULT_MCP_URL}. Plain HTTP is
+   * rejected for non-loopback hosts — the flow carries a bearer token.
    */
   mcpUrl?: string;
+  /** Environment source override (for tests; default: `process.env`). */
+  env?: Record<string, string | undefined>;
   /** OAuth client ID (default {@link DEFAULT_CLIENT_ID}). */
   clientId?: string;
   /**
@@ -91,7 +96,14 @@ export interface LoginOptions {
  * `refreshToken` if the caller needs to react.
  */
 export async function login(options: LoginOptions = {}): Promise<OAuthCredentials> {
-  const mcpUrl = options.mcpUrl ?? DEFAULT_MCP_URL;
+  const env = options.env ?? process.env;
+  // Explicit arg > KAGURA_MCP_URL > public default, matching the Python
+  // CLI. Without the env step a self-hosted user with KAGURA_MCP_URL set
+  // would be silently logged in to the public cloud instead.
+  const mcpUrl = options.mcpUrl?.trim() || env.KAGURA_MCP_URL?.trim() || DEFAULT_MCP_URL;
+  // The device flow carries a bearer token back over this connection, so
+  // the destination is validated before any request goes out.
+  validateHttpsUrl(mcpUrl, "MCP URL");
   const server = baseUrlFromMcp(mcpUrl);
   const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
   const profile = options.profile ?? "default";

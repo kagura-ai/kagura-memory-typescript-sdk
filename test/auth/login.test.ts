@@ -260,6 +260,58 @@ describe("login (#9)", () => {
     expect(fs.existsSync(credentialsPath)).toBe(false);
   });
 
+  it.each([
+    ["http://evil.test/mcp"],
+    ["http://memory.kagura-ai.com.evil.test/mcp"],
+  ])("refuses to run the device flow over plain HTTP (%s)", async (mcpUrl) => {
+    const server = new FakeOAuthServer();
+    // The device flow carries a bearer token back over this connection.
+    // Python's _resolve_server guards this explicitly so a caller cannot
+    // point the flow at http://evil.com; nothing here may be laxer.
+    await expect(login({ mcpUrl, credentialsPath, fetch: server.fetch })).rejects.toThrow(
+      /must use HTTPS/,
+    );
+    expect(server.urls).toEqual([]);
+    expect(fs.existsSync(credentialsPath)).toBe(false);
+  });
+
+  it("allows loopback HTTP for local development", async () => {
+    const server = new FakeOAuthServer();
+    const creds = await login({
+      mcpUrl: "http://localhost:8000/mcp",
+      credentialsPath,
+      fetch: server.fetch,
+    });
+    expect(creds.server).toBe("http://localhost:8000");
+  });
+
+  it("falls back to KAGURA_MCP_URL before the public default", async () => {
+    const server = new FakeOAuthServer();
+    // A self-hosted user with KAGURA_MCP_URL set must not be silently
+    // logged in to the public cloud. Python: --server > KAGURA_MCP_URL >
+    // DEFAULT_SERVER.
+    const creds = await login({
+      credentialsPath,
+      fetch: server.fetch,
+      env: { KAGURA_MCP_URL: "https://self.hosted.test/mcp" },
+    });
+
+    expect(server.urls[0]).toBe("https://self.hosted.test/api/v1/oauth/device/authorize");
+    expect(creds.server).toBe("https://self.hosted.test");
+    expect(creds.mcpUrl).toBe("https://self.hosted.test/mcp");
+  });
+
+  it("prefers an explicit mcpUrl over KAGURA_MCP_URL", async () => {
+    const server = new FakeOAuthServer();
+    const creds = await login({
+      mcpUrl: "https://explicit.test/mcp",
+      credentialsPath,
+      fetch: server.fetch,
+      env: { KAGURA_MCP_URL: "https://self.hosted.test/mcp" },
+    });
+    expect(creds.server).toBe("https://explicit.test");
+  });
+
   it("requests read+write by default, matching the Python CLI", async () => {
     const server = new FakeOAuthServer();
     await login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: server.fetch });
