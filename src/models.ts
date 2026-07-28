@@ -620,6 +620,61 @@ export interface Edge {
 }
 
 // ---------------------------------------------------------------------------
+// Geospatial memories — the WHERE axis (server origin memory-cloud #1331)
+// ---------------------------------------------------------------------------
+
+/**
+ * A geographic point attached to a memory under `details.location`.
+ *
+ * This is what makes a memory reachable from `recallNearby()`. Any memory
+ * type can carry one; the server validates the shape.
+ *
+ * `lat`/`lon` are typed `number` deliberately: argument coercion does not
+ * recurse into `details`, so string-typed numerics (`"35.68"`) are rejected
+ * server-side with HTTP 422 rather than silently parsed.
+ *
+ * Caveat: `updateMemory()` / PATCH replace `details` wholesale. Resend
+ * `location` when updating details, or the memory silently drops off the
+ * spatial axis.
+ */
+export interface MemoryLocation {
+  /** Latitude in decimal degrees (-90..90). */
+  lat: number;
+  /** Longitude in decimal degrees (-180..180). */
+  lon: number;
+  /** Short human label, e.g. a place name. */
+  label?: string;
+  /** Free-form descriptive text about the place. */
+  text?: string;
+}
+
+/**
+ * One entry in a `recall_nearby` result list, ordered nearest first.
+ *
+ * `details` is the memory's full details object; when the memory was
+ * stored with a location it contains `location: MemoryLocation`.
+ */
+export interface NearbyMemory {
+  memory_id: string;
+  summary: string;
+  type: string;
+  details?: Record<string, unknown> | null;
+  /** Great-circle distance from the query point, in meters. */
+  distance_m: number;
+}
+
+/** Response from `recall_nearby`: memories near a point, nearest first. */
+export interface RecallNearbyResponse {
+  status: string;
+  results: NearbyMemory[];
+  context_id: string;
+  context_name: string;
+  context_display_name?: string | null;
+  context_is_private?: boolean;
+  context_is_locked?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Tag vocabulary (server v0.15.4+, SDK issue #620; server origin #614)
 // ---------------------------------------------------------------------------
 

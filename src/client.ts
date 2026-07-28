@@ -98,10 +98,26 @@ export interface RememberOptions {
   sourceType?: SourceType;
   /** Why the memory exists and how to use it (max 2000 chars). */
   contextSummary?: string;
-  /** Structured details JSON, stored as-is. */
+  /**
+   * Structured details JSON, stored as-is.
+   *
+   * A `location: {@link MemoryLocation}` here is what makes the memory
+   * reachable from {@link recallNearby}. `lat`/`lon` must be JSON numbers —
+   * argument coercion does not recurse into `details`, so string-typed
+   * numerics are rejected server-side with HTTP 422.
+   */
   details?: Record<string, unknown>;
   /** Open-ended context metadata JSON. */
   context?: Record<string, unknown>;
+  /**
+   * UUID of an existing memory this one replaces.
+   *
+   * Creates a supersede edge: the old memory is shadowed out of default
+   * recall but stays restorable and reachable via
+   * `recall({ includeSuperseded: true })` and {@link explore}. Prefer this
+   * over {@link forget} + `remember`, which destroys the history.
+   */
+  supersedes?: string;
   /**
    * When the memory is surfaced. `"on_recall"` (default) leaves it to
    * probabilistic recall; `"always"` pins it so every loadPinned call
@@ -143,6 +159,14 @@ export interface UpdateMemoryOptions {
   importance?: number;
   tags?: string[];
   contextSummary?: string;
+  /**
+   * Structured details JSON. **Replaces `details` wholesale** — the server
+   * does not deep-merge. Round-trip any keys you want to keep (notably
+   * `location`, see {@link MemoryLocation}) or they are silently dropped.
+   *
+   * Omitted from the request when `undefined`; pass `{}` to clear.
+   */
+  details?: Record<string, unknown>;
   /** `"always"` pins, `"on_recall"` unpins; omit to leave unchanged. */
   deliveryMode?: DeliveryMode;
 }
@@ -198,6 +222,16 @@ export interface ListTagsOptions {
   sort?: "count" | "recent" | "alpha";
   /** Case-insensitive prefix filter (max 200 chars). */
   prefix?: string;
+  /**
+   * Multi-tag AND drill-down: restrict the vocabulary to memories whose
+   * tags contain **all** of these values (`tags @> with_tags`), and exclude
+   * these values from the returned tags.
+   *
+   * Combine with `prefix` for server-side faceted browsing — one call per
+   * drill-down level, no local index. An empty array is a no-op filter and
+   * is not sent.
+   */
+  withTags?: string[];
 }
 
 export interface ListMemoriesOptions {
@@ -611,6 +645,9 @@ export class KaguraClient {
     if (options.linkedSourceUris !== undefined) {
       args.linked_source_uris = options.linkedSourceUris;
     }
+    if (options.supersedes !== undefined) {
+      args.supersedes = options.supersedes;
+    }
     return this.callToolChecked("remember", args);
   }
 
@@ -686,6 +723,54 @@ export class KaguraClient {
       args.until = options.until;
     }
     return this.callToolChecked("recall_upcoming", args);
+  }
+
+  /**
+   * List memories near a geographic point, nearest first, each carrying
+   * `distance_m`. The WHERE axis — a deterministic spatial query over
+   * stored `details.location` coordinates, not semantic search (use
+   * {@link recall} for topic search). Mirrors {@link recallUpcoming}.
+   *
+   * Store a location with
+   * `remember({ details: { location: { lat, lon, label } } })`; see
+   * {@link MemoryLocation}. Any memory type can carry one.
+   *
+   * Note: {@link updateMemory} replaces `details` wholesale, so resend
+   * `location` when updating details or the memory drops off this axis.
+   *
+   * `radiusM` is clamped server-side to [1, 1_000_000]; it is forwarded
+   * unchanged rather than pre-clamped here, so the server stays the single
+   * authority on the bound.
+   *
+   * @throws Error if `lat`/`lon` are not finite numbers in range. The
+   *   server rejects these with HTTP 422; failing locally turns the common
+   *   swapped-lat/lon mistake into an immediate, named error.
+   */
+  async recallNearby(options: {
+    contextId: string;
+    /** Query latitude (-90..90). */
+    lat: number;
+    /** Query longitude (-180..180). */
+    lon: number;
+    /** Search radius in meters (default 1000). */
+    radiusM?: number;
+    /** Maximum results (default 20, server max 100). */
+    k?: number;
+  }): Promise<ToolResult> {
+    const { lat, lon } = options;
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+      throw new Error(`lat must be a finite number between -90 and 90, got ${lat}`);
+    }
+    if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+      throw new Error(`lon must be a finite number between -180 and 180, got ${lon}`);
+    }
+    return this.callToolChecked("recall_nearby", {
+      context_id: options.contextId,
+      lat,
+      lon,
+      radius_m: options.radiusM ?? 1000,
+      k: options.k ?? 20,
+    });
   }
 
   /**
@@ -1072,6 +1157,11 @@ export class KaguraClient {
     if (prefix) {
       args.prefix = prefix;
     }
+    // An empty drill-down matches everything (`tags @> '{}'`), so it is
+    // equivalent to omitting the key — drop it like an empty prefix.
+    if (options.withTags !== undefined && options.withTags.length > 0) {
+      args.with_tags = options.withTags;
+    }
     const result = await this.callToolChecked("list_tags", args);
     return result as unknown as ListTagsResponse;
   }
@@ -1151,6 +1241,9 @@ export class KaguraClient {
     }
     if (options.contextSummary !== undefined) {
       args.context_summary = options.contextSummary;
+    }
+    if (options.details !== undefined) {
+      args.details = options.details;
     }
     if (options.deliveryMode !== undefined) {
       args.delivery_mode = options.deliveryMode;
