@@ -13,13 +13,25 @@
  * is displayed. The only side effect is the credentials file write.
  */
 
-import { KaguraAuthError } from "../errors.js";
 import { baseUrlFromMcp } from "../http.js";
 import type { OAuthCredentials } from "./credentials.js";
 import { setDefaultProfile, updateProfile } from "./credentials.js";
 import { authorizeDevice, pollForToken, DEFAULT_CLIENT_ID } from "./deviceFlow.js";
 import type { DeviceAuthorizationResponse } from "./deviceFlow.js";
 import { DEFAULT_MCP_URL } from "./resolve.js";
+
+/**
+ * Scope requested when `login()` is called without one.
+ *
+ * Read **and** write, matching the Python CLI's `kagura auth login`
+ * default. The credentials file is shared between both SDKs, so a profile
+ * must not end up with different authority depending on which one wrote
+ * it. Opt down with `scope: READ_ONLY_SCOPE` — the CLI's `--read-only`.
+ */
+export const DEFAULT_SCOPE = "memory:read memory:write";
+
+/** Read-only scope; the Python CLI's `--read-only`. */
+export const READ_ONLY_SCOPE = "memory:read";
 
 export interface LoginOptions {
   /**
@@ -31,9 +43,9 @@ export interface LoginOptions {
   /** OAuth client ID (default {@link DEFAULT_CLIENT_ID}). */
   clientId?: string;
   /**
-   * Requested scope. Defaults to the device-flow default (`memory:read`),
-   * which is **read-only** — pass a wider scope (e.g.
-   * `"memory:read memory:write"`) if the credentials need to write.
+   * Requested scope. Defaults to {@link DEFAULT_SCOPE} (read + write), the
+   * same default as the Python CLI's `kagura auth login`. Pass
+   * {@link READ_ONLY_SCOPE} for the CLI's `--read-only` behaviour.
    */
   scope?: string;
   /** Profile name to store under (default `"default"`). */
@@ -69,13 +81,14 @@ export interface LoginOptions {
  * @returns the credentials that were written.
  * @throws KaguraAuthDeniedError the user denied at the consent screen.
  * @throws KaguraAuthExpiredError the device code expired before approval.
- * @throws KaguraAuthError the token response carried no refresh token, or
- *   (propagated from the device-flow primitives) a protocol/response
- *   failure.
+ * @throws KaguraAuthError propagated from the device-flow primitives on a
+ *   protocol/response failure.
  * @throws KaguraConnectionError the server was unreachable.
  *
- * Nothing is written unless the token exchange succeeds AND yields a
- * refresh token; a failed login never disturbs an existing profile.
+ * Nothing is written unless the token exchange succeeds, so a failed login
+ * never disturbs an existing profile. A response with no `refresh_token`
+ * warns and still persists (matching the Python CLI); check the returned
+ * `refreshToken` if the caller needs to react.
  */
 export async function login(options: LoginOptions = {}): Promise<OAuthCredentials> {
   const mcpUrl = options.mcpUrl ?? DEFAULT_MCP_URL;
@@ -85,7 +98,7 @@ export async function login(options: LoginOptions = {}): Promise<OAuthCredential
 
   const authorization = await authorizeDevice(server, {
     clientId,
-    ...(options.scope !== undefined ? { scope: options.scope } : {}),
+    scope: options.scope ?? DEFAULT_SCOPE,
     ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
   });
 
@@ -100,15 +113,18 @@ export async function login(options: LoginOptions = {}): Promise<OAuthCredential
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
 
-  // pollForToken defaults a missing refresh_token to "". Persisting that
-  // would write a profile this SDK can never auto-refresh: the login looks
-  // like it succeeded, then dies at the first expiry with a bare
-  // "your login expired". Fail here, while the cause is still visible.
+  // A response with no refresh_token yields a profile that cannot
+  // auto-refresh. Python treats that as a legitimate degraded state — it
+  // writes the profile and reports `refreshable: false` from
+  // `kagura auth status` — so this SDK must not reject a state the other
+  // one considers valid on the file they share. Warn instead: the caller
+  // can also branch on the returned `refreshToken`.
   if (!token.refreshToken) {
-    throw new KaguraAuthError(
-      "Login succeeded but the token response carried no refresh_token, so " +
-        "the profile could not auto-refresh. Nothing was written. Verify the " +
-        `'${clientId}' client is allowed offline access on ${server}.`,
+    console.warn(
+      "Logged in, but the token response carried no refresh_token: this " +
+        "profile cannot auto-refresh and will need another login when the " +
+        `access token expires. Verify the '${clientId}' client is allowed ` +
+        `offline access on ${server}.`,
     );
   }
 

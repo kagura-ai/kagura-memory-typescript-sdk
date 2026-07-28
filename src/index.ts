@@ -93,7 +93,7 @@ export type { ResolveAuthOptions } from "./auth/resolve.js";
 // refreshing them. `login()` is the one-call path; the RFC 8628 primitives
 // and the credentials store are exported too so a host app can drive the
 // flow itself (e.g. its own polling UI) or manage profiles.
-export { login } from "./auth/login.js";
+export { DEFAULT_SCOPE, READ_ONLY_SCOPE, login } from "./auth/login.js";
 export type { LoginOptions } from "./auth/login.js";
 
 export {

@@ -2,12 +2,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadCredentialsFile, resetStateCache } from "../../src/auth/credentials.js";
-import { login } from "../../src/auth/login.js";
+import {
+  getSharedState,
+  loadCredentialsFile,
+  resetStateCache,
+} from "../../src/auth/credentials.js";
+import { DEFAULT_SCOPE, READ_ONLY_SCOPE, login } from "../../src/auth/login.js";
 import type { DeviceAuthorizationResponse } from "../../src/auth/deviceFlow.js";
-import { KaguraAuthDeniedError, KaguraAuthError } from "../../src/errors.js";
+import { KaguraAuthDeniedError } from "../../src/errors.js";
 
 let dir: string;
 let credentialsPath: string;
@@ -210,32 +214,32 @@ describe("login (#9)", () => {
   it.each([
     ["omitted", { access_token: "at-1", expires_in: 3600 }],
     ["empty", { access_token: "at-1", refresh_token: "", expires_in: 3600 }],
-  ])("refuses to persist a profile when refresh_token is %s", async (_label, body) => {
+  ])("persists but warns when refresh_token is %s", async (_label, body) => {
     const server = new FakeOAuthServer();
     server.tokenResponses = [{ status: 200, body }];
+    const warnings: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((m: unknown) => {
+      warnings.push(String(m));
+    });
 
-    // A profile with no refresh token can never auto-refresh: it would look
-    // like a successful login and then silently expire an hour later.
-    await expect(
-      login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: server.fetch }),
-    ).rejects.toBeInstanceOf(KaguraAuthError);
+    try {
+      // Python's `kagura auth login` writes this profile and reports it as
+      // non-refreshable (`kagura auth status` → refreshable: false) rather
+      // than failing. The credentials file is shared, so TypeScript must
+      // not reject a state the other SDK treats as legitimate.
+      const creds = await login({
+        mcpUrl: "https://x.test/mcp",
+        credentialsPath,
+        fetch: server.fetch,
+      });
 
-    expect(fs.existsSync(credentialsPath)).toBe(false);
-  });
-
-  it("leaves an existing profile untouched when the new login has no refresh token", async () => {
-    const good = new FakeOAuthServer();
-    await login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: good.fetch });
-
-    const bad = new FakeOAuthServer();
-    bad.tokenResponses = [{ status: 200, body: { access_token: "at-9", expires_in: 60 } }];
-    await expect(
-      login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: bad.fetch }),
-    ).rejects.toBeInstanceOf(KaguraAuthError);
-
-    const cf = loadCredentialsFile(credentialsPath);
-    expect(cf.profiles.default!.accessToken).toBe("at-1");
-    expect(cf.profiles.default!.refreshToken).toBe("rt-1");
+      expect(creds.accessToken).toBe("at-1");
+      expect(creds.refreshToken).toBe("");
+      expect(loadCredentialsFile(credentialsPath).profiles.default!.accessToken).toBe("at-1");
+      expect(warnings.join("\n")).toMatch(/refresh/i);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("propagates a throwing onUserCode without polling or writing", async () => {
@@ -256,18 +260,54 @@ describe("login (#9)", () => {
     expect(fs.existsSync(credentialsPath)).toBe(false);
   });
 
-  it("forwards clientId and scope to the authorize call", async () => {
+  it("requests read+write by default, matching the Python CLI", async () => {
+    const server = new FakeOAuthServer();
+    await login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: server.fetch });
+
+    // `kagura auth login` defaults to DEFAULT_SCOPE (read+write) and opts
+    // *down* via --read-only. The credentials file is shared between both
+    // SDKs, so a profile must not depend on which one wrote it.
+    const body = JSON.parse(server.bodies[0]!) as Record<string, unknown>;
+    expect(body.scope).toBe(DEFAULT_SCOPE);
+    expect(DEFAULT_SCOPE).toBe("memory:read memory:write");
+    expect(READ_ONLY_SCOPE).toBe("memory:read");
+  });
+
+  it("makes a re-login visible to already-cached shared state", async () => {
+    // Python's CLI calls reset_state_cache() after writing. This SDK needs
+    // no equivalent: getSharedState re-reads the file on every call and
+    // refreshes the cached entry. Same outcome, different mechanism — pin
+    // it, because dropping that re-read would silently strand every client
+    // built before the re-login on the old token.
+    const first = new FakeOAuthServer();
+    await login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: first.fetch });
+    expect(getSharedState(credentialsPath, "default")?.credentials.accessToken).toBe("at-1");
+
+    // Re-login in the same process (expired profile, workspace switch, …).
+    const second = new FakeOAuthServer();
+    second.tokenResponses = [
+      {
+        status: 200,
+        body: { access_token: "at-2", refresh_token: "rt-2", expires_in: 3600 },
+      },
+    ];
+    await login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: second.fetch });
+
+    expect(getSharedState(credentialsPath, "default")?.credentials.accessToken).toBe("at-2");
+  });
+
+  it("forwards clientId and an explicit scope to the authorize call", async () => {
     const server = new FakeOAuthServer();
     await login({
       mcpUrl: "https://x.test/mcp",
       credentialsPath,
       clientId: "my-app",
-      scope: "memory:read memory:write",
+      scope: READ_ONLY_SCOPE,
       fetch: server.fetch,
     });
 
     const body = JSON.parse(server.bodies[0]!) as Record<string, unknown>;
-    expect(body).toEqual({ client_id: "my-app", scope: "memory:read memory:write" });
+    expect(body).toEqual({ client_id: "my-app", scope: "memory:read" });
 
     const tokenForm = new URLSearchParams(server.bodies[1]!);
     expect(tokenForm.get("client_id")).toBe("my-app");
