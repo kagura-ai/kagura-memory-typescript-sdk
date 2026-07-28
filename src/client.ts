@@ -148,6 +148,15 @@ export interface RecallOptions {
   contextIds?: string[];
   /** Include up to 3 graph discovery hints under `explore_hints`. */
   includeExploreHints?: boolean;
+  /**
+   * Include memories shadowed by a supersedes edge (default false).
+   *
+   * Superseded versions are demoted out of results by default; `true`
+   * returns them annotated with `superseded_by`, which is what makes the
+   * history {@link RememberOptions.supersedes} preserves actually
+   * readable — audit and "previous versions of this fact" views.
+   */
+  includeSuperseded?: boolean;
 }
 
 export interface UpdateMemoryOptions {
@@ -697,6 +706,9 @@ export class KaguraClient {
     }
     if (options.includeExploreHints) {
       args.include_explore_hints = true;
+    }
+    if (options.includeSuperseded) {
+      args.include_superseded = true;
     }
     return this.callToolChecked("recall", args);
   }
