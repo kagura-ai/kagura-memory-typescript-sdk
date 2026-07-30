@@ -299,7 +299,9 @@ describe("Node 18: no WebCrypto global", () => {
     const sentinel = {
       getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
       subtle: webcrypto.subtle,
-    } as unknown as Crypto;
+      // Not the DOM `Crypto` type: this package's tsconfig has no DOM lib,
+      // so that name does not exist here.
+    } as unknown as typeof globalThis.crypto;
     Object.defineProperty(globalThis, "crypto", { value: sentinel, configurable: true });
     resetAgeCache();
 
