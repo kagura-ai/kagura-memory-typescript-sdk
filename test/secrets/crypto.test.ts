@@ -6,7 +6,7 @@
  * agree" is a contract, not an implementation detail. See `vectors.ts`.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { KaguraCryptoError } from "../../src/errors.js";
 import {
@@ -19,6 +19,7 @@ import {
   MAX_CIPHERTEXT_BYTES,
   recipientFromIdentity,
   RECIPIENT_RE,
+  resetAgeCache,
 } from "../../src/secrets/crypto.js";
 import {
   PYRAGE_ARMORED,
@@ -236,11 +237,65 @@ describe("encrypt / decrypt", () => {
     await expect(encrypt(big, [TEST_RECIPIENT])).rejects.toThrow(/exceeds the .* cap/);
   });
 
+  it("measures the inbound cap in bytes, not UTF-16 code units", async () => {
+    // A multi-byte string can sit under the cap by `.length` while being
+    // several times over it by bytes. The check has to agree with what its
+    // own message claims, and it must be the cap that rejects this — not
+    // armor parsing incidentally noticing the input is not base64.
+    const multibyte = "あ".repeat(MAX_CIPHERTEXT_BYTES / 2);
+    expect(multibyte.length).toBeLessThan(MAX_CIPHERTEXT_BYTES);
+    expect(Buffer.byteLength(multibyte, "utf8")).toBeGreaterThan(MAX_CIPHERTEXT_BYTES);
+
+    await expect(decrypt(multibyte, TEST_IDENTITY)).rejects.toThrow(/exceeds the .* cap/);
+  });
+
   it("accepts an armored ciphertext exactly at the cap boundary", async () => {
     // Guards against an off-by-one turning the cap into a rejection of
     // legitimate values: the check is `>`, not `>=`.
     const atCap = "y".repeat(MAX_CIPHERTEXT_BYTES);
     await expect(decrypt(atCap, TEST_IDENTITY)).rejects.toThrow(/missing PEM header\/footer/);
+  });
+});
+
+describe("Node 18: no WebCrypto global", () => {
+  // WebCrypto only became a global in Node 19. CI on Node 18 failed with
+  // "crypto.getRandomValues must be defined" on every encrypt and keygen
+  // while decryption passed, because only the former need randomness. The
+  // SDK declares engines.node >= 18, so simulate the absence here rather
+  // than relying on the matrix to notice a regression.
+  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto")!;
+
+  afterEach(() => {
+    Object.defineProperty(globalThis, "crypto", original);
+    resetAgeCache();
+  });
+
+  it("generates and encrypts with no crypto global present", async () => {
+    delete (globalThis as { crypto?: unknown }).crypto;
+    resetAgeCache();
+    expect(globalThis.crypto).toBeUndefined();
+
+    const { identity, recipient } = await generateKeypair();
+    const armored = await encrypt(new TextEncoder().encode("node18"), [recipient]);
+
+    expect(decode(await decrypt(armored, identity))).toBe("node18");
+    // The shim installed it rather than merely working around it once.
+    expect(typeof globalThis.crypto.getRandomValues).toBe("function");
+  });
+
+  it("leaves an existing crypto global alone", async () => {
+    const sentinel = globalThis.crypto;
+    resetAgeCache();
+    await generateKeypair();
+    expect(globalThis.crypto).toBe(sentinel);
+  });
+
+  it("keeps it configurable so a host can still substitute its own", async () => {
+    delete (globalThis as { crypto?: unknown }).crypto;
+    resetAgeCache();
+    await generateKeypair();
+
+    expect(Object.getOwnPropertyDescriptor(globalThis, "crypto")!.configurable).toBe(true);
   });
 });
 

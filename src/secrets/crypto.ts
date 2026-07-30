@@ -87,17 +87,49 @@ interface AgeModule {
 let agePromise: Promise<AgeModule> | null = null;
 
 /**
+ * Make `globalThis.crypto` exist, for Node 18.
+ *
+ * WebCrypto only became a global in Node 19. `age-encryption` reaches
+ * `@noble/*`, which reads `globalThis.crypto.getRandomValues` for the file
+ * key and for keygen — so on Node 18 every encrypt and every
+ * {@link generateKeypair} fails with "crypto.getRandomValues must be
+ * defined", while decryption (which needs no randomness) works fine. CI
+ * caught exactly that asymmetry.
+ *
+ * `package.json` says `engines.node >= 18`, so the fix belongs here rather
+ * than in the engines field: `node:crypto` has exposed `webcrypto` since
+ * Node 15, and installing it is precisely what Node 19+ does for you.
+ *
+ * Scoped as tightly as a global assignment can be: only when nothing is
+ * there, only on the way into the crypto package, and `configurable` so a
+ * host that wants its own implementation can still replace it.
+ */
+async function ensureWebCrypto(): Promise<void> {
+  if (globalThis.crypto !== undefined) {
+    return;
+  }
+  const { webcrypto } = await import("node:crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    value: webcrypto,
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  });
+}
+
+/**
  * Load `age-encryption` on first use.
  *
  * @throws KaguraCryptoError if the optional peer dependency is not installed.
  */
 async function loadAge(): Promise<AgeModule> {
-  agePromise ??= import("age-encryption").then(
-    (mod) => mod as AgeModule,
-    (e: unknown) => {
-      // Reset so a caller who installs the package mid-process (or a test
-      // that stubs the loader) is not stuck with the rejected promise.
-      agePromise = null;
+  agePromise ??= (async () => {
+    // Kept outside the try below so a WebCrypto problem is never reported as
+    // "the package is not installed" — the two need different fixes.
+    await ensureWebCrypto();
+    try {
+      return (await import("age-encryption")) as AgeModule;
+    } catch (e) {
       throw new KaguraCryptoError(
         "The secret store needs the optional 'age-encryption' package, which " +
           "is not installed. The base SDK has zero runtime dependencies, so " +
@@ -106,8 +138,14 @@ async function loadAge(): Promise<AgeModule> {
           `  (original error: ${excMessage(e)})`,
         { cause: e },
       );
-    },
-  );
+    }
+  })().catch((e: unknown) => {
+    // Never memoize a failure: a caller who installs the package mid-process,
+    // or a host that supplies its own WebCrypto after the first attempt,
+    // must get a real retry rather than the cached rejection.
+    agePromise = null;
+    throw e;
+  });
   return agePromise;
 }
 
@@ -242,10 +280,17 @@ export async function encrypt(plaintext: Uint8Array, recipients: string[]): Prom
  */
 export async function decrypt(armored: string, identity: string): Promise<Uint8Array> {
   // Inbound cap first, symmetric with encrypt, so an oversized blob is
-  // rejected before it is base64-decoded into memory.
-  if (armored.length > MAX_CIPHERTEXT_BYTES) {
+  // rejected before armor parsing walks the whole string.
+  //
+  // Measured in bytes, not `armored.length`. Python writes `len(armored)`,
+  // which counts code points, and for valid input the two agree exactly —
+  // armor is ASCII — so this is identical in both SDKs for anything that
+  // could actually decrypt. It differs only for input that is already
+  // invalid, where a byte count is both truer to the message and stricter.
+  const size = Buffer.byteLength(armored, "utf8");
+  if (size > MAX_CIPHERTEXT_BYTES) {
     throw new KaguraCryptoError(
-      `ciphertext is ${armored.length} bytes, exceeds the ${MAX_CIPHERTEXT_BYTES}-byte cap`,
+      `ciphertext is ${size} bytes, exceeds the ${MAX_CIPHERTEXT_BYTES}-byte cap`,
     );
   }
   const binary = armorDecode(armored);
