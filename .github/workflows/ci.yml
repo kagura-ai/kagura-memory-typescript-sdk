@@ -20,6 +20,13 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The same suite with globalThis.crypto removed, i.e. Node 18's world
+      # (#28). age-encryption reaches @noble, which reads
+      # crypto.getRandomValues, so encrypt and keygen broke there while
+      # decrypt kept working — an asymmetry only one leg of this matrix could
+      # see. Running it everywhere means the next such regression fails on
+      # whichever leg finishes first, and reproduces locally.
+      - run: npm run test:no-webcrypto
       - run: npm run build
       - name: Pack and install smoke test
         shell: bash
@@ -30,3 +37,62 @@ jobs:
           npm install "$GITHUB_WORKSPACE"/kagura-memory-*.tgz
           node -e "const { KaguraClient } = require('kagura-memory'); if (typeof KaguraClient !== 'function') process.exit(1);"
           node --input-type=module -e "import { KaguraClient } from 'kagura-memory'; if (typeof KaguraClient !== 'function') process.exit(1);"
+
+      # The optional `age-encryption` peer dependency (#28) must stay
+      # optional: a bare install has to keep working, and the crypto path has
+      # to work once the user opts in. Both are properties of the *published*
+      # artifact, so they are checked here rather than in vitest.
+      - name: Optional peer dependency stays optional
+        shell: bash
+        run: |
+          cd /tmp/smoke
+          # npm must not have pulled the peer in on its own — zero runtime
+          # dependencies is a documented promise, not a default.
+          test ! -d node_modules/age-encryption
+          node -e "
+            const { encrypt, fingerprint, SecretClient } = require('kagura-memory');
+            // Everything that does not need the crypto package still works.
+            if (fingerprint('age1x').length !== 64) process.exit(1);
+            if (typeof SecretClient !== 'function') process.exit(1);
+            // Well-formed shape, so validation passes and the call actually
+            // reaches the lazy loader — that is what is under test.
+            encrypt(new Uint8Array([1]), ['age1' + 'q'.repeat(30)]).then(
+              () => { console.error('expected a crypto error'); process.exit(1); },
+              (e) => {
+                if (!/npm install age-encryption/.test(e.message)) {
+                  console.error('unhelpful error:', e.message); process.exit(1);
+                }
+                console.log('bare install: actionable error OK');
+              },
+            );
+          "
+
+      - name: Crypto round-trip once the peer is installed
+        shell: bash
+        run: |
+          cd /tmp/smoke
+          # Pinned to the declared peer range. Unpinned, npm resolves
+          # `latest`, and the first minor outside ^0.3.0 would hard-fail this
+          # step on every PR — npm validates an optional peer strictly once
+          # the package is actually present.
+          npm install 'age-encryption@^0.3.0'
+          # ESM-only dependency reached from the CJS bundle via a native
+          # dynamic import(). An esbuild change that rewrote it to require()
+          # would throw ERR_REQUIRE_ESM here and nowhere else.
+          node -e "
+            const sdk = require('kagura-memory');
+            (async () => {
+              const { identity, recipient } = await sdk.generateKeypair();
+              const armored = await sdk.encrypt(Buffer.from('cjs'), [recipient]);
+              const out = await sdk.decrypt(armored, identity);
+              if (Buffer.from(out).toString() !== 'cjs') process.exit(1);
+              console.log('cjs crypto round-trip OK');
+            })().catch((e) => { console.error(e); process.exit(1); });
+          "
+          node --input-type=module -e "
+            import { generateKeypair, encrypt, decrypt } from 'kagura-memory';
+            const { identity, recipient } = await generateKeypair();
+            const armored = await encrypt(Buffer.from('esm'), [recipient]);
+            if (Buffer.from(await decrypt(armored, identity)).toString() !== 'esm') process.exit(1);
+            console.log('esm crypto round-trip OK');
+          "

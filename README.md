@@ -20,7 +20,10 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 npm install kagura-memory
 ```
 
-Requires Node.js >= 18 (native `fetch`). Zero runtime dependencies.
+Requires Node.js >= 18 (native `fetch`). Zero runtime dependencies —
+the one optional peer dependency, for
+[zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
+unless you ask for it.
 
 ## Quick Start
 
@@ -291,6 +294,7 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. |
 | `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
+| `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 
 Agent Registry and binding methods are covered in
@@ -364,13 +368,112 @@ too. Out-of-range coordinates throw locally rather than round-tripping.
 > server does not deep-merge. Round-trip `location` when updating details
 > or the memory silently drops off the spatial axis.
 
+## Zero-knowledge secrets
+
+`SecretClient` is the fourth REST client, alongside Files, Resource and
+Workspace. The server stores **only opaque ciphertext**: values are
+encrypted to [age](https://age-encryption.org) recipients on your machine
+and decrypted there, so a workspace admin — or the server operator — can
+enumerate secret names and grants but never read a value.
+
+```ts
+import { SecretClient, KeyManager, decrypt } from "kagura-memory";
+
+const secrets = SecretClient.fromMcpUrl();
+
+// One-time: enroll this machine's age key and register the public half.
+// `store` is yours to supply — see "Key custody is yours to wire" below.
+const keys = new KeyManager({ store: myKeyStore });
+const { recipient, fingerprint } = await keys.enroll();
+await secrets.registerPubkey(recipient, "ci-runner");
+// ...an owner approves it (verify `fingerprint` out of band first).
+
+// Store a value, encrypted to every approved recipient.
+const active = (await secrets.listPubkeys()).filter((p) => p.status === "active");
+await secrets.putSecretForRecipients({
+  name: "openai/api-key",
+  plaintext: "sk-live-...",
+  recipients: active,
+});
+
+// Read it back.
+const { ciphertext } = await secrets.fetchSecret("openai/api-key");
+const value = await decrypt(ciphertext, await keys.getIdentity());
+```
+
+Also: `listSecrets`, `revokeGrant`, `deleteSecret`, `verifyAudit`,
+`approvePubkey` / `revokePubkey` / `listMyPubkeys`, and the low-level
+`putSecret` when you want to build the grant lists yourself.
+
+Names may contain `/` — `cloudflare/api-token` is addressable, and each
+segment is percent-encoded so the separators stay structural. `deleteSecret`
+rejects a name with an empty, `.`, or `..` segment rather than encoding it:
+those are RFC 3986 *unreserved*, so encoding does not neutralize them and the
+URL parser would resolve them away — `cloudflare/../openai` would have
+deleted `openai`.
+
+### The crypto package is opt-in
+
+Encryption needs [`age-encryption`](https://www.npmjs.com/package/age-encryption)
+(typage, by age's author — the counterpart of the Rust `pyrage` binding the
+Python SDK uses). It is an **optional peer dependency**, so a plain
+`npm install kagura-memory` still pulls in nothing:
+
+```bash
+npm install age-encryption
+```
+
+Everything except `putSecretForRecipients`, `encrypt`, `decrypt`,
+`generateKeypair` and `recipientFromIdentity` works without it —
+including the whole REST surface, `fingerprint()`, and the armor codec. Call
+one of those without the package and you get a `KaguraCryptoError` naming
+the install command, not a module-resolution stack trace.
+
+> **On Node 18.** This SDK supports Node 18 and CI exercises the crypto
+> round-trip there on every push. But `age-encryption`'s `@noble/*`
+> dependencies declare `engines.node: ">= 20.19.0"`, so `npm install
+> age-encryption` on Node 18 prints `EBADENGINE` warnings, and an
+> `engine-strict=true` npmrc will refuse the install outright. It works —
+> WebCrypto is not a global before Node 19, so the SDK installs
+> `node:crypto`'s `webcrypto` itself — but if you want the warnings gone,
+> use Node 20.19+.
+
+Recipients are X25519-only. `age1pq1…` (post-quantum) and plugin
+recipients are rejected even though `age-encryption` would accept them,
+because `pyrage` cannot read them and the Python CLI has to be able to
+decrypt whatever this SDK writes.
+
+### Key custody is yours to wire
+
+Whoever holds the age private key can decrypt every ciphertext ever shared
+with the matching recipient, so `KeyManager` takes a `KeyStore` and this SDK
+ships **no default backend**:
+
+```ts
+interface KeyStore {
+  get(name: string): Promise<string | null>;
+  set(name: string, value: string): Promise<void>;
+  delete(name: string): Promise<void>;
+}
+```
+
+The Python SDK defaults to the OS keychain via `keyring`. Node has no
+stdlib equivalent, and every option is a native module — so a default here
+would mean either a native runtime dependency or a plaintext file, and
+Python explicitly refuses the latter. Asking you for a store keeps the
+fail-closed property with no insecure fallback to land in by accident.
+Back it with `keytar`/libsecret in an app, or with the ambient secret
+manager in CI. Keys are stored under `identity:{profile}`, the same names
+Python uses, so a shared backend interoperates.
+
 ## Relationship to the Python SDK
 
 This package ports the Python SDK's core (client, auth, REST clients,
 models). Of the `kagura` CLI only the `auth` subcommands are provided
 (`npx kagura-memory auth …`, above); the memory, context, and ingestion
-commands are not ported, nor are the document-ingestion pipeline
-(`FileIngestor`) and the zero-knowledge secrets client.
+commands are not ported, nor is the document-ingestion pipeline
+(`FileIngestor`). The zero-knowledge secret **client** is ported (above);
+its `kagura secret` CLI subcommands are not.
 (`KaguraAgent` was removed from the Python SDK in v0.37.0 — the actor
 role lives in the [kagura-agent](https://pypi.org/project/kagura-agent/)
 package, so it will not be ported here.) Use the Python SDK for those;

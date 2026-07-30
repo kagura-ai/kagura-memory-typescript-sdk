@@ -6,6 +6,111 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`SecretClient` — the zero-knowledge secret store**
+  ([#28](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/28)):
+  the fourth REST client, and the only member of the
+  Files/Resource/Workspace/Secret set that was never ported. The comment on
+  `KaguraRestClient` had been naming it as a sibling since 0.1.0 while
+  nothing implemented it.
+
+  Full surface: the pubkey registry (`registerPubkey`, `listPubkeys`,
+  `listMyPubkeys`, `approvePubkey`, `revokePubkey`), secrets (`putSecret`,
+  `putSecretForRecipients`, `listSecrets`, `fetchSecret`, `revokeGrant`,
+  `deleteSecret`), and `verifyAudit`. `putSecretForRecipients` enforces the
+  server's grant-consistency invariant client-side — every recipient must be
+  `active` and must carry a fingerprint matching its own pubkey — and derives
+  `recipients_snapshot` and `grant_pubkey_ids` from one list so they agree by
+  construction instead of by the caller's care. 403 is mapped to a message
+  naming all three of its causes, because the server answers 403 rather than
+  404 precisely so the response cannot confirm a secret exists.
+
+- **age crypto behind an optional peer dependency**: `generateKeypair`,
+  `recipientFromIdentity`, `fingerprint`, `armorEncode`/`armorDecode`,
+  `encrypt`, `decrypt`. Crypto is delegated to
+  [`age-encryption`](https://www.npmjs.com/package/age-encryption) (typage,
+  by age's author — the counterpart of the `pyrage` binding Python uses),
+  declared as an **optional** peer dependency and imported lazily. A plain
+  `npm install kagura-memory` still installs nothing; zero runtime
+  dependencies stays true, matching how Python gates the same code behind its
+  `[secret]` extra. Calling a crypto function without the package raises
+  `KaguraCryptoError` naming the install command.
+
+  Interoperability with the Python SDK is verified, not assumed: checked-in
+  vectors prove this SDK decrypts pyrage-written ciphertext (grease stanza
+  included), derives the same recipient from an identity, computes the same
+  fingerprint, and armors byte-identically.
+
+  One divergence was necessary. Recipients are X25519-only in both SDKs, but
+  Python gets that from `pyrage.x25519.Recipient.from_str` rejecting anything
+  else one line after its regex, while `age-encryption`'s `addRecipient`
+  *accepts* `age1pq1…` and `age1tag1…`. Copying Python's regex would have let
+  a TypeScript caller write ciphertext the Python CLI could never open, so
+  `RECIPIENT_RE` is tightened to bech32's alphabet — which excludes `1`, and
+  every non-X25519 form carries a second `1`.
+
+- **`KeyManager` and the `KeyStore` interface** for age private-key custody,
+  keyed as `identity:{profile}` exactly as Python keys it, so a shared
+  backend interoperates. No default backend ships: Node has no stdlib
+  keychain and every option is a native module, so a default would mean
+  either a native runtime dependency or the plaintext file Python explicitly
+  refuses. Requiring a store keeps custody fail-closed with no insecure
+  fallback to reach by accident.
+
+- **`KaguraClient.callRawTool(name, args)`** — call any MCP tool by name.
+  `callTool` is private, so before this a tool with no typed wrapper was
+  unreachable: `secret_*` was exactly that, and the only workarounds were
+  vendoring a patched SDK or hand-rolling JSON-RPC. Typed wrappers remain the
+  surface to prefer; this makes the next gap a detour rather than a dead end.
+
+- `KaguraSecretError`, `KaguraCryptoError`, `KaguraKeyCustodyError` — the
+  same three-level hierarchy as Python's, so a contract violation is
+  catchable separately from a transport failure.
+
+- CI now asserts both halves of "optional": that a bare install of the packed
+  tarball has no `age-encryption` and still gives an actionable error, and
+  that the crypto round-trips from **both** the ESM and CJS builds once it is
+  installed. The CJS half matters because `age-encryption` is ESM-only and
+  reached through a native dynamic `import()`; a bundler change that rewrote
+  it to `require()` would fail only in the published artifact.
+
+  `npm run test:no-webcrypto` runs the whole suite with `globalThis.crypto`
+  deleted — Node 18's world, where WebCrypto is not yet a global. That
+  condition broke encryption and keygen while leaving decryption working, an
+  asymmetry only one leg of the CI matrix could see; it now reproduces on any
+  Node version, locally and in `prepublishOnly`. The SDK installs
+  `node:crypto`'s `webcrypto` itself when nothing is there, so
+  `engines.node >= 18` stays honest.
+
+### Security
+
+- **A malformed age identity no longer leaks the private key into error
+  messages.** `@scure/base`, under `age-encryption`, puts the entire
+  offending string in its bech32 errors (`Invalid checksum in
+  AGE-SECRET-KEY-1…: expected "…"`). Both `decrypt()` and
+  `recipientFromIdentity()` interpolated that into their message and attached
+  it as `cause`, which Node prints whenever an error is logged — so a
+  single-character typo in a stored identity wrote a reconstructable private
+  key to logs, CI output, and any crash reporter. Now a fixed message with no
+  interpolation and no cause chain.
+
+  TypeScript-only: `pyrage` answers `invalid Bech32 encoding` and echoes
+  nothing, so the Python port is unaffected.
+
+- **`deleteSecret` rejects names that would retarget the request.** `.` and
+  `..` are RFC 3986 *unreserved*, so percent-encoding leaves them intact and
+  the URL parser then resolves them away:
+  `deleteSecret("cloudflare/../openai")` issued
+  `DELETE /api/v1/config/secrets/openai`, and `deleteSecret("..")` issued
+  `DELETE /api/v1/config/`. On a destructive owner-only operation that is
+  worth refusing outright — an empty, `.`, or `..` segment now throws
+  `KaguraSecretError` before any request. Dots *inside* a segment
+  (`cloudflare/api.token`, `a..b`) are still fine.
+
+  The Python SDK has the same hole (`quote(".", safe="") === "."`) and wants
+  the same guard.
+
 ## [0.6.0] - 2026-07-28
 
 ### Added
