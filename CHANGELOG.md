@@ -75,6 +75,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reached through a native dynamic `import()`; a bundler change that rewrote
   it to `require()` would fail only in the published artifact.
 
+  `npm run test:no-webcrypto` runs the whole suite with `globalThis.crypto`
+  deleted — Node 18's world, where WebCrypto is not yet a global. That
+  condition broke encryption and keygen while leaving decryption working, an
+  asymmetry only one leg of the CI matrix could see; it now reproduces on any
+  Node version, locally and in `prepublishOnly`. The SDK installs
+  `node:crypto`'s `webcrypto` itself when nothing is there, so
+  `engines.node >= 18` stays honest.
+
+### Security
+
+- **A malformed age identity no longer leaks the private key into error
+  messages.** `@scure/base`, under `age-encryption`, puts the entire
+  offending string in its bech32 errors (`Invalid checksum in
+  AGE-SECRET-KEY-1…: expected "…"`). Both `decrypt()` and
+  `recipientFromIdentity()` interpolated that into their message and attached
+  it as `cause`, which Node prints whenever an error is logged — so a
+  single-character typo in a stored identity wrote a reconstructable private
+  key to logs, CI output, and any crash reporter. Now a fixed message with no
+  interpolation and no cause chain.
+
+  TypeScript-only: `pyrage` answers `invalid Bech32 encoding` and echoes
+  nothing, so the Python port is unaffected.
+
+- **`deleteSecret` rejects names that would retarget the request.** `.` and
+  `..` are RFC 3986 *unreserved*, so percent-encoding leaves them intact and
+  the URL parser then resolves them away:
+  `deleteSecret("cloudflare/../openai")` issued
+  `DELETE /api/v1/config/secrets/openai`, and `deleteSecret("..")` issued
+  `DELETE /api/v1/config/`. On a destructive owner-only operation that is
+  worth refusing outright — an empty, `.`, or `..` segment now throws
+  `KaguraSecretError` before any request. Dots *inside* a segment
+  (`cloudflare/api.token`, `a..b`) are still fine.
+
+  The Python SDK has the same hole (`quote(".", safe="") === "."`) and wants
+  the same guard.
+
 ## [0.6.0] - 2026-07-28
 
 ### Added

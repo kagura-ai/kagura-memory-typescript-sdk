@@ -71,7 +71,11 @@ jobs:
         shell: bash
         run: |
           cd /tmp/smoke
-          npm install age-encryption
+          # Pinned to the declared peer range. Unpinned, npm resolves
+          # `latest`, and the first minor outside ^0.3.0 would hard-fail this
+          # step on every PR — npm validates an optional peer strictly once
+          # the package is actually present.
+          npm install 'age-encryption@^0.3.0'
           # ESM-only dependency reached from the CJS bundle via a native
           # dynamic import(). An esbuild change that rewrote it to require()
           # would throw ERR_REQUIRE_ESM here and nowhere else.

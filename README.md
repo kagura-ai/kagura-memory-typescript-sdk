@@ -405,6 +405,13 @@ Also: `listSecrets`, `revokeGrant`, `deleteSecret`, `verifyAudit`,
 `approvePubkey` / `revokePubkey` / `listMyPubkeys`, and the low-level
 `putSecret` when you want to build the grant lists yourself.
 
+Names may contain `/` — `cloudflare/api-token` is addressable, and each
+segment is percent-encoded so the separators stay structural. `deleteSecret`
+rejects a name with an empty, `.`, or `..` segment rather than encoding it:
+those are RFC 3986 *unreserved*, so encoding does not neutralize them and the
+URL parser would resolve them away — `cloudflare/../openai` would have
+deleted `openai`.
+
 ### The crypto package is opt-in
 
 Encryption needs [`age-encryption`](https://www.npmjs.com/package/age-encryption)
@@ -421,6 +428,15 @@ Everything except `putSecretForRecipients`, `encrypt`, `decrypt`,
 including the whole REST surface, `fingerprint()`, and the armor codec. Call
 one of those without the package and you get a `KaguraCryptoError` naming
 the install command, not a module-resolution stack trace.
+
+> **On Node 18.** This SDK supports Node 18 and CI exercises the crypto
+> round-trip there on every push. But `age-encryption`'s `@noble/*`
+> dependencies declare `engines.node: ">= 20.19.0"`, so `npm install
+> age-encryption` on Node 18 prints `EBADENGINE` warnings, and an
+> `engine-strict=true` npmrc will refuse the install outright. It works —
+> WebCrypto is not a global before Node 19, so the SDK installs
+> `node:crypto`'s `webcrypto` itself — but if you want the warnings gone,
+> use Node 20.19+.
 
 Recipients are X25519-only. `age1pq1…` (post-quantum) and plugin
 recipients are rejected even though `age-encryption` would accept them,

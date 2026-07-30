@@ -184,12 +184,36 @@ export class SecretClient extends KaguraRestClient {
    * @param name Slash-containing names are addressable: each path segment
    *   is percent-encoded individually so the `/` separators stay structural
    *   and the server's `{name:path}` converter still routes on them.
+   *
+   *   Dot segments and empty segments are rejected rather than encoded,
+   *   because percent-encoding does not neutralize them: `.` and `..` are
+   *   RFC 3986 *unreserved*, so `encodeURIComponent` leaves them untouched
+   *   and the URL parser in `fetch` then resolves them away. Verified:
+   *   `deleteSecret("cloudflare/../openai")` would have issued
+   *   `DELETE /api/v1/config/secrets/openai` — deleting a different secret —
+   *   and `deleteSecret("..")` would have issued `DELETE /api/v1/config/`.
+   *   On a destructive, owner-only operation that is not a risk worth
+   *   carrying for a name shape the server cannot address anyway.
+   *
+   *   The Python SDK has the same hole (`quote(".", safe="") === "."`) and
+   *   wants the same guard; this is a divergence in the safe direction until
+   *   it gets one.
+   *
+   * @throws KaguraSecretError if `name` is empty or has an empty, `.`, or
+   *   `..` segment.
    */
   async deleteSecret(name: string): Promise<void> {
-    const encoded = name
-      .split("/")
-      .map((segment) => encodeURIComponent(segment))
-      .join("/");
+    const segments = name.split("/");
+    const offending = segments.find((s) => s === "" || s === "." || s === "..");
+    if (offending !== undefined) {
+      throw new KaguraSecretError(
+        `refusing to delete secret ${JSON.stringify(name)}: a name may not be ` +
+          "empty or contain an empty, '.', or '..' path segment. Such a name " +
+          "would resolve to a different URL than intended and delete the " +
+          "wrong secret.",
+      );
+    }
+    const encoded = segments.map((segment) => encodeURIComponent(segment)).join("/");
     await this.request("DELETE", `${BASE}/${encoded}`);
   }
 

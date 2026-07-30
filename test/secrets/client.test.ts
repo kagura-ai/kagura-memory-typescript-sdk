@@ -18,9 +18,10 @@ import {
   KaguraSecretError,
 } from "../../src/errors.js";
 import { SecretClient } from "../../src/secrets/client.js";
+import type { HttpMethod, RestResponse } from "../../src/restBase.js";
 import type { PubkeyResponse } from "../../src/models.js";
 import { TEST_FINGERPRINT, TEST_IDENTITY, TEST_RECIPIENT } from "./vectors.js";
-import { decrypt } from "../../src/secrets/crypto.js";
+import { decrypt, fingerprint, generateKeypair } from "../../src/secrets/crypto.js";
 
 interface Recorded {
   url: string;
@@ -70,6 +71,37 @@ function makeClient(rest: FakeRest): SecretClient {
   return new SecretClient({ apiKey: "k", baseUrl: "https://api.test", fetch: rest.fetch });
 }
 
+/**
+ * Captures the request payload **object**, not its serialization.
+ *
+ * `JSON.stringify` drops keys whose value is `undefined`, so asserting on the
+ * parsed wire body cannot tell `{pubkey}` from `{pubkey, label: undefined}` —
+ * a review pass proved both optional-field tests still passed with their
+ * guards deleted. The distinction is not cosmetic: `request()` threads this
+ * same object to the 403 hook as `requestJson`, so a key present with an
+ * undefined value is observable.
+ */
+class ProbeClient extends SecretClient {
+  readonly payloads: (Record<string, unknown> | undefined)[] = [];
+
+  protected override async request(
+    method: HttpMethod,
+    path: string,
+    opts: {
+      json?: Record<string, unknown>;
+      params?: Record<string, unknown>;
+      extraHeaders?: Record<string, string>;
+    } = {},
+  ): Promise<RestResponse> {
+    this.payloads.push(opts.json);
+    return super.request(method, path, opts);
+  }
+}
+
+function makeProbe(rest: FakeRest): ProbeClient {
+  return new ProbeClient({ apiKey: "k", baseUrl: "https://api.test", fetch: rest.fetch });
+}
+
 const PUBKEY: PubkeyResponse = {
   id: "pk-1",
   identity_id: "id-1",
@@ -102,6 +134,21 @@ describe("pubkey registry", () => {
     expect(rest.requests[0]!.method).toBe("POST");
     expect(rest.json(0)).toEqual({ pubkey: TEST_RECIPIENT, label: "laptop" });
     expect(rest.json(1)).not.toHaveProperty("label");
+  });
+
+  it("omits the label key from the payload object, not just its JSON", async () => {
+    // Asserting the parsed wire body cannot catch this: JSON.stringify drops
+    // undefined values, so `{pubkey, label: undefined}` serializes
+    // identically. A review pass proved the guard could be deleted with all
+    // tests still green. request() hands this object to the 403 hook, so a
+    // key present with an undefined value is observable.
+    const probe = makeProbe(new FakeRest());
+    await probe.registerPubkey(TEST_RECIPIENT);
+    await probe.registerPubkey(TEST_RECIPIENT, "laptop");
+
+    expect(Object.keys(probe.payloads[0]!)).toEqual(["pubkey"]);
+    expect("label" in probe.payloads[0]!).toBe(false);
+    expect(probe.payloads[1]).toEqual({ pubkey: TEST_RECIPIENT, label: "laptop" });
   });
 
   it("lists workspace and caller pubkeys from distinct endpoints", async () => {
@@ -167,6 +214,17 @@ describe("secrets", () => {
     expect(rest.json(1)).toEqual({ name: "cloudflare/api-token", version_number: 3 });
   });
 
+  it("omits version_number from the payload object when unset", async () => {
+    // Same vacuity as the label guard above — see that test.
+    const probe = makeProbe(new FakeRest());
+    await probe.fetchSecret("a/b");
+    await probe.fetchSecret("a/b", 2);
+
+    expect(Object.keys(probe.payloads[0]!)).toEqual(["name"]);
+    expect("version_number" in probe.payloads[0]!).toBe(false);
+    expect(probe.payloads[1]).toEqual({ name: "a/b", version_number: 2 });
+  });
+
   it("lists metadata and verifies the audit chain", async () => {
     const rest = new FakeRest();
     rest.bodies = [JSON.stringify([]), JSON.stringify({ valid: true, entries: 4 })];
@@ -206,6 +264,41 @@ describe("secrets", () => {
     rest.status = 204;
     await makeClient(rest).deleteSecret("a#b?c");
     expect(rest.path()).toBe("/api/v1/config/secrets/a%23b%3Fc");
+  });
+
+  it("refuses a delete whose name would retarget the URL (#28)", async () => {
+    // Percent-encoding does not neutralize dot segments: `.` and `..` are
+    // RFC 3986 unreserved, so encodeURIComponent leaves them and the URL
+    // parser in fetch resolves them away. Measured, before the guard:
+    //   "cloudflare/../openai" -> DELETE /api/v1/config/secrets/openai
+    //   ".."                   -> DELETE /api/v1/config/
+    //   "." and ""             -> DELETE on the collection endpoint
+    // On a destructive owner-only operation, that deletes the wrong secret.
+    const rest = new FakeRest();
+    rest.status = 204;
+    const client = makeClient(rest);
+
+    for (const name of ["cloudflare/../openai", "..", ".", "", "a/./b", "a//b", "/lead", "trail/"]) {
+      await expect(client.deleteSecret(name)).rejects.toBeInstanceOf(KaguraSecretError);
+      await expect(client.deleteSecret(name)).rejects.toThrow(/may not be empty or contain/);
+    }
+    // Nothing was sent — the guard runs before the request.
+    expect(rest.requests).toHaveLength(0);
+  });
+
+  it("still allows the legitimate nested names the guard sits next to", async () => {
+    // The guard must not be so broad that it rejects what the server
+    // addresses: dots *inside* a segment are fine, only whole-segment.
+    const rest = new FakeRest();
+    rest.status = 204;
+    const client = makeClient(rest);
+    await client.deleteSecret("cloudflare/api.token");
+    await client.deleteSecret("a..b");
+    await client.deleteSecret("deep/nested/name");
+
+    expect(rest.path(0)).toBe("/api/v1/config/secrets/cloudflare/api.token");
+    expect(rest.path(1)).toBe("/api/v1/config/secrets/a..b");
+    expect(rest.path(2)).toBe("/api/v1/config/secrets/deep/nested/name");
   });
 });
 
@@ -285,6 +378,39 @@ describe("putSecretForRecipients", () => {
     expect(rest.requests[0]!.body).not.toContain("sk-live-abc");
     const plaintext = await decrypt(sent.ciphertext as string, TEST_IDENTITY);
     expect(new TextDecoder().decode(plaintext)).toBe("sk-live-abc");
+  });
+
+  it("maps every recipient, not just the first (#28)", async () => {
+    // The single-recipient happy path could not distinguish "maps all" from
+    // "takes the first": a review pass replaced all three `recipients.map`
+    // calls with `[recipients[0]]` and every test stayed green. Two distinct
+    // recipients, both of whom must be able to decrypt, is what pins it.
+    const alice = { ...PUBKEY, id: "pk-alice" };
+    const bobKeys = await generateKeypair();
+    const bob: PubkeyResponse = {
+      ...PUBKEY,
+      id: "pk-bob",
+      pubkey: bobKeys.recipient,
+      fingerprint: fingerprint(bobKeys.recipient),
+    };
+
+    const rest = new FakeRest();
+    rest.body = JSON.stringify({ name: "n", version_number: 1 });
+    await makeClient(rest).putSecretForRecipients({
+      name: "shared/key",
+      plaintext: "sk-shared",
+      recipients: [alice, bob],
+    });
+
+    const sent = rest.json();
+    expect(sent.grant_pubkey_ids).toEqual(["pk-alice", "pk-bob"]);
+    expect(sent.recipients_snapshot).toEqual([TEST_FINGERPRINT, bob.fingerprint]);
+
+    // And the ciphertext really is readable by both, which no amount of
+    // list-shape assertion proves.
+    const ciphertext = sent.ciphertext as string;
+    expect(new TextDecoder().decode(await decrypt(ciphertext, TEST_IDENTITY))).toBe("sk-shared");
+    expect(new TextDecoder().decode(await decrypt(ciphertext, bobKeys.identity))).toBe("sk-shared");
   });
 
   it("accepts raw bytes as well as a string", async () => {
