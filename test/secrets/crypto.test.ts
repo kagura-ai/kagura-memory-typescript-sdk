@@ -6,6 +6,8 @@
  * agree" is a contract, not an implementation detail. See `vectors.ts`.
  */
 
+import { inspect } from "node:util";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import { KaguraCryptoError } from "../../src/errors.js";
@@ -212,6 +214,48 @@ describe("encrypt / decrypt", () => {
         "age1pq1qsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqxqmyfk6ka",
       ]),
     ).rejects.toThrow(/malformed age recipient/);
+  });
+
+  it("never puts identity material in an error, message or cause (#28)", async () => {
+    // @scure/base, under age-encryption, echoes the whole input in its
+    // bech32 errors:
+    //   Invalid checksum in AGE-SECRET-KEY-18L790...: expected "zshwqn"
+    // Interpolating that — or attaching it as `cause`, which Node prints
+    // when an error is logged — writes the private key to logs. pyrage says
+    // only "invalid Bech32 encoding", so this hazard is TypeScript-only.
+    const truncated = TEST_IDENTITY.slice(0, 54);
+    const secretish = TEST_IDENTITY.slice(20, 40);
+
+    for (const bad of [truncated, TEST_IDENTITY.slice(0, 30), "AGE-SECRET-KEY-1NOTVALIDBECH32"]) {
+      for (const call of [
+        () => decrypt(PYRAGE_ARMORED, bad),
+        () => recipientFromIdentity(bad),
+      ]) {
+        const error = (await call().catch((e: unknown) => e)) as Error;
+        expect(error).toBeInstanceOf(KaguraCryptoError);
+
+        // Nothing anywhere in the error — message, cause chain, stack — may
+        // contain the input. inspect() with depth walks `cause`, which is
+        // what a logger does.
+        const rendered = inspect(error, { depth: 5 });
+        expect(rendered).not.toContain(bad);
+        expect(error.message).not.toContain(bad.slice(16));
+        expect((error as { cause?: unknown }).cause).toBeUndefined();
+      }
+    }
+
+    // And the assertion above is not vacuous: the raw parser really does
+    // echo the input, so there is something to withhold.
+    const raw = await import("age-encryption");
+    const leak = ((): string => {
+      try {
+        new raw.Decrypter().addIdentity(truncated);
+        return "";
+      } catch (e) {
+        return (e as Error).message;
+      }
+    })();
+    expect(leak).toContain(secretish);
   });
 
   it("reports a bad identity distinctly from a failed decryption", async () => {

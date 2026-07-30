@@ -181,8 +181,35 @@ export async function recipientFromIdentity(identity: string): Promise<string> {
   try {
     return await age.identityToRecipient(identity);
   } catch (e) {
-    throw new KaguraCryptoError(`invalid age identity: ${excMessage(e)}`, { cause: e });
+    throw identityParseError(e);
   }
+}
+
+/**
+ * The error for a malformed `AGE-SECRET-KEY-1` string — deliberately
+ * carrying **nothing** from the underlying failure.
+ *
+ * `@scure/base`, under `age-encryption`, puts the whole offending string in
+ * its bech32 messages:
+ *
+ *     Invalid checksum in AGE-SECRET-KEY-18L790E7K3SJJY...: expected "zshwqn"
+ *
+ * Interpolating that — or attaching it as `cause`, which Node prints when
+ * an error is logged — writes the private key into logs, CI output, and
+ * whatever error reporter is downstream. The cause chain is dropped for the
+ * same reason; nothing about a malformed string is worth that.
+ *
+ * Note this is a TypeScript-only hazard: `pyrage` answers "invalid Bech32
+ * encoding" and echoes nothing, so the Python port interpolates its error
+ * safely. Verified against both implementations rather than assumed.
+ */
+function identityParseError(_cause: unknown): KaguraCryptoError {
+  return new KaguraCryptoError(
+    "invalid age identity: the identity string is not a well-formed " +
+      "AGE-SECRET-KEY-1 value. The underlying parser error is withheld " +
+      "because it echoes the input, which would write the private key to " +
+      "logs.",
+  );
 }
 
 /**
@@ -304,7 +331,8 @@ export async function decrypt(armored: string, identity: string): Promise<Uint8A
   try {
     decrypter.addIdentity(identity);
   } catch (e) {
-    throw new KaguraCryptoError(`invalid age identity: ${excMessage(e)}`, { cause: e });
+    // Message and cause both withheld — see identityParseError.
+    throw identityParseError(e);
   }
 
   try {
