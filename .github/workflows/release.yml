@@ -55,6 +55,29 @@ jobs:
 
       - run: npm ci
 
+      # First, because it is the cheapest check and the one most likely to
+      # fail in practice — tokens expire. Behind the gate it costs two
+      # minutes of typecheck/test/build to learn the release cannot land,
+      # and a dry run against an already-published tag skips it entirely and
+      # proves nothing about the token. That is exactly what happened the
+      # first time this workflow ran.
+      #
+      # npm reports an unauthenticated write as 404 "not in this registry"
+      # rather than 401, which reads as a missing package and sends you
+      # looking in the wrong place. Naming the real cause is the point.
+      - name: Check the npm token authenticates
+        shell: bash
+        run: |
+          if ! who=$(npm whoami 2>&1); then
+            echo "npm auth failed: $who" >&2
+            echo "NPM_TOKEN is missing, expired, or lacks access." >&2
+            echo "It must be an automation token, or a granular token with" >&2
+            echo "'Bypass two-factor authentication' enabled — CI cannot" >&2
+            echo "answer an OTP prompt." >&2
+            exit 1
+          fi
+          echo "authenticated as $who"
+
       # The version has to come from the manifest, and the tag has to agree
       # with it. Publishing 0.6.0 from a v0.7.0 tag, or the reverse, is the
       # kind of mistake that is unfixable after the fact — npm does not allow
@@ -105,24 +128,6 @@ jobs:
       # node:crypto's webcrypto itself. See vitest.no-webcrypto.config.ts.
       - run: npm run test:no-webcrypto
       - run: npm run build
-
-      # Prove the token authenticates before spending the gate on a release
-      # that cannot land. Without this the first sign of a wrong or expired
-      # NPM_TOKEN is the publish step itself, and npm reports unauthenticated
-      # writes as a 404 ("not in this registry") rather than a 401 — which
-      # reads as a missing package and sends you looking in the wrong place.
-      - name: Check the npm token authenticates
-        shell: bash
-        run: |
-          if ! who=$(npm whoami 2>&1); then
-            echo "npm auth failed: $who" >&2
-            echo "NPM_TOKEN is missing, expired, or lacks access." >&2
-            echo "It must be an automation token, or a granular token with" >&2
-            echo "'Bypass two-factor authentication' enabled — CI cannot" >&2
-            echo "answer an OTP prompt." >&2
-            exit 1
-          fi
-          echo "authenticated as $who"
 
       # `prepublishOnly` re-runs typecheck/test/test:no-webcrypto/build, so
       # the gate above is belt-and-braces — it fails faster and names the
