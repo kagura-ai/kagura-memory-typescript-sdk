@@ -71,3 +71,48 @@ describe("public surface: existing entry points", () => {
     expect(typeof sdk.resolveAuth).toBe("function");
   });
 });
+
+describe("public surface: secret store (#28)", () => {
+  it("exports the fourth REST client", () => {
+    // #28 was filed because SecretClient was the one member of the
+    // Files/Resource/Workspace/Secret set that never got ported — and
+    // `callTool` being private meant there was no way to reach the
+    // `secret_*` tools around it either.
+    expect(typeof sdk.SecretClient).toBe("function");
+    expect(sdk.SecretClient.prototype instanceof sdk.KaguraRestClient).toBe(true);
+    expect(typeof sdk.SecretClient.fromMcpUrl).toBe("function");
+  });
+
+  it("exports the escape hatch that stops the next gap being a dead end", () => {
+    expect(typeof sdk.KaguraClient.prototype.callRawTool).toBe("function");
+  });
+
+  it.each([
+    "generateKeypair",
+    "recipientFromIdentity",
+    "fingerprint",
+    "armorEncode",
+    "armorDecode",
+    "encrypt",
+    "decrypt",
+  ])("exports the crypto primitive %s", (name) => {
+    expect(typeof (sdk as unknown as Record<string, unknown>)[name]).toBe("function");
+  });
+
+  it("exports the crypto contract constants", () => {
+    expect(sdk.MAX_CIPHERTEXT_BYTES).toBe(262144);
+    expect(sdk.RECIPIENT_RE).toBeInstanceOf(RegExp);
+  });
+
+  it("exports the custody surface", () => {
+    expect(typeof sdk.KeyManager).toBe("function");
+  });
+
+  it("exports the secret error hierarchy", () => {
+    // Catchable separately from transport failures: a fingerprint mismatch
+    // is a contract violation, not a network problem.
+    expect(sdk.KaguraSecretError.prototype instanceof sdk.KaguraError).toBe(true);
+    expect(sdk.KaguraCryptoError.prototype instanceof sdk.KaguraSecretError).toBe(true);
+    expect(sdk.KaguraKeyCustodyError.prototype instanceof sdk.KaguraSecretError).toBe(true);
+  });
+});

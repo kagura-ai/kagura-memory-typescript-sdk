@@ -1070,3 +1070,73 @@ export interface AgentBootstrapResponse {
   /** ISO 8601 datetime string. */
   generated_at?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Zero-knowledge secret store (#28; server /api/v1/config/secrets, v0.39.0+)
+// ---------------------------------------------------------------------------
+//
+// Field names mirror the server's OpenAPI schema. `status` fields are plain
+// strings, not unions of literals, so a status value the server adds later
+// does not become a type error in a consumer that only switches on the ones
+// it knows.
+
+/** Recipient pubkey metadata. Public material only — never private key bytes. */
+export interface PubkeyResponse {
+  id: string;
+  identity_id: string;
+  /** The public age recipient (`age1...`). */
+  pubkey: string;
+  /** `sha256` hex of {@link PubkeyResponse.pubkey}, as the server computed it. */
+  fingerprint: string;
+  label?: string | null;
+  /** `"pending"` | `"active"` | `"revoked"`. */
+  status: string;
+  created_at: string;
+  attested_at?: string | null;
+  revoked_at?: string | null;
+}
+
+/** Result of storing a new ciphertext version. */
+export interface SecretPutResponse {
+  name: string;
+  version_number: number;
+  status: string;
+  rotation_needed: boolean;
+}
+
+/** Secret metadata. Never includes the value. */
+export interface SecretMetaResponse {
+  name: string;
+  status: string;
+  rotation_needed: boolean;
+  current_version?: number | null;
+  grant_count: number;
+  /**
+   * Nullable in practice: the live server returns null for these on some
+   * secrets even though its OpenAPI marks them required.
+   */
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Opaque armored ciphertext returned to a granted caller. The server cannot read it. */
+export interface SecretValueResponse {
+  name: string;
+  version_number: number;
+  alg: string;
+  /** Armored age ciphertext (`-----BEGIN AGE ENCRYPTED FILE-----`). */
+  ciphertext: string;
+  blob_ref?: string | null;
+  recipients_snapshot: string[];
+  rotation_needed: boolean;
+  created_at: string;
+}
+
+/** Tamper-evidence check over the secret store's audit chain. */
+export interface AuditVerifyResponse {
+  valid: boolean;
+  entries?: number | null;
+  head?: string | null;
+  broken_at?: number | null;
+  reason?: string | null;
+}

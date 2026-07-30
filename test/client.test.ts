@@ -638,3 +638,83 @@ describe("tool definitions", () => {
     expect(tools).toEqual([{ name: "recall" }]);
   });
 });
+
+describe("callRawTool (#28)", () => {
+  it("reaches a tool the SDK has no typed wrapper for", async () => {
+    const server = new FakeServer();
+    server.toolResults.secret_list = { status: "success", secrets: [] };
+    const client = makeClient(server);
+
+    // The case that motivated it: every secret_* MCP tool was unreachable
+    // because callTool is private, so a forgotten wrapper was a dead end.
+    const result = await client.callRawTool("secret_list", { workspace_id: "w1" });
+
+    expect(result).toEqual({ status: "success", secrets: [] });
+    expect(server.requests[1]!.body!.params).toEqual({
+      name: "secret_list",
+      arguments: { workspace_id: "w1" },
+    });
+  });
+
+  it("passes arguments through verbatim, with no camelCase mapping", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.callRawTool("some_tool", { context_id: "c", camelCase: 1 });
+
+    // Deliberate: this is a raw escape hatch, so the caller owns wire form.
+    // A silent snake_case conversion here would be worse than none, because
+    // it would only cover the keys someone thought of.
+    expect(server.requests[1]!.body!.params).toEqual({
+      name: "some_tool",
+      arguments: { context_id: "c", camelCase: 1 },
+    });
+  });
+
+  it("defaults to empty arguments", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.callRawTool("no_args_tool");
+    expect(server.toolCallArgs()).toEqual({});
+  });
+
+  it("still translates domain errors instead of returning them as data", async () => {
+    const server = new FakeServer();
+    server.toolResults.secret_get = {
+      status: "error",
+      error: "secret_not_found",
+      message: "no such secret",
+    };
+    const client = makeClient(server);
+    const error = await client
+      .callRawTool("secret_get", { name: "x" })
+      .catch((e: unknown) => e);
+
+    // The point is that it throws rather than handing back {status:"error"}
+    // as if it were data. The *precise* class depends on the code being one
+    // the SDK knows — `secret_not_found` is not, so it lands on the generic
+    // KaguraError. That is documented on callRawTool rather than papered
+    // over by guessing at codes nobody has verified against the server.
+    expect(error).toBeInstanceOf(KaguraError);
+    expect(error).not.toBeInstanceOf(KaguraNotFoundError);
+    expect((error as Error).message).toBe(
+      "secret_get failed (secret_not_found): no such secret",
+    );
+  });
+
+  it("maps a code the SDK does know", async () => {
+    const server = new FakeServer();
+    server.toolResults.anything = {
+      status: "error",
+      error: "context_not_found",
+      message: "Context xyz not found",
+    };
+    const client = makeClient(server);
+    await expect(client.callRawTool("anything")).rejects.toBeInstanceOf(KaguraNotFoundError);
+  });
+
+  it("rejects an empty tool name", async () => {
+    const client = makeClient(new FakeServer());
+    await expect(client.callRawTool("  ")).rejects.toThrow(/toolName must be a non-empty string/);
+    await expect(client.callRawTool("")).rejects.toThrow(/toolName must be a non-empty string/);
+  });
+});

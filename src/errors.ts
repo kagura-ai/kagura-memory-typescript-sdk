@@ -112,3 +112,29 @@ export class KaguraFetchError extends KaguraError {
 
 /** File ingestion orchestration failed for a non-fetch reason. */
 export class KaguraIngestError extends KaguraError {}
+
+/**
+ * Secret-store operation failed for a non-HTTP reason (#28).
+ *
+ * The base of the secret hierarchy: a client-side contract violation, such
+ * as putting a secret with no recipients or with a recipient whose
+ * advertised fingerprint does not match its pubkey.
+ */
+export class KaguraSecretError extends KaguraError {}
+
+/**
+ * age encryption/decryption failed, or its input was malformed.
+ *
+ * Also raised when the optional `age-encryption` peer dependency is not
+ * installed — the message names the install command, since the base SDK
+ * deliberately ships with no runtime dependencies.
+ */
+export class KaguraCryptoError extends KaguraSecretError {}
+
+/**
+ * The age private key could not be stored or retrieved.
+ *
+ * Custody is fail-closed: refusing to hold the key is an error, never a
+ * silent fallback to a less secure location.
+ */
+export class KaguraKeyCustodyError extends KaguraSecretError {}

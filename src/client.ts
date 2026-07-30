@@ -595,6 +595,39 @@ export class KaguraClient {
   }
 
   /**
+   * Call any MCP tool by name — the escape hatch for tools this SDK has no
+   * typed wrapper for yet (#28).
+   *
+   * Everything above is a typed wrapper over a specific tool, and that is
+   * still the surface to prefer: wrappers validate arguments locally, map
+   * camelCase to the wire's snake_case, and give you a return type. But
+   * `callTool` is private, so before this existed one forgotten wrapper left
+   * a tool completely unreachable — a caller had to vendor a patched SDK or
+   * hand-roll JSON-RPC. `secret_*` was exactly that case.
+   *
+   * Args are passed through **verbatim**, so they must already be in wire
+   * form (`context_id`, not `contextId`), and the result is an untyped
+   * `ToolResult`.
+   *
+   * Domain errors are still translated, so a server `{"status": "error"}`
+   * throws rather than coming back as data — but only error codes the SDK
+   * recognizes get a specific class. A code from a tool with no wrapper
+   * (`secret_not_found`, say) lands on the generic {@link KaguraError}, so
+   * match on the message or add the code to `raiseForMcpError` when you
+   * confirm it against the server.
+   *
+   * Use `getToolDefinitions()` to discover what the connected server offers.
+   *
+   * @throws Error if `toolName` is empty or whitespace.
+   */
+  async callRawTool(toolName: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
+    if (typeof toolName !== "string" || !toolName.trim()) {
+      throw new Error("toolName must be a non-empty string");
+    }
+    return this.callToolChecked(toolName, args);
+  }
+
+  /**
    * Translate an MCP tool's structured error response to an SDK error.
    *
    * The server's MCP tools return `{"status": "error", "error": <code>,

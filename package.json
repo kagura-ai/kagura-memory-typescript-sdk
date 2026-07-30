@@ -57,8 +57,17 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
+  "peerDependencies": {
+    "age-encryption": "^0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "age-encryption": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "age-encryption": "^0.3.0",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

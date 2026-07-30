@@ -43,6 +43,9 @@ export {
   KaguraNotFoundError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraCryptoError,
+  KaguraKeyCustodyError,
+  KaguraSecretError,
 } from "./errors.js";
 
 export { SDK_VERSION } from "./version.js";
@@ -85,6 +88,26 @@ export type {
   CreateInvitationOptions,
   ListInvitationsOptions,
 } from "./workspaceClient.js";
+
+// Zero-knowledge secret store (#28). SecretClient is the fourth REST client,
+// the peer of Files/Resource/Workspace that was never ported. The crypto
+// module needs the optional `age-encryption` peer dependency; everything
+// else here — the client, the wire types, the fingerprint and armor helpers
+// — works on a bare install.
+export { SecretClient } from "./secrets/client.js";
+export {
+  armorDecode,
+  armorEncode,
+  decrypt,
+  encrypt,
+  fingerprint,
+  generateKeypair,
+  recipientFromIdentity,
+  MAX_CIPHERTEXT_BYTES,
+  RECIPIENT_RE,
+} from "./secrets/crypto.js";
+export { KeyManager } from "./secrets/keyManager.js";
+export type { KeyManagerOptions, KeyStore } from "./secrets/keyManager.js";
 
 export { DEFAULT_MCP_URL, resolveAuth } from "./auth/resolve.js";
 export type { ResolveAuthOptions } from "./auth/resolve.js";
