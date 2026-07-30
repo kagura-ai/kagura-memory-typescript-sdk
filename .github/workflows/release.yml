@@ -32,6 +32,14 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Job-wide, not just on the publish step. `setup-node` with a
+    # `registry-url` writes an .npmrc containing
+    # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`, and npm expands
+    # that for *every* command — so with the variable unset, `npm ci` and any
+    # other npm call send a literal `${NODE_AUTH_TOKEN}` and can come back
+    # 401 on a package that needs no auth at all.
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,14 +76,28 @@ jobs:
         run: |
           grep -q "\"$(node -p "require('./package.json').version")\"" src/version.ts
 
+      # Reads the registry directly rather than through `npm view`. The guard
+      # has to distinguish "already published" from "the request failed", and
+      # `npm view` collapses both into a non-zero exit — which this step would
+      # then have to read as "go ahead", i.e. the guard silently stops
+      # guarding. curl -f fails the step instead.
+      # Asks the registry about one version, not the whole packument. The
+      # full document is hundreds of KB, and passing it around as a shell
+      # argument dies with "Argument list too long" — whose non-zero exit a
+      # naive guard reads as "not published", i.e. it silently stops
+      # guarding. A bare status code cannot fail that way, and anything other
+      # than 200/404 fails the step instead of being guessed at.
       - name: Refuse to publish a version that already exists
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          if npm view "kagura-memory@$version" version >/dev/null 2>&1; then
-            echo "kagura-memory@$version is already published" >&2
-            exit 1
-          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/kagura-memory/$version")
+          case "$code" in
+            404) echo "$version is not on the registry yet" ;;
+            200) echo "kagura-memory@$version is already published" >&2; exit 1 ;;
+            *)   echo "registry answered $code; refusing to guess" >&2; exit 1 ;;
+          esac
 
       - run: npm run typecheck
       - run: npm test
@@ -92,24 +114,33 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Read through the `latest` dist-tag, which is one small manifest, and
+      # parse it on stdin rather than through argv (see the guard above).
+      # `npm view` is not used here at all: it serves a cache that reported a
+      # stale `latest` for minutes after the 0.5.0 publish.
       - name: Confirm the registry agrees
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          # The registry is read directly: `npm view` serves a cache that has
-          # shown a stale `latest` immediately after a publish.
           for i in $(seq 1 10); do
-            body=$(curl -fsS https://registry.npmjs.org/kagura-memory) || true
-            latest=$(node -e "try{console.log(JSON.parse(process.argv[1])['dist-tags'].latest)}catch{console.log('')}" "$body")
-            deps=$(node -e "try{console.log(JSON.stringify(JSON.parse(process.argv[1]).versions['$version'].dependencies))}catch{console.log('?')}" "$body")
-            echo "attempt $i: latest=$latest deps=$deps"
-            if [ "$latest" = "$version" ]; then
-              # Zero runtime dependencies is a documented promise; the
-              # optional peer must not have leaked into `dependencies`.
-              test "$deps" = "undefined" || { echo "unexpected dependencies: $deps" >&2; exit 1; }
-              echo "published $version"
-              exit 0
+            if curl -fsS https://registry.npmjs.org/kagura-memory/latest > latest.json; then
+              node -e '
+                const m = JSON.parse(require("fs").readFileSync("latest.json", "utf8"));
+                const want = process.argv[1];
+                console.log("latest=" + m.version, "deps=" + JSON.stringify(m.dependencies));
+                if (m.version !== want) process.exit(2);
+                // Zero runtime dependencies is a documented promise; the
+                // optional peer must not have leaked into `dependencies`.
+                if (m.dependencies && Object.keys(m.dependencies).length > 0) {
+                  console.error("unexpected dependencies: " + JSON.stringify(m.dependencies));
+                  process.exit(1);
+                }
+              ' "$version" && { echo "published $version"; exit 0; }
+              # exit 2 means "not visible yet" — keep waiting. Anything else
+              # is a real failure and must not be retried into a pass.
+              test $? -eq 2 || exit 1
             fi
+            echo "attempt $i: $version not visible yet"
             sleep 15
           done
           echo "registry did not report $version as latest" >&2
