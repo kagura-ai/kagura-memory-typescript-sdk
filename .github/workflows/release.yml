@@ -106,6 +106,24 @@ jobs:
       - run: npm run test:no-webcrypto
       - run: npm run build
 
+      # Prove the token authenticates before spending the gate on a release
+      # that cannot land. Without this the first sign of a wrong or expired
+      # NPM_TOKEN is the publish step itself, and npm reports unauthenticated
+      # writes as a 404 ("not in this registry") rather than a 401 — which
+      # reads as a missing package and sends you looking in the wrong place.
+      - name: Check the npm token authenticates
+        shell: bash
+        run: |
+          if ! who=$(npm whoami 2>&1); then
+            echo "npm auth failed: $who" >&2
+            echo "NPM_TOKEN is missing, expired, or lacks access." >&2
+            echo "It must be an automation token, or a granular token with" >&2
+            echo "'Bypass two-factor authentication' enabled — CI cannot" >&2
+            echo "answer an OTP prompt." >&2
+            exit 1
+          fi
+          echo "authenticated as $who"
+
       # `prepublishOnly` re-runs typecheck/test/test:no-webcrypto/build, so
       # the gate above is belt-and-braces — it fails faster and names the
       # failing step.
