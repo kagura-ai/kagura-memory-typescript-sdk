@@ -43,11 +43,13 @@ import {
   CONTEXTS_ALIAS,
   CONTEXT_GROUP,
 } from "./commands/context.js";
+import { DOCTOR } from "./commands/doctor.js";
 import { FILES_GROUP } from "./commands/files.js";
 import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
+import { SETUP_GROUP } from "./commands/setup.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
@@ -370,11 +372,13 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
   auth: AUTH_GROUP,
   config: CONFIG_GROUP,
   context: CONTEXT_GROUP,
+  doctor: DOCTOR,
   contexts: CONTEXTS_ALIAS,
   edge: EDGE_GROUP,
   files: FILES_GROUP,
   resource: RESOURCE_GROUP,
   secret: SECRET_GROUP,
+  setup: SETUP_GROUP,
   sleep: SLEEP_GROUP,
   ...MEMORY_COMMANDS,
 };

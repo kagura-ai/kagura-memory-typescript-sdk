@@ -78,33 +78,58 @@ Four ways to authenticate, in resolution order:
 }
 ```
 
-#### Logging in from the terminal
+### Command line
 
-To authenticate a machine without writing any code:
+`kagura-memory` mirrors the Python CLI's `kagura` command — same
+subcommands, same flag names, same JSON on stdout, same exit codes (2 for
+a usage error, 1 for a runtime failure).
 
 ```bash
-npx kagura-memory auth login
+npx kagura-memory --help
 ```
 
-`login` / `refresh` / `status` / `use` / `logout`, with the same flag names
-as the Python CLI's `kagura auth …`, writing the same
-`~/.kagura/credentials.json`. Either tool can create a profile the other
-then uses.
+| Group | Commands |
+|---|---|
+| `auth` | `login` `logout` `refresh` `status` `use` `list` `token` |
+| `context` | `list` `create` `update` `delete` `search-config` (plus the `contexts` alias) |
+| memory | `remember` `recall` `reference` `forget` `update-memory` `explore` |
+| `edge` | `list` `create` `update` `delete` |
+| `sleep` | `history` `report` `rollback` |
+| `files` | `upload` `list` `delete` `download-url` |
+| `resource` | `tokens {list,create,update,revoke}` `list` `setup` `schema` `stats` `indexer-status` `events` `ingest` `ingest-batch` `import` |
+| `secret` | `keygen` `list` `put` `get` `grant` `revoke` `rotate` `delete` `pubkeys` `approve` `audit-verify` `exec` |
+| other | `config show` `doctor` `setup claude` |
 
 ```bash
 npx kagura-memory auth login --profile work --read-only
-npx kagura-memory auth status
-npx kagura-memory auth use work
-npx kagura-memory auth refresh --scope "memory:read"
-npx kagura-memory auth logout --profile work
+npx kagura-memory recall "OAuth setup" -c dev -k 10
+npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
+npx kagura-memory doctor
 ```
 
-`status` reports whether each profile is `active`, `expired (refreshable)`,
-or `expired` — a profile whose access token lapsed is still usable when it
-can refresh.
+The context id comes from `-c/--context-id`, or from `context_id` in
+`.kagura.json`. Credentials live in `~/.kagura/credentials.json` and are
+shared with the Python CLI, so either tool can create a profile the other
+then uses.
 
-This bin covers **authentication only**. Memory operations stay
-library-only; use the Python CLI or write TypeScript.
+**Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
+Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
+neither exists in this package and both would cost the zero-dependency
+promise. Use the Python CLI for those.
+
+**Two deliberate divergences.**
+
+- `secret` needs the optional `age-encryption` peer (`npm install
+  age-encryption`), exactly as Python's `[secret]` extra works. Key
+  custody differs: Python uses the OS keychain via `keyring`, which has no
+  zero-dependency equivalent in Node, so this CLI reads the age identity
+  from `KAGURA_AGE_IDENTITY` or `KAGURA_AGE_IDENTITY_FILE` and fails
+  closed when neither is set. **A key custodied by the Python CLI is not
+  readable here, and vice versa.**
+- `setup claude --profile` (the OAuth path) writes an `.mcp.json` that
+  launches Python's `kagura-mcp` stdio proxy, which this package does not
+  install; that flag reports the fact instead of writing a config that
+  would fail at launch. The `--api-key` path works here.
 
 #### Logging in from TypeScript
 
