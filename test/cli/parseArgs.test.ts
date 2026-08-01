@@ -199,6 +199,28 @@ describe("parseArgs", () => {
     expect(parsed.counts.verbose).toBe(0);
   });
 
+  // --- -h ----------------------------------------------------------------
+
+  it("reports -h=x rather than reading it as a request for help", () => {
+    // A malformed option is not a help request. The guard used to accept
+    // any token whose body was "h", inline value and all.
+    const parsed = parse(["cmd", "-h=x"]);
+    expect(parsed.flags.has("help")).toBe(false);
+    expect(parsed.unknown).toEqual(["-h=x"]);
+  });
+
+  it("lets a command that registers -h keep it", () => {
+    // The old guard checked the LONG map for "h", which can never
+    // contain a short name — so it was always true and a command could
+    // not have reclaimed -h even in principle.
+    const withShortH: ParseSpec = {
+      flags: [{ name: "height", short: "h", type: "value" }],
+    };
+    const parsed = parseArgs(["cmd", "-h", "10"], withShortH);
+    expect(parsed.values.height).toBe("10");
+    expect(parsed.flags.has("help")).toBe(false);
+  });
+
   // --- the -- end-of-options marker --------------------------------------
 
   it("treats everything after -- as positional, dashes and all", () => {

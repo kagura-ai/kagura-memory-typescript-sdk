@@ -262,7 +262,11 @@ export function parseArgs(
     const body = eq === -1 ? token.slice(1) : token.slice(1, eq);
     const inline = eq === -1 ? null : token.slice(eq + 1);
 
-    if (body === "h" && !long.has("h")) {
+    // `-h` is reserved for help on every command; no command registers it
+    // for anything else. The `inline` check matters: `-h=x` is a malformed
+    // option, not a request for help, and must fall through to be
+    // reported.
+    if (body === "h" && inline === null && !short.has("h")) {
       flags.add("help");
       continue;
     }

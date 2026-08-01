@@ -109,7 +109,17 @@ const claude: Command = {
       CONTEXT_ID,
       PROFILE,
       PROJECT_DIR,
-      { name: "non-interactive", short: "y", type: "switch", help: "No prompts; use flags/defaults" },
+      // Accepted so a script written for the Python CLI still runs, but
+      // inert: this port never prompts, so it is already what the flag
+      // asks for. Said in the help rather than silently ignored — a flag
+      // that reads as changing behaviour and does not is worse than one
+      // that is rejected.
+      {
+        name: "non-interactive",
+        short: "y",
+        type: "switch",
+        help: "Accepted for compatibility; this port never prompts",
+      },
     ],
   },
   run: async (deps, args) => {
