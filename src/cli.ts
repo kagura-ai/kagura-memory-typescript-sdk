@@ -6,6 +6,9 @@
  * real process exit.
  */
 
+import { spawn } from "node:child_process";
+import { constants } from "node:os";
+import { readFileSync } from "node:fs";
 import * as readline from "node:readline/promises";
 
 import { login } from "./auth/login.js";
@@ -16,6 +19,7 @@ import { KaguraClient } from "./client.js";
 import { loadConfig } from "./config.js";
 import { FilesClient } from "./filesClient.js";
 import { ResourceClient } from "./resourceClient.js";
+import { SecretClient } from "./secrets/client.js";
 
 async function confirm(question: string): Promise<boolean> {
   // A non-interactive stdin (CI, a pipe) must not hang waiting for input
@@ -49,6 +53,35 @@ const code = await runCli(process.argv.slice(2), {
   makeClient: (options) => new KaguraClient(options),
   makeFilesClient: (options) => new FilesClient(options),
   makeResourceClient: (options) => new ResourceClient(options),
+  makeSecretClient: (options) => new SecretClient(options),
+  isTty: () => Boolean(process.stdout.isTTY),
+  readStdin: () => {
+    // A terminal stdin would block forever waiting for input that is not
+    // coming; treat it as "nothing piped in".
+    if (process.stdin.isTTY) return null;
+    try {
+      return readFileSync(0, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+  spawnChild: (command, argv, extraEnv) =>
+    new Promise((resolve) => {
+      const child = spawn(command, argv, {
+        stdio: "inherit",
+        env: { ...process.env, ...extraEnv },
+      });
+      child.on("error", (e) => {
+        process.stderr.write(`Error: cannot run ${command}: ${e.message}
+`);
+        resolve(127);
+      });
+      // A child killed by a signal has no numeric code; 128+n is the shell
+      // convention and keeps "it died" distinguishable from "it exited 0".
+      child.on("close", (code, signal) =>
+        resolve(code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0))),
+      );
+    }),
 });
 
 process.exitCode = code;

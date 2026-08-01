@@ -11,6 +11,7 @@ import type { KaguraClient, KaguraClientOptions } from "../client.js";
 import { loadConfig as loadConfigImpl, type KaguraConfig } from "../config.js";
 import type { FilesClient } from "../filesClient.js";
 import type { ResourceClient } from "../resourceClient.js";
+import type { SecretClient } from "../secrets/client.js";
 import { excMessage } from "../errors.js";
 import { formatJson } from "./output.js";
 import { CliError, CliUsageError } from "./parse.js";
@@ -25,9 +26,21 @@ export interface ClientCommandContext {
   loadConfig: typeof loadConfigImpl;
   /** Injected so tests can supply a fetch stub. */
   makeClient: (options: KaguraClientOptions) => KaguraClient;
-  /** REST counterparts, for the `files` and `resource` groups. */
+  /** REST counterparts, for the `files`, `resource` and `secret` groups. */
   makeFilesClient: (options: RestClientOptions) => FilesClient;
   makeResourceClient: (options: RestClientOptions) => ResourceClient;
+  makeSecretClient: (options: RestClientOptions) => SecretClient;
+  /**
+   * True when stdout is a terminal.
+   *
+   * The secret commands refuse to print plaintext to one; injected so a
+   * test can assert both sides of that guard.
+   */
+  isTty: () => boolean;
+  /** Read all of stdin, or null when it is a terminal / already closed. */
+  readStdin: () => string | null;
+  /** Run a child with extra environment; resolves to its exit code. */
+  spawnChild: (command: string, argv: string[], env: Record<string, string>) => Promise<number>;
 }
 
 /** What the CLI passes to a REST client; a subset of its options. */

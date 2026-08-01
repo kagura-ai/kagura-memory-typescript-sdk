@@ -47,6 +47,7 @@ import { FILES_GROUP } from "./commands/files.js";
 import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
+import { SECRET_GROUP } from "./commands/secret.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
@@ -268,6 +269,59 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
   return existed ? 0 : 1;
 }
 
+/**
+ * `kagura auth list` — one line per profile, default marked with `*`.
+ *
+ * `status` prints the full block; this is the version you can eyeball or
+ * pipe into a picker.
+ */
+function cmdList(deps: CliDeps): number {
+  const cf = loadCredentialsFile(deps.credentialsPath);
+  const names = Object.keys(cf.profiles).sort();
+  if (names.length === 0) {
+    deps.write("No profiles. Run: kagura-memory auth login");
+    return 0;
+  }
+  for (const name of names) {
+    const creds = cf.profiles[name]!;
+    const marker = cf.defaultProfile === name ? "*" : " ";
+    const state = !isExpired(creds) ? "active" : creds.refreshToken ? "expired (refreshable)" : "expired";
+    deps.write(`${marker} ${name}\t${creds.userEmail || "(unknown)"}\t${workspaceLabel(creds)}\t${state}`);
+  }
+  return 0;
+}
+
+/**
+ * `kagura auth token` — the raw access token on stdout, for CI.
+ *
+ * Refreshes first when the stored token has expired, so a script does not
+ * have to distinguish "no token" from "stale token". The value is printed
+ * bare, with no trailing decoration, so `$(… auth token)` is exact.
+ */
+async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
+  const cf = loadCredentialsFile(deps.credentialsPath);
+  const name = args.values.profile ?? cf.defaultProfile;
+  const creds = cf.profiles[name];
+  if (creds === undefined) {
+    deps.writeError(`No profile named '${name}'.\n  Run: kagura-memory auth login`);
+    return 1;
+  }
+  if (!isExpired(creds)) {
+    deps.write(creds.accessToken);
+    return 0;
+  }
+  if (!creds.refreshToken) {
+    deps.writeError(`Profile '${name}' has expired and cannot refresh.\n  Run: kagura-memory auth login`);
+    return 1;
+  }
+  const options: RefreshOptions = {};
+  if (args.values.profile !== undefined) options.profile = args.values.profile;
+  if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
+  const refreshed = await deps.refresh(options);
+  deps.write(refreshed.accessToken);
+  return 0;
+}
+
 /** The `auth` subcommands, as registry entries. */
 const AUTH_GROUP: CommandGroup = {
   summary: "OAuth2 device-flow authentication for Kagura Memory.",
@@ -298,6 +352,16 @@ const AUTH_GROUP: CommandGroup = {
       spec: AUTH_SPEC,
       run: (deps, args) => cmdLogout(deps as CliDeps, args),
     },
+    list: {
+      summary: "List every stored profile; the default is marked with `*`.",
+      spec: AUTH_SPEC,
+      run: async (deps) => cmdList(deps as CliDeps),
+    },
+    token: {
+      summary: "Emit the raw access_token to stdout (for CI / scripts).",
+      spec: AUTH_SPEC,
+      run: (deps, args) => cmdToken(deps as CliDeps, args),
+    },
   },
 };
 
@@ -310,6 +374,7 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
   edge: EDGE_GROUP,
   files: FILES_GROUP,
   resource: RESOURCE_GROUP,
+  secret: SECRET_GROUP,
   sleep: SLEEP_GROUP,
   ...MEMORY_COMMANDS,
 };

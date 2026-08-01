@@ -83,7 +83,7 @@ function renderFlag(flag: FlagSpec): string {
       : flag.short === undefined
         ? `    --${flag.name}`
         : `-${flag.short}, --${flag.name}`;
-  if (flag.type !== "value") return forms;
+  if (flag.type !== "value" && flag.type !== "multiple") return forms;
   return `${forms} ${flag.metavar ?? "TEXT"}`;
 }
 

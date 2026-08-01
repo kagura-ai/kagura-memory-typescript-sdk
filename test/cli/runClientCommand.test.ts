@@ -32,6 +32,10 @@ function harness(config: KaguraConfig = {}): Harness {
     writeError: (line) => err.push(line),
     makeFilesClient: unusedRestClient,
     makeResourceClient: unusedRestClient,
+    makeSecretClient: unusedRestClient,
+    isTty: () => false,
+    readStdin: () => null,
+    spawnChild: async () => 0,
     loadConfig: () => config,
     makeClient: (options) => {
       clientOptions.push({ ...options });

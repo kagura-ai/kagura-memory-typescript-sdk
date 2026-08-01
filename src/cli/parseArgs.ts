@@ -32,9 +32,10 @@ export interface FlagSpec {
   short?: string;
   /**
    * `value` takes an argument, `switch` is a boolean, `count` is a
-   * repeatable verbosity dial. Defaults to `switch`.
+   * repeatable verbosity dial, `multiple` accumulates every occurrence
+   * (click's `multiple=True`). Defaults to `switch`.
    */
-  type?: "value" | "switch" | "count";
+  type?: "value" | "switch" | "count" | "multiple";
   /** One-line description for `--help`. */
   help?: string;
   /** Value placeholder shown in `--help` (default: `TEXT` for value flags). */
@@ -67,6 +68,8 @@ export interface ParsedArgs {
   flags: Set<string>;
   /** Values for `value` flags, keyed by long name. */
   values: Record<string, string | undefined>;
+  /** Accumulated values for `multiple` flags, keyed by long name. */
+  many: Record<string, string[]>;
   /** Occurrence counts for `count` flags, keyed by long name; 0 when absent. */
   counts: Record<string, number>;
   /** Flags that match nothing in the spec, verbatim (e.g. `--porfile`). */
@@ -109,13 +112,15 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
   const flags = new Set<string>();
   const values: Record<string, string | undefined> = {};
   const counts: Record<string, number> = {};
+  const many: Record<string, string[]> = {};
   const unknown: string[] = [];
   const missingValue: string[] = [];
 
-  // Registered count flags read as 0 rather than undefined, so callers can
-  // compare numerically without a `?? 0` at every use.
+  // Registered count and multiple flags read as 0 / [] rather than
+  // undefined, so callers can use them without a `?? 0` at every site.
   for (const flag of spec.flags) {
     if (flag.type === "count") counts[flag.name] = 0;
+    if (flag.type === "multiple") many[flag.name] = [];
   }
 
   /**
@@ -124,10 +129,15 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
    * @returns the number of extra argv tokens eaten (0 or 1), or -1 when the
    *   value was missing.
    */
+  const store = (flag: FlagSpec, value: string) => {
+    if (flag.type === "multiple") many[flag.name]!.push(value);
+    else values[flag.name] = value;
+  };
+
   const takeValue = (flag: FlagSpec, inline: string | null, next: string | undefined): number => {
     if (inline !== null) {
       // `--profile=` is an explicit empty value, not a missing one.
-      values[flag.name] = inline;
+      store(flag, inline);
       return 0;
     }
     // Any following flag means the value was omitted, not that the flag is
@@ -142,12 +152,12 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
     if (next === undefined || (next.startsWith("-") && next.length > 1 && !PY_FLOAT.test(next))) {
       return -1;
     }
-    values[flag.name] = next;
+    store(flag, next);
     return 1;
   };
 
   const record = (flag: FlagSpec, inline: string | null, next: string | undefined, token: string) => {
-    if (flag.type === "value") {
+    if (flag.type === "value" || flag.type === "multiple") {
       const eaten = takeValue(flag, inline, next);
       if (eaten === -1) {
         missingValue.push(token);
@@ -228,6 +238,7 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
     flags,
     values,
     counts,
+    many,
     unknown,
     missingValue,
   };
