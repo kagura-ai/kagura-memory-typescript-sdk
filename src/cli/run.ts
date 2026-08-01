@@ -29,13 +29,51 @@ import {
 } from "../auth/credentials.js";
 import type { DeviceAuthorizationResponse } from "../auth/deviceFlow.js";
 import { excMessage } from "../errors.js";
-import { parseArgs } from "./parseArgs.js";
+import { SDK_VERSION } from "../version.js";
+import {
+  isGroup,
+  renderGroupHelp,
+  renderHelp,
+  type Command,
+  type CommandDeps,
+  type CommandGroup,
+} from "./command.js";
+import {
+  CONFIG_GROUP,
+  CONTEXTS_ALIAS,
+  CONTEXT_GROUP,
+} from "./commands/context.js";
+import { DOCTOR } from "./commands/doctor.js";
+import { FILES_GROUP } from "./commands/files.js";
+import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
+import { MEMORY_COMMANDS } from "./commands/memory.js";
+import { RESOURCE_GROUP } from "./commands/resource.js";
+import { SECRET_GROUP } from "./commands/secret.js";
+import { SETUP_GROUP } from "./commands/setup.js";
+import { CliUsageError } from "./parse.js";
+import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
-export interface CliDeps {
-  write: (line: string) => void;
-  writeError: (line: string) => void;
-  /** Ask a yes/no question; resolves true to proceed. */
-  confirm: (question: string) => Promise<boolean>;
+/**
+ * Every option the `auth` subcommands accept, pooled.
+ *
+ * Pooled rather than per-subcommand because the pool is small and entirely
+ * unambiguous — no two `auth` subcommands give the same flag different
+ * meanings — and because `cmdLogin`/`cmdLogout` already reject the
+ * combinations that are individually valid but mutually exclusive.
+ */
+const AUTH_SPEC: ParseSpec = {
+  flags: [
+    { name: "profile", type: "value", rejectEmpty: true, help: "Profile to act on (default: the file's default)" },
+    { name: "server", type: "value", rejectEmpty: true, metavar: "URL", help: "MCP server URL to authenticate against" },
+    { name: "scope", type: "value", rejectEmpty: true, help: 'Space-separated scopes, e.g. "memory:read memory:write"' },
+    { name: "read-only", type: "switch", help: "Request memory:read only" },
+    { name: "no-browser", type: "switch", help: "Print the code and URL without opening a browser" },
+    { name: "all", type: "switch", help: "logout: remove every stored profile" },
+    { name: "yes", type: "switch", help: "logout: skip the confirmation prompt" },
+  ],
+};
+
+export interface CliDeps extends CommandDeps {
   /** Best-effort browser launch; returns false when it could not open. */
   openBrowser: (url: string) => Promise<boolean>;
   login: typeof login;
@@ -44,18 +82,12 @@ export interface CliDeps {
   credentialsPath?: string;
 }
 
-const USAGE = `kagura-memory auth — manage Kagura Memory credentials
+const ROOT_SUMMARY = "Kagura Memory Cloud CLI - AI-driven memory management.";
 
-Usage:
-  kagura-memory auth login   [--profile <name>] [--server <url>]
-                             [--scope "<scopes>" | --read-only] [--no-browser]
-  kagura-memory auth refresh [--profile <name>] [--scope "<scopes>"] [--no-browser]
-  kagura-memory auth status  [--profile <name>]
-  kagura-memory auth use     <profile>
-  kagura-memory auth logout  [--profile <name>] [--all] [--yes]
-
+const ROOT_EPILOG = `
 Credentials live in ~/.kagura/credentials.json and are shared with the
-Python CLI, so either tool can create or use a profile.
+Python CLI, so either tool can create or use a profile. The context id
+comes from --context-id, or from "context_id" in .kagura.json.
 
 Scopes:
   memory:read   read memories, contexts, files
@@ -240,73 +272,270 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
 }
 
 /**
+ * `kagura auth list` — one line per profile, default marked with `*`.
+ *
+ * `status` prints the full block; this is the version you can eyeball or
+ * pipe into a picker.
+ */
+function cmdList(deps: CliDeps): number {
+  const cf = loadCredentialsFile(deps.credentialsPath);
+  const names = Object.keys(cf.profiles).sort();
+  if (names.length === 0) {
+    deps.write("No profiles. Run: kagura-memory auth login");
+    return 0;
+  }
+  for (const name of names) {
+    const creds = cf.profiles[name]!;
+    const marker = cf.defaultProfile === name ? "*" : " ";
+    const state = !isExpired(creds) ? "active" : creds.refreshToken ? "expired (refreshable)" : "expired";
+    deps.write(`${marker} ${name}\t${creds.userEmail || "(unknown)"}\t${workspaceLabel(creds)}\t${state}`);
+  }
+  return 0;
+}
+
+/**
+ * `kagura auth token` — the raw access token on stdout, for CI.
+ *
+ * Refreshes first when the stored token has expired, so a script does not
+ * have to distinguish "no token" from "stale token". The value is printed
+ * bare, with no trailing decoration, so `$(… auth token)` is exact.
+ */
+async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
+  const cf = loadCredentialsFile(deps.credentialsPath);
+  const name = args.values.profile ?? cf.defaultProfile;
+  const creds = cf.profiles[name];
+  if (creds === undefined) {
+    deps.writeError(`No profile named '${name}'.\n  Run: kagura-memory auth login`);
+    return 1;
+  }
+  if (!isExpired(creds)) {
+    deps.write(creds.accessToken);
+    return 0;
+  }
+  if (!creds.refreshToken) {
+    deps.writeError(`Profile '${name}' has expired and cannot refresh.\n  Run: kagura-memory auth login`);
+    return 1;
+  }
+  const options: RefreshOptions = {};
+  if (args.values.profile !== undefined) options.profile = args.values.profile;
+  if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
+  const refreshed = await deps.refresh(options);
+  deps.write(refreshed.accessToken);
+  return 0;
+}
+
+/** The `auth` subcommands, as registry entries. */
+const AUTH_GROUP: CommandGroup = {
+  summary: "OAuth2 device-flow authentication for Kagura Memory.",
+  commands: {
+    login: {
+      summary: "Authenticate via OAuth2 device flow.",
+      spec: AUTH_SPEC,
+      run: (deps, args) => cmdLogin(deps as CliDeps, args),
+    },
+    refresh: {
+      summary: "Rotate access_token (optionally requesting a new scope).",
+      spec: AUTH_SPEC,
+      run: (deps, args) => cmdRefresh(deps as CliDeps, args),
+    },
+    status: {
+      summary: "Show the current profile, server, scope, expiry, and workspace.",
+      spec: AUTH_SPEC,
+      run: async (deps, args) => cmdStatus(deps as CliDeps, args),
+    },
+    use: {
+      summary: "Set the default profile used when none is selected.",
+      args: "PROFILE",
+      spec: AUTH_SPEC,
+      run: (deps, args) => cmdUse(deps as CliDeps, args),
+    },
+    logout: {
+      summary: "Delete a stored profile (or all of them).",
+      spec: AUTH_SPEC,
+      run: (deps, args) => cmdLogout(deps as CliDeps, args),
+    },
+    list: {
+      summary: "List every stored profile; the default is marked with `*`.",
+      spec: AUTH_SPEC,
+      run: async (deps) => cmdList(deps as CliDeps),
+    },
+    token: {
+      summary: "Emit the raw access_token to stdout (for CI / scripts).",
+      spec: AUTH_SPEC,
+      run: (deps, args) => cmdToken(deps as CliDeps, args),
+    },
+  },
+};
+
+/** Everything reachable as `kagura-memory <name> …`. */
+export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
+  auth: AUTH_GROUP,
+  config: CONFIG_GROUP,
+  context: CONTEXT_GROUP,
+  doctor: DOCTOR,
+  contexts: CONTEXTS_ALIAS,
+  edge: EDGE_GROUP,
+  files: FILES_GROUP,
+  resource: RESOURCE_GROUP,
+  secret: SECRET_GROUP,
+  setup: SETUP_GROUP,
+  sleep: SLEEP_GROUP,
+  ...MEMORY_COMMANDS,
+};
+
+/**
+ * `kagura-memory login` — accepted because v0.7.0 shipped the bin with
+ * only `auth`, and both spellings worked. Not listed in the root help;
+ * `auth login` is canonical and matches the Python CLI.
+ */
+const BARE_AUTH_ALIASES = new Set(Object.keys(AUTH_GROUP.commands));
+
+interface Resolved {
+  command: Command;
+  /** Display path for help and errors, e.g. `kagura-memory auth login`. */
+  path: string;
+  /** argv with the command tokens removed. */
+  rest: string[];
+}
+
+/**
+ * Find the command argv names, without a spec.
+ *
+ * Resolution has to happen before parsing — the parser needs the command's
+ * own flag spec to know which tokens are values — so it reads only leading
+ * non-flag tokens and walks the registry with them.
+ */
+function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code: number } {
+  const head = argv[0];
+  if (head === undefined || head.startsWith("-")) {
+    // No command: `--help` is a request, a bare invocation is a mistake.
+    const wantsHelp = head === "--help" || head === "-h";
+    return { help: renderRootHelp(), code: wantsHelp ? 0 : 2 };
+  }
+  if (head === "help") {
+    return { help: renderRootHelp(), code: 0 };
+  }
+
+  const found: Command | CommandGroup | undefined = BARE_AUTH_ALIASES.has(head)
+    ? AUTH_GROUP.commands[head]
+    : ROOT_COMMANDS[head];
+  if (found === undefined) {
+    deps.writeError(`Error: No such command '${head}'.`);
+    return { help: renderRootHelp(), code: 2 };
+  }
+  let entry: Command | CommandGroup = found;
+
+  // Groups nest — `resource tokens list` is three levels — so walk until a
+  // leaf, taking one non-flag token per level.
+  const path = BARE_AUTH_ALIASES.has(head) ? ["auth", head] : [head];
+  let index = 1;
+  while (isGroup(entry)) {
+    const groupPath = `kagura-memory ${path.join(" ")}`;
+    const next = argv[index];
+    if (next === undefined || next.startsWith("-")) {
+      const wantsHelp = next === "--help" || next === "-h";
+      return {
+        help: renderGroupHelp(groupPath, entry.summary, entry.commands),
+        code: wantsHelp ? 0 : 2,
+      };
+    }
+    const child: Command | CommandGroup | undefined = entry.commands[next];
+    if (child === undefined) {
+      deps.writeError(`Error: No such command '${next}'.`);
+      return { help: renderGroupHelp(groupPath, entry.summary, entry.commands), code: 2 };
+    }
+    entry = child;
+    path.push(next);
+    index += 1;
+  }
+
+  return { command: entry, path: `kagura-memory ${path.join(" ")}`, rest: argv.slice(index) };
+}
+
+function renderRootHelp(): string {
+  return `${renderGroupHelp("kagura-memory", ROOT_SUMMARY, ROOT_COMMANDS)}\n${ROOT_EPILOG}`;
+}
+
+/**
  * Run one CLI invocation.
  *
  * @returns the process exit code. Never throws for expected failures —
- *   auth errors are reported on stderr with their guidance intact.
+ *   Kagura errors carry their own next-step guidance and are reported with
+ *   it intact rather than as a stack trace.
  */
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
-  const args = parseArgs(argv);
+  if (argv[0] === "--version") {
+    deps.write(`kagura-memory, version ${SDK_VERSION}`);
+    return 0;
+  }
 
-  // An empty value is almost always a typo (`--profile=`), and it is not
-  // harmless: "" is a usable profile name, so it would create a nameless
-  // profile, and an empty scope would be sent to the server verbatim.
-  const empty = Object.entries(args.values)
-    .filter(([, value]) => value !== undefined && value.trim() === "")
-    .map(([name]) => `--${name}`);
+  const resolved = resolve(argv, deps);
+  if ("help" in resolved) {
+    if (resolved.code === 0) deps.write(resolved.help);
+    else deps.writeError(resolved.help);
+    return resolved.code;
+  }
 
-  if (args.unknown.length > 0 || args.missingValue.length > 0 || empty.length > 0) {
-    for (const flag of args.unknown) {
+  const { command, path, rest } = resolved;
+  const parsed = parseArgs(
+    rest,
+    command.spec,
+    command.passthrough === true ? { stopAtPositional: true } : {},
+  );
+
+  if (parsed.flags.has("help")) {
+    deps.write(renderHelp(path, command));
+    return 0;
+  }
+
+  // Only the flags that declare `rejectEmpty`. Python accepts an empty
+  // value everywhere, and three behaviours here depend on that:
+  // `--context-id=` falls through to the config via its `or` chain, and
+  // `--tags=` / `--details=` treat blank as unset so an unset shell
+  // variable is not a hard error. Rejecting every empty value globally
+  // contradicted all three — the guard belongs on `--profile` and
+  // `--scope`, where "" does damage rather than nothing.
+  const empty = command.spec.flags
+    .filter((flag) => flag.rejectEmpty === true)
+    .filter((flag) => {
+      const value = parsed.values[flag.name];
+      return value !== undefined && value.trim() === "";
+    })
+    .map((flag) => `--${flag.name}`);
+
+  if (parsed.unknown.length > 0 || parsed.missingValue.length > 0 || empty.length > 0) {
+    for (const flag of parsed.unknown) {
       deps.writeError(`Unknown option: ${flag}`);
     }
-    for (const flag of args.missingValue) {
+    for (const flag of parsed.missingValue) {
       deps.writeError(`Option ${flag} needs a value.`);
     }
     for (const flag of empty) {
       deps.writeError(`Option ${flag} needs a non-empty value.`);
     }
-    deps.writeError(USAGE);
+    deps.writeError(renderHelp(path, command));
     return 2;
   }
 
-  if (args.flags.has("help") || args.command === "" || args.command === "help") {
-    deps.write(USAGE);
-    return args.command === "" && !args.flags.has("help") ? 2 : 0;
-  }
-
-  // The bin exists only for auth, but accept the `auth` prefix so the
-  // command reads the same as its Python counterpart.
-  let args2 = args;
-  if (args.command === "auth") {
-    const next = args.positionals[0];
-    args2 = { ...args, command: next ?? "", positionals: args.positionals.slice(1) };
-    if (args2.command === "") {
-      deps.write(USAGE);
-      return 2;
-    }
-  }
+  // The parser lifts the first positional into `command`; commands read
+  // their arguments positionally, so put it back.
+  const args: ParsedArgs = {
+    ...parsed,
+    positionals: [
+      ...(parsed.command === "" ? [] : [parsed.command]),
+      ...parsed.positionals,
+      // For a passthrough command the remainder was never parsed; it is
+      // the child's argv and must arrive byte-for-byte.
+      ...parsed.rest,
+    ],
+  };
 
   try {
-    switch (args2.command) {
-      case "login":
-        return await cmdLogin(deps, args2);
-      case "refresh":
-        return await cmdRefresh(deps, args2);
-      case "status":
-        return cmdStatus(deps, args2);
-      case "use":
-        return await cmdUse(deps, args2);
-      case "logout":
-        return await cmdLogout(deps, args2);
-      default:
-        deps.writeError(`Unknown command: ${args2.command}`);
-        deps.writeError(USAGE);
-        return 2;
-    }
+    return await command.run(deps, args);
   } catch (e) {
-    // Kagura auth errors carry their own next-step guidance ("Run: kagura
-    // auth login", …); surface the message rather than a stack trace.
-    deps.writeError(excMessage(e));
-    return 1;
+    // Click prefixes both UsageError (exit 2) and ClickException (exit 1)
+    // with "Error: "; the exit code is what tells a script which it was.
+    deps.writeError(`Error: ${excMessage(e)}`);
+    return e instanceof CliUsageError ? 2 : 1;
   }
 }

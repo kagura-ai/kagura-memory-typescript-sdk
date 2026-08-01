@@ -6,12 +6,20 @@
  * real process exit.
  */
 
+import { spawn } from "node:child_process";
+import { constants } from "node:os";
+import { readFileSync } from "node:fs";
 import * as readline from "node:readline/promises";
 
 import { login } from "./auth/login.js";
 import { refresh } from "./auth/refresh.js";
 import { openBrowser } from "./cli/openBrowser.js";
 import { runCli } from "./cli/run.js";
+import { KaguraClient } from "./client.js";
+import { loadConfig } from "./config.js";
+import { FilesClient } from "./filesClient.js";
+import { ResourceClient } from "./resourceClient.js";
+import { SecretClient } from "./secrets/client.js";
 
 async function confirm(question: string): Promise<boolean> {
   // A non-interactive stdin (CI, a pipe) must not hang waiting for input
@@ -31,12 +39,54 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 const code = await runCli(process.argv.slice(2), {
-  write: (line) => process.stdout.write(`${line}\n`),
-  writeError: (line) => process.stderr.write(`${line}\n`),
+  write: (line) => {
+    process.stdout.write(`${line}\n`);
+  },
+  writeError: (line) => {
+    process.stderr.write(`${line}\n`);
+  },
   confirm,
   openBrowser,
   login,
   refresh,
+  loadConfig,
+  makeClient: (options) => new KaguraClient(options),
+  // `fromMcpUrl`, not bare construction: it runs the credential chain
+  // (env > OAuth profile > .kagura.json) and stamps the MCP URL the chosen
+  // branch belongs to. Passing nothing lets each branch pair its credential
+  // with its own URL, which is what Python does and why an OAuth profile
+  // bound to a non-default server still reaches the right host.
+  makeFilesClient: () => FilesClient.fromMcpUrl({}),
+  makeResourceClient: () => ResourceClient.fromMcpUrl({}),
+  makeSecretClient: () => SecretClient.fromMcpUrl({}),
+  isTty: () => Boolean(process.stdout.isTTY),
+  readStdin: () => {
+    // A terminal stdin would block forever waiting for input that is not
+    // coming; treat it as "nothing piped in".
+    if (process.stdin.isTTY) return null;
+    try {
+      return readFileSync(0, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+  spawnChild: (command, argv, extraEnv, unset) =>
+    new Promise((resolve) => {
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, ...extraEnv };
+      // Remove before spawning, not after: the child inherits a snapshot.
+      for (const name of unset) delete childEnv[name];
+      const child = spawn(command, argv, { stdio: "inherit", env: childEnv });
+      child.on("error", (e) => {
+        // 127 is the shell's "command not found", which is what this is.
+        process.stderr.write(`Error: cannot run ${command}: ${e.message}\n`);
+        resolve(127);
+      });
+      // A child killed by a signal has no numeric code; 128+n is the shell
+      // convention and keeps "it died" distinguishable from "it exited 0".
+      child.on("close", (code, signal) =>
+        resolve(code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0))),
+      );
+    }),
 });
 
 process.exitCode = code;

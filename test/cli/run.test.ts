@@ -101,10 +101,35 @@ function harness(over: Partial<CliDeps> = {}): Harness {
 }
 
 describe("cli: usage and dispatch", () => {
-  it.each([[[]], [["--help"]], [["help"]]])("prints usage for %j", async (argv) => {
+  it.each([[[]], [["--help"]], [["help"]]])("lists the command groups for %j", async (argv) => {
     const h = harness();
     await runCli(argv, h.deps);
-    expect([...h.out, ...h.err].join("\n")).toMatch(/kagura-memory auth login/);
+    const text = [...h.out, ...h.err].join("\n");
+    expect(text).toMatch(/Usage: kagura-memory \[OPTIONS\] COMMAND/);
+    // The root listing names groups, not full invocations; `auth --help`
+    // is what expands to the subcommands.
+    for (const name of ["auth", "recall", "remember", "explore"]) {
+      expect(text).toMatch(new RegExp(`^\\s+${name}\\s`, "m"));
+    }
+  });
+
+  it("expands a group's subcommands under `<group> --help`", async () => {
+    const h = harness();
+    expect(await runCli(["auth", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    for (const name of ["login", "logout", "refresh", "status", "use"]) {
+      expect(text).toMatch(new RegExp(`^\\s+${name}\\s`, "m"));
+    }
+  });
+
+  it("prints a command's own options under `<command> --help`", async () => {
+    const h = harness();
+    expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    expect(text).toMatch(/Usage: kagura-memory recall \[OPTIONS\] QUERY/);
+    expect(text).toMatch(/-c, --context-id TEXT/);
+    // `-k` is short-only in Python; the help must not advertise a --k.
+    expect(text).not.toMatch(/--k\b/);
   });
 
   it("exits 2 with no command but 0 for explicit help", async () => {
@@ -140,11 +165,33 @@ describe("cli: usage and dispatch", () => {
   it("rejects an unknown command and an unknown flag", async () => {
     const a = harness();
     expect(await runCli(["frobnicate"], a.deps)).toBe(2);
-    expect(a.err.join("\n")).toMatch(/Unknown command: frobnicate/);
+    // Click's wording, so the two CLIs fail identically.
+    expect(a.err.join("\n")).toMatch(/Error: No such command 'frobnicate'\./);
 
     const b = harness();
     expect(await runCli(["login", "--porfile", "x"], b.deps)).toBe(2);
     expect(b.err.join("\n")).toMatch(/Unknown option: --porfile/);
+  });
+
+  it("rejects an unknown subcommand of a real group", async () => {
+    const h = harness();
+    expect(await runCli(["auth", "frobnicate"], h.deps)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/Error: No such command 'frobnicate'\./);
+  });
+
+  it("reports the version", async () => {
+    const h = harness();
+    expect(await runCli(["--version"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toMatch(/^kagura-memory, version \d+\.\d+\.\d+$/);
+  });
+
+  it("keeps a flag scoped to the command that declares it", async () => {
+    // `--read-only` is real for `auth login` and must still be rejected by
+    // `recall`, which has no such option — the reason each command carries
+    // its own spec instead of sharing one global set.
+    const h = harness();
+    expect(await runCli(["recall", "q", "--read-only"], h.deps)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/Unknown option: --read-only/);
   });
 });
 

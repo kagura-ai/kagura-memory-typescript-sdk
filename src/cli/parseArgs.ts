@@ -1,97 +1,297 @@
 /**
- * Minimal argv parser for the `auth` bin.
+ * Minimal argv parser for the `kagura-memory` bin.
  *
  * Hand-rolled because this package's zero-runtime-dependency invariant is
- * deliberate — pulling in commander to read six flags would trade that
- * away for very little. Scope is correspondingly small: long flags,
- * `-h`, and positionals. No short-flag clustering, no `--`, no negation.
+ * deliberate — pulling in commander to read flags would trade that away.
+ * Scope is correspondingly small: long flags, registered short flags,
+ * repeatable count and multiple flags, positionals, and `--` as the
+ * end-of-options marker. No general short-flag clustering, no negation.
+ *
+ * Each command passes its own {@link ParseSpec}. That is the point: a flag
+ * that is real for `auth login` must still be *rejected* by `recall`,
+ * which has no such option. A single global flag set would accept it and
+ * silently ignore it, which is the failure mode this parser exists to
+ * prevent.
  *
  * Unknown and value-less flags are *reported* rather than ignored or
  * thrown on, so the caller can print one message listing everything wrong
  * instead of failing on the first problem.
  */
 
-/** Flags that take a value; everything else is a boolean switch. */
-const VALUE_FLAGS = new Set(["profile", "server", "scope"]);
-
 /**
- * Boolean switches, so a following token is never mistaken for a value.
+ * One option a command accepts.
  *
- * Only flags a command actually reads belong here: an entry with no
- * implementation is accepted and silently ignored, which is worse than
- * being reported as unknown.
+ * Help text lives here rather than in a parallel table so a flag is
+ * declared exactly once: a spec entry with no help line, or a help line
+ * for a flag that was never registered, is not a state this can reach.
  */
-const SWITCHES = new Set(["read-only", "no-browser", "all", "yes", "help"]);
+export interface FlagSpec {
+  /** Long name, written without the leading `--`. */
+  name: string;
+  /** Optional single-character alias, written without the leading `-`. */
+  short?: string;
+  /**
+   * `value` takes an argument, `switch` is a boolean, `count` is a
+   * repeatable verbosity dial, `multiple` accumulates every occurrence
+   * (click's `multiple=True`). Defaults to `switch`.
+   */
+  type?: "value" | "switch" | "count" | "multiple";
+  /** One-line description for `--help`. */
+  help?: string;
+  /** Value placeholder shown in `--help` (default: `TEXT` for value flags). */
+  metavar?: string;
+  /** Rendered as `[default: …]` in `--help`. */
+  defaultLabel?: string;
+  /** Reported as missing when absent; see `requireOption`. */
+  required?: boolean;
+  /**
+   * Reject `--flag=` (an explicitly empty value).
+   *
+   * Off by default, because Python accepts an empty value everywhere and
+   * several options *rely* on it: `--context-id=` falls through to the
+   * config via Python's `or` chain, and `--tags=` / `--details=` treat
+   * blank as unset so an unset shell variable is not a hard error.
+   *
+   * On only where an empty value would do damage rather than nothing —
+   * `--profile=` would create a nameless profile and `--scope=` would send
+   * an empty scope to the server. That is a deliberate divergence from
+   * click, inherited from the auth-only bin, and it stays scoped to the
+   * flags that motivated it.
+   */
+  rejectEmpty?: boolean;
+  /**
+   * Register only the short form.
+   *
+   * `kagura recall -k 5` is declared in Python as `@click.option("-k")`
+   * with no long form, so `--k` is an unknown option there. Accepting it
+   * here would be a superset — small, but the kind of drift that makes
+   * "the two CLIs take the same flags" stop being literally true.
+   */
+  shortOnly?: boolean;
+}
+
+export interface ParseSpec {
+  flags: readonly FlagSpec[];
+}
+
+export interface ParseOptions {
+  /**
+   * Stop parsing options at the first positional and hand the remainder
+   * back untouched in {@link ParsedArgs.rest}.
+   *
+   * This is click's `allow_interspersed_args=False` +
+   * `ignore_unknown_options=True`, which `secret exec` needs: the tokens
+   * after the command name belong to the *child*, so `-la` in
+   * `secret exec --as A=s -- ls -la` is an argument to `ls`, not an
+   * unknown option of ours.
+   */
+  stopAtPositional?: boolean;
+}
 
 export interface ParsedArgs {
   /** First non-flag token, or `""` when absent. */
   command: string;
   /** Remaining non-flag tokens. */
   positionals: string[];
-  /** Boolean switches that were present. */
+  /** Switches that were present, keyed by long name. */
   flags: Set<string>;
-  /** Values for flags in {@link VALUE_FLAGS}. */
+  /** Values for `value` flags, keyed by long name. */
   values: Record<string, string | undefined>;
-  /** Flags that match neither set, verbatim (e.g. `--porfile`). */
+  /** Accumulated values for `multiple` flags, keyed by long name. */
+  many: Record<string, string[]>;
+  /** Occurrence counts for `count` flags, keyed by long name; 0 when absent. */
+  counts: Record<string, number>;
+  /** Flags that match nothing in the spec, verbatim (e.g. `--porfile`). */
   unknown: string[];
   /** Value flags that ran out of argv before their value. */
   missingValue: string[];
+  /**
+   * Unparsed remainder, when `stopAtPositional` was set. Empty otherwise.
+   * A leading `--` separator is stripped; anything after it is verbatim.
+   */
+  rest: string[];
 }
 
-export function parseArgs(argv: string[]): ParsedArgs {
+/** `--help` works on every command, so it never needs declaring. */
+const HELP: FlagSpec = { name: "help", type: "switch" };
+
+/**
+ * Python's `float()` grammar, shared with `parse.ts`.
+ *
+ * Lives here because the parser needs it too: a dash-prefixed token that
+ * is a number is a *value*, not a flag.
+ */
+export const PY_FLOAT =
+  /^[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)$/i;
+
+interface Index {
+  long: Map<string, FlagSpec>;
+  short: Map<string, FlagSpec>;
+}
+
+function indexSpec(spec: ParseSpec): Index {
+  const long = new Map<string, FlagSpec>([[HELP.name, HELP]]);
+  const short = new Map<string, FlagSpec>();
+  for (const flag of spec.flags) {
+    if (flag.shortOnly !== true) long.set(flag.name, flag);
+    if (flag.short !== undefined) short.set(flag.short, flag);
+  }
+  return { long, short };
+}
+
+export function parseArgs(
+  argv: string[],
+  spec: ParseSpec,
+  options: ParseOptions = {},
+): ParsedArgs {
+  const { long, short } = indexSpec(spec);
+  const stopAtPositional = options.stopAtPositional === true;
+  let rest: string[] = [];
+
   const positionals: string[] = [];
   const flags = new Set<string>();
   const values: Record<string, string | undefined> = {};
+  const counts: Record<string, number> = {};
+  const many: Record<string, string[]> = {};
   const unknown: string[] = [];
   const missingValue: string[] = [];
+
+  // Registered count and multiple flags read as 0 / [] rather than
+  // undefined, so callers can use them without a `?? 0` at every site.
+  for (const flag of spec.flags) {
+    if (flag.type === "count") counts[flag.name] = 0;
+    if (flag.type === "multiple") many[flag.name] = [];
+  }
+
+  /**
+   * Consume the value for `flag`, given how it was written.
+   *
+   * @returns the number of extra argv tokens eaten (0 or 1), or -1 when the
+   *   value was missing.
+   */
+  const store = (flag: FlagSpec, value: string) => {
+    if (flag.type === "multiple") many[flag.name]!.push(value);
+    else values[flag.name] = value;
+  };
+
+  const takeValue = (flag: FlagSpec, inline: string | null, next: string | undefined): number => {
+    if (inline !== null) {
+      // `--profile=` is an explicit empty value, not a missing one.
+      store(flag, inline);
+      return 0;
+    }
+    // Any following flag means the value was omitted, not that the flag is
+    // the value — `--profile --yes` must not set profile="--yes", and
+    // `--profile -h` is a request for help, not a profile named "-h".
+    //
+    // A negative number is the exception: `--bm25 -0.1` and `--limit -5`
+    // are values, and click accepts them. (Click is in fact laxer still —
+    // it consumes whatever follows, so `--reranker -x` sets the value to
+    // "-x" — but that turns a typo into a silent wrong value, so the
+    // stricter rule stays.)
+    if (next === undefined || (next.startsWith("-") && next.length > 1 && !PY_FLOAT.test(next))) {
+      return -1;
+    }
+    store(flag, next);
+    return 1;
+  };
+
+  const record = (flag: FlagSpec, inline: string | null, next: string | undefined, token: string) => {
+    if (flag.type === "value" || flag.type === "multiple") {
+      const eaten = takeValue(flag, inline, next);
+      if (eaten === -1) {
+        missingValue.push(token);
+        return 0;
+      }
+      return eaten;
+    }
+    if (inline !== null) {
+      // `--json=true` is not something this parser understands; accepting
+      // it would silently discard the value.
+      unknown.push(token);
+      return 0;
+    }
+    if (flag.type === "count") counts[flag.name] = (counts[flag.name] ?? 0) + 1;
+    else flags.add(flag.name);
+    return 0;
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
 
-    if (token === "-h") {
-      flags.add("help");
-      continue;
-    }
-    if (!token.startsWith("--")) {
-      // A single-dash token is an attempted short flag, not a value.
-      // Letting it fall through to positionals means most subcommands
-      // ignore it and run with defaults — silently, which is the same
-      // failure mode as a switch that is accepted but never read.
-      if (token.startsWith("-") && token.length > 1) {
-        unknown.push(token);
-        continue;
+    if (token === "--") {
+      if (stopAtPositional) {
+        // Everything from here belongs to whoever we are handing off to.
+        rest = argv.slice(i + 1);
+        break;
       }
+      // Click's end-of-options marker, on every command: what follows is
+      // positional even when it starts with a dash, which is the only way
+      // to pass `-5` or a filename beginning with one. The `--` itself is
+      // consumed rather than kept, or every command would see an extra
+      // argument it did not ask for.
+      positionals.push(...argv.slice(i + 1));
+      break;
+    }
+
+    if (!token.startsWith("-") || token === "-") {
+      if (stopAtPositional) {
+        rest = argv.slice(i);
+        break;
+      }
+      // A bare `-` is a conventional stdin placeholder, not a flag.
       positionals.push(token);
       continue;
     }
 
+    if (token.startsWith("--")) {
+      const eq = token.indexOf("=");
+      const name = eq === -1 ? token.slice(2) : token.slice(2, eq);
+      const inline = eq === -1 ? null : token.slice(eq + 1);
+      const flag = long.get(name);
+      if (flag === undefined) {
+        unknown.push(token);
+        continue;
+      }
+      i += record(flag, inline, argv[i + 1], token);
+      continue;
+    }
+
+    // --- single dash ------------------------------------------------------
     const eq = token.indexOf("=");
-    const name = eq === -1 ? token.slice(2) : token.slice(2, eq);
+    const body = eq === -1 ? token.slice(1) : token.slice(1, eq);
+    const inline = eq === -1 ? null : token.slice(eq + 1);
 
-    if (VALUE_FLAGS.has(name)) {
-      if (eq !== -1) {
-        // `--profile=` is an explicit empty value, not a missing one.
-        values[name] = token.slice(eq + 1);
-        continue;
-      }
-      const next = argv[i + 1];
-      // Any following flag means the value was omitted, not that the flag
-      // is the value — `--profile --yes` must not set profile="--yes",
-      // and `--profile -h` is a request for help, not a profile named
-      // "-h". Short flags count: checking only "--" swallowed them.
-      if (next === undefined || next.startsWith("-")) {
-        missingValue.push(token);
-        continue;
-      }
-      values[name] = next;
-      i++;
+    // `-h` is reserved for help on every command; no command registers it
+    // for anything else. The `inline` check matters: `-h=x` is a malformed
+    // option, not a request for help, and must fall through to be
+    // reported.
+    if (body === "h" && inline === null && !short.has("h")) {
+      flags.add("help");
       continue;
     }
 
-    if (SWITCHES.has(name)) {
-      flags.add(name);
+    const flag = short.get(body);
+    if (flag !== undefined) {
+      i += record(flag, inline, argv[i + 1], token);
       continue;
     }
+
+    // `-vvv` — repetition of one registered count flag. Only same-letter
+    // runs are understood; a mixed cluster like `-vx` is reported rather
+    // than half-applied.
+    if (inline === null && body.length > 1) {
+      const first = body[0]!;
+      const repeated = short.get(first);
+      if (repeated?.type === "count" && body === first.repeat(body.length)) {
+        counts[repeated.name] = (counts[repeated.name] ?? 0) + body.length;
+        continue;
+      }
+    }
+
+    // Silently demoting `-p work` to positionals means the flag is ignored
+    // and the command runs with defaults — the same failure mode as an
+    // accepted-but-unread switch.
     unknown.push(token);
   }
 
@@ -100,7 +300,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     positionals,
     flags,
     values,
+    counts,
+    many,
     unknown,
     missingValue,
+    rest,
   };
 }

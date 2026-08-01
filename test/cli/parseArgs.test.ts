@@ -1,67 +1,84 @@
 import { describe, expect, it } from "vitest";
 
-import { parseArgs } from "../../src/cli/parseArgs.js";
+import { parseArgs, type ParseSpec } from "../../src/cli/parseArgs.js";
+
+/**
+ * A spec exercising every flag kind, so the parser's behaviour is pinned
+ * independently of whichever commands happen to use it today.
+ */
+const SPEC: ParseSpec = {
+  flags: [
+    { name: "profile", type: "value" },
+    { name: "scope", type: "value" },
+    { name: "context-id", short: "c", type: "value" },
+    { name: "importance", short: "i", type: "value" },
+    { name: "read-only", type: "switch" },
+    { name: "no-browser", type: "switch" },
+    { name: "yes", type: "switch" },
+    { name: "json", type: "switch" },
+    { name: "verbose", short: "v", type: "count" },
+  ],
+};
+
+const parse = (argv: string[]) => parseArgs(argv, SPEC);
 
 describe("parseArgs", () => {
   it("reads the subcommand and positionals", () => {
-    const parsed = parseArgs(["login"]);
+    const parsed = parse(["login"]);
     expect(parsed.command).toBe("login");
     expect(parsed.positionals).toEqual([]);
 
-    expect(parseArgs(["use", "work"]).positionals).toEqual(["work"]);
+    expect(parse(["use", "work"]).positionals).toEqual(["work"]);
   });
 
   it("returns an empty command when none is given", () => {
-    expect(parseArgs([]).command).toBe("");
+    expect(parse([]).command).toBe("");
   });
 
   it.each([
     [["login", "--profile", "work"], "work"],
     [["login", "--profile=work"], "work"],
   ])("accepts both --flag value and --flag=value (%j)", (argv, expected) => {
-    expect(parseArgs(argv).values.profile).toBe(expected);
+    expect(parse(argv).values.profile).toBe(expected);
   });
 
   it("treats known switches as booleans", () => {
-    const parsed = parseArgs(["login", "--read-only", "--no-browser"]);
+    const parsed = parse(["login", "--read-only", "--no-browser"]);
     expect(parsed.flags.has("read-only")).toBe(true);
     expect(parsed.flags.has("no-browser")).toBe(true);
     expect(parsed.values.profile).toBeUndefined();
   });
 
   it("does not swallow the next token after a switch", () => {
-    // `--read-only` takes no value, so `use` must stay a positional.
-    const parsed = parseArgs(["logout", "--yes", "extra"]);
+    const parsed = parse(["logout", "--yes", "extra"]);
     expect(parsed.flags.has("yes")).toBe(true);
     expect(parsed.positionals).toEqual(["extra"]);
   });
 
   it("keeps a scope string containing spaces intact", () => {
-    const parsed = parseArgs(["login", "--scope", "memory:read memory:write"]);
+    const parsed = parse(["login", "--scope", "memory:read memory:write"]);
     expect(parsed.values.scope).toBe("memory:read memory:write");
   });
 
   it("accepts an empty --flag= value without consuming the next token", () => {
-    const parsed = parseArgs(["login", "--profile=", "trailing"]);
+    const parsed = parse(["login", "--profile=", "trailing"]);
     expect(parsed.values.profile).toBe("");
     expect(parsed.positionals).toEqual(["trailing"]);
   });
 
   it("reports an unknown flag rather than ignoring it", () => {
-    expect(parseArgs(["login", "--porfile", "work"]).unknown).toEqual(["--porfile"]);
+    expect(parse(["login", "--porfile", "work"]).unknown).toEqual(["--porfile"]);
   });
 
   it("reports a value flag left without a value", () => {
-    expect(parseArgs(["login", "--profile"]).missingValue).toEqual(["--profile"]);
+    expect(parse(["login", "--profile"]).missingValue).toEqual(["--profile"]);
   });
 
   it.each([
     [["login", "--profile", "-h"], "-h"],
     [["login", "--scope", "-x"], "-x"],
   ])("does not swallow a short flag as a value (%j)", (argv, following) => {
-    // `--profile -h` means the value was omitted and help was asked for,
-    // not that the profile is named "-h".
-    const parsed = parseArgs(argv);
+    const parsed = parse(argv);
     expect(parsed.missingValue).toHaveLength(1);
     expect(parsed.values.profile).toBeUndefined();
     expect(parsed.values.scope).toBeUndefined();
@@ -71,23 +88,214 @@ describe("parseArgs", () => {
   });
 
   it.each([["-p"], ["-x"], ["-abc"]])(
-    "reports an unsupported short flag %j rather than treating it as a positional",
+    "reports an unregistered short flag %j rather than treating it as a positional",
     (flag) => {
-      // Silently demoting `-p work` to positionals means the flag is
-      // ignored and the command runs with defaults — the same failure
-      // mode as an accepted-but-unread switch.
-      const parsed = parseArgs(["login", flag, "work"]);
+      const parsed = parse(["login", flag, "work"]);
       expect(parsed.unknown).toEqual([flag]);
       expect(parsed.positionals).toEqual(["work"]);
     },
   );
 
   it("still treats a bare '-' as a positional", () => {
-    expect(parseArgs(["use", "-"]).positionals).toEqual(["-"]);
+    expect(parse(["use", "-"]).positionals).toEqual(["-"]);
   });
 
   it("recognizes -h and --help", () => {
-    expect(parseArgs(["--help"]).flags.has("help")).toBe(true);
-    expect(parseArgs(["login", "-h"]).flags.has("help")).toBe(true);
+    expect(parse(["--help"]).flags.has("help")).toBe(true);
+    expect(parse(["login", "-h"]).flags.has("help")).toBe(true);
+  });
+
+  // --- registered short flags -------------------------------------------
+
+  it("reads a short value flag", () => {
+    expect(parse(["recall", "-c", "ctx-1"]).values["context-id"]).toBe("ctx-1");
+  });
+
+  it("stores a short flag's value under its long name only", () => {
+    // Commands read options by long name; a second entry keyed by the
+    // letter would make `values.c ?? values["context-id"]` necessary at
+    // every call site, and forgetting it reads as "flag not passed".
+    const parsed = parse(["recall", "-c", "ctx-1"]);
+    expect(parsed.values["context-id"]).toBe("ctx-1");
+    expect(parsed.values.c).toBeUndefined();
+  });
+
+  it("accepts -c=value as well as -c value", () => {
+    expect(parse(["recall", "-c=ctx-1"]).values["context-id"]).toBe("ctx-1");
+  });
+
+  it("reports a short value flag left without a value", () => {
+    expect(parse(["recall", "-c"]).missingValue).toEqual(["-c"]);
+  });
+
+  it("does not swallow the token after a short value flag when it is a flag", () => {
+    const parsed = parse(["recall", "-c", "--json"]);
+    expect(parsed.missingValue).toEqual(["-c"]);
+    expect(parsed.flags.has("json")).toBe(true);
+  });
+
+  // --- negative numbers as values ----------------------------------------
+
+  it.each([
+    ["--importance", "-0.5", "importance"],
+    ["-i", "-3", "importance"],
+    ["--importance", "-1e-2", "importance"],
+  ])("accepts a negative number as the value of %s", (flag, value, name) => {
+    // Measured against the real Python CLI: `--bm25 -0.1` reaches the range
+    // check, so click parsed it as a value. Treating every dash-prefixed
+    // token as "value missing" made every negative number unreachable.
+    const parsed = parse(["cmd", flag, value]);
+    expect(parsed.values[name]).toBe(value);
+    expect(parsed.missingValue).toEqual([]);
+  });
+
+  it("still refuses a registered flag as a value", () => {
+    const parsed = parse(["cmd", "--importance", "--json"]);
+    expect(parsed.missingValue).toEqual(["--importance"]);
+    expect(parsed.flags.has("json")).toBe(true);
+  });
+
+  it("still refuses a non-numeric short token as a value", () => {
+    // Click would take "-x" as the value; that turns a typo into a silent
+    // wrong value, so this stays stricter on purpose.
+    const parsed = parse(["cmd", "--scope", "-x"]);
+    expect(parsed.missingValue).toEqual(["--scope"]);
+  });
+
+  it("still reports a bare negative number that no option is waiting for", () => {
+    // The numeric exception applies only where a value is expected. On its
+    // own, `-5` is what click calls "No such option" — reporting it beats
+    // demoting it to a positional that some command silently ignores.
+    expect(parse(["cmd", "-5"]).unknown).toEqual(["-5"]);
+    expect(parse(["cmd", "-5"]).positionals).toEqual([]);
+  });
+
+  // --- count flags -------------------------------------------------------
+
+  it("counts a repeated flag", () => {
+    expect(parse(["process", "-v"]).counts.verbose).toBe(1);
+    expect(parse(["process", "-v", "-v", "-v"]).counts.verbose).toBe(3);
+  });
+
+  it("counts a clustered repetition of the same letter (-vv, -vvv)", () => {
+    expect(parse(["process", "-vv"]).counts.verbose).toBe(2);
+    expect(parse(["process", "-vvv"]).counts.verbose).toBe(3);
+  });
+
+  it("reports zero for a count flag that was never passed", () => {
+    expect(parse(["process"]).counts.verbose).toBe(0);
+  });
+
+  it("accepts the long form of a count flag", () => {
+    expect(parse(["process", "--verbose", "--verbose"]).counts.verbose).toBe(2);
+  });
+
+  it("does not treat a mixed cluster as a count", () => {
+    // `-vx` is not "verbose plus x"; this parser deliberately supports only
+    // same-letter repetition, so anything else must be reported rather than
+    // half-understood.
+    const parsed = parse(["process", "-vx"]);
+    expect(parsed.unknown).toEqual(["-vx"]);
+    expect(parsed.counts.verbose).toBe(0);
+  });
+
+  // --- -h ----------------------------------------------------------------
+
+  it("reports -h=x rather than reading it as a request for help", () => {
+    // A malformed option is not a help request. The guard used to accept
+    // any token whose body was "h", inline value and all.
+    const parsed = parse(["cmd", "-h=x"]);
+    expect(parsed.flags.has("help")).toBe(false);
+    expect(parsed.unknown).toEqual(["-h=x"]);
+  });
+
+  it("lets a command that registers -h keep it", () => {
+    // The old guard checked the LONG map for "h", which can never
+    // contain a short name — so it was always true and a command could
+    // not have reclaimed -h even in principle.
+    const withShortH: ParseSpec = {
+      flags: [{ name: "height", short: "h", type: "value" }],
+    };
+    const parsed = parseArgs(["cmd", "-h", "10"], withShortH);
+    expect(parsed.values.height).toBe("10");
+    expect(parsed.flags.has("help")).toBe(false);
+  });
+
+  // --- the -- end-of-options marker --------------------------------------
+
+  it("treats everything after -- as positional, dashes and all", () => {
+    // Click terminates option parsing at `--` on every command. Without
+    // it there is no way to pass a value that starts with a dash, and
+    // `recall -- -5` reported "Unknown option: -5" — measured against the
+    // Python CLI, which accepts the same argv.
+    const parsed = parse(["recall", "--", "-5", "--json"]);
+    expect(parsed.positionals).toEqual(["-5", "--json"]);
+    expect(parsed.unknown).toEqual([]);
+    expect(parsed.flags.has("json")).toBe(false);
+  });
+
+  it("consumes the -- itself rather than passing it on", () => {
+    // Keeping it would hand every command an extra argument it did not
+    // ask for, which `rejectExtraArgs` then reports.
+    expect(parse(["use", "--", "work"]).positionals).toEqual(["work"]);
+  });
+
+  it("still parses options that appear before --", () => {
+    const parsed = parse(["recall", "--profile", "work", "--", "-5"]);
+    expect(parsed.values.profile).toBe("work");
+    expect(parsed.positionals).toEqual(["-5"]);
+  });
+
+  it("keeps a second -- as a literal positional", () => {
+    expect(parse(["cmd", "--", "a", "--", "b"]).positionals).toEqual(["a", "--", "b"]);
+  });
+
+  // --- passthrough (stopAtPositional) ------------------------------------
+
+  it("hands everything after the first positional back unparsed", () => {
+    const parsed = parseArgs(["--profile", "p", "ls", "-la"], SPEC, { stopAtPositional: true });
+    expect(parsed.values.profile).toBe("p");
+    expect(parsed.rest).toEqual(["ls", "-la"]);
+    // `-la` is the child's flag, not an unknown option of ours.
+    expect(parsed.unknown).toEqual([]);
+  });
+
+  it("strips a leading -- separator from the remainder", () => {
+    const parsed = parseArgs(["--profile", "p", "--", "ls", "-la"], SPEC, { stopAtPositional: true });
+    expect(parsed.rest).toEqual(["ls", "-la"]);
+  });
+
+  it("keeps a -- that appears inside the remainder", () => {
+    // Only the FIRST separator is ours; a second one belongs to the child.
+    const parsed = parseArgs(["--", "sh", "-c", "--", "x"], SPEC, { stopAtPositional: true });
+    expect(parsed.rest).toEqual(["sh", "-c", "--", "x"]);
+  });
+
+  it("leaves rest empty when there is no positional", () => {
+    expect(parseArgs(["--profile", "p"], SPEC, { stopAtPositional: true }).rest).toEqual([]);
+  });
+
+  it("still reports an unknown option that appears BEFORE the positional", () => {
+    const parsed = parseArgs(["--nope", "ls"], SPEC, { stopAtPositional: true });
+    expect(parsed.unknown).toEqual(["--nope"]);
+  });
+
+  it("does not collect a remainder without the option", () => {
+    expect(parseArgs(["ls", "-la"], SPEC).rest).toEqual([]);
+  });
+
+  // --- spec isolation ----------------------------------------------------
+
+  it("reports a flag that belongs to a different command's spec", () => {
+    // The whole point of per-command specs: `--read-only` is real for
+    // `auth login` and must still be rejected by a command that has no
+    // such option, rather than accepted and ignored.
+    const narrow: ParseSpec = { flags: [{ name: "json", type: "switch" }] };
+    expect(parseArgs(["list", "--read-only"], narrow).unknown).toEqual(["--read-only"]);
+  });
+
+  it("always accepts --help regardless of the spec", () => {
+    const narrow: ParseSpec = { flags: [] };
+    expect(parseArgs(["list", "--help"], narrow).flags.has("help")).toBe(true);
   });
 });
