@@ -38,6 +38,56 @@ jobs:
           node -e "const { KaguraClient } = require('kagura-memory'); if (typeof KaguraClient !== 'function') process.exit(1);"
           node --input-type=module -e "import { KaguraClient } from 'kagura-memory'; if (typeof KaguraClient !== 'function') process.exit(1);"
 
+      # The `kagura-memory` bin, launched the way a user launches it — through
+      # the symlink npm installs, not `node dist/cli.js`. That path depends on
+      # the shebang banner and the manifest's `bin` entry, neither of which any
+      # vitest test can observe.
+      #
+      # HOME is redirected so nothing here can read or write a real
+      # ~/.kagura/credentials.json.
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          cd /tmp/smoke
+          mkdir -p fakehome
+          export HOME="$PWD/fakehome"
+          CLI=./node_modules/.bin/kagura-memory
+
+          "$CLI" --version | grep -qE '^kagura-memory, version [0-9]+\.[0-9]+\.[0-9]+$'
+          # Every group must be reachable from the root listing.
+          for cmd in auth config context contexts doctor edge explore files \
+                     forget recall reference remember resource secret setup \
+                     sleep update-memory; do
+            "$CLI" --help | grep -qE "^  $cmd( |$)" || { echo "missing: $cmd" >&2; exit 1; }
+          done
+          # Nested groups resolve three levels deep.
+          "$CLI" resource tokens --help | grep -q 'resource tokens'
+
+          # Exit codes, which are the contract scripts depend on. `set -e` is
+          # on, so each non-zero case is captured rather than aborting.
+          code=0; "$CLI" >/dev/null 2>&1 || code=$?
+          test "$code" = "2" || { echo "bare invocation: want 2, got $code" >&2; exit 1; }
+          code=0; "$CLI" frobnicate >/dev/null 2>&1 || code=$?
+          test "$code" = "2" || { echo "unknown command: want 2, got $code" >&2; exit 1; }
+          code=0; "$CLI" recall >/dev/null 2>&1 || code=$?
+          test "$code" = "2" || { echo "missing argument: want 2, got $code" >&2; exit 1; }
+          code=0; "$CLI" recall hello >/dev/null 2>&1 || code=$?
+          test "$code" = "1" || { echo "no credentials: want 1, got $code" >&2; exit 1; }
+
+          # Without the optional peer, `secret` must name the install command
+          # rather than crash on a missing module.
+          #
+          # This step runs BEFORE the one that installs age-encryption. If it
+          # is ever reordered, keygen would succeed and print a real private
+          # key into the build log, so that is asserted against rather than
+          # assumed — a check that depends on step order should say so.
+          out=$("$CLI" secret keygen --no-register 2>&1 || true)
+          echo "$out" | grep -q 'age-encryption'
+          if echo "$out" | grep -q 'AGE-SECRET-KEY-1'; then
+            echo "a private key reached the build log; this step must run before age-encryption is installed" >&2
+            exit 1
+          fi
+
       # The optional `age-encryption` peer dependency (#28) must stay
       # optional: a bare install has to keep working, and the crypto path has
       # to work once the user opts in. Both are properties of the *published*
