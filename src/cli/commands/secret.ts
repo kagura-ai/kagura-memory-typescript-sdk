@@ -55,6 +55,17 @@ const FROM_FILE: FlagSpec = {
   help: "Read the value from a file instead of stdin",
 };
 
+/**
+ * Environment carrying the age private key.
+ *
+ * Stripped from any child `secret exec` launches: `--as` is a scoping
+ * mechanism, and a child that inherits the identity could decrypt every
+ * other secret in the workspace, which is exactly what the scoping was
+ * for. Python does not have this exposure because it reads the key from
+ * the OS keychain, so nothing is in the environment to inherit.
+ */
+const IDENTITY_ENV = ["KAGURA_AGE_IDENTITY", "KAGURA_AGE_IDENTITY_FILE"] as const;
+
 const IDENTITY_HELP =
   "No age private key available.\n" +
   "  Set KAGURA_AGE_IDENTITY to the AGE-SECRET-KEY-1… value, or\n" +
@@ -266,12 +277,16 @@ const get: Command = {
     const { config } = resolveConfig(deps, undefined, false);
     const client = makeSecretClient(deps, config);
     const fetched = await client.fetchSecret(name, version);
-    const plaintext = new TextDecoder().decode(await decrypt(fetched.ciphertext, identity));
+    const plaintext = await decrypt(fetched.ciphertext, identity);
 
     if (output === undefined) {
-      deps.write(plaintext);
+      // stdout is text; a binary secret belongs in --output.
+      deps.write(new TextDecoder().decode(plaintext));
       return 0;
     }
+    // Bytes, not a decoded string: a signing key or keytab would otherwise
+    // have every non-UTF-8 byte replaced with U+FFFD and be silently
+    // corrupted on the way to disk.
     writePrivateFile(output, plaintext);
     deps.write(formatJson({ status: "success", name, written_to: output }));
     return 0;
@@ -375,7 +390,7 @@ const exec: Command = {
       const fetched = await client.fetchSecret(secretName);
       injected[envName] = decoder.decode(await decrypt(fetched.ciphertext, identity));
     }
-    return deps.spawnChild(argv[0]!, argv.slice(1), injected);
+    return deps.spawnChild(argv[0]!, argv.slice(1), injected, IDENTITY_ENV);
   },
 };
 
@@ -447,15 +462,32 @@ function dedupe(rows: PubkeyResponse[]): PubkeyResponse[] {
   return rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
 }
 
-/** Write with mode 0600 from creation, never widening an existing file. */
-function writePrivateFile(target: string, contents: string): void {
+/**
+ * Write plaintext to a file that is 0600 *before* any of it lands there.
+ *
+ * `writeFileSync(..., {mode})` applies the mode only when it creates the
+ * file, so writing over an existing 0644 file would leave the secret
+ * world-readable for the window between the write and a later chmod.
+ * Opening the descriptor first closes that window, and O_NOFOLLOW refuses
+ * a symlink planted where the output was meant to go.
+ */
+function writePrivateFile(target: string, contents: Uint8Array): void {
+  const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+  let fd: number | undefined;
   try {
-    fs.writeFileSync(target, contents, { mode: 0o600 });
-    // writeFileSync's mode applies only at creation; an existing file keeps
-    // its permissions, so tighten explicitly.
-    fs.chmodSync(target, 0o600);
+    fd = fs.openSync(
+      target,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | NOFOLLOW,
+      0o600,
+    );
+    // An existing file keeps its old mode through open(); tighten before
+    // writing, not after.
+    fs.fchmodSync(fd, 0o600);
+    fs.writeSync(fd, contents);
   } catch (e) {
     throw new CliError(`cannot write ${target}: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

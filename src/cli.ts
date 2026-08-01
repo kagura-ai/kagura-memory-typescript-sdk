@@ -65,12 +65,12 @@ const code = await runCli(process.argv.slice(2), {
       return null;
     }
   },
-  spawnChild: (command, argv, extraEnv) =>
+  spawnChild: (command, argv, extraEnv, unset) =>
     new Promise((resolve) => {
-      const child = spawn(command, argv, {
-        stdio: "inherit",
-        env: { ...process.env, ...extraEnv },
-      });
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, ...extraEnv };
+      // Remove before spawning, not after: the child inherits a snapshot.
+      for (const name of unset) delete childEnv[name];
+      const child = spawn(command, argv, { stdio: "inherit", env: childEnv });
       child.on("error", (e) => {
         process.stderr.write(`Error: cannot run ${command}: ${e.message}
 `);

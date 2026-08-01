@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { SecretClient } from "../../../src/secrets/client.js";
-import { TEST_IDENTITY } from "../../secrets/vectors.js";
+import { PYRAGE_ARMORED, TEST_IDENTITY } from "../../secrets/vectors.js";
 
 interface Recorded {
   url: string;
@@ -40,7 +40,7 @@ interface Harness {
   err: string[];
   rest: FakeRest;
   prompts: string[];
-  spawned: { command: string; argv: string[]; env: Record<string, string> }[];
+  spawned: { command: string; argv: string[]; env: Record<string, string>; unset: readonly string[] }[];
 }
 
 function harness(options: { tty?: boolean; stdin?: string | null; confirm?: boolean } = {}): Harness {
@@ -73,8 +73,13 @@ function harness(options: { tty?: boolean; stdin?: string | null; confirm?: bool
       new SecretClient({ ...o, baseUrl: "https://api.test", fetch: rest.fetch }),
     isTty: () => options.tty ?? false,
     readStdin: () => options.stdin ?? null,
-    spawnChild: async (command: string, argv: string[], env: Record<string, string>) => {
-      spawned.push({ command, argv, env });
+    spawnChild: async (
+      command: string,
+      argv: string[],
+      env: Record<string, string>,
+      unset: readonly string[],
+    ) => {
+      spawned.push({ command, argv, env, unset });
       return 0;
     },
   } as unknown as CliDeps;
@@ -212,6 +217,32 @@ describe("kagura-memory secret exec", () => {
     const code = await runCli(["secret", "exec", "--as", "A=s", "ls", "-la"], h.deps);
     expect(h.err.join("\n")).not.toMatch(/Unknown option/);
     expect(code).not.toBe(2);
+  });
+
+  it("does not hand the age identity to the child", async () => {
+    // `--as` is a scoping mechanism. A child that inherits
+    // KAGURA_AGE_IDENTITY could decrypt every OTHER secret in the
+    // workspace, which is precisely what the scoping was for. Python has
+    // no such exposure because it reads the key from the OS keychain, so
+    // nothing is in the environment to inherit.
+    process.env.KAGURA_AGE_IDENTITY = TEST_IDENTITY;
+    const h = harness();
+    h.rest.routes["/api/v1/config/secrets/fetch"] = {
+      name: "s",
+      version_number: 1,
+      alg: "age",
+      ciphertext: PYRAGE_ARMORED,
+      recipients_snapshot: [],
+      rotation_needed: false,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    const code = await runCli(["secret", "exec", "--as", "A=s", "--", "echo"], h.deps);
+    expect(code).toBe(0);
+    expect(h.spawned).toHaveLength(1);
+    expect(h.spawned[0]!.unset).toContain("KAGURA_AGE_IDENTITY");
+    expect(h.spawned[0]!.unset).toContain("KAGURA_AGE_IDENTITY_FILE");
+    // The scoped secret still arrives.
+    expect(Object.keys(h.spawned[0]!.env)).toEqual(["A"]);
   });
 
   it("rejects an --as without an equals sign", async () => {

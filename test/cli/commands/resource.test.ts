@@ -1,3 +1,7 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
@@ -261,5 +265,67 @@ describe("kagura-memory files", () => {
     h.rest.status = 204;
     expect(await runCli(["files", "delete", "file-1", "-c", CONTEXT_UUID], h.deps)).toBe(0);
     expect(JSON.parse(h.out.join("\n"))).toEqual({ status: "success", file_id: "file-1" });
+  });
+});
+
+describe("kagura-memory resource: review fixes", () => {
+  it("chunks import at 100 events, as Python does", async () => {
+    const h = harness();
+    h.rest.body = { accepted: 100 };
+    const rows = Array.from({ length: 150 }, (_, i) => `${i + 1}`).join("\n");
+    const file = path.join(os.tmpdir(), `kagura-import-${Date.now()}.csv`);
+    fs.writeFileSync(file, `n\n${rows}\n`);
+    try {
+      const code = await runCli(["resource", "import", "-r", "res", "-k", "rk", "-f", file], h.deps);
+      expect(code).toBe(0);
+      // 150 rows must be two requests; one body of 150 is rejected wholesale
+      // by an endpoint that accepts 1-100.
+      const posts = h.rest.requests.filter((r) => r.method === "POST");
+      expect(posts).toHaveLength(2);
+      expect((posts[0]!.body!.events as unknown[]).length).toBe(100);
+      expect((posts[1]!.body!.events as unknown[]).length).toBe(50);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it("refuses a missing --id-column instead of numbering the rows", async () => {
+    const h = harness();
+    const file = path.join(os.tmpdir(), `kagura-idcol-${Date.now()}.csv`);
+    fs.writeFileSync(file, "sku,qty\nA-1,3\n");
+    try {
+      // A typo here would otherwise import every row under doc_id "1","2",…
+      // and a corrected re-run would insert them all a second time.
+      const code = await runCli(
+        ["resource", "import", "-r", "res", "-k", "rk", "-f", file, "--id-column", "skus"],
+        h.deps,
+      );
+      expect(code).toBe(2);
+      expect(h.err.join("\n")).toContain("--id-column 'skus' is missing on row 1");
+      expect(h.rest.requests).toEqual([]);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it("refuses an empty tokens update instead of sending a no-op PATCH", async () => {
+    const h = harness();
+    const code = await runCli(["resource", "tokens", "update", "42"], h.deps);
+    expect(code).toBe(1);
+    expect(h.err.join("\n")).toBe("Error: At least --description or --quota is required");
+    expect(h.rest.requests).toEqual([]);
+  });
+
+  it("rejects a non-numeric --importance rather than sending null", async () => {
+    // Number.parseFloat("abc") is NaN, which survives an `!== undefined`
+    // guard and serializes to null — silently clearing the field.
+    const h = harness();
+    const code = await runCli(
+      ["resource", "ingest", "-r", "r", "-k", "k", "--doc-id", "d", "--importance", "abc"],
+      h.deps,
+    );
+    expect(code).toBe(2);
+    expect(h.err.join("\n")).toContain("is not a valid float");
+    expect(h.rest.requests).toEqual([]);
   });
 });

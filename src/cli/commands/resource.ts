@@ -15,7 +15,15 @@
 import * as fs from "node:fs";
 
 import { requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
-import { CliUsageError, parseChoice, parseIntOption, parseRanged, quote } from "../parse.js";
+import {
+  CliError,
+  CliUsageError,
+  parseChoice,
+  parseFloatOption,
+  parseIntOption,
+  parseRanged,
+  quote,
+} from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import type { ResourceEventInput } from "../../resourceClient.js";
 import { resolveConfig, restOptions, runAndPrint } from "../runClientCommand.js";
@@ -135,6 +143,11 @@ const tokensUpdate: Command = {
     rejectExtraArgs(args, 1);
     const description = args.values.description;
     const quotaEventsPerHour = optionalInt(args, QUOTA);
+    if (description === undefined && quotaEventsPerHour === undefined) {
+      // Python guards this; without it a shell typo that eats --quota sends
+      // an empty PATCH and exits 0, so a script reads "updated".
+      throw new CliError("At least --description or --quota is required");
+    }
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
       deps.makeResourceClient(restOptions(config)).updateToken(tokenId, {
@@ -375,8 +388,11 @@ const ingest: Command = {
     const version = optionalInt(args, VERSION);
     const payload = parsePayload(args.values.payload);
     const rawImportance = args.values.importance;
+    // parseFloatOption, not Number.parseFloat: the latter yields NaN for
+    // "abc", the NaN survives the `!== undefined` guard, and JSON.stringify
+    // serializes it as null — so a typo would silently clear importance.
     const importance =
-      rawImportance === undefined ? undefined : Number.parseFloat(rawImportance);
+      rawImportance === undefined ? undefined : parseFloatOption(IMPORTANCE, rawImportance);
 
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
@@ -460,6 +476,9 @@ function toEventInput(row: Record<string, unknown>): ResourceEventInput {
   };
 }
 
+/** The server's per-request event cap; Python chunks at the same size. */
+const BATCH_SIZE = 100;
+
 const FORMAT: FlagSpec = {
   name: "format",
   type: "value",
@@ -506,18 +525,41 @@ const importCmd: Command = {
 
     const text = readInput(file);
     const rows = parseRecords(text, rawFormat as "auto" | "csv" | "json" | "jsonl", file);
-    const events_ = rows.map((row, index) => ({
-      // Python falls back to the 1-based row number as a string.
-      docId: idColumn === undefined ? String(index + 1) : String(row[idColumn] ?? index + 1),
-      op: "upsert" as const,
-      version,
-      payload: row,
-    }));
+    const events_ = rows.map((row, index) => {
+      if (idColumn !== undefined && (row[idColumn] === undefined || row[idColumn] === "")) {
+        // Falling back to the row number here would look like a successful
+        // import while every doc_id was wrong — and on a re-run with the
+        // column spelled right, the same rows would be inserted a second
+        // time under different ids.
+        throw new CliUsageError(
+          `--id-column ${quote(idColumn)} is missing on row ${index + 1} of ${file}.`,
+        );
+      }
+      return {
+        // Python falls back to the 1-based row number as a string.
+        docId: idColumn === undefined ? String(index + 1) : String(row[idColumn]),
+        op: "upsert" as const,
+        version,
+        payload: row,
+      };
+    });
 
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).ingestEvents(resourceId, apiKey, events_),
-    );
+    return runAndPrint(deps, async () => {
+      // The endpoint takes 1-100 events; Python chunks at 100 and this must
+      // too, or any import over 100 rows is rejected wholesale.
+      const client = deps.makeResourceClient(restOptions(config));
+      const batches = [];
+      for (let i = 0; i < events_.length; i += BATCH_SIZE) {
+        batches.push(await client.ingestEvents(resourceId, apiKey, events_.slice(i, i + BATCH_SIZE)));
+      }
+      return {
+        status: "success",
+        events: events_.length,
+        batches: batches.length,
+        results: batches,
+      };
+    });
   },
 };
 

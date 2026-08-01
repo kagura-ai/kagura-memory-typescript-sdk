@@ -39,8 +39,19 @@ export interface ClientCommandContext {
   isTty: () => boolean;
   /** Read all of stdin, or null when it is a terminal / already closed. */
   readStdin: () => string | null;
-  /** Run a child with extra environment; resolves to its exit code. */
-  spawnChild: (command: string, argv: string[], env: Record<string, string>) => Promise<number>;
+  /**
+   * Run a child with extra environment; resolves to its exit code.
+   *
+   * `unset` names variables to REMOVE from the inherited environment. It
+   * exists for the age identity: a tool handed one secret through `--as`
+   * must not also receive the key that decrypts every other secret.
+   */
+  spawnChild: (
+    command: string,
+    argv: string[],
+    env: Record<string, string>,
+    unset: readonly string[],
+  ) => Promise<number>;
 }
 
 /** What the CLI passes to a REST client; a subset of its options. */
