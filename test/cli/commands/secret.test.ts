@@ -69,8 +69,10 @@ function harness(options: { tty?: boolean; stdin?: string | null; confirm?: bool
     makeResourceClient: (() => {
       throw new Error("resource client not expected here");
     }) as unknown as CliDeps["makeResourceClient"],
-    makeSecretClient: (o: Record<string, unknown>) =>
-      new SecretClient({ ...o, baseUrl: "https://api.test", fetch: rest.fetch }),
+    // `fromMcpUrl`, as production does — bare construction would throw for
+    // anyone without a static api_key, which is every OAuth operator.
+    makeSecretClient: () =>
+      SecretClient.fromMcpUrl({ apiKey: "k", mcpUrl: "https://api.test/mcp", fetch: rest.fetch }),
     isTty: () => options.tty ?? false,
     readStdin: () => options.stdin ?? null,
     spawnChild: async (

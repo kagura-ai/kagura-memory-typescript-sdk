@@ -26,10 +26,25 @@ export interface ClientCommandContext {
   loadConfig: typeof loadConfigImpl;
   /** Injected so tests can supply a fetch stub. */
   makeClient: (options: KaguraClientOptions) => KaguraClient;
-  /** REST counterparts, for the `files`, `resource` and `secret` groups. */
-  makeFilesClient: (options: RestClientOptions) => FilesClient;
-  makeResourceClient: (options: RestClientOptions) => ResourceClient;
-  makeSecretClient: (options: RestClientOptions) => SecretClient;
+  /**
+   * REST counterparts, for the `files`, `resource` and `secret` groups.
+   *
+   * They take nothing on purpose: a REST client has to be built through
+   * `fromMcpUrl`, which runs the full credential chain (env > OAuth
+   * profile > .kagura.json) and stamps the MCP URL the chosen branch
+   * belongs to. Bare construction throws without a static api_key — so
+   * every REST command would fail for anyone who authenticated with
+   * `auth login` — and leaves `resource setup` permanently broken, since
+   * it needs that stamped URL.
+   *
+   * Python is explicit here and carries a note from its own review: pass
+   * no mcp_url, so each resolver branch pairs its credential with its own
+   * URL source. Forwarding the config file's mcp_url would override an
+   * OAuth profile bound to a non-default server.
+   */
+  makeFilesClient: () => FilesClient;
+  makeResourceClient: () => ResourceClient;
+  makeSecretClient: () => SecretClient;
   /**
    * True when stdout is a terminal.
    *
@@ -52,12 +67,6 @@ export interface ClientCommandContext {
     env: Record<string, string>,
     unset: readonly string[],
   ) => Promise<number>;
-}
-
-/** What the CLI passes to a REST client; a subset of its options. */
-export interface RestClientOptions {
-  apiKey?: string;
-  baseUrl?: string;
 }
 
 /**
@@ -87,13 +96,6 @@ export function resolveConfig(
   const resolved = contextId || config.context_id || "";
   if (!resolved) throw new CliError(NO_CONTEXT_MESSAGE);
   return { config, contextId: resolved };
-}
-
-/** The REST-client options a config produces, empties omitted. */
-export function restOptions(config: KaguraConfig): RestClientOptions {
-  const options: RestClientOptions = {};
-  if (config.api_key) options.apiKey = config.api_key;
-  return options;
 }
 
 /**

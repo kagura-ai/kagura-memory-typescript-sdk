@@ -68,10 +68,13 @@ function harness(): Harness {
     makeClient: (() => {
       throw new Error("MCP client not expected here");
     }) as unknown as CliDeps["makeClient"],
-    makeFilesClient: (o: Record<string, unknown>) =>
-      new FilesClient({ ...o, baseUrl: "https://api.test", fetch: rest.fetch }),
-    makeResourceClient: (o: Record<string, unknown>) =>
-      new ResourceClient({ ...o, baseUrl: "https://api.test", fetch: rest.fetch }),
+    // `fromMcpUrl`, as production does: baseUrl is derived from the MCP
+    // URL rather than passed, so this exercises the same construction path
+    // — the one that also stamps the MCP URL `resource setup` needs.
+    makeFilesClient: () =>
+      FilesClient.fromMcpUrl({ apiKey: "k", mcpUrl: "https://api.test/mcp", fetch: rest.fetch }),
+    makeResourceClient: () =>
+      ResourceClient.fromMcpUrl({ apiKey: "k", mcpUrl: "https://api.test/mcp", fetch: rest.fetch }),
   } as unknown as CliDeps;
   return { deps, out, err, rest };
 }
@@ -327,5 +330,38 @@ describe("kagura-memory resource: review fixes", () => {
     expect(code).toBe(2);
     expect(h.err.join("\n")).toContain("is not a valid float");
     expect(h.rest.requests).toEqual([]);
+  });
+});
+
+describe("REST clients are built through the credential chain", () => {
+  it("`resource setup` gets past client construction and onto the network", async () => {
+    // It needs the MCP URL that only fromMcpUrl/fromResolvedAuth stamps.
+    // Built bare it threw "setupResource() requires MCP URL" on EVERY
+    // invocation, before any request — the command was unusable, not
+    // merely misconfigured.
+    //
+    // This fake speaks REST, not the MCP handshake `setupResource` opens,
+    // so the call still fails — but on the session, which is proof it got
+    // past the construction guard the fix was about.
+    const h = harness();
+    const code = await runCli(["resource", "setup", "-r", "res-1"], h.deps);
+    expect(h.err.join("\n")).not.toMatch(/requires MCP URL/);
+    expect(h.rest.requests.length).toBeGreaterThan(0);
+    expect(code).toBe(1);
+  });
+
+  it("aggregates an import the way Python does", async () => {
+    const h = harness();
+    h.rest.body = { created_count: 2, failed_count: 0, errors: [] };
+    const file = path.join(os.tmpdir(), `kagura-agg-${Date.now()}.csv`);
+    fs.writeFileSync(file, "n\n1\n2\n");
+    try {
+      expect(await runCli(["resource", "import", "-r", "r", "-k", "k", "-f", file], h.deps)).toBe(0);
+      // One aggregate, not a per-batch array: a script must not parse a
+      // different shape for 99 rows than for 101.
+      expect(JSON.parse(h.out.join("\n"))).toEqual({ created: 2, failed: 0, total: 2 });
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
   });
 });

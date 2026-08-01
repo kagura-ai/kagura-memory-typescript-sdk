@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
 import { CliUsageError, parseRanged, parseTags } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
-import { mcpOptions, resolveConfig, restOptions, runAndPrint } from "../runClientCommand.js";
+import { mcpOptions, resolveConfig, runAndPrint } from "../runClientCommand.js";
 
 const CONTEXT_ID: FlagSpec = {
   name: "context-id",
@@ -91,7 +91,7 @@ const upload: Command = {
     const tags = parseTags(args.values.tags);
 
     return runAndPrint(deps, async () => {
-      const files = deps.makeFilesClient(restOptions(config));
+      const files = deps.makeFilesClient();
       const uploaded = await files.upload({
         contextId,
         source,
@@ -150,7 +150,7 @@ const list: Command = {
     const { config, contextId } = resolveConfig(deps, args.values["context-id"]);
     return runAndPrint(deps, () =>
       deps
-        .makeFilesClient(restOptions(config))
+        .makeFilesClient()
         .list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) }),
     );
   },
@@ -165,7 +165,7 @@ const deleteFile: Command = {
     rejectExtraArgs(args, 1);
     const { config, contextId } = resolveConfig(deps, args.values["context-id"]);
     return runAndPrint(deps, async () => {
-      await deps.makeFilesClient(restOptions(config)).delete(fileId, { contextId });
+      await deps.makeFilesClient().delete(fileId, { contextId });
       // The REST call returns 204; Python prints the same confirmation
       // rather than an empty line.
       return { status: "success", file_id: fileId };
@@ -182,7 +182,7 @@ const downloadUrl: Command = {
     rejectExtraArgs(args, 1);
     const { config, contextId } = resolveConfig(deps, args.values["context-id"]);
     return runAndPrint(deps, () =>
-      deps.makeFilesClient(restOptions(config)).downloadUrl(fileId, { contextId }),
+      deps.makeFilesClient().downloadUrl(fileId, { contextId }),
     );
   },
 };

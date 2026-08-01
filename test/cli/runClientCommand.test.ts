@@ -4,7 +4,6 @@ import type { KaguraClient } from "../../src/client.js";
 import type { KaguraConfig } from "../../src/config.js";
 import {
   mcpOptions,
-  restOptions,
   runClientCommand,
   type ClientCommandContext,
 } from "../../src/cli/runClientCommand.js";
@@ -221,18 +220,21 @@ describe("runClientCommand: output and exit codes", () => {
   });
 });
 
-describe("mcpOptions vs restOptions", () => {
-  it("carries mcp_url for the MCP client but not the REST one", () => {
+describe("mcpOptions", () => {
+  it("carries mcp_url as well as the key", () => {
     // `files upload --remember` builds an MCP client after a REST upload.
-    // Handing it the REST options dropped mcp_url, so a self-hosted server
-    // silently lost the memory to the default cloud one.
-    const config = { api_key: "k", mcp_url: "https://self.hosted/mcp" };
-    expect(mcpOptions(config)).toEqual({ apiKey: "k", mcpUrl: "https://self.hosted/mcp" });
-    expect(restOptions(config)).toEqual({ apiKey: "k" });
+    // Options without mcp_url dropped a self-hosted server and sent the
+    // memory to the default cloud one.
+    expect(mcpOptions({ api_key: "k", mcp_url: "https://self.hosted/mcp" })).toEqual({
+      apiKey: "k",
+      mcpUrl: "https://self.hosted/mcp",
+    });
   });
 
-  it("omits empties from both, so the resolution chain still runs", () => {
+  it("omits empties, so the resolution chain still runs", () => {
+    // Python: `api_key=config.get("api_key") or None`. Forwarding "" would
+    // send `Authorization: Bearer ` and always 401 instead of letting the
+    // OAuth profile resolve.
     expect(mcpOptions({ api_key: "", mcp_url: "" })).toEqual({});
-    expect(restOptions({ api_key: "" })).toEqual({});
   });
 });

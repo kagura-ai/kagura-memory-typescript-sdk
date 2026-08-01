@@ -51,9 +51,14 @@ const code = await runCli(process.argv.slice(2), {
   refresh,
   loadConfig,
   makeClient: (options) => new KaguraClient(options),
-  makeFilesClient: (options) => new FilesClient(options),
-  makeResourceClient: (options) => new ResourceClient(options),
-  makeSecretClient: (options) => new SecretClient(options),
+  // `fromMcpUrl`, not bare construction: it runs the credential chain
+  // (env > OAuth profile > .kagura.json) and stamps the MCP URL the chosen
+  // branch belongs to. Passing nothing lets each branch pair its credential
+  // with its own URL, which is what Python does and why an OAuth profile
+  // bound to a non-default server still reaches the right host.
+  makeFilesClient: () => FilesClient.fromMcpUrl({}),
+  makeResourceClient: () => ResourceClient.fromMcpUrl({}),
+  makeSecretClient: () => SecretClient.fromMcpUrl({}),
   isTty: () => Boolean(process.stdout.isTTY),
   readStdin: () => {
     // A terminal stdin would block forever waiting for input that is not

@@ -26,7 +26,7 @@ import {
 } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import type { ResourceEventInput } from "../../resourceClient.js";
-import { resolveConfig, restOptions, runAndPrint } from "../runClientCommand.js";
+import { resolveConfig, runAndPrint } from "../runClientCommand.js";
 import { parseRecords } from "./importFormats.js";
 
 const RESOURCE_ID: FlagSpec = {
@@ -101,7 +101,7 @@ const tokensList: Command = {
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
       deps
-        .makeResourceClient(restOptions(config))
+        .makeResourceClient()
         .listTokens({ ...(resourceId !== undefined ? { resourceId } : {}), limit }),
     );
   },
@@ -125,7 +125,7 @@ const tokensCreate: Command = {
     const quotaEventsPerHour = optionalInt(args, QUOTA) ?? 1000;
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).createToken({
+      deps.makeResourceClient().createToken({
         resourceId,
         ...(description !== undefined ? { description } : {}),
         quotaEventsPerHour,
@@ -150,7 +150,7 @@ const tokensUpdate: Command = {
     }
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).updateToken(tokenId, {
+      deps.makeResourceClient().updateToken(tokenId, {
         ...(description !== undefined ? { description } : {}),
         ...(quotaEventsPerHour !== undefined ? { quotaEventsPerHour } : {}),
       }),
@@ -167,7 +167,7 @@ const tokensRevoke: Command = {
     rejectExtraArgs(args, 1);
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, async () => {
-      await deps.makeResourceClient(restOptions(config)).revokeToken(tokenId);
+      await deps.makeResourceClient().revokeToken(tokenId);
       return { status: "success", token_id: tokenId };
     });
   },
@@ -196,7 +196,7 @@ const resourceList: Command = {
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () => deps.makeResourceClient(restOptions(config)).listResources());
+    return runAndPrint(deps, () => deps.makeResourceClient().listResources());
   },
 };
 
@@ -208,7 +208,7 @@ const stats: Command = {
     const resourceId = requiredValue(args, RESOURCE_ID);
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).getResourceImpact(resourceId),
+      deps.makeResourceClient().getResourceImpact(resourceId),
     );
   },
 };
@@ -221,7 +221,7 @@ const indexerStatus: Command = {
     const resourceId = requiredValue(args, RESOURCE_ID);
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).getIndexerStatus(resourceId),
+      deps.makeResourceClient().getIndexerStatus(resourceId),
     );
   },
 };
@@ -244,7 +244,7 @@ const schema: Command = {
     const version = optionalInt(args, SCHEMA_VERSION);
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).getResourceSchema(resourceId, version),
+      deps.makeResourceClient().getResourceSchema(resourceId, version),
     );
   },
 };
@@ -289,7 +289,7 @@ const events: Command = {
 
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).listResourceEvents(resourceId, {
+      deps.makeResourceClient().listResourceEvents(resourceId, {
         limit,
         ...(cursor !== undefined ? { cursor } : {}),
         ...(op !== undefined ? { op } : {}),
@@ -345,7 +345,7 @@ const setup: Command = {
         : parseRanged(QUOTA, raw, { min: 1, max: 10000, rangeLabel: "1<=x<=10000", integer: true });
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).setupResource({
+      deps.makeResourceClient().setupResource({
         resourceId,
         ...(summary !== undefined ? { summary } : {}),
         ...(description !== undefined ? { description } : {}),
@@ -396,7 +396,7 @@ const ingest: Command = {
 
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
-      deps.makeResourceClient(restOptions(config)).ingestEvent(resourceId, apiKey, {
+      deps.makeResourceClient().ingestEvent(resourceId, apiKey, {
         docId,
         op,
         ...(version !== undefined ? { version } : {}),
@@ -454,7 +454,7 @@ const ingestBatch: Command = {
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
       deps
-        .makeResourceClient(restOptions(config))
+        .makeResourceClient()
         .ingestEvents(resourceId, apiKey, events_.map(toEventInput)),
     );
   },
@@ -548,17 +548,28 @@ const importCmd: Command = {
     return runAndPrint(deps, async () => {
       // The endpoint takes 1-100 events; Python chunks at 100 and this must
       // too, or any import over 100 rows is rejected wholesale.
-      const client = deps.makeResourceClient(restOptions(config));
-      const batches = [];
+      const client = deps.makeResourceClient();
+      let created = 0;
+      let failed = 0;
+      const errors: unknown[] = [];
       for (let i = 0; i < events_.length; i += BATCH_SIZE) {
-        batches.push(await client.ingestEvents(resourceId, apiKey, events_.slice(i, i + BATCH_SIZE)));
+        const result = await client.ingestEvents(
+          resourceId,
+          apiKey,
+          events_.slice(i, i + BATCH_SIZE),
+        );
+        created += result.created_count ?? 0;
+        failed += result.failed_count ?? 0;
+        // Python keeps the first five errors per batch and prints ten in
+        // total; a full dump of a bad 10k-row file is unreadable.
+        if (Array.isArray(result.errors)) errors.push(...result.errors.slice(0, 5));
       }
-      return {
-        status: "success",
-        events: events_.length,
-        batches: batches.length,
-        results: batches,
-      };
+      // One aggregate for the whole import, matching Python's shape — a
+      // per-batch array would make a script parse a different result for
+      // 99 rows than for 101.
+      const output: Record<string, unknown> = { created, failed, total: events_.length };
+      if (errors.length > 0) output.errors = errors.slice(0, 10);
+      return output;
     });
   },
 };
