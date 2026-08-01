@@ -78,6 +78,15 @@ export interface ParsedArgs {
 /** `--help` works on every command, so it never needs declaring. */
 const HELP: FlagSpec = { name: "help", type: "switch" };
 
+/**
+ * Python's `float()` grammar, shared with `parse.ts`.
+ *
+ * Lives here because the parser needs it too: a dash-prefixed token that
+ * is a number is a *value*, not a flag.
+ */
+export const PY_FLOAT =
+  /^[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)$/i;
+
 interface Index {
   long: Map<string, FlagSpec>;
   short: Map<string, FlagSpec>;
@@ -124,7 +133,13 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
     // Any following flag means the value was omitted, not that the flag is
     // the value — `--profile --yes` must not set profile="--yes", and
     // `--profile -h` is a request for help, not a profile named "-h".
-    if (next === undefined || (next.startsWith("-") && next.length > 1)) {
+    //
+    // A negative number is the exception: `--bm25 -0.1` and `--limit -5`
+    // are values, and click accepts them. (Click is in fact laxer still —
+    // it consumes whatever follows, so `--reranker -x` sets the value to
+    // "-x" — but that turns a typo into a silent wrong value, so the
+    // stricter rule stays.)
+    if (next === undefined || (next.startsWith("-") && next.length > 1 && !PY_FLOAT.test(next))) {
       return -1;
     }
     values[flag.name] = next;

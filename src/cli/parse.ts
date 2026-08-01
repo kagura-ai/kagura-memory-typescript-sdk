@@ -8,7 +8,7 @@
  * between the two tools reads the same guidance.
  */
 
-import type { FlagSpec } from "./parseArgs.js";
+import { PY_FLOAT, type FlagSpec } from "./parseArgs.js";
 
 /**
  * A usage error: bad input, detected before anything is sent.
@@ -57,13 +57,13 @@ export function parseTags(raw: string | undefined): string[] | undefined {
 }
 
 /**
- * Python's `float()` grammar.
+ * Python's `int()` grammar. The float counterpart lives in `parseArgs.ts`
+ * because the parser needs it to tell `-0.1` (a value) from `-x` (a flag).
  *
- * `Number()` is not a substitute: it accepts `0x10`, `0b11` and `""`,
- * all of which `float()` rejects, so the CLI would silently accept input
- * the Python CLI refuses.
+ * `Number()` is not a substitute for either: it accepts `0x10`, `0b11` and
+ * `""`, all of which Python rejects, so the CLI would silently accept
+ * input the Python CLI refuses.
  */
-const PY_FLOAT = /^[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)$/i;
 const PY_INT = /^[+-]?\d+$/;
 
 /** Coerce a `type=float` option, or raise click's message for it. */
@@ -86,6 +86,72 @@ export function parseIntOption(flag: FlagSpec, raw: string): number {
     );
   }
   return Number(text);
+}
+
+/**
+ * Coerce a `click.IntRange` / `click.FloatRange` option.
+ *
+ * `rangeLabel` is passed rather than derived because click renders the
+ * bounds as the Python literals they were declared with: `0.0<=x<=1.0`,
+ * where JS would produce `0<=x<=1`.
+ */
+export function parseRanged(
+  flag: FlagSpec,
+  raw: string,
+  options: { min: number; max: number; rangeLabel: string; integer?: boolean },
+): number {
+  const integer = options.integer === true;
+  let value: number;
+  try {
+    value = integer ? parseIntOption(flag, raw) : parseFloatOption(flag, raw);
+  } catch {
+    // A ranged option reports "not a valid float range", not "not a valid
+    // float" — click names the *type* it declared, which is the Range.
+    throw new CliUsageError(
+      `Invalid value for ${flagLabel(flag)}: ${quote(raw)} is not a valid ${integer ? "integer" : "float"} range.`,
+    );
+  }
+  if (!(value >= options.min && value <= options.max)) {
+    throw new CliUsageError(
+      `Invalid value for ${flagLabel(flag)}: ${raw.trim()} is not in the range ${options.rangeLabel}.`,
+    );
+  }
+  return value;
+}
+
+/** Coerce a `click.Choice` option, matching case-insensitively. */
+export function parseChoice<T extends string>(
+  flag: FlagSpec,
+  raw: string,
+  choices: readonly T[],
+): T {
+  const match = choices.find((c) => c === raw.toLowerCase());
+  if (match === undefined) {
+    throw new CliUsageError(
+      `Invalid value for ${flagLabel(flag)}: ${quote(raw)} is not one of ${choices.map(quote).join(", ")}.`,
+    );
+  }
+  return match;
+}
+
+/**
+ * Resolve a `--flag / --no-flag` pair into a tri-state.
+ *
+ * Click models these as one option with `default=None`, so "neither given"
+ * has to stay distinguishable from `false` — the key is omitted entirely
+ * and the stored value is left alone.
+ */
+export function pairedFlag(
+  present: boolean,
+  absent: boolean,
+  labels: [string, string],
+): boolean | undefined {
+  if (present && absent) {
+    throw new CliUsageError(`${labels[0]} and ${labels[1]} are mutually exclusive; pick one.`);
+  }
+  if (present) return true;
+  if (absent) return false;
+  return undefined;
 }
 
 /** Python's `repr()` of a string, which click interpolates into errors. */

@@ -38,6 +38,12 @@ import {
   type CommandDeps,
   type CommandGroup,
 } from "./command.js";
+import {
+  CONFIG_GROUP,
+  CONTEXTS_ALIAS,
+  CONTEXT_GROUP,
+} from "./commands/context.js";
+import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
@@ -296,6 +302,11 @@ const AUTH_GROUP: CommandGroup = {
 /** Everything reachable as `kagura-memory <name> …`. */
 export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
   auth: AUTH_GROUP,
+  config: CONFIG_GROUP,
+  context: CONTEXT_GROUP,
+  contexts: CONTEXTS_ALIAS,
+  edge: EDGE_GROUP,
+  sleep: SLEEP_GROUP,
   ...MEMORY_COMMANDS,
 };
 

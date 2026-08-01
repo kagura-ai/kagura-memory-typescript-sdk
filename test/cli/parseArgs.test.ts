@@ -134,6 +134,42 @@ describe("parseArgs", () => {
     expect(parsed.flags.has("json")).toBe(true);
   });
 
+  // --- negative numbers as values ----------------------------------------
+
+  it.each([
+    ["--importance", "-0.5", "importance"],
+    ["-i", "-3", "importance"],
+    ["--importance", "-1e-2", "importance"],
+  ])("accepts a negative number as the value of %s", (flag, value, name) => {
+    // Measured against the real Python CLI: `--bm25 -0.1` reaches the range
+    // check, so click parsed it as a value. Treating every dash-prefixed
+    // token as "value missing" made every negative number unreachable.
+    const parsed = parse(["cmd", flag, value]);
+    expect(parsed.values[name]).toBe(value);
+    expect(parsed.missingValue).toEqual([]);
+  });
+
+  it("still refuses a registered flag as a value", () => {
+    const parsed = parse(["cmd", "--importance", "--json"]);
+    expect(parsed.missingValue).toEqual(["--importance"]);
+    expect(parsed.flags.has("json")).toBe(true);
+  });
+
+  it("still refuses a non-numeric short token as a value", () => {
+    // Click would take "-x" as the value; that turns a typo into a silent
+    // wrong value, so this stays stricter on purpose.
+    const parsed = parse(["cmd", "--scope", "-x"]);
+    expect(parsed.missingValue).toEqual(["--scope"]);
+  });
+
+  it("still reports a bare negative number that no option is waiting for", () => {
+    // The numeric exception applies only where a value is expected. On its
+    // own, `-5` is what click calls "No such option" — reporting it beats
+    // demoting it to a positional that some command silently ignores.
+    expect(parse(["cmd", "-5"]).unknown).toEqual(["-5"]);
+    expect(parse(["cmd", "-5"]).positionals).toEqual([]);
+  });
+
   // --- count flags -------------------------------------------------------
 
   it("counts a repeated flag", () => {
