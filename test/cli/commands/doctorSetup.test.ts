@@ -228,3 +228,33 @@ describe("kagura-memory setup claude", () => {
     expect(h.err.join("\n")).toContain("no API key");
   });
 });
+
+describe("credential files are not world-readable", () => {
+  // Windows has no POSIX mode bits — chmod there only toggles the
+  // read-only flag — so the assertion is meaningful on POSIX only. CI runs
+  // ubuntu-latest, which is where it counts.
+  const onPosix = os.platform() === "win32" ? it.skip : it;
+
+  onPosix("setup claude writes .kagura.json and .mcp.json at 0600", async () => {
+    // Both files carry the API key. At the common umask they would land at
+    // 0644, readable by every other account on a shared build host.
+    const h = harness({});
+    expect(
+      await runCli(["setup", "claude", "--api-key", "kagura_secret", "--project-dir", sandbox], h.deps),
+    ).toBe(0);
+    for (const name of [".kagura.json", ".mcp.json"]) {
+      const mode = fs.statSync(path.join(sandbox, name)).mode & 0o777;
+      expect(mode & 0o077).toBe(0);
+    }
+  });
+
+  onPosix("tightens a file that already existed at 0644", async () => {
+    // writeFileSync's `mode` applies only on creation, so an existing file
+    // keeps its old permissions unless something else tightens them.
+    const target = path.join(sandbox, ".kagura.json");
+    fs.writeFileSync(target, "{}", { mode: 0o644 });
+    const h = harness({});
+    await runCli(["setup", "claude", "--api-key", "k", "--project-dir", sandbox], h.deps);
+    expect(fs.statSync(target).mode & 0o077).toBe(0);
+  });
+});
