@@ -14,6 +14,8 @@ import { openBrowser } from "./cli/openBrowser.js";
 import { runCli } from "./cli/run.js";
 import { KaguraClient } from "./client.js";
 import { loadConfig } from "./config.js";
+import { FilesClient } from "./filesClient.js";
+import { ResourceClient } from "./resourceClient.js";
 
 async function confirm(question: string): Promise<boolean> {
   // A non-interactive stdin (CI, a pipe) must not hang waiting for input
@@ -45,6 +47,8 @@ const code = await runCli(process.argv.slice(2), {
   refresh,
   loadConfig,
   makeClient: (options) => new KaguraClient(options),
+  makeFilesClient: (options) => new FilesClient(options),
+  makeResourceClient: (options) => new ResourceClient(options),
 });
 
 process.exitCode = code;

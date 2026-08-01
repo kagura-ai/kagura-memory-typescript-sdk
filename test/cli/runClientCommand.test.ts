@@ -23,9 +23,15 @@ function harness(config: KaguraConfig = {}): Harness {
   const clientOptions: Record<string, unknown>[] = [];
   const h = { out, err, server, clientOptions, closed: 0 } as Harness;
 
+  const unusedRestClient = () => {
+    throw new Error("this suite exercises the MCP path only");
+  };
+
   h.ctx = {
     write: (line) => out.push(line),
     writeError: (line) => err.push(line),
+    makeFilesClient: unusedRestClient,
+    makeResourceClient: unusedRestClient,
     loadConfig: () => config,
     makeClient: (options) => {
       clientOptions.push({ ...options });

@@ -9,6 +9,8 @@
 
 import type { KaguraClient, KaguraClientOptions } from "../client.js";
 import { loadConfig as loadConfigImpl, type KaguraConfig } from "../config.js";
+import type { FilesClient } from "../filesClient.js";
+import type { ResourceClient } from "../resourceClient.js";
 import { excMessage } from "../errors.js";
 import { formatJson } from "./output.js";
 import { CliError, CliUsageError } from "./parse.js";
@@ -23,6 +25,68 @@ export interface ClientCommandContext {
   loadConfig: typeof loadConfigImpl;
   /** Injected so tests can supply a fetch stub. */
   makeClient: (options: KaguraClientOptions) => KaguraClient;
+  /** REST counterparts, for the `files` and `resource` groups. */
+  makeFilesClient: (options: RestClientOptions) => FilesClient;
+  makeResourceClient: (options: RestClientOptions) => ResourceClient;
+}
+
+/** What the CLI passes to a REST client; a subset of its options. */
+export interface RestClientOptions {
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+/**
+ * Resolve config + context the way `_run_client_command` does, without
+ * building an MCP client — the REST groups need the same front half.
+ *
+ * @throws CliError with the Python message when no context resolves.
+ */
+export function resolveConfig(
+  ctx: ClientCommandContext,
+  contextId: string | undefined,
+  needsContext = true,
+): { config: KaguraConfig; contextId: string } {
+  let config: KaguraConfig;
+  try {
+    config = ctx.loadConfig();
+  } catch (e) {
+    // A malformed .kagura.json is a real failure; reporting it here beats
+    // letting it surface later as an unrelated auth error.
+    throw new CliError(excMessage(e));
+  }
+  if (!needsContext) return { config, contextId: "" };
+
+  // Python: `context_id or config.get("context_id") or ""`. An empty
+  // string is falsy there, so `--context-id=` falls through to the config
+  // rather than being sent as a blank context.
+  const resolved = contextId || config.context_id || "";
+  if (!resolved) throw new CliError(NO_CONTEXT_MESSAGE);
+  return { config, contextId: resolved };
+}
+
+/** The REST-client options a config produces, empties omitted. */
+export function restOptions(config: KaguraConfig): RestClientOptions {
+  const options: RestClientOptions = {};
+  if (config.api_key) options.apiKey = config.api_key;
+  return options;
+}
+
+/**
+ * Run an operation and print its result, mapping failures the same way
+ * `runClientCommand` does. For commands that build their own client.
+ */
+export async function runAndPrint(
+  ctx: ClientCommandContext,
+  operation: () => Promise<unknown>,
+): Promise<number> {
+  try {
+    const result = await operation();
+    ctx.write(formatJson(result));
+    return 0;
+  } catch (e) {
+    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(excMessage(e));
+  }
 }
 
 export interface RunClientCommandOptions {
@@ -49,27 +113,11 @@ export async function runClientCommand(
   operation: (client: KaguraClient, contextId: string) => Promise<unknown>,
   options: RunClientCommandOptions = {},
 ): Promise<number> {
-  const needsContext = options.needsContext ?? true;
-
-  let config: KaguraConfig;
-  try {
-    config = ctx.loadConfig();
-  } catch (e) {
-    // A malformed .kagura.json is a real failure; reporting it here beats
-    // letting it surface later as an unrelated auth error.
-    throw new CliError(excMessage(e));
-  }
-
-  let resolvedContext = "";
-  if (needsContext) {
-    // Python: `context_id or config.get("context_id") or ""`. An empty
-    // string is falsy there, so `--context-id=` falls through to the
-    // config rather than being sent as a blank context.
-    resolvedContext = contextId || config.context_id || "";
-    if (!resolvedContext) {
-      throw new CliError(NO_CONTEXT_MESSAGE);
-    }
-  }
+  const { config, contextId: resolvedContext } = resolveConfig(
+    ctx,
+    contextId,
+    options.needsContext ?? true,
+  );
 
   // Python: `api_key=config.get("api_key") or None`. An empty value must be
   // omitted, not forwarded — `Authorization: Bearer ` always 401s, and

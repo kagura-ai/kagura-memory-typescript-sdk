@@ -43,8 +43,10 @@ import {
   CONTEXTS_ALIAS,
   CONTEXT_GROUP,
 } from "./commands/context.js";
+import { FILES_GROUP } from "./commands/files.js";
 import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
+import { RESOURCE_GROUP } from "./commands/resource.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
@@ -306,6 +308,8 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
   context: CONTEXT_GROUP,
   contexts: CONTEXTS_ALIAS,
   edge: EDGE_GROUP,
+  files: FILES_GROUP,
+  resource: RESOURCE_GROUP,
   sleep: SLEEP_GROUP,
   ...MEMORY_COMMANDS,
 };
@@ -343,34 +347,40 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
     return { help: renderRootHelp(), code: 0 };
   }
 
-  const entry = BARE_AUTH_ALIASES.has(head) ? AUTH_GROUP.commands[head] : ROOT_COMMANDS[head];
-  if (entry === undefined) {
+  const found: Command | CommandGroup | undefined = BARE_AUTH_ALIASES.has(head)
+    ? AUTH_GROUP.commands[head]
+    : ROOT_COMMANDS[head];
+  if (found === undefined) {
     deps.writeError(`Error: No such command '${head}'.`);
     return { help: renderRootHelp(), code: 2 };
   }
+  let entry: Command | CommandGroup = found;
 
-  if (!isGroup(entry)) {
-    const path = BARE_AUTH_ALIASES.has(head) ? `kagura-memory auth ${head}` : `kagura-memory ${head}`;
-    return { command: entry, path, rest: argv.slice(1) };
+  // Groups nest — `resource tokens list` is three levels — so walk until a
+  // leaf, taking one non-flag token per level.
+  const path = BARE_AUTH_ALIASES.has(head) ? ["auth", head] : [head];
+  let index = 1;
+  while (isGroup(entry)) {
+    const groupPath = `kagura-memory ${path.join(" ")}`;
+    const next = argv[index];
+    if (next === undefined || next.startsWith("-")) {
+      const wantsHelp = next === "--help" || next === "-h";
+      return {
+        help: renderGroupHelp(groupPath, entry.summary, entry.commands),
+        code: wantsHelp ? 0 : 2,
+      };
+    }
+    const child: Command | CommandGroup | undefined = entry.commands[next];
+    if (child === undefined) {
+      deps.writeError(`Error: No such command '${next}'.`);
+      return { help: renderGroupHelp(groupPath, entry.summary, entry.commands), code: 2 };
+    }
+    entry = child;
+    path.push(next);
+    index += 1;
   }
 
-  const sub = argv[1];
-  if (sub === undefined || sub.startsWith("-")) {
-    const wantsHelp = sub === "--help" || sub === "-h";
-    return {
-      help: renderGroupHelp(`kagura-memory ${head}`, entry.summary, entry.commands),
-      code: wantsHelp ? 0 : 2,
-    };
-  }
-  const command = entry.commands[sub];
-  if (command === undefined) {
-    deps.writeError(`Error: No such command '${sub}'.`);
-    return {
-      help: renderGroupHelp(`kagura-memory ${head}`, entry.summary, entry.commands),
-      code: 2,
-    };
-  }
-  return { command, path: `kagura-memory ${head} ${sub}`, rest: argv.slice(2) };
+  return { command: entry, path: `kagura-memory ${path.join(" ")}`, rest: argv.slice(index) };
 }
 
 function renderRootHelp(): string {

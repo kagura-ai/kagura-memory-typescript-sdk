@@ -27,7 +27,8 @@ export interface Command {
 
 export interface CommandGroup {
   summary: string;
-  commands: Record<string, Command>;
+  /** Nestable: `resource tokens list` is a group inside a group. */
+  commands: Record<string, Command | CommandGroup>;
 }
 
 export function isGroup(entry: Command | CommandGroup): entry is CommandGroup {
