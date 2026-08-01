@@ -204,10 +204,24 @@ export function parseArgs(
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
 
-    if (token === "--" || !token.startsWith("-") || token === "-") {
+    if (token === "--") {
       if (stopAtPositional) {
         // Everything from here belongs to whoever we are handing off to.
-        rest = argv.slice(token === "--" ? i + 1 : i);
+        rest = argv.slice(i + 1);
+        break;
+      }
+      // Click's end-of-options marker, on every command: what follows is
+      // positional even when it starts with a dash, which is the only way
+      // to pass `-5` or a filename beginning with one. The `--` itself is
+      // consumed rather than kept, or every command would see an extra
+      // argument it did not ask for.
+      positionals.push(...argv.slice(i + 1));
+      break;
+    }
+
+    if (!token.startsWith("-") || token === "-") {
+      if (stopAtPositional) {
+        rest = argv.slice(i);
         break;
       }
       // A bare `-` is a conventional stdin placeholder, not a flag.

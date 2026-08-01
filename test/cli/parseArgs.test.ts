@@ -199,6 +199,35 @@ describe("parseArgs", () => {
     expect(parsed.counts.verbose).toBe(0);
   });
 
+  // --- the -- end-of-options marker --------------------------------------
+
+  it("treats everything after -- as positional, dashes and all", () => {
+    // Click terminates option parsing at `--` on every command. Without
+    // it there is no way to pass a value that starts with a dash, and
+    // `recall -- -5` reported "Unknown option: -5" — measured against the
+    // Python CLI, which accepts the same argv.
+    const parsed = parse(["recall", "--", "-5", "--json"]);
+    expect(parsed.positionals).toEqual(["-5", "--json"]);
+    expect(parsed.unknown).toEqual([]);
+    expect(parsed.flags.has("json")).toBe(false);
+  });
+
+  it("consumes the -- itself rather than passing it on", () => {
+    // Keeping it would hand every command an extra argument it did not
+    // ask for, which `rejectExtraArgs` then reports.
+    expect(parse(["use", "--", "work"]).positionals).toEqual(["work"]);
+  });
+
+  it("still parses options that appear before --", () => {
+    const parsed = parse(["recall", "--profile", "work", "--", "-5"]);
+    expect(parsed.values.profile).toBe("work");
+    expect(parsed.positionals).toEqual(["-5"]);
+  });
+
+  it("keeps a second -- as a literal positional", () => {
+    expect(parse(["cmd", "--", "a", "--", "b"]).positionals).toEqual(["a", "--", "b"]);
+  });
+
   // --- passthrough (stopAtPositional) ------------------------------------
 
   it("hands everything after the first positional back unparsed", () => {
