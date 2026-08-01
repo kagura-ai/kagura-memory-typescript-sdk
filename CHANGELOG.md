@@ -48,6 +48,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+Everything below was caught by an adversarial review of this release's own
+diff — eight confirmed findings, one refuted — before it shipped.
+
+- **REST commands sent credentials to the wrong host and failed for OAuth
+  users.** `files`, `resource` and `secret` bare-constructed their clients,
+  which never runs the credential chain and never stamps the MCP URL. Three
+  consequences: every one of them threw for anyone who authenticated with
+  `auth login` rather than a static key; `resource setup` was unusable on
+  every invocation; and a self-hosted operator's requests went to
+  `https://memory.kagura-ai.com` **carrying their API key** instead of to
+  their own server. They now go through `fromMcpUrl`, passing no URL so
+  each resolver branch pairs its credential with its own — which is what
+  Python does, and why an OAuth profile bound to a non-default server now
+  reaches the right host.
+
+- **`secret exec` handed the age private key to the child process.**
+  `--as ENV=name` is a scoping mechanism, but the child inherited the whole
+  environment including `KAGURA_AGE_IDENTITY` — the key that decrypts every
+  *other* secret in the workspace. A vendor tool given one credential got
+  the means to read them all. The identity variables are now stripped from
+  the child. Python has no such exposure because it reads the key from the
+  OS keychain, so nothing is in the environment to inherit.
+
+- **`secret exec` rejected the child's own flags.**
+  `secret exec --as A=s -- ls -la` failed with `Unknown option: -la`. Click
+  sets `ignore_unknown_options` and `allow_interspersed_args=False` on that
+  command for exactly this reason.
+
+- **`resource import` sent every row in one request.** The endpoint accepts
+  1-100 events and Python chunks at 100, so any file over 100 rows was
+  rejected wholesale. Now chunked, with Python's `{created, failed, total}`
+  aggregate rather than a per-batch array — a script must not parse a
+  different shape for 99 rows than for 101.
+
+- **`--id-column` fell back to the row number when the column was absent.**
+  A typo in the column name imported every row under doc_id `1`, `2`, … and
+  reported success; re-running with the name spelled right would then
+  insert them all a second time under different ids.
+
+- **Files holding credentials were written world-readable.** `setup claude`
+  wrote `.kagura.json` and `.mcp.json` at the umask default, and
+  `secret get -o` left plaintext in a pre-existing file at its old mode
+  until a later chmod. Both are now 0600 before any bytes land in them, and
+  the secret path opens with `O_NOFOLLOW`. `secret get -o` writes raw bytes
+  too, so a binary secret is no longer corrupted by U+FFFD substitution.
+
+- **Smaller ones**: `resource ingest --importance abc` sent `null`
+  (`Number.parseFloat` yields NaN, which survives an `!== undefined` guard);
+  `resource tokens update 42` with no options sent an empty PATCH and exited
+  0; `files upload --remember` built its MCP client without `mcp_url`, so
+  the upload landed on the configured server and the memory did not.
+
 - **Negative numbers were unreachable as option values.** The parser read
   every dash-prefixed token as "value missing", so `--bm25 -0.1`,
   `--limit -5` and `--min-weight -1` could not be passed. Measured against
