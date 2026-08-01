@@ -483,7 +483,10 @@ function writePrivateFile(target: string, contents: Uint8Array): void {
     // An existing file keeps its old mode through open(); tighten before
     // writing, not after.
     fs.fchmodSync(fd, 0o600);
-    fs.writeSync(fd, contents);
+    // writeFileSync on the descriptor, not writeSync: the latter returns
+    // the number of bytes written and may be short, which would truncate
+    // the secret silently. writeFileSync loops until the buffer is done.
+    fs.writeFileSync(fd, contents);
   } catch (e) {
     throw new CliError(`cannot write ${target}: ${e instanceof Error ? e.message : String(e)}`);
   } finally {

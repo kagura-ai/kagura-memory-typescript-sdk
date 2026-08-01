@@ -9,6 +9,7 @@ import {
   parseIntOption,
   parseLocation,
   parseTags,
+  quote,
 } from "../../src/cli/parse.js";
 
 const IMPORTANCE = { name: "importance", short: "i", type: "value" } as const;
@@ -108,6 +109,31 @@ describe("flagLabel", () => {
     expect(flagLabel(CONTENT)).toBe("'--content'");
   });
 });
+
+describe("quote", () => {
+  // Vectors captured from the real repr() on CPython 3.13. Click
+  // interpolates these into its error messages, so a divergence here shows
+  // up in every "Invalid value for ..." the two CLIs print.
+  it.each([
+    ["plain", "'plain'"],
+    ["a\nb", "'a\\nb'"],
+    ["a\tb", "'a\\tb'"],
+    ["C:\\Users\\x", "'C:\\\\Users\\\\x'"],
+    ["it's", '"it\'s"'],
+    ['say "hi"', '\'say "hi"\''],
+    ['both \' and "', '\'both \\\' and "\''],
+    ["\u0000ctrl", "'\\x00ctrl'"],
+  ])("matches Python repr for %j", (input, expected) => {
+    expect(quote(input)).toBe(expected);
+  });
+
+  it("never emits a raw newline, which would split the error message", () => {
+    // A raw newline would break the error across lines and any script
+    // grepping for it.
+    expect(quote("a\nb")).not.toContain("\n");
+  });
+});
+
 
 describe("parseDetails", () => {
   it("parses a JSON object", () => {

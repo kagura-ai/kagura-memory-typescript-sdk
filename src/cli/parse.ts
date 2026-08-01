@@ -154,11 +154,36 @@ export function pairedFlag(
   return undefined;
 }
 
-/** Python's `repr()` of a string, which click interpolates into errors. */
+/**
+ * Python's `repr()` of a string, which click interpolates into errors.
+ *
+ * Escapes matter: a value containing a newline would otherwise split the
+ * error across lines, and a Windows path would lose its backslashes.
+ * Pinned against the real `repr()` output in the tests.
+ *
+ *   'a\n b'          -> 'a\\n b'          (control characters escaped)
+ *   'C:\\Users'      -> 'C:\\\\Users'     (backslash doubled)
+ *   "it's"           -> "it's"            (double-quoted to avoid escaping)
+ *   "both ' and \""  -> 'both \\' and "'  (single-quoted, apostrophe escaped)
+ */
 export function quote(value: string): string {
-  return value.includes("'") && !value.includes('"')
-    ? `"${value}"`
-    : `'${value.replace(/'/g, "\\'")}'`;
+  // Python prefers single quotes, switching to double only when the value
+  // contains an apostrophe and no double quote.
+  const double = value.includes("'") && !value.includes('"');
+  const quoteChar = double ? '"' : "'";
+
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0)!;
+    if (ch === "\\") out += "\\\\";
+    else if (ch === quoteChar) out += `\\${ch}`;
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, "0")}`;
+    else out += ch;
+  }
+  return `${quoteChar}${out}${quoteChar}`;
 }
 
 /**

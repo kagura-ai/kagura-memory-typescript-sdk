@@ -77,8 +77,8 @@ const code = await runCli(process.argv.slice(2), {
       for (const name of unset) delete childEnv[name];
       const child = spawn(command, argv, { stdio: "inherit", env: childEnv });
       child.on("error", (e) => {
-        process.stderr.write(`Error: cannot run ${command}: ${e.message}
-`);
+        // 127 is the shell's "command not found", which is what this is.
+        process.stderr.write(`Error: cannot run ${command}: ${e.message}\n`);
         resolve(127);
       });
       // A child killed by a signal has no numeric code; 128+n is the shell
