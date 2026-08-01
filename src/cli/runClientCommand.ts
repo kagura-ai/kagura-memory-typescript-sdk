@@ -101,9 +101,10 @@ export function resolveConfig(
 /**
  * The MCP-client options a config produces.
  *
- * Separate from {@link restOptions} because the MCP client also needs
- * `mcp_url`: passing it the REST options would silently drop a
- * self-hosted server and send the call to the default cloud one.
+ * Only the MCP client takes options: the REST clients go through
+ * `fromMcpUrl`, which resolves everything itself. This one needs
+ * `mcp_url` explicitly, and forgetting it silently drops a self-hosted
+ * server and sends the call to the default cloud one.
  */
 export function mcpOptions(config: KaguraConfig): KaguraClientOptions {
   // Python: `api_key=config.get("api_key") or None`. An empty value must be

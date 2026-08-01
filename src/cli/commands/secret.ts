@@ -33,7 +33,7 @@ import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type Comma
 import { formatJson } from "../output.js";
 import { CliError, CliUsageError, parseIntOption } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
-import { resolveConfig, runAndPrint } from "../runClientCommand.js";
+import { runAndPrint } from "../runClientCommand.js";
 
 const PROFILE: FlagSpec = {
   name: "profile",
@@ -109,7 +109,6 @@ const list: Command = {
   spec: { flags: [] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () => makeSecretClient(deps).listSecrets());
   },
 };
@@ -120,7 +119,6 @@ const pubkeys: Command = {
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const mine = args.flags.has("mine");
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () => {
       const client = makeSecretClient(deps);
       return mine ? client.listMyPubkeys() : client.listPubkeys();
@@ -135,7 +133,6 @@ const approve: Command = {
   run: async (deps, args) => {
     const pubkeyId = requireArg(args, 0, "PUBKEY_ID");
     rejectExtraArgs(args, 1);
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () => makeSecretClient(deps).approvePubkey(pubkeyId));
   },
 };
@@ -148,7 +145,6 @@ const revoke: Command = {
     const name = requireArg(args, 0, "NAME");
     rejectExtraArgs(args, 1);
     const to = requireValue(args, TO_ONE);
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () => makeSecretClient(deps).revokeGrant(name, to));
   },
 };
@@ -163,7 +159,6 @@ const deleteSecret: Command = {
     if (!args.flags.has("yes") && !(await deps.confirm(`Hard-delete secret '${name}' and all versions?`))) {
       throw new CliError("Aborted!");
     }
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, async () => {
       await makeSecretClient(deps).deleteSecret(name);
       return { status: "success", name };
@@ -176,7 +171,6 @@ const auditVerify: Command = {
   spec: { flags: [] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () => makeSecretClient(deps).verifyAudit());
   },
 };
@@ -216,7 +210,6 @@ const keygen: Command = {
       deps.write(formatJson({ recipient, fingerprint: fingerprint(recipient), identity }));
       return 0;
     }
-    const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, async () => {
       const registered = await makeSecretClient(deps).registerPubkey(recipient, label);
       return { pubkey: registered, identity };
@@ -233,7 +226,6 @@ const put: Command = {
     rejectExtraArgs(args, 1);
     const value = readSecretValue(deps, args.values["from-file"]);
     const toIds = args.many.to ?? [];
-    const { config } = resolveConfig(deps, undefined, false);
 
     return runAndPrint(deps, async () => {
       const client = makeSecretClient(deps);
@@ -274,7 +266,6 @@ const get: Command = {
     }
 
     const identity = readIdentity();
-    const { config } = resolveConfig(deps, undefined, false);
     const client = makeSecretClient(deps);
     const fetched = await client.fetchSecret(name, version);
     const plaintext = await decrypt(fetched.ciphertext, identity);
@@ -302,7 +293,6 @@ const grant: Command = {
     rejectExtraArgs(args, 1);
     const to = requireValue(args, TO_ONE);
     const identity = readIdentity();
-    const { config } = resolveConfig(deps, undefined, false);
 
     return runAndPrint(deps, async () => {
       const client = makeSecretClient(deps);
@@ -330,7 +320,6 @@ const rotate: Command = {
     const name = requireArg(args, 0, "NAME");
     rejectExtraArgs(args, 1);
     const value = readSecretValue(deps, args.values["from-file"]);
-    const { config } = resolveConfig(deps, undefined, false);
 
     return runAndPrint(deps, async () => {
       const client = makeSecretClient(deps);
@@ -381,7 +370,6 @@ const exec: Command = {
     });
 
     const identity = readIdentity();
-    const { config } = resolveConfig(deps, undefined, false);
     const client = makeSecretClient(deps);
 
     const injected: Record<string, string> = {};

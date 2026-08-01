@@ -4,8 +4,8 @@
  * Hand-rolled because this package's zero-runtime-dependency invariant is
  * deliberate — pulling in commander to read flags would trade that away.
  * Scope is correspondingly small: long flags, registered short flags,
- * repeatable count flags, and positionals. No general short-flag
- * clustering, no `--`, no negation.
+ * repeatable count and multiple flags, positionals, and `--` as the
+ * end-of-options marker. No general short-flag clustering, no negation.
  *
  * Each command passes its own {@link ParseSpec}. That is the point: a flag
  * that is real for `auth login` must still be *rejected* by `recall`,
