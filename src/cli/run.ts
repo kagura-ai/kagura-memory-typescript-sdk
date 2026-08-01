@@ -63,9 +63,9 @@ import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
  */
 const AUTH_SPEC: ParseSpec = {
   flags: [
-    { name: "profile", type: "value", help: "Profile to act on (default: the file's default)" },
-    { name: "server", type: "value", metavar: "URL", help: "MCP server URL to authenticate against" },
-    { name: "scope", type: "value", help: 'Space-separated scopes, e.g. "memory:read memory:write"' },
+    { name: "profile", type: "value", rejectEmpty: true, help: "Profile to act on (default: the file's default)" },
+    { name: "server", type: "value", rejectEmpty: true, metavar: "URL", help: "MCP server URL to authenticate against" },
+    { name: "scope", type: "value", rejectEmpty: true, help: 'Space-separated scopes, e.g. "memory:read memory:write"' },
     { name: "read-only", type: "switch", help: "Request memory:read only" },
     { name: "no-browser", type: "switch", help: "Print the code and URL without opening a browser" },
     { name: "all", type: "switch", help: "logout: remove every stored profile" },
@@ -488,12 +488,20 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     return 0;
   }
 
-  // An empty value is almost always a typo (`--profile=`), and it is not
-  // harmless: "" is a usable profile name, so it would create a nameless
-  // profile, and an empty scope would be sent to the server verbatim.
-  const empty = Object.entries(parsed.values)
-    .filter(([, value]) => value !== undefined && value.trim() === "")
-    .map(([name]) => `--${name}`);
+  // Only the flags that declare `rejectEmpty`. Python accepts an empty
+  // value everywhere, and three behaviours here depend on that:
+  // `--context-id=` falls through to the config via its `or` chain, and
+  // `--tags=` / `--details=` treat blank as unset so an unset shell
+  // variable is not a hard error. Rejecting every empty value globally
+  // contradicted all three — the guard belongs on `--profile` and
+  // `--scope`, where "" does damage rather than nothing.
+  const empty = command.spec.flags
+    .filter((flag) => flag.rejectEmpty === true)
+    .filter((flag) => {
+      const value = parsed.values[flag.name];
+      return value !== undefined && value.trim() === "";
+    })
+    .map((flag) => `--${flag.name}`);
 
   if (parsed.unknown.length > 0 || parsed.missingValue.length > 0 || empty.length > 0) {
     for (const flag of parsed.unknown) {

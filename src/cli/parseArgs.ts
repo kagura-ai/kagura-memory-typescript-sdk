@@ -45,6 +45,21 @@ export interface FlagSpec {
   /** Reported as missing when absent; see `requireOption`. */
   required?: boolean;
   /**
+   * Reject `--flag=` (an explicitly empty value).
+   *
+   * Off by default, because Python accepts an empty value everywhere and
+   * several options *rely* on it: `--context-id=` falls through to the
+   * config via Python's `or` chain, and `--tags=` / `--details=` treat
+   * blank as unset so an unset shell variable is not a hard error.
+   *
+   * On only where an empty value would do damage rather than nothing —
+   * `--profile=` would create a nameless profile and `--scope=` would send
+   * an empty scope to the server. That is a deliberate divergence from
+   * click, inherited from the auth-only bin, and it stays scoped to the
+   * flags that motivated it.
+   */
+  rejectEmpty?: boolean;
+  /**
    * Register only the short form.
    *
    * `kagura recall -k 5` is declared in Python as `@click.option("-k")`

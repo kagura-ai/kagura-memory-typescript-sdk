@@ -181,6 +181,35 @@ describe("kagura-memory recall", () => {
   });
 });
 
+describe("an explicitly empty value", () => {
+  // Python accepts an explicit empty value everywhere; only two options
+  // here reject it, and only because "" does damage there rather than
+  // nothing. Measured against the real Python CLI, which reaches
+  // authentication with both of the argv below.
+  it("lets --context-id= fall through to the config", async () => {
+    // `context_id or config.get("context_id") or ""` — the resolution was
+    // written for exactly this, but a global guard rejected it first.
+    const { code, args } = await wire(["recall", "q", "--context-id="]);
+    expect(code).toBe(0);
+    expect(args).toMatchObject({ context_id: "ctx-default" });
+  });
+
+  it("treats --tags= as unset rather than a usage error", async () => {
+    // An unset shell variable expands to this; erroring would make
+    // `--tags "$MAYBE_EMPTY"` unusable.
+    const { code, args } = await wire(["remember", "-s", "S", "--content", "C", "--tags="]);
+    expect(code).toBe(0);
+    expect(args).not.toHaveProperty("tags");
+  });
+
+  it("treats --details= as unset", async () => {
+    const { code, args } = await wire(["remember", "-s", "S", "--content", "C", "--details="]);
+    expect(code).toBe(0);
+    expect(args).not.toHaveProperty("details");
+  });
+
+});
+
 describe("kagura-memory forget", () => {
   it("requires one of --memory-id or --query, exiting 1", async () => {
     // ClickException in Python, so exit 1 rather than the usage code 2.
