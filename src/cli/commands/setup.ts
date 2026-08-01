@@ -57,8 +57,26 @@ function readJsonSafe(target: string): Record<string, unknown> {
   }
 }
 
+/**
+ * Write a config file that carries credentials.
+ *
+ * Both files this command writes hold the API key, so they are created
+ * 0600 and tightened even when they already existed — `writeFileSync`
+ * applies `mode` only on creation, and the default 0644 under the common
+ * umask lets any other local account read the key out of a shared build
+ * host's workspace.
+ */
 function writeJson(target: string, data: Record<string, unknown>): void {
-  fs.writeFileSync(target, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
+  fs.writeFileSync(target, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  try {
+    fs.chmodSync(target, 0o600);
+  } catch {
+    // Windows has no POSIX mode bits; chmod there only toggles read-only.
+    // The write above is what matters, and the tests skip the assertion.
+  }
 }
 
 /**
