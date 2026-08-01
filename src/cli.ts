@@ -12,6 +12,8 @@ import { login } from "./auth/login.js";
 import { refresh } from "./auth/refresh.js";
 import { openBrowser } from "./cli/openBrowser.js";
 import { runCli } from "./cli/run.js";
+import { KaguraClient } from "./client.js";
+import { loadConfig } from "./config.js";
 
 async function confirm(question: string): Promise<boolean> {
   // A non-interactive stdin (CI, a pipe) must not hang waiting for input
@@ -31,12 +33,18 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 const code = await runCli(process.argv.slice(2), {
-  write: (line) => process.stdout.write(`${line}\n`),
-  writeError: (line) => process.stderr.write(`${line}\n`),
+  write: (line) => {
+    process.stdout.write(`${line}\n`);
+  },
+  writeError: (line) => {
+    process.stderr.write(`${line}\n`);
+  },
   confirm,
   openBrowser,
   login,
   refresh,
+  loadConfig,
+  makeClient: (options) => new KaguraClient(options),
 });
 
 process.exitCode = code;
