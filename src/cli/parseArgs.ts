@@ -59,6 +59,20 @@ export interface ParseSpec {
   flags: readonly FlagSpec[];
 }
 
+export interface ParseOptions {
+  /**
+   * Stop parsing options at the first positional and hand the remainder
+   * back untouched in {@link ParsedArgs.rest}.
+   *
+   * This is click's `allow_interspersed_args=False` +
+   * `ignore_unknown_options=True`, which `secret exec` needs: the tokens
+   * after the command name belong to the *child*, so `-la` in
+   * `secret exec --as A=s -- ls -la` is an argument to `ls`, not an
+   * unknown option of ours.
+   */
+  stopAtPositional?: boolean;
+}
+
 export interface ParsedArgs {
   /** First non-flag token, or `""` when absent. */
   command: string;
@@ -76,6 +90,11 @@ export interface ParsedArgs {
   unknown: string[];
   /** Value flags that ran out of argv before their value. */
   missingValue: string[];
+  /**
+   * Unparsed remainder, when `stopAtPositional` was set. Empty otherwise.
+   * A leading `--` separator is stripped; anything after it is verbatim.
+   */
+  rest: string[];
 }
 
 /** `--help` works on every command, so it never needs declaring. */
@@ -105,8 +124,14 @@ function indexSpec(spec: ParseSpec): Index {
   return { long, short };
 }
 
-export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
+export function parseArgs(
+  argv: string[],
+  spec: ParseSpec,
+  options: ParseOptions = {},
+): ParsedArgs {
   const { long, short } = indexSpec(spec);
+  const stopAtPositional = options.stopAtPositional === true;
+  let rest: string[] = [];
 
   const positionals: string[] = [];
   const flags = new Set<string>();
@@ -180,6 +205,11 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
     const token = argv[i]!;
 
     if (token === "--" || !token.startsWith("-") || token === "-") {
+      if (stopAtPositional) {
+        // Everything from here belongs to whoever we are handing off to.
+        rest = argv.slice(token === "--" ? i + 1 : i);
+        break;
+      }
       // A bare `-` is a conventional stdin placeholder, not a flag.
       positionals.push(token);
       continue;
@@ -241,5 +271,6 @@ export function parseArgs(argv: string[], spec: ParseSpec): ParsedArgs {
     many,
     unknown,
     missingValue,
+    rest,
   };
 }

@@ -342,6 +342,7 @@ const exec: Command = {
     "  Secrets are decrypted locally and passed to the child through its\n" +
     "  environment only — they never touch disk and never appear in argv.\n" +
     "  The child's exit code becomes this command's exit code.",
+  passthrough: true,
   spec: {
     flags: [
       { name: "as", type: "multiple", metavar: "ENV=NAME", help: "ENV_NAME=secret_name (repeatable)" },
@@ -351,9 +352,9 @@ const exec: Command = {
   run: async (deps, args) => {
     const specs = args.many.as ?? [];
     if (specs.length === 0) throw new CliUsageError("Missing option '--as'.");
-    // Everything after `--` is the child command, untouched.
-    const separator = args.positionals.indexOf("--");
-    const argv = separator === -1 ? args.positionals : args.positionals.slice(separator + 1);
+    // The router stopped parsing at the first positional and stripped a
+    // leading `--`, so these are the child's argv verbatim.
+    const argv = args.positionals;
     if (argv.length === 0) throw new CliUsageError("Missing argument 'COMMAND'.");
 
     const mapping = specs.map((spec) => {

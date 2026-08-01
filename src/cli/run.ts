@@ -477,7 +477,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   }
 
   const { command, path, rest } = resolved;
-  const parsed = parseArgs(rest, command.spec);
+  const parsed = parseArgs(
+    rest,
+    command.spec,
+    command.passthrough === true ? { stopAtPositional: true } : {},
+  );
 
   if (parsed.flags.has("help")) {
     deps.write(renderHelp(path, command));
@@ -509,7 +513,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   // their arguments positionally, so put it back.
   const args: ParsedArgs = {
     ...parsed,
-    positionals: parsed.command === "" ? parsed.positionals : [parsed.command, ...parsed.positionals],
+    positionals: [
+      ...(parsed.command === "" ? [] : [parsed.command]),
+      ...parsed.positionals,
+      // For a passthrough command the remainder was never parsed; it is
+      // the child's argv and must arrive byte-for-byte.
+      ...parsed.rest,
+    ],
   };
 
   try {

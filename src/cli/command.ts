@@ -22,6 +22,13 @@ export interface Command {
   /** Extra paragraphs for `--help`, after the option list. */
   description?: string;
   spec: ParseSpec;
+  /**
+   * Stop option parsing at the first positional and pass the remainder
+   * through verbatim — click's `ignore_unknown_options` +
+   * `allow_interspersed_args=False`. `secret exec` needs it so the child's
+   * own flags reach the child instead of being rejected as ours.
+   */
+  passthrough?: boolean;
   run: (deps: CommandDeps, args: ParsedArgs) => Promise<number>;
 }
 

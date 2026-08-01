@@ -181,6 +181,39 @@ describe("kagura-memory secret exec", () => {
     expect(b.err.join("\n")).toContain("Missing argument 'COMMAND'.");
   });
 
+  it("passes the child's own flags through untouched", async () => {
+    // Click sets ignore_unknown_options + allow_interspersed_args=False on
+    // this command precisely so `-la` reaches `ls`. Measured against the
+    // real Python CLI, which gets as far as authentication with the same
+    // argv this used to reject.
+    process.env.KAGURA_AGE_IDENTITY = TEST_IDENTITY;
+    const h = harness();
+    h.rest.routes["/api/v1/config/secrets/fetch"] = {
+      name: "s",
+      version_number: 1,
+      alg: "age",
+      ciphertext: "x",
+      recipients_snapshot: [],
+      rotation_needed: false,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    // Decryption of the stub ciphertext fails, but the argv must have been
+    // accepted to get that far — a parse rejection exits 2 with
+    // "Unknown option: -la" and never reaches the fetch.
+    const code = await runCli(["secret", "exec", "--as", "A=s", "--", "ls", "-la"], h.deps);
+    expect(code).toBe(1);
+    expect(h.err.join("\n")).not.toMatch(/Unknown option/);
+    expect(h.rest.requests.length).toBeGreaterThan(0);
+  });
+
+  it("works without the -- separator too", async () => {
+    process.env.KAGURA_AGE_IDENTITY = TEST_IDENTITY;
+    const h = harness();
+    const code = await runCli(["secret", "exec", "--as", "A=s", "ls", "-la"], h.deps);
+    expect(h.err.join("\n")).not.toMatch(/Unknown option/);
+    expect(code).not.toBe(2);
+  });
+
   it("rejects an --as without an equals sign", async () => {
     process.env.KAGURA_AGE_IDENTITY = TEST_IDENTITY;
     const h = harness();

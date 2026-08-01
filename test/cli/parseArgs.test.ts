@@ -199,6 +199,40 @@ describe("parseArgs", () => {
     expect(parsed.counts.verbose).toBe(0);
   });
 
+  // --- passthrough (stopAtPositional) ------------------------------------
+
+  it("hands everything after the first positional back unparsed", () => {
+    const parsed = parseArgs(["--profile", "p", "ls", "-la"], SPEC, { stopAtPositional: true });
+    expect(parsed.values.profile).toBe("p");
+    expect(parsed.rest).toEqual(["ls", "-la"]);
+    // `-la` is the child's flag, not an unknown option of ours.
+    expect(parsed.unknown).toEqual([]);
+  });
+
+  it("strips a leading -- separator from the remainder", () => {
+    const parsed = parseArgs(["--profile", "p", "--", "ls", "-la"], SPEC, { stopAtPositional: true });
+    expect(parsed.rest).toEqual(["ls", "-la"]);
+  });
+
+  it("keeps a -- that appears inside the remainder", () => {
+    // Only the FIRST separator is ours; a second one belongs to the child.
+    const parsed = parseArgs(["--", "sh", "-c", "--", "x"], SPEC, { stopAtPositional: true });
+    expect(parsed.rest).toEqual(["sh", "-c", "--", "x"]);
+  });
+
+  it("leaves rest empty when there is no positional", () => {
+    expect(parseArgs(["--profile", "p"], SPEC, { stopAtPositional: true }).rest).toEqual([]);
+  });
+
+  it("still reports an unknown option that appears BEFORE the positional", () => {
+    const parsed = parseArgs(["--nope", "ls"], SPEC, { stopAtPositional: true });
+    expect(parsed.unknown).toEqual(["--nope"]);
+  });
+
+  it("does not collect a remainder without the option", () => {
+    expect(parseArgs(["ls", "-la"], SPEC).rest).toEqual([]);
+  });
+
   // --- spec isolation ----------------------------------------------------
 
   it("reports a flag that belongs to a different command's spec", () => {
