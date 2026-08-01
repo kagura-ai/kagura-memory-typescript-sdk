@@ -86,6 +86,23 @@ export function restOptions(config: KaguraConfig): RestClientOptions {
 }
 
 /**
+ * The MCP-client options a config produces.
+ *
+ * Separate from {@link restOptions} because the MCP client also needs
+ * `mcp_url`: passing it the REST options would silently drop a
+ * self-hosted server and send the call to the default cloud one.
+ */
+export function mcpOptions(config: KaguraConfig): KaguraClientOptions {
+  // Python: `api_key=config.get("api_key") or None`. An empty value must be
+  // omitted, not forwarded — `Authorization: Bearer ` always 401s, and
+  // omitting lets the OAuth profile resolve instead.
+  const options: KaguraClientOptions = {};
+  if (config.api_key) options.apiKey = config.api_key;
+  if (config.mcp_url) options.mcpUrl = config.mcp_url;
+  return options;
+}
+
+/**
  * Run an operation and print its result, mapping failures the same way
  * `runClientCommand` does. For commands that build their own client.
  */
@@ -132,14 +149,7 @@ export async function runClientCommand(
     options.needsContext ?? true,
   );
 
-  // Python: `api_key=config.get("api_key") or None`. An empty value must be
-  // omitted, not forwarded — `Authorization: Bearer ` always 401s, and
-  // omitting lets the OAuth profile resolve instead.
-  const clientOptions: KaguraClientOptions = {};
-  if (config.api_key) clientOptions.apiKey = config.api_key;
-  if (config.mcp_url) clientOptions.mcpUrl = config.mcp_url;
-
-  const client = ctx.makeClient(clientOptions);
+  const client = ctx.makeClient(mcpOptions(config));
   try {
     const result = await operation(client, resolvedContext);
     ctx.write(formatJson(result));

@@ -6,6 +6,87 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-01
+
+### Added
+
+- **The `kagura-memory` bin now mirrors the Python `kagura` CLI** — 17 of its
+  19 top-level commands, 59 subcommands, up from the five `auth` ones 0.7.0
+  shipped. Same subcommand names, same flags and short forms, same JSON on
+  stdout, same exit codes (2 for a usage error, 1 for a runtime failure).
+
+  `auth` (now with `list` and `token`), `config show`, `context` +
+  `contexts`, `remember`, `recall`, `reference`, `forget`, `update-memory`,
+  `explore`, `edge`, `sleep`, `files`, `resource` (including the nested
+  `resource tokens` CRUD), `secret`, `doctor`, and `setup claude`.
+
+  Ported from the Python **source**, not its `--help`: help output omits the
+  output format and the exit codes, and the version installed here (0.35.0)
+  predated the source tree (0.38.0), so it was missing flags that exist —
+  `remember --details` and `--location` among them.
+
+- **Output parity was measured, not assumed.** `JSON.stringify(x, null, 2)`
+  and `json.dumps(x, indent=2, ensure_ascii=False)` were compared
+  byte-for-byte over Japanese text, an em dash, an emoji, an astral-plane
+  character, escapes, control characters, nested empty containers, `null`
+  and booleans: identical. Three numeric shapes differ and cannot be
+  reconciled because they are language-level rather than formatting choices
+  — Python `1.0` vs JS `1`, `1e-07` vs `1e-7`, and integers past 2^53, the
+  last of which is a property of `JSON.parse` and so of the whole SDK.
+
+- **A per-command flag spec.** Each command declares its own options, so a
+  flag that is real elsewhere is still *rejected* here: `recall
+  --read-only` is an error rather than a silently ignored switch. The parser
+  also learned registered short flags (`-c`, `-m`, `-k`), `-vvv` counts,
+  repeatable options (click's `multiple=True`), and short-only options —
+  `-k` has no `--k` long form in Python, so it has none here.
+
+- **An RFC 4180 CSV reader** for `resource import`, because Python leans on
+  `csv.DictReader` and Node has no equivalent. Quoted fields, `""` escapes,
+  embedded commas and newlines, CRLF. A `line.split(",")` would silently
+  corrupt any row containing a quoted comma, which is most real exports.
+
+### Fixed
+
+- **Negative numbers were unreachable as option values.** The parser read
+  every dash-prefixed token as "value missing", so `--bm25 -0.1`,
+  `--limit -5` and `--min-weight -1` could not be passed. Measured against
+  the real Python CLI, which parses them as values. Click is laxer still —
+  it consumes whatever follows, so `--reranker -x` sets the value to `-x` —
+  but that turns a typo into a silent wrong value, so only the numeric case
+  changed; `--profile -h` still reads as "help", not a profile named `-h`.
+
+### Changed
+
+- **Errors now carry click's `Error: ` prefix.** The `auth` commands printed
+  a bare message while Python raises `ClickException` there too, which
+  renders as `Error: …`. Unifying was the only option that did not leave one
+  group spelling failure differently from the other 16. Stderr text only;
+  exit codes are unchanged.
+
+### Notes
+
+- **`ingest` and `process` are not ported.** The first needs the
+  text-extraction pipeline (PDF, Office, EPUB, audio) plus LLM providers;
+  the second needs the litellm-backed agent. Neither exists in this package
+  and both would cost the zero-dependency promise. Use the Python CLI.
+
+- **Three deliberate divergences**, each commented where it lives:
+
+  - `config show` does not reproduce Python's mask
+    (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12
+    characters and render `"abc"` as `"abc...abc"` — printing the whole
+    secret twice. A mask that echoes its input is not a mask.
+  - `secret` key custody reads the age identity from `KAGURA_AGE_IDENTITY`
+    or `KAGURA_AGE_IDENTITY_FILE` and fails closed when neither is set.
+    Python uses the OS keychain via `keyring`; Node has no zero-dependency
+    equivalent, and `secrets/keyManager.ts` already rejected both a native
+    dependency and a plaintext file. **A key custodied by the Python CLI is
+    not readable here, and vice versa.**
+  - `setup claude --profile` reports that the OAuth path needs Python's
+    `kagura-mcp` stdio proxy instead of writing an `.mcp.json` that names a
+    binary this package does not install. The `--api-key` path works.
+
 ## [0.7.0] - 2026-07-30
 
 ### Added
@@ -308,7 +389,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.3.0...v0.5.0

@@ -16,9 +16,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { defaultCredentialsPath, loadCredentialsFile, isExpired } from "../../auth/credentials.js";
+import type { KaguraConfig } from "../../config.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
+import { mcpOptions } from "../runClientCommand.js";
 
 type Status = "pass" | "warn" | "fail" | "info";
 
@@ -246,10 +248,7 @@ function checkKeyCustody(): DoctorCheck[] {
 }
 
 async function checkServer(deps: CommandDeps): Promise<DoctorCheck[]> {
-  const config = safeConfig(deps);
-  const clientOptions: { apiKey?: string; mcpUrl?: string } = {};
-  if (typeof config?.api_key === "string" && config.api_key) clientOptions.apiKey = config.api_key;
-  if (typeof config?.mcp_url === "string" && config.mcp_url) clientOptions.mcpUrl = config.mcp_url;
+  const clientOptions = mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
 
   // Construction is inside the try because it validates the URL and can
   // throw — and a check whose job is to *report* a bad URL must not be the

@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
 import { CliUsageError, parseRanged, parseTags } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
-import { resolveConfig, restOptions, runAndPrint } from "../runClientCommand.js";
+import { mcpOptions, resolveConfig, restOptions, runAndPrint } from "../runClientCommand.js";
 
 const CONTEXT_ID: FlagSpec = {
   name: "context-id",
@@ -102,7 +102,7 @@ const upload: Command = {
 
       // The memory is a second, separate call; a failure here must not
       // read as "the upload failed", so it names itself.
-      const client = deps.makeClient(restOptions(config));
+      const client = deps.makeClient(mcpOptions(config));
       try {
         const memory = await client.remember({
           contextId,

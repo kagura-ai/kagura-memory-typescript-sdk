@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { KaguraClient } from "../../src/client.js";
 import type { KaguraConfig } from "../../src/config.js";
-import { runClientCommand, type ClientCommandContext } from "../../src/cli/runClientCommand.js";
+import {
+  mcpOptions,
+  restOptions,
+  runClientCommand,
+  type ClientCommandContext,
+} from "../../src/cli/runClientCommand.js";
 import { KaguraError } from "../../src/errors.js";
 import { CliUsageError } from "../../src/cli/parse.js";
 import { FakeServer, makeClient } from "../fakeServer.js";
@@ -213,5 +218,21 @@ describe("runClientCommand: output and exit codes", () => {
     );
     expect(code).toBe(0);
     expect(h.server.toolCallArgs(0)).toMatchObject({ context_id: "ctx-9", query: "hello" });
+  });
+});
+
+describe("mcpOptions vs restOptions", () => {
+  it("carries mcp_url for the MCP client but not the REST one", () => {
+    // `files upload --remember` builds an MCP client after a REST upload.
+    // Handing it the REST options dropped mcp_url, so a self-hosted server
+    // silently lost the memory to the default cloud one.
+    const config = { api_key: "k", mcp_url: "https://self.hosted/mcp" };
+    expect(mcpOptions(config)).toEqual({ apiKey: "k", mcpUrl: "https://self.hosted/mcp" });
+    expect(restOptions(config)).toEqual({ apiKey: "k" });
+  });
+
+  it("omits empties from both, so the resolution chain still runs", () => {
+    expect(mcpOptions({ api_key: "", mcp_url: "" })).toEqual({});
+    expect(restOptions({ api_key: "" })).toEqual({});
   });
 });
