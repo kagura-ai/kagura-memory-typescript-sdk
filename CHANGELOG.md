@@ -48,8 +48,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-Everything below was caught by an adversarial review of this release's own
-diff — eight confirmed findings, one refuted — before it shipped.
+Everything below was caught by review of this release's own diff before it
+shipped: an adversarial pass (eight confirmed, one refuted) plus two rounds
+of Copilot on the PR.
 
 - **REST commands sent credentials to the wrong host and failed for OAuth
   users.** `files`, `resource` and `secret` bare-constructed their clients,
@@ -94,11 +95,24 @@ diff — eight confirmed findings, one refuted — before it shipped.
   the secret path opens with `O_NOFOLLOW`. `secret get -o` writes raw bytes
   too, so a binary secret is no longer corrupted by U+FFFD substitution.
 
+- **`secret get --output` could truncate the secret.** `fs.writeSync` returns
+  the byte count and may be short; nothing checked it, so a partial write
+  would have left a silently truncated credential on disk.
+
+- **`--` was not an end-of-options marker.** It was passed through as an
+  ordinary positional, so it neither terminated option parsing nor
+  disappeared: `recall -- -5` reported `Unknown option: -5`, and there was
+  no way to pass a value beginning with a dash. Click terminates parsing
+  there on every command.
+
 - **Smaller ones**: `resource ingest --importance abc` sent `null`
   (`Number.parseFloat` yields NaN, which survives an `!== undefined` guard);
   `resource tokens update 42` with no options sent an empty PATCH and exited
   0; `files upload --remember` built its MCP client without `mcp_url`, so
-  the upload landed on the configured server and the memory did not.
+  the upload landed on the configured server and the memory did not; and
+  `quote()` claimed to be Python's `repr()` while escaping neither
+  backslashes nor control characters, so a Windows path lost its separators
+  in error messages and a newline split them across lines.
 
 - **Negative numbers were unreachable as option values.** The parser read
   every dash-prefixed token as "value missing", so `--bm25 -0.1`,
