@@ -16,7 +16,7 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 | **`AgentsClient`** | REST API | Agent bootstrap for API-key-only callers (no MCP session) |
 
 A `kagura-memory` command-line tool ships alongside it, mirroring the Python
-SDK's `kagura` command — see [Command line](#command-line).
+CLI's `kagura` command — see [Command line](#command-line).
 
 ## Installation
 
