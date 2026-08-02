@@ -169,8 +169,35 @@ jobs:
       # publishing generates it anyway — the flag is what fails the publish
       # if the attestation cannot be produced, rather than quietly shipping
       # a tarball without one.
+      #
+      # "Already published" is not treated as a failure, and that is not the
+      # guard going soft. On the v0.8.0 publish npm uploaded the tarball at
+      # 12:15:39 and then reported `cannot publish over the previously
+      # published versions` at 12:15:51 — it had retried internally and
+      # collided with its own successful write. The run went red over a
+      # release that had actually landed, which is the shape of error that
+      # gets a good publish re-run by hand.
+      #
+      # Nothing is concluded from the exit code either way: the next step
+      # is the authority, and it checks the registry for *this* version
+      # with zero dependencies. Every other publish error still fails here
+      # — EOTP, 403 and 404 included.
       - name: Publish
-        run: npm publish --provenance --access public
+        shell: bash
+        run: |
+          set +e
+          out=$(npm publish --provenance --access public 2>&1)
+          code=$?
+          echo "$out"
+          set -e
+          if [ "$code" -eq 0 ]; then
+            exit 0
+          fi
+          if echo "$out" | grep -qi 'cannot publish over the previously published version'; then
+            echo "::notice::npm reported the version as already present; the next step verifies it."
+            exit 0
+          fi
+          exit "$code"
 
       # Read through the `latest` dist-tag, which is one small manifest, and
       # parse it on stdin rather than through argv (see the guard above).
