@@ -8,10 +8,26 @@ name: Release
 #     was not published (which is exactly how v0.7.0 ended up: tagged and
 #     released on GitHub, but the local npm token had expired).
 #
-# Requires one repository secret, `NPM_TOKEN`. It must be an **automation**
-# (or granular) token: those bypass the OTP prompt, which a classic token
-# with 2FA-on-publish does not, and OTP is not something CI can answer.
-# Add it under Settings → Secrets and variables → Actions.
+# Authentication is npm **trusted publishing** (OIDC): npm trusts this
+# repository and workflow directly, so there is no token to store, rotate,
+# or have expire. Configured on npmjs.com under the package's Settings →
+# Trusted Publisher, naming this repo and `release.yml`.
+#
+# It replaced `NPM_TOKEN`, which failed every attempt with `EOTP`: the
+# package's publishing-access setting exempts only a *granular* token with
+# 2FA-bypass, and a classic automation token does not qualify. Chasing the
+# right token type would have left a credential that still expires; this
+# removes the credential.
+#
+# Two consequences for the steps below:
+#
+#   - npm must be **>= 11.5.1** (the first release that speaks OIDC), which
+#     needs Node >= 20.17. The job therefore runs a newer Node than the
+#     package's floor — see the note on `node-version`.
+#   - `setup-node` must NOT be given a `registry-url`. That writes an
+#     .npmrc line `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`,
+#     and with the variable unset npm sends the literal string as a token
+#     on every call.
 
 on:
   push:
@@ -25,21 +41,14 @@ on:
 
 permissions:
   contents: read
-  # Required for npm provenance — it signs the published tarball with an
-  # OIDC token proving it was built from this repo at this commit.
+  # Both the identity npm authenticates against and the signer of the
+  # provenance statement. Without it, `npm publish` has no way to prove it
+  # is this workflow.
   id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Job-wide, not just on the publish step. `setup-node` with a
-    # `registry-url` writes an .npmrc containing
-    # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`, and npm expands
-    # that for *every* command — so with the variable unset, `npm ci` and any
-    # other npm call send a literal `${NODE_AUTH_TOKEN}` and can come back
-    # 401 on a package that needs no auth at all.
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,36 +56,58 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # The lowest version the package claims to support, so the release
-          # is built by the oldest engine a consumer might use.
-          node-version: 18
+          # Not the package's floor (18). npm >= 11.5.1 is what speaks
+          # OIDC, and it needs Node >= 20.17. Building on a newer engine
+          # does not change the artifact: tsup pins `target: "node18"`
+          # explicitly for both entries, so the output is the same bytes
+          # whichever Node runs the build. Node 18 support is proven by the
+          # CI matrix, which still runs the suite there.
+          node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
+          # Deliberately no `registry-url` — see the header.
+
+      # Assert rather than assume. `npm install -g` can fail without taking
+      # the step down, and falling through to publish with npm 10 produces
+      # an authentication error that says nothing about the real cause.
+      - name: npm must be new enough to speak OIDC
+        shell: bash
+        run: |
+          npm install -g npm@^11.5.1
+          version=$(npm --version)
+          echo "npm $version"
+          node -e '
+            const [maj, min, patch] = process.argv[1].split(".").map(Number);
+            const ok = maj > 11 || (maj === 11 && (min > 5 || (min === 5 && patch >= 1)));
+            if (!ok) {
+              console.error(`npm ${process.argv[1]} cannot use trusted publishing; need >= 11.5.1`);
+              process.exit(1);
+            }
+          ' "$version"
+
+      # The OIDC token request URL is injected only when `id-token: write`
+      # is granted. If someone trims the permissions block, publish would
+      # otherwise fail much later with an opaque auth error.
+      - name: OIDC must be available to this job
+        shell: bash
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "No OIDC token available — is 'id-token: write' still in the" >&2
+            echo "permissions block? Trusted publishing cannot work without it." >&2
+            exit 1
+          fi
+          echo "OIDC token endpoint present"
 
       - run: npm ci
 
-      # First, because it is the cheapest check and the one most likely to
-      # fail in practice — tokens expire. Behind the gate it costs two
-      # minutes of typecheck/test/build to learn the release cannot land,
-      # and a dry run against an already-published tag skips it entirely and
-      # proves nothing about the token. That is exactly what happened the
-      # first time this workflow ran.
+      # There is deliberately no pre-flight auth check here any more.
       #
-      # npm reports an unauthenticated write as 404 "not in this registry"
-      # rather than 401, which reads as a missing package and sends you
-      # looking in the wrong place. Naming the real cause is the point.
-      - name: Check the npm token authenticates
-        shell: bash
-        run: |
-          if ! who=$(npm whoami 2>&1); then
-            echo "npm auth failed: $who" >&2
-            echo "NPM_TOKEN is missing, expired, or lacks access." >&2
-            echo "It must be an automation token, or a granular token with" >&2
-            echo "'Bypass two-factor authentication' enabled — CI cannot" >&2
-            echo "answer an OTP prompt." >&2
-            exit 1
-          fi
-          echo "authenticated as $who"
+      # The old one ran `npm whoami`, which proves only that a token is
+      # readable — the five failed v0.8.0 attempts all passed it and then
+      # died on the write. With trusted publishing there is no ambient
+      # identity to interrogate before the publish call, so a check would
+      # either be vacuous or would have to attempt the publish itself.
+      # The two assertions above cover what is genuinely knowable early:
+      # the npm version and the presence of an OIDC token.
 
       # The version has to come from the manifest, and the tag has to agree
       # with it. Publishing 0.6.0 from a v0.7.0 tag, or the reverse, is the
@@ -132,10 +163,14 @@ jobs:
       # `prepublishOnly` re-runs typecheck/test/test:no-webcrypto/build, so
       # the gate above is belt-and-braces — it fails faster and names the
       # failing step.
+      #
+      # No `env:` block: authentication is the OIDC exchange npm performs
+      # itself. `--provenance` stays explicit even though trusted
+      # publishing generates it anyway — the flag is what fails the publish
+      # if the attestation cannot be produced, rather than quietly shipping
+      # a tarball without one.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Read through the `latest` dist-tag, which is one small manifest, and
       # parse it on stdin rather than through argv (see the guard above).
