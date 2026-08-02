@@ -12,7 +12,11 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
 | **`WorkspaceClient`** | REST API | Workspace member, invitation, and API key management |
+| **`SecretClient`** | REST API | [Zero-knowledge secrets](#zero-knowledge-secrets) — age-encrypted on your machine, opaque to the server |
 | **`AgentsClient`** | REST API | Agent bootstrap for API-key-only callers (no MCP session) |
+
+A `kagura-memory` command-line tool ships alongside it, mirroring the Python
+CLI's `kagura` command — see [Command line](#command-line).
 
 ## Installation
 
@@ -117,7 +121,7 @@ Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
 neither exists in this package and both would cost the zero-dependency
 promise. Use the Python CLI for those.
 
-**Two deliberate divergences.**
+**Three deliberate divergences.**
 
 - `secret` needs the optional `age-encryption` peer (`npm install
   age-encryption`), exactly as Python's `[secret]` extra works. Key
@@ -130,6 +134,15 @@ promise. Use the Python CLI for those.
   launches Python's `kagura-mcp` stdio proxy, which this package does not
   install; that flag reports the fact instead of writing a config that
   would fail at launch. The `--api-key` path works here.
+- `config show` does not reproduce Python's key mask
+  (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12 characters
+  and print the whole secret twice.
+
+One divergence runs the other way, and it is small: `--profile=` and
+`--scope=` reject an explicitly empty value, where click would accept it.
+An empty profile name would create a nameless profile and an empty scope
+would go to the server verbatim. Every other option treats `--flag=` as
+Python does.
 
 #### Logging in from TypeScript
 
@@ -494,26 +507,41 @@ Python uses, so a shared backend interoperates.
 ## Relationship to the Python SDK
 
 This package ports the Python SDK's core (client, auth, REST clients,
-models). Of the `kagura` CLI only the `auth` subcommands are provided
-(`npx kagura-memory auth …`, above); the memory, context, and ingestion
-commands are not ported, nor is the document-ingestion pipeline
-(`FileIngestor`). The zero-knowledge secret **client** is ported (above);
-its `kagura secret` CLI subcommands are not.
-(`KaguraAgent` was removed from the Python SDK in v0.37.0 — the actor
-role lives in the [kagura-agent](https://pypi.org/project/kagura-agent/)
-package, so it will not be ported here.) Use the Python SDK for those;
-both SDKs share the same credential files and server APIs. See
+models, the zero-knowledge secret client) and, since 0.8.0, 17 of the
+`kagura` CLI's 19 top-level commands — see [Command line](#command-line).
+
+Two things are deliberately not ported, and both would cost the
+zero-dependency promise:
+
+- **The document-ingestion pipeline** (`FileIngestor`, `kagura ingest`),
+  which needs text extraction from PDF, Office, EPUB and audio plus LLM
+  providers.
+- **`kagura process`**, which needs the litellm-backed agent.
+
+(`KaguraAgent` was removed from the Python SDK in v0.37.0 — the actor role
+lives in the [kagura-agent](https://pypi.org/project/kagura-agent/)
+package, so it will not be ported here either.)
+
+Use the Python SDK for those. Both SDKs share the same credential files
+and server APIs, so they interoperate — with one exception, noted above:
+age private keys are custodied differently and are **not** readable across
+the two. See
 [`docs/design/2026-07-05-typescript-port-design.md`](docs/design/2026-07-05-typescript-port-design.md)
-for the scope decisions.
+for the original scope decisions.
 
 ## Development
 
 ```bash
 npm install
-npm test           # vitest
-npm run typecheck  # tsc --noEmit
-npm run build      # tsup → dist/ (ESM + CJS + d.ts)
+npm test                   # vitest
+npm run test:no-webcrypto  # the same suite with globalThis.crypto deleted
+npm run typecheck          # tsc --noEmit
+npm run build              # tsup → dist/ (ESM + CJS + d.ts)
 ```
+
+`test:no-webcrypto` reproduces Node 18, which has no WebCrypto global —
+the crypto path installs `node:crypto`'s `webcrypto` itself, and that used
+to break in CI only. `prepublishOnly` runs all four.
 
 ## License
 

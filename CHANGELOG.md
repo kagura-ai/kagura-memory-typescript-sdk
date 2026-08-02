@@ -11,7 +11,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **The `kagura-memory` bin now mirrors the Python `kagura` CLI** — 17 of its
-  19 top-level commands, 59 subcommands, up from the five `auth` ones 0.7.0
+  19 top-level commands, 58 subcommands, up from the five `auth` ones 0.7.0
   shipped. Same subcommand names, same flags and short forms, same JSON on
   stdout, same exit codes (2 for a usage error, 1 for a runtime failure).
 
@@ -49,8 +49,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 Everything below was caught by review of this release's own diff before it
-shipped: an adversarial pass (eight confirmed, one refuted) plus two rounds
-of Copilot on the PR.
+shipped: an adversarial pass (eight confirmed, one refuted) plus five rounds
+of Copilot on the PR (nine findings).
 
 - **REST commands sent credentials to the wrong host and failed for OAuth
   users.** `files`, `resource` and `secret` bare-constructed their clients,
