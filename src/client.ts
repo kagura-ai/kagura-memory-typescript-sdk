@@ -298,7 +298,13 @@ export interface CreateContextOptions {
   summary?: string;
   /** LLM-oriented memory usage guidelines. */
   usageGuide?: string;
-  /** Resource identifier for external data ingestion. */
+  /**
+   * @deprecated The server's `create_context` does not read `resource_id`
+   * (memory-cloud through v0.76.0), so this was silently dropped; it is no
+   * longer sent (#47). Set it afterwards with
+   * `updateContext({ contextId, resourceId })` (owner only), or use
+   * {@link KaguraClient.setupResource} for a resource context.
+   */
   resourceId?: string;
   /**
    * Privacy flag (default: true). A shared (`false`) context needs the
@@ -334,8 +340,19 @@ export interface UpdateContextOptions {
 
 export interface SetupResourceOptions {
   resourceId: string;
-  /** Context name (defaults to resourceId server-side). */
+  /**
+   * Context name (defaults to `resourceId`). The server requires one; a
+   * resource id always passes its context-name rule, up to the 100-character
+   * name limit.
+   */
   name?: string;
+  /**
+   * @deprecated The server's `setup_resource` has no summary (memory-cloud
+   * through v0.76.0), so this was silently dropped; it is no longer sent
+   * (#47). Set it afterwards with
+   * `updateContext({ contextId, summary })` on the returned `context_id`
+   * (owner only).
+   */
   summary?: string;
   /** Token description. */
   description?: string;
@@ -1898,9 +1915,8 @@ export class KaguraClient {
     if (options.usageGuide !== undefined) {
       args.usage_guide = options.usageGuide;
     }
-    if (options.resourceId !== undefined) {
-      args.resource_id = options.resourceId;
-    }
+    // `resourceId` is deliberately not sent: create_context does not read
+    // it (#47). See CreateContextOptions.resourceId.
     if (options.embeddingModel !== undefined) {
       args.embedding_model = options.embeddingModel;
     }
@@ -1947,21 +1963,21 @@ export class KaguraClient {
    * Plan-gated on the `resources` feature (server v0.68.0+): a plan
    * without it is refused with nothing created.
    *
+   * The context is named `name`, or `resourceId` when `name` is omitted:
+   * the server requires a name and refuses the call without one.
+   *
    * @throws KaguraFeatureNotAvailableError when the plan lacks `resources`;
    *   `requiredPlanDisplay` names the plan that has it.
    * @throws KaguraQuotaError at the workspace's context or token cap.
    */
   async setupResource(options: SetupResourceOptions): Promise<ToolResult> {
+    // `summary` is deliberately not sent: setup_resource has none (#47).
+    // See SetupResourceOptions.summary.
     const args: Record<string, unknown> = {
       resource_id: options.resourceId,
+      name: options.name ?? options.resourceId,
       quota_events_per_hour: options.quotaEventsPerHour ?? 1000,
     };
-    if (options.name !== undefined) {
-      args.name = options.name;
-    }
-    if (options.summary !== undefined) {
-      args.summary = options.summary;
-    }
     if (options.description !== undefined) {
       args.description = options.description;
     }

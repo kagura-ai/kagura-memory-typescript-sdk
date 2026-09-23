@@ -4,9 +4,11 @@ import * as path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { SETUP_SUMMARY_IGNORED_NOTE } from "../../../src/cli/commands/resource.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FilesClient } from "../../../src/filesClient.js";
 import { ResourceClient } from "../../../src/resourceClient.js";
+import { FakeServer } from "../../fakeServer.js";
 
 const CONTEXT_UUID = "11111111-2222-4333-8444-555555555555";
 
@@ -52,7 +54,12 @@ interface Harness {
   rest: FakeRest;
 }
 
-function harness(): Harness {
+/**
+ * `resourceFetch` replaces the REST fake behind the resource client — for
+ * `resource setup`, whose MCP session needs a fake that speaks the
+ * handshake ({@link FakeServer}).
+ */
+function harness(resourceFetch?: typeof globalThis.fetch): Harness {
   const out: string[] = [];
   const err: string[] = [];
   const rest = new FakeRest();
@@ -74,7 +81,11 @@ function harness(): Harness {
     makeFilesClient: () =>
       FilesClient.fromMcpUrl({ apiKey: "k", mcpUrl: "https://api.test/mcp", fetch: rest.fetch }),
     makeResourceClient: () =>
-      ResourceClient.fromMcpUrl({ apiKey: "k", mcpUrl: "https://api.test/mcp", fetch: rest.fetch }),
+      ResourceClient.fromMcpUrl({
+        apiKey: "k",
+        mcpUrl: "https://api.test/mcp",
+        fetch: resourceFetch ?? rest.fetch,
+      }),
   } as unknown as CliDeps;
   return { deps, out, err, rest };
 }
@@ -334,20 +345,50 @@ describe("kagura-memory resource: review fixes", () => {
 });
 
 describe("REST clients are built through the credential chain", () => {
-  it("`resource setup` gets past client construction and onto the network", async () => {
+  it("`resource setup` sets a resource up, naming the context after it", async () => {
     // It needs the MCP URL that only fromMcpUrl/fromResolvedAuth stamps.
     // Built bare it threw "setupResource() requires MCP URL" on EVERY
     // invocation, before any request — the command was unusable, not
     // merely misconfigured.
     //
-    // This fake speaks REST, not the MCP handshake `setupResource` opens,
-    // so the call still fails — but on the session, which is proof it got
-    // past the construction guard the fix was about.
-    const h = harness();
+    // Past that, the server requires a context name, which the command has
+    // no flag for: without the resource id as the default it was refused
+    // with missing_fields on every call (#47).
+    const server = new FakeServer();
+    server.toolResults.setup_resource = {
+      status: "success",
+      context_id: CONTEXT_UUID,
+      context_name: "res-1",
+      resource_id: "res-1",
+      token: "kagura_rt_x",
+      token_id: 1,
+    };
+    const h = harness(server.fetch);
     const code = await runCli(["resource", "setup", "-r", "res-1"], h.deps);
-    expect(h.err.join("\n")).not.toMatch(/requires MCP URL/);
-    expect(h.rest.requests.length).toBeGreaterThan(0);
-    expect(code).toBe(1);
+
+    expect(h.err).toEqual([]);
+    expect(code).toBe(0);
+    expect(server.toolCallArgs()).toEqual({
+      resource_id: "res-1",
+      name: "res-1",
+      quota_events_per_hour: 1000,
+    });
+    expect(JSON.parse(h.out.join("\n"))).toMatchObject({
+      context_id: CONTEXT_UUID,
+      token: "kagura_rt_x",
+    });
+  });
+
+  it("`resource setup --summary` says the server ignores it, and does not send it (#47)", async () => {
+    const server = new FakeServer();
+    const h = harness(server.fetch);
+    const code = await runCli(["resource", "setup", "-r", "res-1", "-s", "About res-1"], h.deps);
+
+    expect(code).toBe(0);
+    expect(h.err).toEqual([SETUP_SUMMARY_IGNORED_NOTE]);
+    // The note names the command that does set it.
+    expect(SETUP_SUMMARY_IGNORED_NOTE).toMatch(/--summary.*ignored.*context update <context_id> --summary/);
+    expect(server.toolCallArgs()).not.toHaveProperty("summary");
   });
 
   it("aggregates an import the way Python does", async () => {

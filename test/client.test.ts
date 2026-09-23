@@ -1860,6 +1860,46 @@ describe("listTags withTags drill-down (#47)", () => {
   });
 });
 
+describe("options the server ignores (#47)", () => {
+  it("setupResource defaults the context name to resourceId, which the server requires", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.setupResource({ resourceId: "crm" });
+    expect(server.toolCallArgs()).toEqual({
+      resource_id: "crm",
+      name: "crm",
+      quota_events_per_hour: 1000,
+    });
+  });
+
+  it("setupResource keeps an explicit name", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.setupResource({ resourceId: "crm", name: "crm-context", description: "d" });
+    expect(server.toolCallArgs()).toEqual({
+      resource_id: "crm",
+      name: "crm-context",
+      description: "d",
+      quota_events_per_hour: 1000,
+    });
+  });
+
+  it("setupResource does not send the deprecated summary", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.setupResource({ resourceId: "crm", summary: "ignored" });
+    expect(server.toolCallArgs()).not.toHaveProperty("summary");
+  });
+
+  it("createContext does not send the deprecated resourceId", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: true, contexts: [] };
+    const client = makeClient(server);
+    await client.createContext({ name: "n", resourceId: "x" });
+    expect(server.toolCallArgs(1)).toEqual({ name: "n", is_private: true });
+  });
+});
+
 describe("recallNearby (#5)", () => {
   it("sends the WHERE-axis args with defaults and returns the typed response", async () => {
     const server = new FakeServer();

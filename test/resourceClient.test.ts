@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { KaguraNotFoundError, KaguraFeatureNotAvailableError, KaguraQuotaError } from "../src/errors.js";
 import { ResourceClient } from "../src/resourceClient.js";
+import { FakeServer } from "./fakeServer.js";
 
 interface Recorded {
   url: string;
@@ -317,5 +318,52 @@ describe("setupResource", () => {
   it("throws when the client was not built via fromMcpUrl", async () => {
     const client = makeClient(new FakeRest());
     await expect(client.setupResource({ resourceId: "r" })).rejects.toThrow(/requires MCP URL/);
+  });
+
+  /** A client whose inner MCP session talks to `server` (#47). */
+  function mcpClient(server: FakeServer): ResourceClient {
+    return ResourceClient.fromMcpUrl({
+      apiKey: "kagura_test",
+      mcpUrl: "https://x.test/mcp",
+      fetch: server.fetch,
+    });
+  }
+
+  it("defaults the context name to resourceId, which the server requires (#47)", async () => {
+    const server = new FakeServer();
+    server.toolResults.setup_resource = {
+      status: "success",
+      context_id: "c1",
+      context_name: "crm",
+      resource_id: "crm",
+      token: "kagura_rt_x",
+      token_id: 3,
+    };
+    const result = await mcpClient(server).setupResource({ resourceId: "crm" });
+
+    expect(server.toolCallArgs()).toEqual({
+      resource_id: "crm",
+      name: "crm",
+      quota_events_per_hour: 1000,
+    });
+    expect(result.token).toBe("kagura_rt_x");
+    expect(server.requests[0]!.headers.authorization).toBe("Bearer kagura_test");
+  });
+
+  it("keeps contextName and does not send the deprecated summary (#47)", async () => {
+    const server = new FakeServer();
+    await mcpClient(server).setupResource({
+      resourceId: "crm",
+      contextName: "crm-context",
+      summary: "ignored",
+      description: "d",
+      quotaEventsPerHour: 50,
+    });
+    expect(server.toolCallArgs()).toEqual({
+      resource_id: "crm",
+      name: "crm-context",
+      description: "d",
+      quota_events_per_hour: 50,
+    });
   });
 });

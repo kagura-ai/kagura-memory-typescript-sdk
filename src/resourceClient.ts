@@ -86,9 +86,14 @@ export interface UpdateTokenOptions {
 export interface ResourceSetupOptions {
   /** Resource identifier for data ingestion. */
   resourceId: string;
-  /** Context name (defaults to resourceId server-side). */
+  /** Context name (defaults to `resourceId`; the server requires one). */
   contextName?: string;
-  /** Context summary. */
+  /**
+   * @deprecated The server's `setup_resource` has no summary (memory-cloud
+   * through v0.76.0), so this was silently dropped; it is no longer sent
+   * (#47). Set it afterwards with `KaguraClient.updateContext` on the
+   * returned `context_id` (owner only).
+   */
   summary?: string;
   /** Token description. */
   description?: string;
@@ -287,7 +292,8 @@ export class ResourceClient extends KaguraRestClient {
    * Calls the server-side atomic `setup_resource` MCP tool which creates
    * Context + Resource entity + token in a single transaction. On
    * failure, no orphan Context rows are left on the server. Requires the
-   * client to be created via `fromMcpUrl()`.
+   * client to be created via `fromMcpUrl()`. The context is named
+   * `contextName`, or `resourceId` when that is omitted.
    *
    * @returns ResourceSetupResponse with plaintext token (shown only once).
    * @throws Error if the client was not created via `fromMcpUrl()`, or
@@ -332,10 +338,10 @@ export class ResourceClient extends KaguraRestClient {
       fetch: this.fetchImpl,
     });
     try {
+      // `summary` is not forwarded: the server has none to set (#47).
       const result = await mcp.setupResource({
         resourceId: options.resourceId,
-        name: options.contextName,
-        summary: options.summary,
+        name: options.contextName ?? options.resourceId,
         description: options.description,
         quotaEventsPerHour: options.quotaEventsPerHour ?? 1000,
       });
