@@ -1564,23 +1564,299 @@ describe("listTags validation", () => {
     expect(server.toolCallArgs()).toEqual({ context_id: "c", limit: 50, min_count: 1, sort: "count" });
   });
 
-  it("maps withTags to with_tags and omits it when unset or empty (#8)", async () => {
+  it.each([[undefined], [[]], [["  ", ""]]])(
+    "stays on MCP list_tags, with no with_tags, for withTags %o",
+    async (withTags) => {
+      // An empty drill-down is a no-op filter server-side (`tags @> '{}'`),
+      // and blank values are dropped before it is judged empty.
+      const server = new FakeServer();
+      server.toolResults.list_tags = { context_id: "c", context_name: "n", tags: [], total: 0 };
+      const client = makeClient(server);
+      await client.listTags({ contextId: "c", ...(withTags === undefined ? {} : { withTags }) });
+      expect(server.toolCallArgs()).toEqual({ context_id: "c", limit: 50, min_count: 1, sort: "count" });
+      expect(server.requests.every((r) => r.method === "POST")).toBe(true);
+    },
+  );
+
+  it.each([
+    [Array.from({ length: 51 }, (_, i) => `t${i}`), /withTags accepts at most 50 tags, got 51/],
+    [["ok", "x".repeat(201)], /each withTags value must be at most 200 characters, got 201/],
+  ])("rejects withTags %#, before any request", async (withTags, pattern) => {
     const server = new FakeServer();
-    server.toolResults.list_tags = { context_id: "c", tags: [], total: 0 };
     const client = makeClient(server);
+    await expect(client.listTags({ contextId: "c", withTags })).rejects.toThrow(pattern);
+    expect(server.requests).toEqual([]);
+  });
+});
 
-    await client.listTags({ contextId: "c", prefix: "when:", withTags: ["client:acme"] });
-    await client.listTags({ contextId: "c" });
-    // An empty drill-down is a no-op filter server-side; omit it rather
-    // than sending `tags @> '{}'`, mirroring how `prefix: ""` is dropped.
-    await client.listTags({ contextId: "c", withTags: [] });
+describe("listTags withTags drill-down (#47)", () => {
+  // MCP list_tags has no with_tags through server v0.76.0 and drops it
+  // silently, so a drill-down goes to the REST route that has it.
+  const TAGS_PATH = "/api/v1/contexts/c1/tags";
+  const REST_BODY = {
+    context_id: "c1",
+    tags: [
+      { tag: "when:2026-09", count: 2, sample_summary: null, last_used_at: "2026-09-01T00:00:00Z" },
+    ],
+    total: 1,
+  };
+  const MCP_BODY = {
+    status: "success",
+    context_id: "c1",
+    context_name: "demo",
+    tags: [{ tag: "client:acme", count: 5, last_used_at: null }],
+    total: 1,
+  };
 
-    expect(server.toolCallArgs(0)).toMatchObject({
+  function drillServer(): FakeServer {
+    const server = new FakeServer();
+    server.restResults[TAGS_PATH] = REST_BODY;
+    server.toolResults.list_tags = MCP_BODY;
+    return server;
+  }
+
+  function toolCalls(server: FakeServer): Record<string, unknown>[] {
+    return server.requests
+      .filter((r) => r.body?.method === "tools/call")
+      .map((r) => r.body!.params as Record<string, unknown>);
+  }
+
+  async function rejection(promise: Promise<unknown>): Promise<unknown> {
+    return promise.then(
+      () => {
+        throw new Error("expected the call to reject");
+      },
+      (e: unknown) => e,
+    );
+  }
+
+  it("sends the drill-down to the REST tags route as repeated, trimmed with_tags keys", async () => {
+    const server = drillServer();
+    const client = makeClient(server);
+    await client.listTags({
+      contextId: "c1",
       prefix: "when:",
-      with_tags: ["client:acme"],
+      withTags: ["client:acme", " kind:invoice ", "  "],
     });
-    expect(server.toolCallArgs(1)).not.toHaveProperty("with_tags");
-    expect(server.toolCallArgs(2)).not.toHaveProperty("with_tags");
+
+    const rest = server.requests[0]!;
+    expect(rest.method).toBe("GET");
+    const url = new URL(rest.url);
+    expect(url.origin + url.pathname).toBe(`https://x.test${TAGS_PATH}`);
+    // Repeated keys, never comma-joined: the server reads `a,b` as ONE tag.
+    expect(url.searchParams.getAll("with_tags")).toEqual(["client:acme", "kind:invoice"]);
+    expect(url.searchParams.get("limit")).toBe("50");
+    expect(url.searchParams.get("min_count")).toBe("1");
+    expect(url.searchParams.get("sort")).toBe("count");
+    expect(url.searchParams.get("prefix")).toBe("when:");
+    expect(rest.headers.authorization).toBe("Bearer test-key");
+    // No MCP call ever carries with_tags.
+    for (const call of toolCalls(server)) {
+      expect(call.arguments).not.toHaveProperty("with_tags");
+    }
+  });
+
+  it("passes limit, minCount and sort through, and omits an empty prefix", async () => {
+    const server = drillServer();
+    const client = makeClient(server);
+    await client.listTags({ contextId: "c1", limit: 7, minCount: 3, sort: "alpha", withTags: ["a"] });
+    const params = new URL(server.requests[0]!.url).searchParams;
+    expect(params.get("limit")).toBe("7");
+    expect(params.get("min_count")).toBe("3");
+    expect(params.get("sort")).toBe("alpha");
+    expect(params.has("prefix")).toBe(false);
+  });
+
+  it("returns the MCP path's exact shape, naming the context via list_tags limit 1", async () => {
+    const server = drillServer();
+    const client = makeClient(server);
+    const result = await client.listTags({ contextId: "c1", withTags: ["client:acme"] });
+
+    expect(result).toEqual({
+      status: "success",
+      context_id: "c1",
+      context_name: "demo",
+      tags: [{ tag: "when:2026-09", count: 2, last_used_at: "2026-09-01T00:00:00Z" }],
+      total: 1,
+    });
+    // The REST route has no context_name. The lookup is list_tags itself:
+    // the same access check as the REST route, and one tag of payload.
+    expect(toolCalls(server)).toEqual([
+      { name: "list_tags", arguments: { context_id: "c1", limit: 1 } },
+    ]);
+    // REST first, so its errors are the ones a caller sees.
+    expect(server.requests[0]!.method).toBe("GET");
+  });
+
+  it("maps a missing last_used_at to null, as the MCP path sends it", async () => {
+    const server = drillServer();
+    server.restResults[TAGS_PATH] = { context_id: "c1", tags: [{ tag: "a", count: 1 }], total: 1 };
+    const client = makeClient(server);
+    const result = await client.listTags({ contextId: "c1", withTags: ["b"] });
+    expect(result.tags).toEqual([{ tag: "a", count: 1, last_used_at: null }]);
+  });
+
+  it("reuses the name a plain listTags returned, with no extra call", async () => {
+    const server = drillServer();
+    const client = makeClient(server);
+    await client.listTags({ contextId: "c1" });
+    const result = await client.listTags({ contextId: "c1", withTags: ["client:acme"] });
+
+    expect(result.context_name).toBe("demo");
+    expect(toolCalls(server)).toHaveLength(1); // the plain call only
+  });
+
+  it("looks a context's name up once per client", async () => {
+    const server = drillServer();
+    const client = makeClient(server);
+    await client.listTags({ contextId: "c1", withTags: ["a"] });
+    await client.listTags({ contextId: "c1", withTags: ["b"] });
+    expect(toolCalls(server)).toHaveLength(1);
+
+    // The cache belongs to the client, not the process.
+    await makeClient(server).listTags({ contextId: "c1", withTags: ["a"] });
+    expect(toolCalls(server)).toHaveLength(2);
+  });
+
+  it("keys the name cache on the canonical id the server returns", async () => {
+    // The caller may spell the UUID in upper case; both routes answer with
+    // the canonical lower-case form.
+    const id = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const server = new FakeServer();
+    server.restResults[`/api/v1/contexts/${id.toUpperCase()}/tags`] = { ...REST_BODY, context_id: id };
+    server.toolResults.list_tags = { ...MCP_BODY, context_id: id };
+    const client = makeClient(server);
+    await client.listTags({ contextId: id.toUpperCase() });
+    const result = await client.listTags({ contextId: id.toUpperCase(), withTags: ["a"] });
+
+    expect(result.context_id).toBe(id);
+    expect(result.context_name).toBe("demo");
+    expect(toolCalls(server)).toHaveLength(1);
+  });
+
+  it("throws KaguraNotFoundError on a REST 404, and looks no name up", async () => {
+    const server = new FakeServer(); // no REST result → 404
+    const client = makeClient(server);
+    const err = await rejection(client.listTags({ contextId: "c1", withTags: ["a"] }));
+
+    expect(err).toBeInstanceOf(KaguraNotFoundError);
+    expect((err as Error).message).toBe("list_tags: Not Found");
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("throws KaguraError, not KaguraConnectionError, on a REST 422", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({ detail: "with_tags accepts at most 50 tags." }),
+      { status: 422 },
+    );
+    const client = makeClient(server);
+    const err = await rejection(client.listTags({ contextId: "c1", withTags: ["a"] }));
+
+    expect(err).toBeInstanceOf(KaguraError);
+    expect(err).not.toBeInstanceOf(KaguraConnectionError);
+    expect((err as Error).message).toBe(
+      "list_tags failed (invalid_argument): with_tags accepts at most 50 tags.",
+    );
+  });
+
+  it("formats a FastAPI validation 422 the same way", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({
+        detail: [{ loc: ["path", "context_id"], msg: "Input should be a valid UUID", type: "uuid_parsing" }],
+      }),
+      { status: 422 },
+    );
+    const client = makeClient(server);
+    const err = await rejection(client.listTags({ contextId: "nope", withTags: ["a"] }));
+
+    expect(err).toBeInstanceOf(KaguraError);
+    expect(err).not.toBeInstanceOf(KaguraConnectionError);
+    expect((err as Error).message).toMatch(/^list_tags failed \(invalid_argument\): .*valid UUID/);
+  });
+
+  it.each([
+    [401, KaguraAuthError],
+    [429, KaguraRateLimitError],
+  ])("keeps the standard mapping for HTTP %i", async (status, errorClass) => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(JSON.stringify({ detail: "no" }), { status });
+    const client = makeClient(server);
+    await expect(client.listTags({ contextId: "c1", withTags: ["a"] })).rejects.toBeInstanceOf(
+      errorClass,
+    );
+  });
+
+  it("throws KaguraNotFoundError when the name lookup cannot see the context", async () => {
+    const server = drillServer();
+    server.toolResults.list_tags = {
+      status: "error",
+      error: "context_not_found",
+      message: "Context not found or you don't have access to it.",
+    };
+    const client = makeClient(server);
+    await expect(client.listTags({ contextId: "c1", withTags: ["a"] })).rejects.toBeInstanceOf(
+      KaguraNotFoundError,
+    );
+  });
+
+  it("throws KaguraConnectionError when the name lookup has no context_name", async () => {
+    const server = drillServer();
+    server.toolResults.list_tags = { status: "success", context_id: "c1", tags: [], total: 0 };
+    const client = makeClient(server);
+    await expect(client.listTags({ contextId: "c1", withTags: ["a"] })).rejects.toThrow(
+      /Unexpected list_tags response: missing 'context_name'/,
+    );
+  });
+
+  it.each([
+    [{ context_id: "c1", total: 0 }],
+    [{ context_id: "c1", tags: [] }],
+    [{ tags: [], total: 0 }],
+    [{ context_id: "c1", tags: [{ tag: "a" }], total: 1 }],
+  ])("throws KaguraConnectionError on a malformed REST body %o", async (body) => {
+    const server = drillServer();
+    server.restResults[TAGS_PATH] = body;
+    const client = makeClient(server);
+    const err = await rejection(client.listTags({ contextId: "c1", withTags: ["a"] }));
+
+    expect(err).toBeInstanceOf(KaguraConnectionError);
+    expect((err as Error).message).toMatch(/^Unexpected list_tags response/);
+    expect(toolCalls(server)).toEqual([]);
+  });
+
+  it("drops blank values before counting them against the 50-tag cap", async () => {
+    const server = drillServer();
+    const client = makeClient(server);
+    const withTags = [...Array.from({ length: 50 }, (_, i) => `t${i}`), ...Array(10).fill("  ")];
+    await client.listTags({ contextId: "c1", withTags });
+    expect(new URL(server.requests[0]!.url).searchParams.getAll("with_tags")).toHaveLength(50);
+  });
+
+  it("measures the 200-character cap in characters, as the server does", async () => {
+    // Python's len() counts code points; a UTF-16 .length would count this
+    // tag as 400 and refuse a value the server accepts.
+    const server = drillServer();
+    const client = makeClient(server);
+    await client.listTags({ contextId: "c1", withTags: ["🏷".repeat(200)] });
+    expect(new URL(server.requests[0]!.url).searchParams.get("with_tags")).toBe("🏷".repeat(200));
+  });
+
+  it("uses the REST base URL of a workspace-scoped MCP URL", async () => {
+    const server = drillServer();
+    const client = makeClient(server, { mcpUrl: "https://x.test/mcp/w/ws-1?profile=core" });
+    await client.listTags({ contextId: "c1", withTags: ["a"] });
+    expect(server.requests[0]!.url).toMatch(/^https:\/\/x\.test\/api\/v1\/contexts\/c1\/tags\?/);
+    // The name lookup is an MCP call and keeps the MCP URL as given.
+    expect(server.requests[1]!.url).toBe("https://x.test/mcp/w/ws-1?profile=core");
+  });
+
+  it("encodes the context id into one path segment", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listTags({ contextId: "a/b", withTags: ["a"] }).catch(() => undefined);
+    expect(new URL(server.requests[0]!.url).pathname).toBe("/api/v1/contexts/a%2Fb/tags");
   });
 });
 
