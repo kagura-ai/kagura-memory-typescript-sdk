@@ -135,6 +135,7 @@ export type { RefreshOptions } from "./auth/refresh.js";
 
 export {
   authorizeDevice,
+  buildInviteLink,
   pollForToken,
   refreshAccessToken,
   revokeToken,

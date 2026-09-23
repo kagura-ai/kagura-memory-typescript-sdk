@@ -467,3 +467,91 @@ export async function revokeToken(
     return false;
   }
 }
+
+// memory-cloud's beta-invite token shape (its beta_invite_service). Checked
+// client-side so a mistyped invite fails before any request, not at sign-up.
+const INVITE_TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
+
+/** An invite reduced to what the `/join` hand-off needs. */
+export interface ParsedInvite {
+  token: string;
+  /** Origin of a pasted `/join/<token>` link; `null` for a bare token. */
+  origin: string | null;
+}
+
+/**
+ * Read an invite given as a bare token or as a link whose path ends in
+ * `/join/<token>`. Any query or fragment on the link is ignored.
+ *
+ * Returns `null` instead of throwing because the natural error would quote
+ * the input, and the token is a sign-up credential: callers word their own
+ * error without it.
+ */
+export function parseInvite(value: string): ParsedInvite | null {
+  const text = value.trim();
+  if (INVITE_TOKEN_RE.test(text)) {
+    return { token: text, origin: null };
+  }
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return null;
+  }
+  const token = /\/join\/([^/]*)$/.exec(url.pathname)?.[1];
+  if (token === undefined || !INVITE_TOKEN_RE.test(token)) {
+    return null;
+  }
+  return { token, origin: url.origin };
+}
+
+/**
+ * The one link that signs a new account up with an invite and lands it on
+ * the approval page with the code filled in:
+ * `<origin>/join/<token>?return_to=<path and query of verificationUriComplete>`.
+ *
+ * Pure, and meant for `login()`'s `onUserCode` — the first point where both
+ * the invite and the user code are known. The origin is `verificationUri`'s,
+ * the frontend, which serves `/join` as well as `/device`. `return_to` is
+ * the relative path the server validates as same-origin; when the complete
+ * form is empty it is `verificationUri`'s path plus `?user_code=`.
+ *
+ * Needs a memory-cloud whose `/join` honours `return_to` (memory-cloud
+ * #1655). An older one signs the user up and stops on its dashboard, where
+ * `verificationUriComplete` still approves the pending code — so show that
+ * too.
+ *
+ * @param invite a bare token or a `…/join/<token>` link.
+ * @throws KaguraAuthError the invite is malformed (the message never quotes
+ *   it), or a pasted link belongs to a different deployment than `auth`.
+ */
+export function buildInviteLink(
+  invite: string,
+  auth: Pick<DeviceAuthorizationResponse, "userCode" | "verificationUri" | "verificationUriComplete">,
+): string {
+  const parsed = parseInvite(invite);
+  if (parsed === null) {
+    throw new KaguraAuthError(
+      "The invite is neither an invite token nor a /join/<token> link.",
+    );
+  }
+  const frontend = new URL(auth.verificationUri);
+  if (parsed.origin !== null && parsed.origin !== frontend.origin) {
+    throw new KaguraAuthError(
+      `This invite belongs to another deployment (${parsed.origin}), ` +
+        `not the one being logged into (${frontend.origin}).\n` +
+        "  Log in to the server that issued it, or use an invite for this one.",
+    );
+  }
+  let returnTo: string;
+  if (auth.verificationUriComplete) {
+    const complete = new URL(auth.verificationUriComplete, frontend);
+    returnTo = `${complete.pathname}${complete.search}`;
+  } else {
+    returnTo = `${frontend.pathname}?${new URLSearchParams({ user_code: auth.userCode })}`;
+  }
+  return `${frontend.origin}/join/${parsed.token}?return_to=${encodeURIComponent(returnTo)}`;
+}

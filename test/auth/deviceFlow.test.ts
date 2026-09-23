@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CLIENT_ID,
   authorizeDevice,
+  buildInviteLink,
+  parseInvite,
   pollForToken,
   refreshAccessToken,
   revokeToken,
@@ -444,5 +446,102 @@ describe("revokeToken", () => {
 
   it("returns false on network failure (never throws)", async () => {
     expect(await revokeToken(SERVER, { token: "atok", fetch: failingFetch() })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Invite hand-off (#44)
+// ---------------------------------------------------------------------------
+
+/** Matches the server's `^[A-Za-z0-9_-]{20,128}$`; 30 characters. */
+const INVITE = "inv_ABCDEFGHIJKLMNOPQRSTUV-123";
+
+/**
+ * A device response whose frontend (`app.test`) is not the API host, as on
+ * a deployment that serves them apart: the link must follow the frontend.
+ */
+const DEVICE = {
+  userCode: "WDJB-MJHT",
+  verificationUri: "https://app.test/device",
+  verificationUriComplete: "https://app.test/device?user_code=WDJB-MJHT",
+};
+
+const LINK = `https://app.test/join/${INVITE}?return_to=%2Fdevice%3Fuser_code%3DWDJB-MJHT`;
+
+describe("parseInvite", () => {
+  it("accepts a bare token", () => {
+    expect(parseInvite(INVITE)).toEqual({ token: INVITE, origin: null });
+  });
+
+  it("accepts a /join/<token> link, ignoring any query or fragment", () => {
+    expect(parseInvite(`https://app.test/join/${INVITE}?utm=mail#top`)).toEqual({
+      token: INVITE,
+      origin: "https://app.test",
+    });
+  });
+
+  it("tolerates the whitespace a paste drags along", () => {
+    expect(parseInvite(`  ${INVITE}\n`)?.token).toBe(INVITE);
+  });
+
+  it.each([
+    ["too short", "a".repeat(19)],
+    ["too long", "a".repeat(129)],
+    ["outside the alphabet", `${INVITE}!`],
+    ["empty", ""],
+    ["a link with no /join/ segment", `https://app.test/invite/${INVITE}`],
+    ["a link with a segment after the token", `https://app.test/join/${INVITE}/extra`],
+    ["a link whose token is malformed", "https://app.test/join/short"],
+    ["a link on a non-web scheme", `ftp://app.test/join/${INVITE}`],
+    ["a host without a scheme", `app.test/join/${INVITE}`],
+  ])("returns null for %s", (_label, value) => {
+    expect(parseInvite(value)).toBeNull();
+  });
+});
+
+describe("buildInviteLink", () => {
+  it("builds <frontend>/join/<token>?return_to=<device path and query>", () => {
+    expect(buildInviteLink(INVITE, DEVICE)).toBe(LINK);
+  });
+
+  it("builds the same link from a pasted link on the same origin", () => {
+    expect(buildInviteLink(`https://app.test/join/${INVITE}?x=1`, DEVICE)).toBe(LINK);
+  });
+
+  it("joins at the frontend origin's /join, whatever path the pasted link had", () => {
+    // Only the pasted link's origin is compared; the path the link is
+    // rebuilt on is the frontend's own /join, where the hand-off lives.
+    expect(buildInviteLink(`https://app.test/app/join/${INVITE}`, DEVICE)).toBe(LINK);
+  });
+
+  it("falls back to verificationUri's path plus the user code when the complete form is empty", () => {
+    expect(buildInviteLink(INVITE, { ...DEVICE, verificationUriComplete: "" })).toBe(LINK);
+  });
+
+  it("refuses a link from another deployment, naming origins but never the token", () => {
+    let caught: unknown;
+    try {
+      buildInviteLink(`https://other.test/join/${INVITE}`, DEVICE);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    const msg = (caught as Error).message;
+    expect(msg).toMatch(/another deployment/);
+    expect(msg).toContain("https://other.test");
+    expect(msg).toContain("https://app.test");
+    expect(msg).not.toContain(INVITE);
+  });
+
+  it("refuses a malformed invite without quoting it", () => {
+    const bad = "not-a-real-invite-but-close!";
+    let caught: unknown;
+    try {
+      buildInviteLink(bad, DEVICE);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    expect((caught as Error).message).not.toContain(bad);
   });
 });

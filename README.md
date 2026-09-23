@@ -150,6 +150,40 @@ An empty profile name would create a nameless profile and an empty scope
 would go to the server verbatim. Every other option treats `--flag=` as
 Python does.
 
+#### Signing up with an invite
+
+On a deployment that admits new accounts only by beta invite, pass the
+invite to `auth login`, either as the bare token or as the
+`https://…/join/<token>` link it arrived in:
+
+```bash
+npx kagura-memory auth login --invite <token-or-link>
+```
+
+Without it, a new user who starts from `auth login` is refused at sign-up:
+the approval page sends a signed-out visitor to the login page, which does
+not carry an invite. With it, the CLI first asks the server how to present
+the invite (`GET /api/v1/system/info`, which takes no credentials):
+
+- **The server supports the hand-off** (memory-cloud 0.76.0 or later): one
+  link, `<frontend>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>`,
+  that signs up with the invite and lands on the approval page with the
+  code filled in. The browser opens that link. Below it, "If you land on the
+  dashboard instead, approve here:" and the approval URL cover a user who
+  is already signed in.
+- **An older or unrecognised version, or the check failed**: two steps. The
+  plain `/join/<token>` link, which the browser opens, then the approval URL.
+- **The server does not take invites** (`features.beta_invites` off): a
+  one-line notice, then the ordinary prompt.
+
+The invite is checked before any request, and a malformed one exits 2. A
+link from a different deployment than the one being logged into aborts
+before the device code is polled, so no profile is written. The token is
+never saved, in `credentials.json` or anywhere else, and never appears in an
+error message: it is printed only inside the link. Every other `auth`
+subcommand rejects `--invite` with exit 2 rather than ignoring it.
+`--no-browser` works as it does without an invite.
+
 #### Logging in from TypeScript
 
 `login()` runs the OAuth 2.0 Device Authorization Grant (RFC 8628) and
@@ -201,6 +235,29 @@ primitives are exported too: `authorizeDevice`, `pollForToken`,
 `refreshAccessToken`, `revokeToken`, plus the credentials store
 (`loadCredentialsFile`, `updateProfile`, `setDefaultProfile`,
 `deleteProfile`, …).
+
+For a new user holding a beta invite, `buildInviteLink` builds the same
+sign-up-and-approve link the CLI's `--invite` prints. `onUserCode` is the
+first point where both the invite and the user code are known, so call it
+there. It is a pure function and does not check the server version; that
+check is the CLI's own.
+
+```ts
+import { buildInviteLink, login } from "kagura-memory";
+
+const invite = "https://memory.kagura-ai.com/join/<token>"; // or the bare token
+
+await login({
+  onUserCode: (auth) => {
+    // Throws KaguraAuthError, before any polling, if the link belongs to
+    // another deployment than the one being logged into.
+    console.log(`Sign up and approve: ${buildInviteLink(invite, auth)}`);
+    // A signed-in user, or a server older than memory-cloud 0.76.0, ends
+    // up on the dashboard instead; the pending code is approved here.
+    console.log(`Or approve at: ${auth.verificationUriComplete}`);
+  },
+});
+```
 
 #### Refreshing
 

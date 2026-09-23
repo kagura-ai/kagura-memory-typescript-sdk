@@ -42,6 +42,12 @@ describe("public surface: interactive login (#9)", () => {
     expect(typeof sdk.REFRESH_SKEW_SEC).toBe("number");
   });
 
+  it("exports the invite-link builder next to the primitives (#44)", () => {
+    // An app that embeds login() builds the same link the CLI prints, in
+    // its own onUserCode.
+    expect(typeof sdk.buildInviteLink).toBe("function");
+  });
+
   it("exports the OAuth client constants", () => {
     expect(sdk.DEFAULT_CLIENT_ID).toBe("kagura-cli");
     expect(sdk.DEVICE_FLOW_GRANT_TYPE).toBe("urn:ietf:params:oauth:grant-type:device_code");

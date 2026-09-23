@@ -16,6 +16,7 @@ import {
   DEFAULT_SCOPE,
   READ_ONLY_SCOPE,
   login,
+  resolveLoginMcpUrl,
   type LoginOptions,
 } from "../auth/login.js";
 import { refresh, type RefreshOptions } from "../auth/refresh.js";
@@ -27,8 +28,13 @@ import {
   setDefaultProfile,
   type OAuthCredentials,
 } from "../auth/credentials.js";
-import type { DeviceAuthorizationResponse } from "../auth/deviceFlow.js";
+import {
+  buildInviteLink,
+  parseInvite,
+  type DeviceAuthorizationResponse,
+} from "../auth/deviceFlow.js";
 import { excMessage } from "../errors.js";
+import { baseUrlFromMcp } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 import {
   isGroup,
@@ -50,6 +56,7 @@ import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
 import { SETUP_GROUP } from "./commands/setup.js";
+import { checkInviteSupport, type InviteSupport } from "./invite.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
@@ -60,6 +67,8 @@ import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
  * unambiguous — no two `auth` subcommands give the same flag different
  * meanings — and because `cmdLogin`/`cmdLogout` already reject the
  * combinations that are individually valid but mutually exclusive.
+ * `--invite` is the exception that gets refused rather than ignored where
+ * it is not read; see {@link refuseInvite}.
  */
 const AUTH_SPEC: ParseSpec = {
   flags: [
@@ -68,6 +77,14 @@ const AUTH_SPEC: ParseSpec = {
     { name: "scope", type: "value", rejectEmpty: true, help: 'Space-separated scopes, e.g. "memory:read memory:write"' },
     { name: "read-only", type: "switch", help: "Request memory:read only" },
     { name: "no-browser", type: "switch", help: "Print the code and URL without opening a browser" },
+    {
+      name: "invite",
+      type: "value",
+      metavar: "TOKEN_OR_LINK",
+      // A token may begin with "-"; see FlagSpec.dashValue.
+      dashValue: true,
+      help: "login: sign up with a beta invite (token or /join/<token> link)",
+    },
     { name: "all", type: "switch", help: "logout: remove every stored profile" },
     { name: "yes", type: "switch", help: "logout: skip the confirmation prompt" },
   ],
@@ -80,6 +97,8 @@ export interface CliDeps extends CommandDeps {
   refresh: typeof refresh;
   /** Overrides for tests; production passes nothing. */
   credentialsPath?: string;
+  /** Overrides for tests; production passes nothing (global fetch). */
+  fetch?: typeof globalThis.fetch;
 }
 
 const ROOT_SUMMARY = "Kagura Memory Cloud CLI - AI-driven memory management.";
@@ -97,16 +116,66 @@ Default scope is "${DEFAULT_SCOPE}"; --read-only requests "${READ_ONLY_SCOPE}".
 Narrowing a scope on refresh is silent; widening needs consent, so it
 re-runs the device flow.`;
 
-/** Print the code and URL, then optionally try to open a browser. */
-function devicePrompt(deps: CliDeps, openBrowserFlag: boolean) {
+/** `--invite`, parsed and checked against the server before login starts. */
+interface InviteHandoff {
+  /** The flag's value, handed to `buildInviteLink`; never printed bare. */
+  value: string;
+  support: InviteSupport;
+}
+
+/**
+ * Print the code and URL, then optionally try to open a browser.
+ *
+ * With `--invite`, the URL printed and opened is the invite link: the one
+ * link when the server can return to the approval page after sign-up, the
+ * plain `/join` link as step one of two when it cannot or might not, and
+ * none at all when the server takes no invites.
+ */
+function devicePrompt(deps: CliDeps, openBrowserFlag: boolean, invite?: InviteHandoff) {
   return async (auth: DeviceAuthorizationResponse): Promise<void> => {
-    const url = auth.verificationUriComplete || auth.verificationUri;
+    const approveUrl = auth.verificationUriComplete || auth.verificationUri;
+    // Built before anything is printed, whichever way the invite is shown:
+    // a link from another deployment throws here, and login() awaits this
+    // callback, so the login stops before it polls or writes a profile.
+    const link = invite === undefined ? undefined : buildInviteLink(invite.value, auth);
+    let url = approveUrl;
+    let steps = ["  Then approve at:", `    ${approveUrl}`];
+
+    if (invite?.support === "off") {
+      deps.write("");
+      deps.write("  (--invite: this server does not take invite links; logging in without one.)");
+    } else if (link !== undefined && invite?.support === "one-link") {
+      url = link;
+      steps = [
+        "  Then sign up with your invite and approve at:",
+        `    ${link}`,
+        // An already-signed-in user, or a /join that still ends on the
+        // dashboard, leaves the code pending; this approves it directly.
+        "  If you land on the dashboard instead, approve here:",
+        `    ${approveUrl}`,
+      ];
+    } else if (link !== undefined) {
+      // return_to would be ignored, so the browser opens /join alone.
+      const join = new URL(link);
+      join.search = "";
+      url = join.toString();
+      steps = [
+        "  This server may not return you to the approval page after sign-up,",
+        "  so it takes two steps:",
+        "  1. Sign up with your invite:",
+        `    ${url}`,
+        "  2. Then approve at:",
+        `    ${approveUrl}`,
+      ];
+    }
+
     // Unconditionally, and before any launch attempt: if the browser opens
     // silently or fails, the operator can still copy the code by eye.
     deps.write("");
     deps.write(`  First copy your one-time code: ${auth.userCode}`);
-    deps.write("  Then approve at:");
-    deps.write(`    ${url}`);
+    for (const line of steps) {
+      deps.write(line);
+    }
     deps.write("");
 
     if (!openBrowserFlag) {
@@ -156,14 +225,29 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
     return 2;
   }
 
+  let invite: InviteHandoff | undefined;
+  if (args.values.invite !== undefined) {
+    // Before any request. The value is not quoted back: an invite is a
+    // sign-up credential, and stderr ends up in CI logs.
+    if (parseInvite(args.values.invite) === null) {
+      deps.writeError(
+        "--invite takes an invite token or a /join/<token> link; the value given is neither.",
+      );
+      return 2;
+    }
+    const server = baseUrlFromMcp(resolveLoginMcpUrl(args.values.server));
+    invite = { value: args.values.invite, support: await checkInviteSupport(server, deps.fetch) };
+  }
+
   const options: LoginOptions = {
-    onUserCode: devicePrompt(deps, !args.flags.has("no-browser")),
+    onUserCode: devicePrompt(deps, !args.flags.has("no-browser"), invite),
   };
   if (args.values.profile !== undefined) options.profile = args.values.profile;
   if (args.values.server !== undefined) options.mcpUrl = args.values.server;
   if (readOnly) options.scope = READ_ONLY_SCOPE;
   else if (scope !== undefined) options.scope = scope;
   if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
+  if (deps.fetch !== undefined) options.fetch = deps.fetch;
 
   const creds = await deps.login(options);
   deps.write(
@@ -324,45 +408,70 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   return 0;
 }
 
+/**
+ * Refuse `--invite` on an `auth` subcommand that does not read it.
+ *
+ * AUTH_SPEC is pooled, so every subcommand parses the flag; only `login`
+ * uses it. Ignored elsewhere, it would read as though the invite had been
+ * used — plausibly so on `refresh`, which can re-run the device flow — and
+ * a flag that looks like it changes behaviour but does not is worse than
+ * one that is rejected (the argument `setup claude` makes too). The
+ * message names the flag, never its value.
+ */
+function refuseInvite(run: Command["run"]): Command["run"] {
+  return async (deps, args) => {
+    if (args.values.invite !== undefined) {
+      deps.writeError("--invite applies only to 'auth login'.");
+      return 2;
+    }
+    return run(deps, args);
+  };
+}
+
 /** The `auth` subcommands, as registry entries. */
 const AUTH_GROUP: CommandGroup = {
   summary: "OAuth2 device-flow authentication for Kagura Memory.",
   commands: {
     login: {
       summary: "Authenticate via OAuth2 device flow.",
+      description:
+        "  --invite signs a new account up with a beta invite and approves this\n" +
+        "  login from one link, on a server that supports it. An older server\n" +
+        "  gets two steps instead, and one that takes no invites a notice. The\n" +
+        "  invite is never saved, and is printed only inside a link.",
       spec: AUTH_SPEC,
       run: (deps, args) => cmdLogin(deps as CliDeps, args),
     },
     refresh: {
       summary: "Rotate access_token (optionally requesting a new scope).",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdRefresh(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdRefresh(deps as CliDeps, args)),
     },
     status: {
       summary: "Show the current profile, server, scope, expiry, and workspace.",
       spec: AUTH_SPEC,
-      run: async (deps, args) => cmdStatus(deps as CliDeps, args),
+      run: refuseInvite(async (deps, args) => cmdStatus(deps as CliDeps, args)),
     },
     use: {
       summary: "Set the default profile used when none is selected.",
       args: "PROFILE",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdUse(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdUse(deps as CliDeps, args)),
     },
     logout: {
       summary: "Delete a stored profile (or all of them).",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdLogout(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdLogout(deps as CliDeps, args)),
     },
     list: {
       summary: "List every stored profile; the default is marked with `*`.",
       spec: AUTH_SPEC,
-      run: async (deps) => cmdList(deps as CliDeps),
+      run: refuseInvite(async (deps) => cmdList(deps as CliDeps)),
     },
     token: {
       summary: "Emit the raw access_token to stdout (for CI / scripts).",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdToken(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdToken(deps as CliDeps, args)),
     },
   },
 };
