@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   KaguraConnectionError,
   KaguraIntegrityError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "../src/errors.js";
 import { FilesClient } from "../src/filesClient.js";
@@ -309,7 +309,7 @@ describe("403 workspace hint (#115)", () => {
     expect((error as Error).message).toContain("HTTP 403");
   });
 
-  it("maps a FEAT-001 plan refusal to KaguraPlanError, not the workspace hint (#40)", async () => {
+  it("maps a FEAT-001 plan refusal to KaguraFeatureNotAvailableError, not the workspace hint (#40)", async () => {
     const server = new FakeServer();
     server.routes["/api/v1/files/reserve"] = {
       status: 403,
@@ -329,8 +329,8 @@ describe("403 workspace hint (#115)", () => {
     const error = await client
       .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" })
       .catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(KaguraPlanError);
-    expect((error as KaguraPlanError).feature).toBe("file_storage");
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((error as KaguraFeatureNotAvailableError).feature).toBe("file_storage");
     expect((error as Error).message).not.toContain("workspace not accessible");
   });
 
@@ -348,7 +348,7 @@ describe("403 workspace hint (#115)", () => {
     const error = await client
       .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" })
       .catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
     expect((error as Error).message).toBe("HTTP 403");
   });
 

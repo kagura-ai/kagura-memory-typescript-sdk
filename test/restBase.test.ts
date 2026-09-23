@@ -9,7 +9,7 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "../src/errors.js";
 import { SDK_VERSION } from "../src/http.js";
@@ -266,7 +266,7 @@ describe("status mapping", () => {
     expect((err as KaguraAuthError).message).toBe("no access (HTTP 403)");
   });
 
-  it("maps a v0.75 403 FEAT-001 to KaguraPlanError by its gate", async () => {
+  it("maps a v0.75 403 FEAT-001 to KaguraFeatureNotAvailableError by its gate", async () => {
     const server = new FakeRest();
     server.status = 403;
     server.body = JSON.stringify({
@@ -284,8 +284,8 @@ describe("status mapping", () => {
     const probe = makeProbe(server);
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/resource-tokens"));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    const plan = err as KaguraPlanError;
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
     expect(plan.message).toBe(
       "Feature 'resources' not available on L plan. Upgrade to XL plan to access this feature.",
     );
@@ -296,7 +296,7 @@ describe("status mapping", () => {
     expect(plan.currentPlan).toBe("pro");
   });
 
-  it("maps a pre-v0.75 403 FEAT-001 to KaguraPlanError by its code", async () => {
+  it("maps a pre-v0.75 403 FEAT-001 to KaguraFeatureNotAvailableError by its code", async () => {
     // v0.68-v0.74 sent only details.feature beside the code.
     const server = new FakeRest();
     server.status = 403;
@@ -308,10 +308,10 @@ describe("status mapping", () => {
     const probe = makeProbe(server);
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/resource-tokens"));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).gate).toBeNull();
-    expect((err as KaguraPlanError).feature).toBe("resources");
-    expect((err as KaguraPlanError).requiredPlan).toBeNull();
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).gate).toBeNull();
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("resources");
+    expect((err as KaguraFeatureNotAvailableError).requiredPlan).toBeNull();
   });
 
   it("maps a 403 QUOTA-001 to KaguraQuotaError — a 403 is not always a plan refusal", async () => {
@@ -337,7 +337,7 @@ describe("status mapping", () => {
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/resource-tokens"));
     expect(err).toBeInstanceOf(KaguraQuotaError);
-    expect(err).not.toBeInstanceOf(KaguraPlanError);
+    expect(err).not.toBeInstanceOf(KaguraFeatureNotAvailableError);
     const quota = err as KaguraQuotaError;
     expect(quota.message).toBe("Token limit reached. Your L plan allows 3 active tokens.");
     expect(quota.gate).toBe("quota");
@@ -351,7 +351,7 @@ describe("status mapping", () => {
 
   it("chooses the class from the gate before the code", async () => {
     // The gate and the code disagree here, so checking the code first
-    // would give a KaguraPlanError.
+    // would give a KaguraFeatureNotAvailableError.
     const server = new FakeRest();
     server.status = 403;
     server.body = JSON.stringify({
@@ -377,8 +377,8 @@ describe("status mapping", () => {
     const probe = makeProbe(server);
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).feature).toBe("team_invitations");
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("team_invitations");
   });
 
   it("maps a pre-v0.75 403 CONNECTOR-001 to KaguraQuotaError by its code", async () => {
@@ -450,7 +450,7 @@ describe("status mapping", () => {
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
     expect(err).toBeInstanceOf(KaguraQuotaError);
-    expect(err).not.toBeInstanceOf(KaguraPlanError);
+    expect(err).not.toBeInstanceOf(KaguraFeatureNotAvailableError);
   });
 
   it("scrubs a gate refusal's message carrying credential markers", async () => {
@@ -464,11 +464,11 @@ describe("status mapping", () => {
     const probe = makeProbe(server);
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).message).toBe("HTTP 403");
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).message).toBe("HTTP 403");
   });
 
-  it("keeps a FEAT-001 behind an allowlist or deployment switch a KaguraPlanError", async () => {
+  it("keeps a FEAT-001 behind an allowlist or deployment switch a KaguraFeatureNotAvailableError", async () => {
     // Pre-v0.75 servers send these as bare FEAT-001, so the class must not
     // change with the server version; `gate` says no upgrade will help.
     const server = new FakeRest();
@@ -481,9 +481,9 @@ describe("status mapping", () => {
     const probe = makeProbe(server);
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).gate).toBe("deployment");
-    expect((err as KaguraPlanError).requiredPlan).toBeNull();
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).gate).toBe("deployment");
+    expect((err as KaguraFeatureNotAvailableError).requiredPlan).toBeNull();
   });
 
   it("leaves a 403 that is no gate refusal on the generic mapping", async () => {

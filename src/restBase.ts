@@ -134,7 +134,7 @@ function jsonTypeName(value: unknown): string {
  * default hooks implement the majority behavior:
  *
  * - 401 → {@link KaguraAuthError} with an OAuth-aware recovery hint
- * - 403 → {@link KaguraPlanError} / {@link KaguraQuotaError} for a plan
+ * - 403 → {@link KaguraFeatureNotAvailableError} / {@link KaguraQuotaError} for a plan
  *   or quota refusal (see {@link gateRefusal}), else the generic
  *   `HTTP 403: <detail>` mapping
  * - 404 → {@link KaguraNotFoundError} (server detail or "Not found")

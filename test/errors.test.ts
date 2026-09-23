@@ -11,7 +11,7 @@ import {
   KaguraNotFoundError,
   KaguraPartialRollbackError,
   KaguraPermissionError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
@@ -60,10 +60,10 @@ describe("gate errors (#40)", () => {
   });
 
   it("every new class is a KaguraError", () => {
-    expect(new KaguraPlanError("plan")).toBeInstanceOf(KaguraError);
+    expect(new KaguraFeatureNotAvailableError("plan")).toBeInstanceOf(KaguraError);
     expect(new KaguraPartialRollbackError("partial")).toBeInstanceOf(KaguraError);
     expect(new KaguraPermissionError("denied")).toBeInstanceOf(KaguraError);
-    expect(new KaguraPlanError("plan").name).toBe("KaguraPlanError");
+    expect(new KaguraFeatureNotAvailableError("plan").name).toBe("KaguraFeatureNotAvailableError");
   });
 
   it("KaguraQuotaError keeps its (message, retryAfter, options) signature", () => {
@@ -136,8 +136,8 @@ describe("gate errors (#40)", () => {
     expect(garbled.retryAfter).toBeNull();
   });
 
-  it("KaguraPlanError carries the plan payload and defaults it to null", () => {
-    const e = new KaguraPlanError("upgrade", {
+  it("KaguraFeatureNotAvailableError carries the plan payload and defaults it to null", () => {
+    const e = new KaguraFeatureNotAvailableError("upgrade", {
       gate: "plan",
       feature: "resources",
       requiredPlan: "promax",
@@ -150,7 +150,7 @@ describe("gate errors (#40)", () => {
     expect(e.requiredPlanDisplay).toBe("XL");
     expect(e.currentPlan).toBe("pro");
 
-    const bare = new KaguraPlanError("upgrade");
+    const bare = new KaguraFeatureNotAvailableError("upgrade");
     expect(bare.gate).toBeNull();
     expect(bare.feature).toBeNull();
     expect(bare.requiredPlan).toBeNull();

@@ -117,7 +117,7 @@ export interface ListInvitationsOptions {
  *   Also returned for a workspace-scoped key used against a different
  *   workspace (uniform 404, memory-cloud #963) — a 404 here does NOT
  *   prove the resource is absent.
- * - `KaguraPlanError` — the plan lacks the feature (403 `FEAT-001`):
+ * - `KaguraFeatureNotAvailableError` — the plan lacks the feature (403 `FEAT-001`):
  *   a public-bound member key, or team invitations (server v0.75.0+;
  *   older servers answer 403 `HTTP-403`, a `KaguraConnectionError`)
  * - `KaguraQuotaError` — member seat cap or rate limit exceeded (429);
@@ -385,7 +385,7 @@ export class WorkspaceClient extends KaguraRestClient {
    * key/workspace mismatch) — those pass through untouched. Only the
    * deliberately uniform denial gets the owner-key hint, because that is
    * the one a non-owner static key actually hits. A `FEAT-001` plan gate
-   * never gets here (it becomes a {@link KaguraPlanError}); a pre-v0.75
+   * never gets here (it becomes a {@link KaguraFeatureNotAvailableError}); a pre-v0.75
    * `HTTP-403` one does, and passes through as text.
    */
   private format403(serverDetail: string): string {

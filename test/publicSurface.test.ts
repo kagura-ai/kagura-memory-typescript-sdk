@@ -149,7 +149,7 @@ describe("public surface: secret store (#28)", () => {
 
 describe("public surface: typed gate errors (#40)", () => {
   it.each([
-    "KaguraPlanError",
+    "KaguraFeatureNotAvailableError",
     "KaguraPartialRollbackError",
     "KaguraPermissionError",
     "KaguraQuotaError",

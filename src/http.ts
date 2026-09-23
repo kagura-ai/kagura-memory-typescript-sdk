@@ -4,7 +4,7 @@ import {
   KaguraAuthError,
   KaguraConnectionError,
   KaguraError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "./errors.js";
@@ -283,7 +283,7 @@ function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
 
 /**
  * Build the typed error for a plan or quota refusal, or `null` if it is
- * neither: {@link KaguraPlanError} or {@link KaguraQuotaError}, as
+ * neither: {@link KaguraFeatureNotAvailableError} or {@link KaguraQuotaError}, as
  * `gateKind` decides, carrying the payload `block` holds.
  */
 export function gateError(
@@ -299,7 +299,7 @@ export function gateError(
   }
   const options = gateOptions(block);
   return kind === "plan"
-    ? new KaguraPlanError(message, options)
+    ? new KaguraFeatureNotAvailableError(message, options)
     : new KaguraQuotaError(message, retryAfter, options);
 }
 

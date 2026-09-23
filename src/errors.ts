@@ -229,8 +229,12 @@ export class KaguraQuotaError extends KaguraError {
  * Show `requiredPlanDisplay`; decide with `requiredPlan`. Both are `null`
  * when no tier lifts the refusal, and a v0.75.0+ server says why in
  * `gate`: `"allowlist"` or `"deployment"` mean an upgrade will not help.
+
+ *
+ * Named after the server's MCP `feature_not_available` code and the Python
+ * SDK's class of the same name: not every refusal here is about the plan.
  */
-export class KaguraPlanError extends KaguraError {
+export class KaguraFeatureNotAvailableError extends KaguraError {
   readonly gate: string | null;
   readonly feature: string | null;
   readonly requiredPlan: string | null;

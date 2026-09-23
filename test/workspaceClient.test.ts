@@ -18,7 +18,7 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "../src/errors.js";
 import {
@@ -505,7 +505,7 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     expect((err as KaguraConnectionError).message).toContain("Pro plan");
   });
 
-  it("maps the v0.75 team-invitations FEAT-001 to KaguraPlanError", async () => {
+  it("maps the v0.75 team-invitations FEAT-001 to KaguraFeatureNotAvailableError", async () => {
     const server = new FakeRest();
     server.status = 403;
     server.body = JSON.stringify({
@@ -524,8 +524,8 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     const client = makeClient(server);
 
     const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    const plan = err as KaguraPlanError;
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
     expect(plan.feature).toBe("team_invitations");
     expect(plan.requiredPlanDisplay).toBe("L");
     // The server's own message, without the generic "HTTP 403: " prefix.
@@ -535,7 +535,7 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     );
   });
 
-  it("maps a pre-v0.75 FEAT-001 (public-bound member key) to KaguraPlanError", async () => {
+  it("maps a pre-v0.75 FEAT-001 (public-bound member key) to KaguraFeatureNotAvailableError", async () => {
     const server = new FakeRest();
     server.status = 403;
     server.body = JSON.stringify({
@@ -546,8 +546,8 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     const client = makeClient(server);
 
     const err = await caught(client.mintMemberKey(WS, "google_2", "ci", 30));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).feature).toBe("resources");
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("resources");
   });
 
   it("maps a 403 QUOTA-001 to KaguraQuotaError, not an ownership error", async () => {
@@ -588,8 +588,8 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     const client = makeClient(server);
 
     const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).message).toBe("HTTP 403");
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).message).toBe("HTTP 403");
   });
 
   it("names the static credential source and workspace prefix in the uniform-403 hint", async () => {

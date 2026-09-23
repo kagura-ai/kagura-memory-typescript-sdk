@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { KaguraNotFoundError, KaguraPlanError, KaguraQuotaError } from "../src/errors.js";
+import { KaguraNotFoundError, KaguraFeatureNotAvailableError, KaguraQuotaError } from "../src/errors.js";
 import { ResourceClient } from "../src/resourceClient.js";
 
 interface Recorded {
@@ -244,7 +244,7 @@ describe("error mapping", () => {
 });
 
 describe("gate refusals on createToken (#40)", () => {
-  it("maps 403 FEAT-001 to KaguraPlanError", async () => {
+  it("maps 403 FEAT-001 to KaguraFeatureNotAvailableError", async () => {
     const server = new FakeRest();
     server.routes["/api/v1/resource-tokens"] = {
       status: 403,
@@ -263,8 +263,8 @@ describe("gate refusals on createToken (#40)", () => {
     const client = makeClient(server);
 
     const error = await client.createToken({ resourceId: "r" }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(KaguraPlanError);
-    expect((error as KaguraPlanError).requiredPlan).toBe("promax");
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((error as KaguraFeatureNotAvailableError).requiredPlan).toBe("promax");
   });
 
   it("maps the active-token cap (403 QUOTA-001) to KaguraQuotaError", async () => {

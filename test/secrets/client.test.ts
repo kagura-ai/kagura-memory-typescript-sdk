@@ -14,7 +14,7 @@ import {
   KaguraAuthError,
   KaguraConnectionError,
   KaguraNotFoundError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraSecretError,
 } from "../../src/errors.js";
@@ -344,7 +344,7 @@ describe("error mapping", () => {
 
     // A plan refusal is none of the three grant causes, so it must not be
     // dressed up as one.
-    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
     expect((error as Error).message).not.toMatch(/may not have a grant/);
   });
 
@@ -360,7 +360,7 @@ describe("error mapping", () => {
       .listSecrets()
       .catch((e: unknown) => e);
 
-    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
     expect((error as Error).message).toBe("HTTP 403");
   });
 

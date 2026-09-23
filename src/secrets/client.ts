@@ -40,7 +40,7 @@ const BASE = "/api/v1/config/secrets";
  * {@link KaguraNotFoundError} (404), or {@link KaguraConnectionError} for
  * other HTTP and network failures — including the 400 the server returns
  * when a put's grant set is inconsistent, the 403 described below, and
- * any 429. A 403 plan or quota refusal is {@link KaguraPlanError} /
+ * any 429. A 403 plan or quota refusal is {@link KaguraFeatureNotAvailableError} /
  * {@link KaguraQuotaError} instead.
  */
 export class SecretClient extends KaguraRestClient {

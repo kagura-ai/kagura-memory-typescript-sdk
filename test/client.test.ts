@@ -8,7 +8,7 @@ import {
   KaguraNotFoundError,
   KaguraPartialRollbackError,
   KaguraPermissionError,
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
@@ -585,8 +585,8 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     };
     const err = await failure(server, (c) => c.setupResource({ resourceId: "r" }));
 
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    const plan = err as KaguraPlanError;
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
     expect(plan.message).toMatch(/^setup_resource failed \(plan_required\): Feature 'resources'/);
     expect(plan.gate).toBe("plan");
     expect(plan.feature).toBe("resources");
@@ -606,15 +606,15 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     };
     const err = await failure(server, (c) => c.updateContext({ contextId: "c", isPublic: true }));
 
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    const plan = err as KaguraPlanError;
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
     expect(plan.gate).toBeNull();
     expect(plan.requiredPlan).toBe("pro");
     expect(plan.feature).toBeNull();
     expect(plan.requiredPlanDisplay).toBeNull();
   });
 
-  it("maps create_context's v0.75 shared-context refusal to KaguraPlanError", async () => {
+  it("maps create_context's v0.75 shared-context refusal to KaguraFeatureNotAvailableError", async () => {
     // Before v0.75 this was a validation_error; it is a plan gate now.
     const server = new FakeServer();
     server.toolResults.list_contexts = { can_create: true, contexts: [] };
@@ -629,8 +629,8 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       current_plan: "free",
     };
     const err = await failure(server, (c) => c.createContext({ name: "team", isPrivate: false }));
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).feature).toBe("shared_contexts");
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("shared_contexts");
   });
 
   it("chooses the class from the gate, not the code", async () => {
@@ -660,10 +660,10 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     expect((quota as KaguraQuotaError).quotaType).toBe("connectors");
 
     const plan = await client.callRawTool("analyze_context").catch((e: unknown) => e);
-    expect(plan).toBeInstanceOf(KaguraPlanError);
+    expect(plan).toBeInstanceOf(KaguraFeatureNotAvailableError);
     // allowlist: no tier lifts it, so there is no plan to offer.
-    expect((plan as KaguraPlanError).gate).toBe("allowlist");
-    expect((plan as KaguraPlanError).requiredPlan).toBeNull();
+    expect((plan as KaguraFeatureNotAvailableError).gate).toBe("allowlist");
+    expect((plan as KaguraFeatureNotAvailableError).requiredPlan).toBeNull();
   });
 
   it("maps a pre-v0.75 feature_not_available envelope by its code", async () => {
@@ -677,9 +677,9 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     };
     const err = await failure(server, (c) => c.callRawTool("analyze_context"));
 
-    expect(err).toBeInstanceOf(KaguraPlanError);
-    expect((err as KaguraPlanError).gate).toBeNull();
-    expect((err as KaguraPlanError).feature).toBe("memory_analysis");
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).gate).toBeNull();
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("memory_analysis");
   });
 
   it("maps a pre-v0.75 CONNECTOR-001 envelope from setup_connector by its code", async () => {
@@ -823,7 +823,7 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     };
     const err = await failure(server, (c) => c.updateContext({ contextId: "c", isPublic: false }));
     expect(err).toBeInstanceOf(KaguraError);
-    expect(err).not.toBeInstanceOf(KaguraPlanError);
+    expect(err).not.toBeInstanceOf(KaguraFeatureNotAvailableError);
     expect(err).not.toBeInstanceOf(KaguraQuotaError);
     expect(err).not.toBeInstanceOf(KaguraPermissionError);
   });

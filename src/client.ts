@@ -12,7 +12,7 @@ import {
   KaguraPartialRollbackError,
   KaguraPermissionError,
   // Referenced only from JSDoc {@link} on the plan-gated options.
-  KaguraPlanError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "./errors.js";
 import {
@@ -298,7 +298,7 @@ export interface CreateContextOptions {
   /**
    * Privacy flag (default: true). A shared (`false`) context needs the
    * `shared_contexts` feature; from server v0.75.0 a plan without it
-   * throws {@link KaguraPlanError} (older servers: a generic
+   * throws {@link KaguraFeatureNotAvailableError} (older servers: a generic
    * `validation_error`).
    */
   isPrivate?: boolean;
@@ -320,7 +320,7 @@ export interface UpdateContextOptions {
   /**
    * Public visibility (required for resource tokens). Making a context
    * public is plan-gated on the `public_contexts` feature (server
-   * v0.68.0+): `true` on a plan without it throws {@link KaguraPlanError}.
+   * v0.68.0+): `true` on a plan without it throws {@link KaguraFeatureNotAvailableError}.
    */
   isPublic?: boolean;
   /** Locked contexts cannot be deleted. */
@@ -814,7 +814,7 @@ export class KaguraClient {
    * match on the message or add the code to `raiseForMcpError` when you
    * confirm it against the server. Plan and quota refusals are the
    * exception: a v0.75.0+ server tags them with a `gate`, so they get
-   * {@link KaguraPlanError} / {@link KaguraQuotaError} from any tool.
+   * {@link KaguraFeatureNotAvailableError} / {@link KaguraQuotaError} from any tool.
    *
    * Use `getToolDefinitions()` to discover what the connected server offers.
    *
@@ -1655,7 +1655,7 @@ export class KaguraClient {
    *
    * @throws KaguraQuotaError when the workspace context limit is reached
    *   (`quotaType: "contexts"`, with `current` / `limit`).
-   * @throws KaguraPlanError for a shared context (`isPrivate: false`) on a
+   * @throws KaguraFeatureNotAvailableError for a shared context (`isPrivate: false`) on a
    *   plan without `shared_contexts` (server v0.75.0+).
    */
   async createContext(options: CreateContextOptions): Promise<ToolResult> {
@@ -1753,7 +1753,7 @@ export class KaguraClient {
    * Plan-gated on the `resources` feature (server v0.68.0+): a plan
    * without it is refused with nothing created.
    *
-   * @throws KaguraPlanError when the plan lacks `resources`;
+   * @throws KaguraFeatureNotAvailableError when the plan lacks `resources`;
    *   `requiredPlanDisplay` names the plan that has it.
    * @throws KaguraQuotaError at the workspace's context or token cap.
    */

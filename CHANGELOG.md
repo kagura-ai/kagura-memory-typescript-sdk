@@ -21,7 +21,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   | Class | Raised for | Carries |
   |---|---|---|
-  | `KaguraPlanError` (new) | MCP `plan_required` / `feature_not_available`, REST 403 `FEAT-001` | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+  | `KaguraFeatureNotAvailableError` (new) | MCP `plan_required` / `feature_not_available`, REST 403 `FEAT-001` | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
   | `KaguraQuotaError` (extended) | MCP `quota_exceeded` / `CONNECTOR-001`, REST `QUOTA-001` / `QUOTA-002` / `CONNECTOR-001` | the above plus `quotaType`, `current`, `limit`, `usedToday`, `resetsAt` |
   | `KaguraPartialRollbackError` (new) | `rollbackSleepRun` reversing only part of a run | `reportId`, `summary` |
   | `KaguraPermissionError` (new) | MCP `permission_denied` | `requiredRole` |
@@ -47,8 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ResourceClient.createToken` is a `QUOTA-001` that still answers **403**,
   and becomes a `KaguraQuotaError`. v0.75.0 also turned `createContext`'s
   shared-context refusal from a `validation_error` into `plan_required`, so
-  it is a `KaguraPlanError` against a new server. A `FEAT-001` behind an
-  `allowlist` or `deployment` switch stays a `KaguraPlanError` — the class
+  it is a `KaguraFeatureNotAvailableError` against a new server. A `FEAT-001` behind an
+  `allowlist` or `deployment` switch stays a `KaguraFeatureNotAvailableError` — the class
   an older server's bare `FEAT-001` already gets — with `requiredPlan`
   `null`, because no upgrade lifts it. `gate: "quota"`, by contrast, marks
   every typed cap, including one no tier raises, so an upgrade helps only
@@ -193,7 +193,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`ResourceClient`, `AgentsClient`), the server's message from
   `WorkspaceClient`, `HTTP 403: <message>` or the workspace-mismatch hint
   from `FilesClient`, and `Access denied (HTTP 403): …` with the grant text
-  from `SecretClient`. It is now a `KaguraPlanError` or `KaguraQuotaError`
+  from `SecretClient`. It is now a `KaguraFeatureNotAvailableError` or `KaguraQuotaError`
   whose message is the server's own, with no prefix or hint. Code that
   catches `KaguraConnectionError`, or matches `HTTP 403` in the message, on
   these calls stops matching them; catch the typed class, or `KaguraError`.

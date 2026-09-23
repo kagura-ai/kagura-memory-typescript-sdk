@@ -10,7 +10,7 @@
  * - {@link KaguraAuthError}: Authentication failed (401)
  * - {@link KaguraNotFoundError}: Resource not found (404)
  * - {@link KaguraConnectionError}: Connection or HTTP error
- * - {@link KaguraPlanError}: The plan lacks the `resources` feature
+ * - {@link KaguraFeatureNotAvailableError}: The plan lacks the `resources` feature
  *   (403 `FEAT-001`, e.g. from `createToken`)
  * - {@link KaguraQuotaError}: Quota exceeded (429), or the active-token
  *   cap reached (403 `QUOTA-001`, `quotaType: "resource_tokens"`; server
@@ -209,7 +209,7 @@ export class ResourceClient extends KaguraRestClient {
    * Create a new resource token.
    *
    * @returns Created token including plaintext token (shown only once).
-   * @throws KaguraPlanError when the plan lacks the `resources` feature.
+   * @throws KaguraFeatureNotAvailableError when the plan lacks the `resources` feature.
    * @throws KaguraQuotaError at the plan's active-token cap — a 403, not a
    *   429; `limit` is the cap. Revoke a token or upgrade. Server v0.75.0+;
    *   older servers answer 403 `HTTP-403`, a KaguraConnectionError.
@@ -296,7 +296,7 @@ export class ResourceClient extends KaguraRestClient {
    *   {@link SETUP_OAUTH_NOT_SUPPORTED_MSG}).
    * @throws KaguraAuthError if the Authorization header is missing or
    *   malformed in the static path.
-   * @throws KaguraPlanError when the plan lacks the `resources` feature,
+   * @throws KaguraFeatureNotAvailableError when the plan lacks the `resources` feature,
    *   and KaguraQuotaError at the context or token cap — see
    *   `KaguraClient.setupResource`.
    *

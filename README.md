@@ -258,7 +258,7 @@ keyed on the error code and the envelope's fields, never on the message:
 | Class | Raised for | Carries |
 |-------|------------|---------|
 | `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings | — |
-| `KaguraPlanError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+| `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`; REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
 | `KaguraPermissionError` | MCP `permission_denied` — the caller's role is too low | `requiredRole` |
@@ -284,12 +284,12 @@ quota also sets the `KaguraQuotaError` fields on it (`quotaType` is
 per-minute limit. `SecretClient` renders a 429 as `KaguraConnectionError`.
 
 ```ts
-import { KaguraPlanError, KaguraQuotaError } from "kagura-memory";
+import { KaguraFeatureNotAvailableError, KaguraQuotaError } from "kagura-memory";
 
 try {
   await client.setupResource({ resourceId: "crm" });
 } catch (e) {
-  if (e instanceof KaguraPlanError) {
+  if (e instanceof KaguraFeatureNotAvailableError) {
     // requiredPlanDisplay is null when no plan lifts it (allowlist / deployment).
     console.log(e.requiredPlanDisplay ? `upgrade to ${e.requiredPlanDisplay}` : e.message);
   } else if (e instanceof KaguraQuotaError) {
@@ -348,13 +348,13 @@ the counterpart to `recall`'s probabilistic search.
 | Method | What it does |
 |--------|--------------|
 | `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. |
-| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraPlanError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). |
+| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). |
 | `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed. |
-| `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraPlanError` on a plan without public contexts. |
+| `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraFeatureNotAvailableError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
 | `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only. Returns the whole updated `config`, the only place the reinforce and routing fields come back. |
-| `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. Plan-gated: throws `KaguraPlanError` on a plan without resources. |
+| `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. Plan-gated: throws `KaguraFeatureNotAvailableError` on a plan without resources. |
 
 ### Agent run-state
 
