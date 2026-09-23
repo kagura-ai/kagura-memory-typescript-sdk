@@ -28,6 +28,25 @@ export interface LoadConfigOptions {
   env?: Record<string, string | undefined>;
 }
 
+/**
+ * Where `JSON.parse` stopped in `text`, as Python's JSON errors say it
+ * (`line 1 column 13`), or null when its message gives no position.
+ *
+ * Never the message itself: V8's "Unexpected token" one quotes the text
+ * around the error, and every file read this way (`.kagura.json`,
+ * `.mcp.json`) can hold an API key. Only the digits of the position are
+ * taken from it.
+ *
+ * @internal Shared with the CLI; not part of the package's API.
+ */
+export function jsonErrorWhere(error: unknown, text: string): string | null {
+  const match = error instanceof Error ? /\bat position (\d+)\b/.exec(error.message) : null;
+  if (match === null) return null;
+  const before = text.slice(0, Math.min(Number(match[1]), text.length));
+  const lines = before.split("\n");
+  return `line ${lines.length} column ${lines[lines.length - 1]!.length + 1}`;
+}
+
 function readConfigFile(filePath: string, label: string): KaguraConfig {
   let text: string;
   try {
@@ -35,17 +54,18 @@ function readConfigFile(filePath: string, label: string): KaguraConfig {
   } catch (e) {
     throw new Error(`Failed to read ${label}: ${e instanceof Error ? e.message : String(e)}`);
   }
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error("expected a JSON object");
-    }
-    return parsed as KaguraConfig;
+    parsed = JSON.parse(text);
   } catch (e) {
-    throw new Error(
-      `Invalid JSON or encoding in ${label} (expected UTF-8): ${e instanceof Error ? e.message : String(e)}`,
-    );
+    // The file is named, never quoted: see jsonErrorWhere.
+    const where = jsonErrorWhere(e, text);
+    throw new Error(`Invalid JSON or encoding in ${label} (expected UTF-8)${where ? `: ${where}` : ""}`);
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Invalid JSON or encoding in ${label} (expected UTF-8): expected a JSON object`);
+  }
+  return parsed as KaguraConfig;
 }
 
 /**

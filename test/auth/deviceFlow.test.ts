@@ -472,6 +472,20 @@ describe("refreshAccessToken", () => {
     ).rejects.toThrow(/HTTP 503/);
   });
 
+  it("quotes a bare error_description rather than the raw body", async () => {
+    // No `error` code, so this is the non-OAuth branch; extractDetail reads
+    // error_description there, as the Python SDK's extract_detail does.
+    const stub = sequenceFetch([jsonResponse(400, { error_description: "Refresh token revoked." })]);
+    const message = await refreshAccessToken(SERVER, {
+      clientId: DEFAULT_CLIENT_ID,
+      refreshToken: "rtok-old",
+      fetch: stub,
+    }).catch((e: unknown) => (e as Error).message);
+    expect(message).toBe(
+      "Refresh failed: HTTP 400 with no OAuth error code. Body: Refresh token revoked.",
+    );
+  });
+
   it("wraps a network error as KaguraConnectionError with a non-empty reason", async () => {
     let caught: unknown;
     try {

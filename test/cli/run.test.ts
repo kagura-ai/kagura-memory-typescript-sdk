@@ -19,14 +19,38 @@ import { KaguraAuthExpiredError } from "../../src/errors.js";
 
 let dir: string;
 let credentialsPath: string;
+const ORIGINAL_ENV = { ...process.env };
+const ORIGINAL_CWD = process.cwd();
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-cli-"));
   credentialsPath = path.join(dir, "credentials.json");
   resetStateCache();
+  // `auth status` reports the Claude Code entry of the directory it runs
+  // in, from ~/.claude.json and .mcp.json: neither the developer's own nor
+  // this repository's may leak in. The sandbox is its own git root, so the
+  // local-scope key is the sandbox too.
+  fs.mkdirSync(path.join(dir, ".git"));
+  process.env.CLAUDE_CONFIG_DIR = dir;
+  // An isolated HOME, which does not contain the sandbox: messages name a
+  // file under HOME as `~/…`, and the sandbox's own paths must print in
+  // full wherever TMPDIR is, ~/tmp included.
+  process.env.HOME = path.join(dir, "home");
+  process.env.USERPROFILE = process.env.HOME;
+  fs.mkdirSync(process.env.HOME);
+  process.chdir(dir);
+  // `auth logout` notes it when set.
+  delete process.env.KAGURA_API_KEY;
 });
 
 afterEach(() => {
+  process.chdir(ORIGINAL_CWD);
+  // Restored in place, so os.homedir() and friends keep reading the real
+  // process environment.
+  for (const key of Object.keys(process.env)) {
+    if (!(key in ORIGINAL_ENV)) delete process.env[key];
+  }
+  Object.assign(process.env, ORIGINAL_ENV);
   fs.rmSync(dir, { recursive: true, force: true });
   resetStateCache();
 });
@@ -146,8 +170,10 @@ describe("cli: usage and dispatch", () => {
 
   it("accepts the 'auth' prefix so it reads like the Python CLI", async () => {
     const h = harness();
-    expect(await runCli(["auth", "status"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toMatch(/No profiles/);
+    // Exit 1 with nothing stored, as Python's ClickException.
+    expect(await runCli(["auth", "status"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+    expect(h.out).toEqual([]);
   });
 
   it.each([
@@ -166,7 +192,7 @@ describe("cli: usage and dispatch", () => {
   it("reports --json as unknown rather than silently ignoring it", async () => {
     const h = harness();
     expect(await runCli(["login", "--json"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: --json/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: --json/);
   });
 
   it("rejects an unknown command and an unknown flag", async () => {
@@ -177,13 +203,68 @@ describe("cli: usage and dispatch", () => {
 
     const b = harness();
     expect(await runCli(["login", "--porfile", "x"], b.deps)).toBe(2);
-    expect(b.err.join("\n")).toMatch(/Unknown option: --porfile/);
+    // Click's too.
+    expect(b.err[0]).toBe("Error: No such option: --porfile");
   });
 
   it("rejects an unknown subcommand of a real group", async () => {
     const h = harness();
     expect(await runCli(["auth", "frobnicate"], h.deps)).toBe(2);
     expect(h.err.join("\n")).toMatch(/Error: No such command 'frobnicate'\./);
+  });
+
+  // Click 8.3's words (the version the Python CLI's lockfile pins), checked
+  // against it: the option's name, never a value written into the token.
+  it.each([
+    [["recall", "q", "--bogus=kg_secret_key"], "Error: No such option: --bogus"],
+    [["recall", "q", "-xkg_secret_key"], "Error: No such option: -x"],
+    [["auth", "status", "--bogus=kg_secret_key"], "Error: No such option: --bogus"],
+    [["auth", "status", "--profile", "p", "--json=kg_secret_key"], "Error: No such option: --json"],
+    [["auth", "list", "--json=kg_secret_key"], "Error: Option '--json' does not take a value."],
+  ])("reports %j by the option's name alone", async (argv, line) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(line);
+    expect([...h.out, ...h.err].join("\n")).not.toContain("kg_secret");
+  });
+
+  it("reports only the first bad option, as click stops at the first error", async () => {
+    // Every later unknown would otherwise be named too: the `-Z` of a
+    // pasted `--invite -Zkg_secret…` token, one character of it.
+    const h = harness();
+    expect(await runCli(["recall", "q", "--invite", "-Zkg_secret_key", "--bogus"], h.deps)).toBe(2);
+    expect(h.err.filter((l) => l.startsWith("Error:"))).toEqual(["Error: No such option: --invite"]);
+    expect([...h.out, ...h.err].join("\n")).not.toContain("-Z");
+  });
+
+  it.each([
+    [["--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory [OPTIONS]"],
+    [["--bogus=kg_secret_key"], "Error: No such option: --bogus", "Usage: kagura-memory [OPTIONS]"],
+    [["--version=1"], "Error: Option '--version' does not take a value.", "Usage: kagura-memory [OPTIONS]"],
+    [["auth", "--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory auth [OPTIONS]"],
+    [["auth", "-xkg_secret_key", "status"], "Error: No such option: -x", "Usage: kagura-memory auth [OPTIONS]"],
+    [["resource", "tokens", "--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory resource tokens [OPTIONS]"],
+  ])("reports an option the root or a group does not take (%j), then its help", async (argv, line, usage) => {
+    // Click's groups say so too; this printed the help alone before.
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(line);
+    expect(h.err[1]).toMatch(new RegExp(`^${usage.replace(/[[\]]/g, "\\$&")}`));
+    expect(h.out).toEqual([]);
+    expect(h.err.join("\n")).not.toContain("kg_secret");
+  });
+
+  it("still gives the help of the root or a group for --help or -h, and bare, exit 2 with no error", async () => {
+    for (const argv of [["--help"], ["-h"], ["auth", "--help"], ["auth", "-h"]]) {
+      const h = harness();
+      expect(await runCli(argv, h.deps)).toBe(0);
+      expect(h.err).toEqual([]);
+    }
+    for (const argv of [[], ["auth"]]) {
+      const h = harness();
+      expect(await runCli(argv, h.deps)).toBe(2);
+      expect(h.err[0]).toMatch(/^Usage: /);
+    }
   });
 
   it("reports the version", async () => {
@@ -198,7 +279,7 @@ describe("cli: usage and dispatch", () => {
     // its own spec instead of sharing one global set.
     const h = harness();
     expect(await runCli(["recall", "q", "--read-only"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: --read-only/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: --read-only/);
   });
 });
 
@@ -228,10 +309,10 @@ describe("cli: login", () => {
     expect(b.loginCalls[0]).not.toHaveProperty("scope");
   });
 
-  it("rejects --read-only together with --scope, as Python does", async () => {
+  it("rejects --read-only together with --scope with exit 1, as Python's ClickException does", async () => {
     const h = harness();
-    expect(await runCli(["login", "--read-only", "--scope", "memory:read"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/mutually exclusive/);
+    expect(await runCli(["login", "--read-only", "--scope", "memory:read"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: --read-only and --scope are mutually exclusive; pick one."]);
     expect(h.loginCalls).toEqual([]);
   });
 
@@ -824,22 +905,100 @@ describe("cli: login --invite (#44)", () => {
   it.each(others.flatMap((name) => [
     [["auth", name, "--invite", INVITE]],
     [["auth", name, `--invite=${INVITE}`]],
-    // The bare alias parses the same pooled flag.
+    // A token that begins with a dash is still taken as the value, so it
+    // is never reported, and quoted, as an unknown option.
+    [["auth", name, "--invite", `-${INVITE.slice(1)}`]],
+    // The bare alias takes the same flag.
     [[name, "--invite", INVITE]],
   ]))("rejects %j with exit 2, without echoing the token", async (argv) => {
     seed({ default: creds() });
     const h = harness();
 
-    expect(await runCli([...argv, "--yes"], h.deps)).toBe(2);
+    // --yes, so logout would otherwise act without asking.
+    const yes = argv.includes("logout") ? ["--yes"] : [];
+    expect(await runCli([...argv, ...yes], h.deps)).toBe(2);
     expect(h.err.join("\n")).toMatch(/--invite applies only to 'auth login'/);
-    expect([...h.out, ...h.err].join("\n")).not.toContain(INVITE);
+    expect([...h.out, ...h.err].join("\n")).not.toContain(INVITE.slice(1));
     expect(h.refreshCalls).toEqual([]);
     // Nothing acted: logout --yes would otherwise have removed this.
     expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default"]);
   });
+
+  it.each(others)("does not list --invite in auth %s --help", async (name) => {
+    const h = harness();
+    expect(await runCli(["auth", name, "--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).not.toContain("--invite");
+  });
+});
+
+describe("cli: each auth subcommand takes only the flags it reads", () => {
+  // Python declares its options per command, so click refuses the rest;
+  // the pooled spec this replaced took every auth flag on every subcommand.
+  const OWN: Record<string, string[]> = {
+    login: ["--profile", "--server", "--scope", "--read-only", "--no-browser", "--invite"],
+    // --no-browser is this port's: refresh can re-run the device flow.
+    refresh: ["--profile", "--scope", "--no-browser"],
+    status: ["--profile"],
+    use: [],
+    logout: ["--profile", "--all", "--yes"],
+    list: ["--json"],
+    token: ["--profile"],
+  };
+  const EVERY = ["--profile", "--server", "--scope", "--read-only", "--no-browser", "--all", "--yes", "--json"];
+  const VALUE_FLAGS = new Set(["--profile", "--server", "--scope"]);
+
+  it("covers every auth subcommand", () => {
+    expect(Object.keys((ROOT_COMMANDS.auth as CommandGroup).commands).sort()).toEqual(Object.keys(OWN).sort());
+  });
+
+  it.each(
+    Object.entries(OWN).flatMap(([name, own]) => EVERY.filter((f) => !own.includes(f)).map((f) => [name, f])),
+  )("auth %s rejects %s with exit 2, acting on nothing", async (name, flag) => {
+    seed({ default: creds() });
+    const h = harness();
+    const argv = ["auth", name, ...(name === "use" ? ["default"] : []), flag, ...(VALUE_FLAGS.has(flag) ? ["x"] : [])];
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(`Error: No such option: ${flag}`);
+    expect(h.out).toEqual([]);
+    expect(h.loginCalls).toEqual([]);
+    expect(h.refreshCalls).toEqual([]);
+    expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
+  });
+
+  it.each(Object.entries(OWN))("auth %s --help lists only its own flags", async (name, own) => {
+    const h = harness();
+    expect(await runCli(["auth", name, "--help"], h.deps)).toBe(0);
+    const lines = h.out.join("\n").split("\n");
+    const listed = lines
+      .slice(lines.indexOf("Options:") + 1)
+      .flatMap((line) => /^\s+(?:-\w, )?(--[\w-]+)/.exec(line)?.[1] ?? [])
+      .filter((f) => f !== "--help");
+    expect(listed.sort()).toEqual([...own].sort());
+  });
+
+  it("takes -y for logout --yes, as Python does", async () => {
+    seed({ default: creds() });
+    const h = harness({
+      confirm: async () => {
+        throw new Error("should not prompt");
+      },
+    });
+    expect(await runCli(["auth", "logout", "-y"], h.deps)).toBe(0);
+    expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+  });
 });
 
 describe("cli: status", () => {
+  it.each([[[]], [["--profile", "work"]]])(
+    "exits 1 with no profiles, as Python's ClickException does (%j)",
+    async (extra) => {
+      const h = harness();
+      expect(await runCli(["auth", "status", ...extra], h.deps)).toBe(1);
+      expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+      expect(h.out).toEqual([]);
+    },
+  );
+
   it("reports refreshable: false for a profile with no refresh token", async () => {
     seed({ default: creds({ refreshToken: "" }) });
     const h = harness();
@@ -875,6 +1034,174 @@ describe("cli: status", () => {
     const h = harness();
     expect(await runCli(["status", "--profile", "nope"], h.deps)).toBe(1);
     expect(h.err.join("\n")).toMatch(/No profile named 'nope'/);
+  });
+
+  describe("the Claude Code entry in use here (#55)", () => {
+    const STDIO = { type: "stdio", command: "kagura-mcp", args: ["--profile", "default"] };
+    const BEARER = { type: "http", url: "https://x/mcp", headers: { Authorization: "Bearer k" } };
+
+    function writeMcpJson(entry: unknown, where = dir): void {
+      fs.writeFileSync(path.join(where, ".mcp.json"), JSON.stringify({ mcpServers: { "kagura-memory": entry } }));
+    }
+    function writeUserEntry(entry: unknown): void {
+      fs.writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: { "kagura-memory": entry } }));
+    }
+    /** The label of $CLAUDE_CONFIG_DIR/.claude.json: the sandbox is not under HOME (see beforeEach). */
+    const userLabel = () => path.join(dir, ".claude.json");
+
+    /** What `status` prints after the profile blocks. */
+    async function claudeLines(argv = ["auth", "status"]): Promise<string[]> {
+      seed({ default: creds() });
+      const h = harness();
+      expect(await runCli(argv, h.deps)).toBe(0);
+      const at = h.out.findIndex((l) => l.startsWith("Claude Code ("));
+      return at === -1 ? [] : h.out.slice(at);
+    }
+
+    it("reports a stdio entry as refresh-aware, in Python's words", async () => {
+      writeMcpJson(STDIO);
+      expect(await claudeLines()).toEqual([
+        "Claude Code (.mcp.json, project scope): refresh-aware (kagura-mcp stdio proxy)",
+      ]);
+    });
+
+    it("points a static-token entry at the Python CLI's refresh-aware setup", async () => {
+      // This bin has no --profile setup: the kagura-mcp proxy is Python's.
+      writeMcpJson(BEARER);
+      expect(await claudeLines()).toEqual([
+        "Claude Code (.mcp.json, project scope): legacy static API-key token (no auto-refresh)",
+        "  Migrate to refresh-aware with the Python CLI: kagura setup claude --profile <name>",
+      ]);
+    });
+
+    it("reports a url-form entry", async () => {
+      writeMcpJson({ type: "url", url: "https://x/mcp" });
+      expect(await claudeLines()).toEqual(["Claude Code (.mcp.json, project scope): url form (no Authorization header)"]);
+    });
+
+    it("reports a user-scope entry by the file it read, and each entry the one in use hides", async () => {
+      writeUserEntry({ type: "http", url: "https://x/mcp" });
+      writeMcpJson(BEARER);
+      expect(await claudeLines()).toEqual([
+        "Claude Code (.mcp.json, project scope): legacy static API-key token (no auto-refresh)",
+        "  Migrate to refresh-aware with the Python CLI: kagura setup claude --profile <name>",
+        `  (hides the user-scope entry in ${userLabel()})`,
+      ]);
+
+      fs.rmSync(path.join(dir, ".mcp.json"));
+      expect(await claudeLines()).toEqual([`Claude Code (${userLabel()}, user scope): url form (no Authorization header)`]);
+    });
+
+    it("finds a parent directory's .mcp.json from a subdirectory", async () => {
+      writeMcpJson(STDIO);
+      fs.mkdirSync(path.join(dir, "sub"));
+      process.chdir(path.join(dir, "sub"));
+      const [line] = await claudeLines();
+      expect(line).toBe(
+        `Claude Code (${path.join(fs.realpathSync(dir), ".mcp.json")}, project scope): refresh-aware (kagura-mcp stdio proxy)`,
+      );
+    });
+
+    it("prints once, after every profile block, and after the one --profile names", async () => {
+      writeMcpJson(STDIO);
+      seed({ default: creds(), work: creds() });
+      const all = harness();
+      await runCli(["auth", "status"], all.deps);
+      expect(all.out.filter((l) => l.startsWith("Claude Code ("))).toHaveLength(1);
+      expect(all.out.at(-1)).toMatch(/^Claude Code \(/);
+
+      const one = harness();
+      await runCli(["auth", "status", "--profile", "work"], one.deps);
+      expect(one.out.at(-1)).toMatch(/^Claude Code \(/);
+    });
+
+    it.each([
+      ["no scope defines one", null],
+      ["the entry in use is no form it knows", { type: "sse", url: "https://x/sse" }],
+    ])("says nothing of Claude Code when %s, hidden entries included", async (_label, entry) => {
+      writeUserEntry(BEARER);
+      if (entry !== null) writeMcpJson(entry);
+      else fs.rmSync(path.join(dir, ".claude.json"));
+      expect(await claudeLines()).toEqual([]);
+    });
+
+    it("says nothing of Claude Code without a profile to show", async () => {
+      writeMcpJson(STDIO);
+      const empty = harness();
+      expect(await runCli(["auth", "status"], empty.deps)).toBe(1);
+      expect([...empty.out, ...empty.err].join("\n")).not.toContain("Claude Code");
+
+      seed({ default: creds() });
+      const unknown = harness();
+      expect(await runCli(["auth", "status", "--profile", "nope"], unknown.deps)).toBe(1);
+      expect([...unknown.out, ...unknown.err].join("\n")).not.toContain("Claude Code");
+    });
+  });
+});
+
+describe("cli: list", () => {
+  it("prints one line per profile, the default marked", async () => {
+    seed({ default: creds(), work: creds({ workspaceName: "Work" }) }, "work");
+    const h = harness();
+    expect(await runCli(["auth", "list"], h.deps)).toBe(0);
+    expect(h.out).toEqual([
+      "  default\tdev@kagura-ai.com\tAcme\tactive",
+      "* work\tdev@kagura-ai.com\tWork\tactive",
+    ]);
+  });
+
+  it("exits 1 with no profiles, as Python's ClickException does", async () => {
+    const h = harness();
+    expect(await runCli(["auth", "list"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+  });
+
+  it("--json emits Python's keys, one object per profile in file order, and no token", async () => {
+    const expiresAt = new Date("2026-10-01T12:34:56Z");
+    seed(
+      {
+        work: creds({ accessToken: "atok-secret", refreshToken: "rtok-secret", expiresAt }),
+        old: creds({ expiresAt: new Date(Date.now() - 3600_000), refreshToken: "" }),
+      },
+      "work",
+    );
+    const h = harness();
+    expect(await runCli(["auth", "list", "--json"], h.deps)).toBe(0);
+    const payload = JSON.parse(h.out.join("\n")) as Record<string, unknown>[];
+    expect(payload[0]).toEqual({
+      profile: "work",
+      default: true,
+      user_email: "dev@kagura-ai.com",
+      workspace_name: "Acme",
+      workspace_id: "ws-1",
+      server: "https://x.test",
+      scope: DEFAULT_SCOPE,
+      expired: false,
+      refreshable: true,
+      // Python's datetime.isoformat() of the UTC expiry.
+      expires_at: "2026-10-01T12:34:56+00:00",
+    });
+    expect(payload[1]).toMatchObject({ profile: "old", default: false, expired: true, refreshable: false });
+    expect(h.out.join("\n")).not.toContain("secret");
+  });
+
+  it("--json emits [] with no profiles, and exits 0, as Python does", async () => {
+    const h = harness();
+    expect(await runCli(["auth", "list", "--json"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["[]"]);
+  });
+
+  it("--json escapes non-ASCII as Python's json.dumps does by default", async () => {
+    // Python prints this payload with json.dumps(..., indent=2), no
+    // ensure_ascii=False: byte for byte, "神楽 WS" is "\u795e\u697d WS".
+    seed({ work: creds({ workspaceName: "神楽 WS", userEmail: "ユーザー@example.com" }) }, "work");
+    const h = harness();
+    expect(await runCli(["auth", "list", "--json"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    expect(text).toContain('"workspace_name": "\\u795e\\u697d WS"');
+    expect(text).toContain('"user_email": "\\u30e6\\u30fc\\u30b6\\u30fc@example.com"');
+    expect(/[^\x00-\x7e]/.test(text)).toBe(false);
+    expect((JSON.parse(text) as { workspace_name: string }[])[0]!.workspace_name).toBe("神楽 WS");
   });
 });
 
@@ -932,11 +1259,14 @@ describe("cli: logout", () => {
     expect(fs.existsSync(credentialsPath)).toBe(false);
   });
 
-  it("rejects --all together with --profile", async () => {
-    seed({ default: creds() });
+  it.each([[[]], [["--yes"]]])("rejects --all together with --profile (%j)", async (extra) => {
+    // Python ignores --profile and removes every profile; naming one says
+    // the rest should stay, so this refuses rather than guess.
+    seed({ default: creds(), work: creds() });
     const h = harness();
-    expect(await runCli(["logout", "--all", "--profile", "default"], h.deps)).toBe(2);
-    expect(fs.existsSync(credentialsPath)).toBe(true);
+    expect(await runCli(["logout", "--all", "--profile", "default", ...extra], h.deps)).toBe(2);
+    expect(h.err).toEqual(["--all and --profile are mutually exclusive; pick one."]);
+    expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default", "work"]);
   });
 
   it("is a successful no-op when there is nothing stored", async () => {
@@ -961,6 +1291,116 @@ describe("cli: logout", () => {
     const h = harness();
     expect(await runCli(["logout", "--profile", "nope", "--yes"], h.deps)).toBe(1);
     expect(h.out.join("\n")).toMatch(/No profile named 'nope'/);
+  });
+
+  describe("revoking on the server, best effort, as Python does (#55)", () => {
+    /** A fetch that records every request and answers `status`, or fails. */
+    function revokeServer(status: number | Error) {
+      const requests: { url: string; method?: string; body: string }[] = [];
+      const impl = async (input: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(input), method: init?.method, body: String(init?.body) });
+        if (status instanceof Error) throw status;
+        return new Response(null, { status });
+      };
+      return { requests, fetch: impl as typeof globalThis.fetch };
+    }
+    const WARNING =
+      "  Warning: server-side revoke failed (network or 5xx). The local profile was still deleted. " +
+      "The refresh_token may remain valid until it expires naturally.";
+
+    it("revokes the access token of the profile it removes, then removes it", async () => {
+      seed({ default: creds({ server: "https://api.test/", accessToken: "at-default" }), work: creds() });
+      const server = revokeServer(200);
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+
+      expect(server.requests).toHaveLength(1);
+      expect(server.requests[0]).toMatchObject({ url: "https://api.test/api/v1/oauth/revoke", method: "POST" });
+      expect(Object.fromEntries(new URLSearchParams(server.requests[0]!.body))).toEqual({
+        token: "at-default",
+        client_id: "kagura-cli",
+      });
+      expect(h.out).toEqual(["Profile 'default' removed."]);
+      expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["work"]);
+    });
+
+    it.each([
+      ["a 5xx", 503],
+      ["a network failure", new TypeError("fetch failed")],
+    ])("still removes the profile after %s, with Python's warning", async (_label, status) => {
+      seed({ default: creds() });
+      const h = harness({ fetch: revokeServer(status).fetch });
+      expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+      expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
+      expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+    });
+
+    it("gives up on the server after 30 s, Python's timeout, and still removes the profile", async () => {
+      // A server that never answers: only the request's signal ends it.
+      // The timer is stood in for by a signal that has already fired, so
+      // the test does not wait; without the bound there is no signal at all.
+      const fired = AbortSignal.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(fired);
+      let signal: AbortSignal | null | undefined;
+      const hang = (async (_input: unknown, init?: RequestInit) => {
+        signal = init?.signal;
+        if (!signal) throw new Error("the revocation is unbounded");
+        const bound = signal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (bound.aborted) reject(bound.reason);
+          else bound.addEventListener("abort", () => reject(bound.reason));
+        });
+      }) as typeof globalThis.fetch;
+      try {
+        seed({ default: creds() });
+        const h = harness({ fetch: hang });
+        expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+        expect(timeout).toHaveBeenCalledWith(30_000);
+        expect(signal).toBe(fired);
+        expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
+        expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+
+    it("revokes every profile with --all, and says nothing of a failure, as Python does", async () => {
+      seed({ default: creds({ accessToken: "at-a" }), work: creds({ accessToken: "at-b" }) });
+      const server = revokeServer(503);
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--all", "--yes"], h.deps)).toBe(0);
+      expect(server.requests.map((r) => new URLSearchParams(r.body).get("token"))).toEqual(["at-a", "at-b"]);
+      expect(h.out).toEqual(["All profiles removed."]);
+      expect(fs.existsSync(credentialsPath)).toBe(false);
+    });
+
+    it.each([
+      ["the confirmation is declined", ["auth", "logout"]],
+      ["the named profile is absent", ["auth", "logout", "--profile", "nope", "--yes"]],
+    ])("sends nothing when %s", async (_label, argv) => {
+      seed({ default: creds() });
+      const server = revokeServer(200);
+      const h = harness({ fetch: server.fetch });
+      h.confirmAnswer.value = false;
+      expect(await runCli(argv, h.deps)).toBe(1);
+      expect(server.requests).toEqual([]);
+      expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default"]);
+    });
+
+    it.each([
+      ["one profile", ["auth", "logout", "--yes"]],
+      ["--all", ["auth", "logout", "--all", "--yes"]],
+    ])("notes that KAGURA_API_KEY still authenticates (%s)", async (_label, argv) => {
+      process.env.KAGURA_API_KEY = "kagura_env";
+      seed({ default: creds() });
+      const h = harness({ fetch: revokeServer(200).fetch });
+      expect(await runCli(argv, h.deps)).toBe(0);
+      expect(h.out.at(-1)).toBe(
+        "  Note: KAGURA_API_KEY is set in your environment — the env var will still authenticate " +
+          "kagura-memory commands until you unset it.",
+      );
+      expect(h.out.join("\n")).not.toContain("kagura_env");
+    });
   });
 });
 

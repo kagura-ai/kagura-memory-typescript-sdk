@@ -32,12 +32,43 @@ const SUMMARY: FlagSpec = {
 const USAGE_GUIDE: FlagSpec = { name: "usage-guide", type: "value", help: "LLM-oriented usage guidelines" };
 const YES: FlagSpec = { name: "yes", short: "y", type: "switch", help: "Skip confirmation prompt" };
 
+const NAME_CONTAINS: FlagSpec = {
+  name: "name-contains",
+  type: "value",
+  help:
+    "Only contexts whose name or display name contains this text " +
+    "(case-insensitive, max 100 chars)",
+};
+
 const list: Command = {
   summary: "List available contexts.",
-  spec: { flags: [] },
+  description:
+    "  Rows are slim by default (id, name, is_private, is_locked, last_used_at);\n" +
+    "  memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.\n\n" +
+    "  Examples:\n" +
+    "    kagura-memory context list\n" +
+    "    kagura-memory context list --name-contains auth --summary\n" +
+    "    kagura-memory context list --stats",
+  spec: {
+    flags: [
+      NAME_CONTAINS,
+      { name: "summary", type: "switch", help: "Add summaries (300-char preview)" },
+      { name: "details", type: "switch", help: "Add full summaries and embedding_model" },
+      { name: "stats", type: "switch", help: "Add memory_count per context" },
+    ],
+  },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    return runClientCommand(deps, undefined, (client) => client.listContexts(), {
+    // Python forwards the filter only when truthy (`if name_contains:`), so
+    // an empty `--name-contains=` lists everything; the client would send "".
+    const nameContains = args.values["name-contains"] || undefined;
+    const options = {
+      ...(nameContains !== undefined ? { nameContains } : {}),
+      ...(args.flags.has("summary") ? { includeSummary: true } : {}),
+      ...(args.flags.has("details") ? { includeDetails: true } : {}),
+      ...(args.flags.has("stats") ? { includeStats: true } : {}),
+    };
+    return runClientCommand(deps, undefined, (client) => client.listContexts(options), {
       needsContext: false,
     });
   },
@@ -240,10 +271,22 @@ export const CONTEXT_GROUP: CommandGroup = {
   },
 };
 
-/** `kagura contexts` — the backward-compatible alias for `context list`. */
+/**
+ * `kagura contexts` — the backward-compatible short form of `context list`.
+ *
+ * Python declares it with no options, so it takes none here either: a
+ * `contexts --stats` that worked only in this bin would break on `kagura`.
+ */
 export const CONTEXTS_ALIAS: Command = {
-  ...list,
-  summary: "List available contexts (alias for 'context list').",
+  summary: "List available contexts (short form of 'context list', without its options).",
+  description: "  For --name-contains/--summary/--details/--stats use 'kagura-memory context list'.",
+  spec: { flags: [] },
+  run: async (deps, args) => {
+    rejectExtraArgs(args);
+    return runClientCommand(deps, undefined, (client) => client.listContexts(), {
+      needsContext: false,
+    });
+  },
 };
 
 /**

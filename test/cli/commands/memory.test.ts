@@ -175,10 +175,67 @@ describe("kagura-memory recall", () => {
     expect(args).not.toHaveProperty("filters");
   });
 
+  it("omits use_rerank without --rerank/--no-rerank, so the context's config decides", async () => {
+    const { code, args } = await wire(["recall", "q"]);
+    expect(code).toBe(0);
+    expect(args).not.toHaveProperty("use_rerank");
+  });
+
+  it("sends use_rerank: true with --rerank", async () => {
+    const { code, args } = await wire(["recall", "q", "--rerank"]);
+    expect(code).toBe(0);
+    expect(args).toMatchObject({ query: "q", use_rerank: true });
+  });
+
+  it("sends an explicit use_rerank: false with --no-rerank", async () => {
+    // false is a request of its own (skip reranking for this call), not
+    // "unset": the key must be on the wire.
+    const { code, args } = await wire(["recall", "q", "--no-rerank"]);
+    expect(code).toBe(0);
+    expect(args).toHaveProperty("use_rerank", false);
+  });
+
+  it("combines --no-rerank with --trusted-only", async () => {
+    const { args } = await wire(["recall", "latency-sensitive lookup", "--no-rerank", "--trusted-only"]);
+    expect(args).toMatchObject({
+      query: "latency-sensitive lookup",
+      use_rerank: false,
+      filters: { trust_tier: "trusted" },
+    });
+  });
+
+  it("refuses --rerank with --no-rerank, exiting 2 before any call", async () => {
+    // click takes the last of the pair; this bin refuses the pair, as it
+    // does for `context search-config --rerank --no-rerank`.
+    const { code, h } = await wire(["recall", "q", "--rerank", "--no-rerank"]);
+    expect(code).toBe(2);
+    expect(h.err.join("\n")).toContain("--rerank and --no-rerank are mutually exclusive; pick one.");
+    expect(h.server.requests).toHaveLength(0);
+  });
+
+  it("describes --rerank/--no-rerank in the Python CLI's words", async () => {
+    const h = harness();
+    expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
+    const help = h.out.join("\n");
+    const line = (flag: string) =>
+      help.split("\n").find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
+    expect(line("--rerank")).toContain(
+      "Request reranking for this call (default: follow the context's search config)",
+    );
+    expect(line("--no-rerank")).toContain("Skip reranking for this call");
+    // Python's docstring, reflowed.
+    expect(help.replace(/\s+/g, " ")).toContain(
+      "Without --rerank/--no-rerank the server follows the context's search config " +
+        "(memory-cloud v0.69.0+). --rerank applies only when the context enables " +
+        "reranking; --no-rerank always skips it.",
+    );
+    expect(help).toContain('kagura-memory recall "latency-sensitive lookup" --no-rerank');
+  });
+
   it("rejects --k, which Python does not declare", async () => {
     const { code, h } = await wire(["recall", "q", "--k", "3"]);
     expect(code).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: --k/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: --k/);
   });
 
   it("exits 2 when the query positional is missing", async () => {
@@ -187,10 +244,12 @@ describe("kagura-memory recall", () => {
     expect(h.err.join("\n")).toContain("Missing argument 'QUERY'.");
   });
 
-  it("exits 2 for a non-integer -k", async () => {
-    const { code, h } = await wire(["recall", "q", "-k", "abc"]);
-    expect(code).toBe(2);
-    expect(h.err.join("\n")).toContain("'abc' is not a valid integer.");
+  it("exits 2 for a non-integer -k, naming it as click does: -k alone, with no long form", async () => {
+    for (const argv of [["recall", "q", "-k", "abc"], ["recall", "q", "-kabc"]]) {
+      const { code, h } = await wire(argv);
+      expect(code).toBe(2);
+      expect(h.err[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
+    }
   });
 
   it("exits 1 when no context resolves, with the Python message", async () => {
@@ -249,6 +308,15 @@ describe("kagura-memory forget", () => {
     const { args } = await wire(["forget", "-q", "stale"]);
     expect(args).toMatchObject({ query: "stale", k: 10 });
   });
+
+  it("converts -k before the memory-id/query check, so a bad -k exits 2 as in click", async () => {
+    // click coerces `type=int` before the body's ClickException can run.
+    const { code, h } = await wire(["forget", "-k", "abc"]);
+    expect(code).toBe(2);
+    expect(h.err[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
+    expect(h.err.join("\n")).not.toContain("Either --memory-id or --query is required");
+    expect(h.server.requests).toHaveLength(0);
+  });
 });
 
 describe("kagura-memory update-memory", () => {
@@ -267,9 +335,88 @@ describe("kagura-memory update-memory", () => {
     expect(args).toMatchObject({ context_id: "ctx-default", memory_id: "mem-1", summary: "New summary" });
     // Unlike `remember`, there is no default type/importance here — an
     // absent key means "leave unchanged".
-    for (const key of ["type", "importance", "content", "tags"]) {
+    for (const key of ["type", "importance", "content", "tags", "dismiss_supersede_candidate"]) {
       expect(args).not.toHaveProperty(key);
     }
+  });
+
+  it("sends dismiss_supersede_candidate: true with --dismiss-supersede-candidate", async () => {
+    const { code, args } = await wire(["update-memory", "-m", "mem-1", "--dismiss-supersede-candidate"]);
+    expect(code).toBe(0);
+    expect(args).toEqual({
+      context_id: "ctx-default",
+      memory_id: "mem-1",
+      dismiss_supersede_candidate: true,
+    });
+  });
+
+  it("refuses --dismiss-supersede-candidate with --external-id, exiting 1 before any call", async () => {
+    // ClickException in Python, so exit 1: an upsert replaces the memory,
+    // leaving no suggestion to dismiss.
+    const { code, h } = await wire([
+      "update-memory",
+      "--external-id",
+      "ext-key",
+      "--dismiss-supersede-candidate",
+    ]);
+    expect(code).toBe(1);
+    expect(h.err.join("\n")).toBe(
+      "Error: --dismiss-supersede-candidate requires --memory-id (not --external-id)",
+    );
+    expect(h.server.requests).toHaveLength(0);
+  });
+
+  it("refuses it beside an empty --external-id= too, which the client would send", async () => {
+    // The client tests for presence, not truthiness, because "" still goes
+    // out as external_id; checking the same way here keeps the refusal a
+    // CLI error rather than the client's.
+    const { code, h } = await wire([
+      "update-memory",
+      "-m",
+      "mem-1",
+      "--external-id=",
+      "--dismiss-supersede-candidate",
+    ]);
+    expect(code).toBe(1);
+    expect(h.err.join("\n")).toBe(
+      "Error: --dismiss-supersede-candidate requires --memory-id (not --external-id)",
+    );
+    expect(h.server.requests).toHaveLength(0);
+  });
+
+  it("keeps the memory-id/external-id checks ahead of the dismissal check", async () => {
+    // Python's order: neither, then both, then the dismissal.
+    const { code, h } = await wire(["update-memory", "--dismiss-supersede-candidate"]);
+    expect(code).toBe(1);
+    expect(h.err.join("\n")).toBe("Error: Either --memory-id or --external-id is required");
+  });
+
+  it("converts -i before any of those checks, so a bad float exits 2 as in click", async () => {
+    // click coerces `type=float` before the body's ClickExceptions run, so
+    // the usage error wins over every exit-1 check.
+    for (const argv of [
+      ["update-memory", "-i", "abc", "--dismiss-supersede-candidate", "--external-id", "y"],
+      ["update-memory", "-i", "abc"],
+      ["update-memory", "-m", "m", "--external-id", "e", "-i", "abc"],
+    ]) {
+      const { code, h } = await wire(argv);
+      expect(code, argv.join(" ")).toBe(2);
+      expect(h.err.join("\n")).toContain(
+        "Invalid value for '--importance' / '-i': 'abc' is not a valid float.",
+      );
+      expect(h.server.requests).toHaveLength(0);
+    }
+  });
+
+  it("describes --dismiss-supersede-candidate in the Python CLI's words, with its example", async () => {
+    const h = harness();
+    expect(await runCli(["update-memory", "--help"], h.deps)).toBe(0);
+    const help = h.out.join("\n");
+    expect(help.replace(/\s+/g, " ")).toContain(
+      "Reject this memory's supersede_candidate suggestion (needs --memory-id; " +
+        "server v0.65.0+, older servers drop it silently)",
+    );
+    expect(help).toContain("kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate");
   });
 });
 

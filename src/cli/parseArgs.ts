@@ -3,9 +3,10 @@
  *
  * Hand-rolled because this package's zero-runtime-dependency invariant is
  * deliberate — pulling in commander to read flags would trade that away.
- * Scope is correspondingly small: long flags, registered short flags,
- * repeatable count and multiple flags, positionals, and `--` as the
- * end-of-options marker. No general short-flag clustering, no negation.
+ * Scope is correspondingly small: long flags, registered short flags
+ * (combined as click combines them: `-yv`, `-k5`), repeatable count and
+ * multiple flags, positionals, and `--` as the end-of-options marker. No
+ * negation.
  *
  * Each command passes its own {@link ParseSpec}. That is the point: a flag
  * that is real for `auth login` must still be *rejected* by `recall`,
@@ -15,7 +16,8 @@
  *
  * Unknown and value-less flags are *reported* rather than ignored or
  * thrown on, so the caller can print one message listing everything wrong
- * instead of failing on the first problem.
+ * instead of failing on the first problem. They are reported by the name
+ * click's error gives them, never with a value written into the token.
  */
 
 /**
@@ -73,13 +75,23 @@ export interface FlagSpec {
    *
    * For `--invite`: an invite token is base64url, so about one in 64
    * starts with `-`. Under the default rule `--invite -Ab…` reads as a
-   * missing value followed by an unknown option, and the unknown-option
-   * error quotes the token — a sign-up credential. Click consumes whatever
+   * missing value followed by short options: the token — a sign-up
+   * credential — read a letter at a time, and its first letter that is no
+   * option named in the error. Click consumes whatever
    * follows a value option anyway; this restores that for the one flag
    * whose values need it, and the flag's own validation catches a flag
    * that was swallowed by mistake.
    */
   dashValue?: boolean;
+  /**
+   * Parse the flag but leave it out of `--help`.
+   *
+   * For a flag a command declares only to refuse it: `--invite` on the
+   * `auth` subcommands other than `login`. Parsed, its value is consumed
+   * rather than read as options of its own when it begins with `-`;
+   * listed, it would advertise an option the command does not take.
+   */
+  hidden?: boolean;
 }
 
 export interface ParseSpec {
@@ -113,8 +125,15 @@ export interface ParsedArgs {
   many: Record<string, string[]>;
   /** Occurrence counts for `count` flags, keyed by long name; 0 when absent. */
   counts: Record<string, number>;
-  /** Flags that match nothing in the spec, verbatim (e.g. `--porfile`). */
+  /**
+   * Options that match nothing in the spec, by the name click's "No such
+   * option" gives: `--porfile` for `--porfile=work`, and `-x` for `-xVALUE`
+   * or `-yx` (the first letter of a short cluster that is not an option).
+   * Never with a value: one written into the token can be a credential.
+   */
   unknown: string[];
+  /** Switches given a value, `--json=true`, by name: click's "does not take a value". */
+  noValue: string[];
   /** Value flags that ran out of argv before their value. */
   missingValue: string[];
   /**
@@ -166,6 +185,7 @@ export function parseArgs(
   const counts: Record<string, number> = {};
   const many: Record<string, string[]> = {};
   const unknown: string[] = [];
+  const noValue: string[] = [];
   const missingValue: string[] = [];
 
   // Registered count and multiple flags read as 0 / [] rather than
@@ -221,9 +241,9 @@ export function parseArgs(
       return eaten;
     }
     if (inline !== null) {
-      // `--json=true` is not something this parser understands; accepting
-      // it would silently discard the value.
-      unknown.push(token);
+      // `--json=true`: accepting it would silently discard the value.
+      // Named without it, as click names it.
+      noValue.push(token.slice(0, token.indexOf("=")));
       return 0;
     }
     if (flag.type === "count") counts[flag.name] = (counts[flag.name] ?? 0) + 1;
@@ -265,7 +285,8 @@ export function parseArgs(
       const inline = eq === -1 ? null : token.slice(eq + 1);
       const flag = long.get(name);
       if (flag === undefined) {
-        unknown.push(token);
+        // `--x=value` is reported as `--x`: the value may be a secret.
+        unknown.push(`--${name}`);
         continue;
       }
       i += record(flag, inline, argv[i + 1], token);
@@ -286,28 +307,37 @@ export function parseArgs(
       continue;
     }
 
+    // `-c value`, `-c=value`.
     const flag = short.get(body);
-    if (flag !== undefined) {
+    if (flag !== undefined && (inline === null || flag.type === "value" || flag.type === "multiple")) {
       i += record(flag, inline, argv[i + 1], token);
       continue;
     }
 
-    // `-vvv` — repetition of one registered count flag. Only same-letter
-    // runs are understood; a mixed cluster like `-vx` is reported rather
-    // than half-applied.
-    if (inline === null && body.length > 1) {
-      const first = body[0]!;
-      const repeated = short.get(first);
-      if (repeated?.type === "count" && body === first.repeat(body.length)) {
-        counts[repeated.name] = (counts[repeated.name] ?? 0) + body.length;
-        continue;
+    // Anything else is read letter by letter, as click reads it: each a
+    // registered switch or count (`-yv`, `-vvv`), until one that takes a
+    // value, which takes the rest of the token (`-k5`) or else the next
+    // one. The first letter that is no option is reported by itself, `-x`,
+    // never with the rest of the token, which may be a value. Silently
+    // demoting `-p work` to positionals instead would mean the flag is
+    // ignored and the command runs with defaults — the same failure mode
+    // as an accepted-but-unread switch.
+    // By code point, as click reads a Python string.
+    const letters = Array.from(token.slice(1));
+    for (let at = 0; at < letters.length; at++) {
+      const letter = letters[at]!;
+      const option = short.get(letter);
+      if (option === undefined) {
+        unknown.push(`-${letter}`);
+        break;
       }
+      if (option.type === "value" || option.type === "multiple") {
+        const attached = letters.slice(at + 1).join("");
+        i += record(option, attached === "" ? null : attached, argv[i + 1], `-${letter}`);
+        break;
+      }
+      record(option, null, undefined, `-${letter}`);
     }
-
-    // Silently demoting `-p work` to positionals means the flag is ignored
-    // and the command runs with defaults — the same failure mode as an
-    // accepted-but-unread switch.
-    unknown.push(token);
   }
 
   return {
@@ -318,6 +348,7 @@ export function parseArgs(
     counts,
     many,
     unknown,
+    noValue,
     missingValue,
     rest,
   };

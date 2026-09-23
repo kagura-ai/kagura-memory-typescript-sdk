@@ -109,7 +109,7 @@ describe("kagura-memory context update", () => {
   it("takes the context id positionally, not from --context-id", async () => {
     const { code, h } = await wire(["context", "update", "--context-id", "ctx-1", "-d", "x"]);
     expect(code).toBe(2);
-    expect(h.err.join("\n")).toContain("Unknown option: --context-id");
+    expect(h.err.join("\n")).toContain("Error: No such option: --context-id");
   });
 });
 
@@ -209,6 +209,59 @@ describe("kagura-memory context search-config", () => {
   });
 });
 
+describe("kagura-memory context list", () => {
+  it("sends no list_contexts options by default", async () => {
+    const { code, args } = await wire(["context", "list"]);
+    expect(code).toBe(0);
+    expect(args).toEqual({});
+  });
+
+  it("forwards --name-contains, --summary, --details and --stats", async () => {
+    const { code, args } = await wire([
+      "context",
+      "list",
+      "--name-contains",
+      "auth",
+      "--summary",
+      "--details",
+      "--stats",
+    ]);
+    expect(code).toBe(0);
+    expect(args).toEqual({
+      name_contains: "auth",
+      include_summary: true,
+      include_details: true,
+      include_stats: true,
+    });
+  });
+
+  it("omits an empty --name-contains=, as Python's truthiness check does", async () => {
+    // `if name_contains:` in Python, where the client would send "" as given.
+    const { code, args } = await wire(["context", "list", "--name-contains=", "--stats"]);
+    expect(code).toBe(0);
+    expect(args).toEqual({ include_stats: true });
+  });
+
+  it("describes its options in the Python CLI's words", async () => {
+    const h = harness();
+    expect(await runCli(["context", "list", "--help"], h.deps)).toBe(0);
+    const help = h.out.join("\n");
+    const line = (flag: string) =>
+      help.split("\n").find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
+    expect(line("--name-contains")).toContain(
+      "Only contexts whose name or display name contains this text (case-insensitive, max 100 chars)",
+    );
+    expect(line("--summary")).toContain("Add summaries (300-char preview)");
+    expect(line("--details")).toContain("Add full summaries and embedding_model");
+    expect(line("--stats")).toContain("Add memory_count per context");
+    expect(help.replace(/\s+/g, " ")).toContain(
+      "Rows are slim by default (id, name, is_private, is_locked, last_used_at); " +
+        "memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.",
+    );
+    expect(help).toContain("kagura-memory context list --name-contains auth --summary");
+  });
+});
+
 describe("kagura-memory contexts (alias)", () => {
   it("behaves like `context list`", async () => {
     const h = harness();
@@ -219,6 +272,28 @@ describe("kagura-memory contexts (alias)", () => {
 
   it("does not require a context id", async () => {
     expect(await runCli(["contexts"], harness({ config: {} }).deps)).toBe(0);
+  });
+
+  it.each(["--name-contains=auth", "--summary", "--details", "--stats"])(
+    "rejects %s with exit 2: Python's alias takes none of context list's options",
+    async (flag) => {
+      const { code, h } = await wire(["contexts", flag]);
+      expect(code).toBe(2);
+      expect(h.err.join("\n")).toContain(flag.split("=")[0]!);
+      expect(h.server.requests).toHaveLength(0);
+    },
+  );
+
+  it("points at `context list` for the options, in the Python CLI's words", async () => {
+    const h = harness();
+    expect(await runCli(["contexts", "--help"], h.deps)).toBe(0);
+    const help = h.out.join("\n");
+    expect(help).toContain(
+      "List available contexts (short form of 'context list', without its options).",
+    );
+    expect(help).toContain(
+      "For --name-contains/--summary/--details/--stats use 'kagura-memory context list'.",
+    );
   });
 });
 

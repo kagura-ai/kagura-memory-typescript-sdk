@@ -188,7 +188,7 @@ describe("kagura-memory resource schema vs ingest: the -v/-V trap", () => {
     expect(
       await runCli(["resource", "ingest", "-r", "r", "-k", "k", "--doc-id", "d", "-v", "4"], h.deps),
     ).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: -v/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: -v/);
   });
 });
 

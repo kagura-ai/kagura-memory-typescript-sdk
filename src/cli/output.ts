@@ -31,21 +31,42 @@ export function formatJson(value: unknown): string {
   // `null` is the faithful counterpart.
   if (value === undefined) return "null";
 
-  const seen = new WeakSet<object>();
-  const replacer = (_key: string, v: unknown): unknown => {
+  // The objects from the root down to the one being serialized. Only an
+  // object that contains itself is a cycle; one that merely appears twice
+  // (two checks sharing a details object) is printed both times, as
+  // Python prints it.
+  const ancestors: object[] = [];
+  function replacer(this: unknown, _key: string, v: unknown): unknown {
     // JSON.stringify throws TypeError on a bigint. A server response can
     // only produce one if a caller passed it in, but a crash with a stack
     // trace is never the right answer to "print this".
     if (typeof v === "bigint") return Number(v);
-    if (typeof v === "object" && v !== null) {
-      if (seen.has(v)) return "[Circular]";
-      seen.add(v);
-    }
+    if (typeof v !== "object" || v === null) return v;
+    // `this` is the object holding `v`: whatever was entered after it has
+    // been left.
+    while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+    if (ancestors.includes(v)) return "[Circular]";
+    ancestors.push(v);
     return v;
-  };
+  }
 
   const text = JSON.stringify(value, replacer, 2);
   // Still possible: a value that is entirely unserializable (a bare
   // function or symbol) yields undefined from JSON.stringify.
   return text === undefined ? "null" : text;
+}
+
+/**
+ * {@link formatJson} with every character outside printable ASCII escaped
+ * as `\uXXXX` — Python's `json.dumps` default (`ensure_ascii=True`), for the
+ * one payload the Python CLI prints that way: `auth list --json`.
+ */
+export function formatJsonAscii(value: unknown): string {
+  // Only string contents can hold such a character: JSON's own syntax is
+  // ASCII. A character beyond the BMP is two UTF-16 code units, and so two
+  // escapes, the surrogate pair Python writes.
+  return formatJson(value).replace(
+    /[\u007f-\uffff]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
 }

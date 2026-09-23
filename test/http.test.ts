@@ -118,6 +118,27 @@ describe("extractDetail", () => {
     expect(extractDetail(body)).toBe("MCP session not found or expired.");
   });
 
+  it("returns error_description from an OAuth-style body (the MCP workspace-URL 400/403)", () => {
+    const body = JSON.stringify({
+      error: "access_denied",
+      error_description: "You are not a member of this workspace.",
+    });
+    expect(extractDetail(body)).toBe("You are not a member of this workspace.");
+  });
+
+  it("reads error_description last, after every other shape", () => {
+    expect(extractDetail(JSON.stringify({ detail: "d", error_description: "e" }))).toBe("d");
+    expect(
+      extractDetail(JSON.stringify({ error: "CODE", message: "m", error_description: "e" })),
+    ).toBe("m");
+    expect(
+      extractDetail(
+        JSON.stringify({ error: { code: -32600, message: "rpc" }, error_description: "e" }),
+      ),
+    ).toBe("rpc");
+    expect(extractDetail(JSON.stringify({ error: "x", error_description: 42 }))).toBe("");
+  });
+
   it("returns empty string for non-JSON, non-object, or unknown shapes", () => {
     expect(extractDetail("<html>maintenance</html>")).toBe("");
     expect(extractDetail("[1,2]")).toBe("");
@@ -260,6 +281,19 @@ describe("throwForKaguraStatus", () => {
       throwForKaguraStatus(422, new Headers(), JSON.stringify({ detail: "bad field" })),
     ).toThrow(/HTTP 422: bad field/);
     expect(() => throwForKaguraStatus(500, new Headers(), "")).toThrow(KaguraConnectionError);
+  });
+
+  it("quotes an OAuth-style error_description, not a bare status", () => {
+    // memory-cloud's MCP transport answers a workspace-URL mismatch this way.
+    const body = JSON.stringify({
+      error: "workspace_mismatch",
+      error_description:
+        "API key workspace does not match URL workspace. Use an API key scoped to this workspace.",
+    });
+    expect(() => throwForKaguraStatus(403, new Headers(), body)).toThrow(
+      "HTTP 403: API key workspace does not match URL workspace. " +
+        "Use an API key scoped to this workspace.",
+    );
   });
 
   it("uses the fallback message when no detail is present", () => {

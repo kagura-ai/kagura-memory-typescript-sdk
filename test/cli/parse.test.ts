@@ -108,6 +108,11 @@ describe("flagLabel", () => {
   it("names only the long form otherwise", () => {
     expect(flagLabel(CONTENT)).toBe("'--content'");
   });
+
+  it("names only the short form of a short-only option, which has no long one", () => {
+    // click's `@click.option("-k", type=int)`: "Invalid value for '-k'".
+    expect(flagLabel({ name: "k", short: "k", type: "value", shortOnly: true })).toBe("'-k'");
+  });
 });
 
 describe("quote", () => {

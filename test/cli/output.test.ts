@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatJson } from "../../src/cli/output.js";
+import { formatJson, formatJsonAscii } from "../../src/cli/output.js";
 
 describe("formatJson", () => {
   it("matches Python's json.dumps(indent=2) layout", () => {
@@ -46,5 +46,38 @@ describe("formatJson", () => {
     a.self = a;
     expect(() => formatJson(a)).not.toThrow();
     expect(formatJson(a)).toContain('"name": "a"');
+  });
+
+  it("marks only a real cycle, an object inside itself, as [Circular]", () => {
+    const a: Record<string, unknown> = { name: "a" };
+    const b: Record<string, unknown> = { a };
+    a.b = b;
+    expect(JSON.parse(formatJson({ list: [a] }))).toEqual({ list: [{ name: "a", b: { a: "[Circular]" } }] });
+  });
+
+  it("prints an object shared by two places both times", () => {
+    // doctor's checks once shared a details object, and the second printed
+    // as "[Circular]" though nothing contained itself.
+    const details = { scope: "project", source: ".mcp.json" };
+    const nested = { deep: { details } };
+    expect(JSON.parse(formatJson({ checks: [{ details }, { details }], nested, again: nested }))).toEqual({
+      checks: [{ details }, { details }],
+      nested,
+      again: nested,
+    });
+  });
+});
+
+describe("formatJsonAscii", () => {
+  it("escapes what Python's json.dumps escapes by default (ensure_ascii=True)", () => {
+    // json.dumps({"s": "神楽 WS — 📌\x7f\x01"}, indent=2)
+    expect(formatJsonAscii({ s: "神楽 WS — 📌\x7f\x01" })).toBe(
+      '{\n  "s": "\\u795e\\u697d WS \\u2014 \\ud83d\\udccc\\u007f\\u0001"\n}',
+    );
+  });
+
+  it("leaves ASCII as formatJson prints it", () => {
+    const value = { a: [1, "x\ny"], b: null, c: true };
+    expect(formatJsonAscii(value)).toBe(formatJson(value));
   });
 });

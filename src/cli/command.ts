@@ -100,7 +100,7 @@ export function renderHelp(path: string, command: Command): string {
   if (command.summary) lines.push(`  ${command.summary}`, "");
   if (command.description) lines.push(command.description, "");
 
-  const rendered = command.spec.flags.map((f) => [renderFlag(f), f] as const);
+  const rendered = command.spec.flags.filter((f) => f.hidden !== true).map((f) => [renderFlag(f), f] as const);
   const width = Math.max(24, ...rendered.map(([text]) => text.length + 2));
 
   lines.push("Options:");
