@@ -12,7 +12,7 @@ import {
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
-import type { ListContextsResponse } from "../src/models.js";
+import type { ListContextsResponse, SearchConfig } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
 
 describe("construction", () => {
@@ -1169,6 +1169,22 @@ describe("memory mutation guards", () => {
     expect(server.requests).toHaveLength(0);
   });
 
+  it("updateMemory rejects dismissSupersedeCandidate with an empty externalId too (#42)", async () => {
+    // `""` slips past the truthy exactly-one check but is still sent as
+    // external_id, which the server counts as present and rejects.
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(
+      client.updateMemory({
+        contextId: "c",
+        memoryId: "m1",
+        externalId: "",
+        dismissSupersedeCandidate: true,
+      }),
+    ).rejects.toThrow(/dismissSupersedeCandidate requires memoryId/);
+    expect(server.requests).toHaveLength(0);
+  });
+
   it("forget requires memoryId or query, and only query mode sends k", async () => {
     const server = new FakeServer();
     const client = makeClient(server);
@@ -1306,6 +1322,34 @@ describe("updateSearchConfig", () => {
       reinforce_max_boost: 0,
       reinforce_require_host_arbitration: false,
     });
+  });
+
+  it("returns the echoed config typed as SearchConfig (#42)", async () => {
+    // get_context_info does not return the reinforce and routing fields, so
+    // this echo is the only typed place to read them back.
+    const server = new FakeServer();
+    server.toolResults.update_search_config = {
+      status: "success",
+      message: "Search configuration updated.",
+      context_id: "c",
+      config: {
+        semantic_weight: 0.6,
+        bm25_weight: 0.4,
+        fetch_factor: 3,
+        use_rerank: false,
+        reranker_provider: "voyage",
+        reranker_model: "rerank-2",
+        reinforce_enabled: false,
+        reinforce_max_boost: 0.15,
+        reinforce_require_host_arbitration: false,
+        routing_mode: "off",
+      },
+    };
+    const client = makeClient(server);
+    const result = await client.updateSearchConfig({ contextId: "c", reinforceEnabled: false });
+    const config: SearchConfig = result.config;
+    expect(config.reinforce_enabled).toBe(false);
+    expect(config.routing_mode).toBe("off");
   });
 });
 

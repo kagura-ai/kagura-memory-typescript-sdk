@@ -45,6 +45,7 @@ import type {
   RecallNearbyResponse,
   RollbackResult,
   RollbackSummary,
+  SearchConfig,
   ServerInfo,
   SleepReport,
   SleepReportDetail,
@@ -244,16 +245,23 @@ export interface ListContextsOptions {
   /**
    * Only contexts whose name or display name contains this text
    * (case-insensitive, max 100 chars; blank means no filter).
+   *
+   * Server v0.73.0+. Older servers ignore it without an error and return
+   * every context, so do not rely on it to narrow the list there.
    */
   nameContains?: string;
-  /** Add each context's `summary`, capped at 300 characters. */
+  /**
+   * Add each context's `summary`, capped at 300 characters (server
+   * v0.73.0+; older servers ignore it but always send the full `summary`).
+   */
   includeSummary?: boolean;
   /**
    * Add the full `summary` and `embedding_model`. Large on a big
    * workspace, so pair it with `nameContains`. Wins over `includeSummary`.
+   * Server v0.73.0+; older servers ignore it but always send both fields.
    */
   includeDetails?: boolean;
-  /** Add `memory_count` per context. */
+  /** Add `memory_count` per context. Works on every supported server. */
   includeStats?: boolean;
 }
 
@@ -1530,8 +1538,9 @@ export class KaguraClient {
       throw new Error("Provide exactly one of memoryId or externalId");
     }
     // The server rejects this pair too; an upsert replaces the memory, so
-    // there is no stored suggestion left to dismiss.
-    if (options.dismissSupersedeCandidate && options.externalId) {
+    // there is no stored suggestion left to dismiss. Tested for presence,
+    // not truthiness, because `""` is still sent as external_id below.
+    if (options.dismissSupersedeCandidate && options.externalId !== undefined) {
       throw new Error(
         "dismissSupersedeCandidate requires memoryId; an externalId upsert " +
           "replaces the memory and its suggestion",
@@ -1896,8 +1905,14 @@ export class KaguraClient {
    * reinforce re-rank, and query routing. Weights must sum to 1.0
    * (±0.01). Requires owner or editor permission. Omitted fields keep
    * their current values.
+   *
+   * The result echoes the whole configuration after the update under
+   * `config`. That is the only place the reinforce and routing fields
+   * come back: {@link getContextInfo}'s `search_config` leaves them out.
    */
-  async updateSearchConfig(options: UpdateSearchConfigOptions): Promise<ToolResult> {
+  async updateSearchConfig(
+    options: UpdateSearchConfigOptions,
+  ): Promise<ToolResult & { config: SearchConfig }> {
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.semanticWeight !== undefined) {
       args.semantic_weight = options.semanticWeight;
@@ -1929,7 +1944,8 @@ export class KaguraClient {
     if (options.routingMode !== undefined) {
       args.routing_mode = options.routingMode;
     }
-    return this.callToolChecked("update_search_config", args);
+    const result = await this.callToolChecked("update_search_config", args);
+    return result as ToolResult & { config: SearchConfig };
   }
 
   /** Get server name, version, environment, and feature flags. */

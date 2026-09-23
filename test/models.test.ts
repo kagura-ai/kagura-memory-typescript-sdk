@@ -134,7 +134,7 @@ const listTags: ListTagsResponse = {
 };
 
 // The `config` echoed by update_search_config: every field, including the
-// reinforce re-rank and routing knobs get_context_info may leave out.
+// reinforce re-rank and routing knobs get_context_info does not return.
 const searchConfig: SearchConfig = {
   semantic_weight: 0.6,
   bm25_weight: 0.4,

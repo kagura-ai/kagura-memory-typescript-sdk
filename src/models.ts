@@ -73,9 +73,11 @@ export interface UsageInfo {
 /**
  * Hybrid search configuration for a context.
  *
- * `update_search_config` echoes every field under `config`;
- * `get_context_info` may leave out the reinforce and routing ones, so they
- * are optional like the rest.
+ * `update_search_config` echoes every field under `config`, which
+ * `updateSearchConfig()` returns typed. `get_context_info` does not
+ * return the reinforce and routing fields (as of server v0.75.0), so they
+ * are always absent from `ContextDetail.search_config`; read them from
+ * that echo instead.
  */
 export interface SearchConfig {
   /** @default 0.6 */
