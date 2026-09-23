@@ -160,6 +160,16 @@ describe("kagura-memory recall", () => {
     expect(args).toMatchObject({ query: "q", filters: { trust_tier: "trusted" } });
   });
 
+  it("describes --trusted-only in the Python CLI's words", async () => {
+    const h = harness();
+    expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
+    const line = h.out.join("\n").split("\n").find((l) => l.trimStart().startsWith("--trusted-only"));
+    expect(line).toContain(
+      "Exclude external / connector-ingested memories (filters.trust_tier=trusted). " +
+        "Use it for reads fed back to an agent, like the SessionStart hook.",
+    );
+  });
+
   it("sends no filters without --trusted-only", async () => {
     const { args } = await wire(["recall", "q"]);
     expect(args).not.toHaveProperty("filters");

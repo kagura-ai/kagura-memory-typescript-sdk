@@ -181,11 +181,14 @@ const recall: Command = {
       CONTEXT_ID,
       RECALL_K,
       // Python added this for its SessionStart hook. This bin installs no
-      // hooks, but the flag is mirrored so the two CLIs take the same argv.
+      // hooks, but the flag is mirrored so the two CLIs take the same argv,
+      // and its help is Python's: a hook of the user's own is the same case.
       {
         name: "trusted-only",
         type: "switch",
-        help: "Only trusted memories (excludes external/connector-ingested ones)",
+        help:
+          "Exclude external / connector-ingested memories (filters.trust_tier=trusted). " +
+          "Use it for reads fed back to an agent, like the SessionStart hook.",
       },
     ],
   },
