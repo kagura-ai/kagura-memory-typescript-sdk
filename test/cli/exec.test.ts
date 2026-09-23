@@ -82,7 +82,7 @@ describe("execFile", () => {
   it("runs with no shell and a closed stdin, and captures both streams", async () => {
     const child = fakeChild();
     const calls: unknown[][] = [];
-    const pending = execFile("/bin/codex", ["mcp", "add", "a&b"], ((...args: unknown[]) => {
+    const pending = execFile("/bin/codex", ["mcp", "add", "a&b"], {}, ((...args: unknown[]) => {
       calls.push(args);
       return child;
     }) as never);
@@ -98,22 +98,35 @@ describe("execFile", () => {
     expect(options).toMatchObject({ shell: false, stdio: ["ignore", "pipe", "pipe"] });
   });
 
+  it("runs in the directory it is given", async () => {
+    // `claude plugin list` answers for the project it is run in.
+    const child = fakeChild();
+    let options: Record<string, unknown> = {};
+    const pending = execFile("/bin/claude", ["plugin", "list"], { cwd: dir }, ((...args: unknown[]) => {
+      options = args[2] as Record<string, unknown>;
+      return child;
+    }) as never);
+    child.emit("close", 0, null);
+    await pending;
+    expect(options.cwd).toBe(dir);
+  });
+
   it("reports the exit code of a failing program", async () => {
     const child = fakeChild();
-    const pending = execFile("x", [], (() => child) as never);
+    const pending = execFile("x", [], {}, (() => child) as never);
     child.emit("close", 3, null);
     await expect(pending).resolves.toMatchObject({ code: 3 });
   });
 
   it("maps a start failure to 127, the shell's 'command not found'", async () => {
     const child = fakeChild();
-    const pending = execFile("x", [], (() => child) as never);
+    const pending = execFile("x", [], {}, (() => child) as never);
     child.emit("error", new Error("spawn x ENOENT"));
     await expect(pending).resolves.toMatchObject({ code: 127, stderr: "spawn x ENOENT" });
   });
 
   it("maps a synchronous spawn throw to 127", async () => {
-    const result = await execFile("x", [], (() => {
+    const result = await execFile("x", [], {}, (() => {
       throw new Error("EINVAL");
     }) as never);
     expect(result).toMatchObject({ code: 127, stderr: "EINVAL" });
@@ -121,7 +134,7 @@ describe("execFile", () => {
 
   it("maps death by signal to 128+n", async () => {
     const child = fakeChild();
-    const pending = execFile("x", [], (() => child) as never);
+    const pending = execFile("x", [], {}, (() => child) as never);
     child.emit("close", null, "SIGTERM");
     await expect(pending).resolves.toMatchObject({ code: 128 + os.constants.signals.SIGTERM });
   });

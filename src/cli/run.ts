@@ -59,7 +59,7 @@ import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
 import { SETUP_GROUP } from "./commands/setup.js";
-import type { ExecResult } from "./exec.js";
+import type { ExecOptions, ExecResult } from "./exec.js";
 import { checkInviteSupport, type InviteSupport } from "./invite.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
@@ -106,7 +106,7 @@ export interface CliDeps extends CommandDeps {
    */
   which: (name: string) => string | null;
   /** Run a program with no shell and no stdin; never rejects. */
-  execFile: (file: string, argv: readonly string[]) => Promise<ExecResult>;
+  execFile: (file: string, argv: readonly string[], options?: ExecOptions) => Promise<ExecResult>;
   login: typeof login;
   refresh: typeof refresh;
   /** Overrides for tests; production passes nothing. */

@@ -12,6 +12,8 @@ import {
   tomlHasServer,
   upsertEnvLine,
   withQueryParam,
+  withoutQuery,
+  withoutQueryParam,
   yamlHasServer,
 } from "../../../src/cli/commands/harnessConfig.js";
 
@@ -48,6 +50,26 @@ describe("withQueryParam", () => {
     expect(withQueryParam("https://x.test/mcp#frag", "profile", "core")).toBe(
       "https://x.test/mcp?profile=core#frag",
     );
+  });
+});
+
+describe("withoutQueryParam", () => {
+  it("drops every occurrence and keeps the rest as written", () => {
+    expect(
+      withoutQueryParam(`https://x.test/mcp?guardrails=${UUID}&tools=a,b&guardrails=off#f`, "guardrails"),
+    ).toBe("https://x.test/mcp?tools=a,b#f");
+  });
+
+  it("leaves no bare ? behind", () => {
+    expect(withoutQueryParam("https://x.test/mcp?guardrails=off", "guardrails")).toBe("https://x.test/mcp");
+    expect(withoutQueryParam("https://x.test/mcp", "guardrails")).toBe("https://x.test/mcp");
+  });
+});
+
+describe("withoutQuery", () => {
+  it("drops the query and the fragment, and keeps the path", () => {
+    expect(withoutQuery("https://x.test/mcp/w/ws1?profile=core&tools=a,b#f")).toBe("https://x.test/mcp/w/ws1");
+    expect(withoutQuery("https://x.test/mcp")).toBe("https://x.test/mcp");
   });
 });
 
@@ -175,6 +197,9 @@ describe("blocks", () => {
 
   it("hermes: derives the variable the way `hermes mcp add` does", () => {
     expect(hermesEnvVar("kagura-memory")).toBe("MCP_KAGURA_MEMORY_API_KEY");
+    // Hermes strips the underscores a leading or trailing '-' or '_' leaves.
+    expect(hermesEnvVar("kagura_")).toBe("MCP_KAGURA_API_KEY");
+    expect(hermesEnvVar("-kagura-")).toBe("MCP_KAGURA_API_KEY");
     expect(hermesYamlBlock("kagura-memory", "https://x.test/mcp", "MCP_KAGURA_MEMORY_API_KEY")).toBe(
       [
         "mcp_servers:",

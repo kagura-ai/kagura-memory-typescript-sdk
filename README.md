@@ -126,8 +126,10 @@ then uses.
 
 **Connecting a harness.** Each `setup` subcommand writes `.kagura.json`
 (0600, gitignored) and an MCP entry named `kagura-memory`: the URL plus a
-Bearer header. The key is never printed, and outside Claude Code it never
-goes into the harness's config file.
+Bearer header. `.kagura.json` gets the URL without its query, since the
+REST base is derived from it. The key is never printed, and outside
+Claude Code it never goes into the harness's config file. `setup codex`
+also leaves a key it found in `KAGURA_API_KEY` out of `.kagura.json`.
 
 | Subcommand | How the entry is applied | Where the key lives |
 |---|---|---|
@@ -139,12 +141,24 @@ goes into the harness's config file.
 This package has no TOML, YAML or JSON5 parser, so it never rewrites those
 files. When the harness's CLI is not on `PATH`, the block is printed on
 stderr with the file it belongs in, and stdout stays one JSON document.
-`--guardrails <context-id|off>` and `--tool-profile` set the URL's query
-parameters; `--dry-run` shows what would be configured and changes
-nothing. `setup claude` stops with the matching `claude mcp remove`
-command when a stronger Claude Code scope already defines the entry, and
-when the Kagura Memory plugin is enabled it lists the plugin settings to
-enter.
+On Windows, a CLI installed only as an npm `.cmd` shim counts as not
+found: Node runs one only through a shell, which would re-parse the
+arguments.
+
+`--guardrails <context-id|off>` sets the URL's `guardrails` parameter on
+`setup claude` and `setup codex`. Hermes and OpenClaw do not pass the
+server's instructions to the model, so there `off` is refused and a
+context id is dropped, whether it comes from the flag or from the URL.
+`--tool-profile` (claude, codex) sets `profile`. `--name`, `--force` and
+`--dry-run` (codex, hermes, openclaw) name the entry, replace an existing
+one, and show what would be configured without changing anything.
+
+`setup claude` stops with the matching `claude mcp remove` command when a
+stronger Claude Code scope already defines the entry, and when the Kagura
+Memory plugin is enabled it lists the plugin settings to enter. With
+`--scope user`, an existing user-scope entry is replaced: `claude mcp
+remove` runs before `claude mcp add-json`, and if the add then fails, the
+error says so and prints the command to add the entry by hand.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;

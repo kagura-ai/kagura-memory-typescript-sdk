@@ -14,6 +14,15 @@ import * as path from "node:path";
 
 type SpawnLike = typeof spawn;
 
+export interface ExecOptions {
+  /**
+   * The directory to run in; the current one when unset. `claude plugin
+   * list` answers for the project it runs in, so `setup` runs it in the
+   * project it is setting up.
+   */
+  cwd?: string;
+}
+
 export interface ExecResult {
   /** Exit code; 127 when the program could not be started, 128+n for signal n. */
   code: number;
@@ -84,6 +93,7 @@ export function which(
 export function execFile(
   file: string,
   argv: readonly string[],
+  options: ExecOptions = {},
   spawnImpl: SpawnLike = spawn,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
@@ -107,6 +117,7 @@ export function execFile(
       // stdin is closed: a CLI that unexpectedly prompts reads EOF rather
       // than waiting for an answer this port never gives.
       child = spawnImpl(file, [...argv], {
+        cwd: options.cwd,
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         windowsHide: true,

@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ExecResult } from "../../../src/cli/exec.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
+import type { KaguraConfig } from "../../../src/config.js";
 
 interface Harness {
   deps: CliDeps;
@@ -30,7 +31,7 @@ interface Programs {
   exec?: (file: string, argv: readonly string[]) => ExecResult;
 }
 
-function harness(programs: Programs = {}): Harness {
+function harness(programs: Programs = {}, config: KaguraConfig = {}): Harness {
   const out: string[] = [];
   const err: string[] = [];
   const runs: string[][] = [];
@@ -43,7 +44,7 @@ function harness(programs: Programs = {}): Harness {
       runs.push([file, ...argv]);
       return programs.exec?.(file, argv) ?? { code: 0, stdout: "", stderr: "" };
     },
-    loadConfig: () => ({}),
+    loadConfig: () => config,
   } as unknown as CliDeps;
   return { deps, out, err, runs };
 }
@@ -137,6 +138,30 @@ describe("setup codex", () => {
     expect(fs.existsSync(configToml())).toBe(false);
   });
 
+  it("keeps .kagura.json on the URL without its query, which the SDK's REST base needs", async () => {
+    // baseUrlFromMcp strips `/mcp` only at the end of the path; a query
+    // after it would leave the whole URL as the REST base.
+    const h = harness(codex);
+    const given = `${MCP_URL}?profile=core&tools=a,b`;
+    await runCli(setup("codex", "--mcp-url", given), h.deps);
+    expect(h.runs[0]![5]).toBe(given);
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, ".kagura.json"), "utf-8")).mcp_url).toBe(MCP_URL);
+  });
+
+  it("does not copy a key that came from KAGURA_API_KEY into .kagura.json", async () => {
+    // Codex reads the key from that variable, and so does this bin; the
+    // environment is where the user chose to keep it.
+    process.env.KAGURA_API_KEY = "envonly_key_abcdef";
+    const h = harness(codex, { api_key: "envonly_key_abcdef" });
+    expect(
+      await runCli(["setup", "codex", "--mcp-url", MCP_URL, "--project-dir", sandbox, "-c", CONTEXT], h.deps),
+    ).toBe(0);
+    const kagura = fs.readFileSync(path.join(sandbox, ".kagura.json"), "utf-8");
+    expect(kagura).not.toContain("envonly_key_abcdef");
+    expect(JSON.parse(kagura)).toEqual({ mcp_url: MCP_URL, context_id: CONTEXT });
+    expect((report(h).notes as string[]).join("\n")).toMatch(/not copied into .*\.kagura\.json/);
+  });
+
   it("--dry-run prints the two-key TOML table and runs and writes nothing", async () => {
     const h = harness(codex);
     expect(await runCli(setup("codex", "--dry-run"), h.deps)).toBe(0);
@@ -157,6 +182,9 @@ describe("setup codex", () => {
     expect(err).toContain(configToml());
     expect(err).toContain("bearer_token_env_var");
     expect(report(h).applied_with).toBeNull();
+    // True on Windows too, where an npm-installed codex is a .cmd shim
+    // that `which` passes over.
+    expect((report(h).notes as string[]).join("\n")).toMatch(/`codex` was not found on PATH.*\.cmd/);
   });
 
   it("honours CODEX_HOME", async () => {
@@ -279,9 +307,10 @@ describe("setup codex", () => {
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 
-  it.each(["kagura memory", "a.b", "x/y"])("rejects --name %j with exit 2", async (name) => {
+  it.each(["kagura memory", "a.b", "x/y", ""])("rejects --name %j with exit 2", async (name) => {
     const h = harness(codex);
-    expect(await runCli(setup("codex", "--name", name), h.deps)).toBe(2);
+    expect(await runCli(setup("codex", `--name=${name}`), h.deps)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/Invalid value for '--name'/);
   });
 
   it("refuses --profile, naming the Python path for Codex", async () => {
@@ -359,6 +388,29 @@ describe("setup hermes", () => {
     expect((report(h).notes as string[]).join("\n")).toMatch(/get_context_info\(context_id\) at session start/);
   });
 
+  it("refuses guardrails=off carried in --mcp-url, as it does the flag", async () => {
+    const h = harness({});
+    expect(await runCli(setup("hermes", "--mcp-url", `${MCP_URL}?guardrails=off`), h.deps)).toBe(2);
+    expect(h.err.join("\n")).toMatch(/guardrails=off.*get_context_info/s);
+    expect(fs.existsSync(envFile())).toBe(false);
+  });
+
+  it("refuses guardrails=off carried in the configured mcp_url", async () => {
+    const h = harness({}, { mcp_url: `${MCP_URL}?guardrails=OFF` });
+    expect(await runCli(["setup", "hermes", "--api-key", KEY, "--project-dir", sandbox], h.deps)).toBe(2);
+    expect(fs.existsSync(envFile())).toBe(false);
+  });
+
+  it("drops a guardrails context id carried in --mcp-url, keeping the rest", async () => {
+    const h = harness({});
+    expect(
+      await runCli(setup("hermes", "--mcp-url", `${MCP_URL}?profile=core&guardrails=${CONTEXT}`), h.deps),
+    ).toBe(0);
+    expect(h.err.join("\n")).toContain(`url: "${MCP_URL}?profile=core"`);
+    expect(report(h)).toMatchObject({ mcp_url: `${MCP_URL}?profile=core`, guardrails: null });
+    expect((report(h).notes as string[]).join("\n")).toMatch(/get_context_info\(context_id\) at session start/);
+  });
+
   it("stops on an existing entry in config.yaml unless --force", async () => {
     fs.mkdirSync(hermesDir(), { recursive: true });
     fs.writeFileSync(configYaml(), "mcp_servers:\n  kagura-memory:\n    url: https://old\n");
@@ -382,6 +434,15 @@ describe("setup hermes", () => {
   it("does not take --tool-profile", async () => {
     const h = harness({});
     expect(await runCli(setup("hermes", "--tool-profile", "core"), h.deps)).toBe(2);
+  });
+
+  it("describes --guardrails as what it does here, not as a URL parameter", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "hermes", "--help"], h.deps)).toBe(0);
+    const line = h.out.join("\n").split("\n").find((l) => l.trimStart().startsWith("--guardrails"));
+    expect(line).toBeDefined();
+    expect(line).not.toMatch(/Set the URL's guardrails parameter/);
+    expect(line).toMatch(/not written/);
   });
 });
 
@@ -472,6 +533,29 @@ describe("setup openclaw", () => {
     await runCli(setup("openclaw", "--guardrails", CONTEXT), h.deps);
     expect(h.runs[0]![5]).toBe(MCP_URL);
     expect((report(h).notes as string[]).join("\n")).toMatch(/get_context_info/);
+  });
+
+  it("refuses guardrails=off carried in --mcp-url, and runs nothing", async () => {
+    const h = harness(openclaw);
+    expect(await runCli(setup("openclaw", "--mcp-url", `${MCP_URL}?guardrails=off`), h.deps)).toBe(2);
+    expect(h.runs).toEqual([]);
+    expect(fs.existsSync(envFile())).toBe(false);
+  });
+
+  it("drops a guardrails context id carried in --mcp-url", async () => {
+    const h = harness(openclaw);
+    expect(await runCli(setup("openclaw", "--mcp-url", `${MCP_URL}?guardrails=${CONTEXT}`), h.deps)).toBe(0);
+    expect(h.runs[0]![5]).toBe(MCP_URL);
+    expect((report(h).notes as string[]).join("\n")).toMatch(/get_context_info/);
+  });
+
+  it("stops on an unparseable .kagura.json before openclaw runs or .env is written", async () => {
+    fs.writeFileSync(path.join(sandbox, ".kagura.json"), "{not json");
+    const h = harness(openclaw);
+    expect(await runCli(setup("openclaw"), h.deps)).toBe(1);
+    expect(h.err.join("\n")).toMatch(/refusing to rewrite .*\.kagura\.json/);
+    expect(h.runs).toEqual([]);
+    expect(fs.existsSync(envFile())).toBe(false);
   });
 
   it("stops on an existing JSON5 entry unless --force", async () => {

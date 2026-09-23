@@ -83,6 +83,21 @@ export function withQueryParam(url: string, key: string, value: string): string 
 }
 
 /**
+ * Drop `key` from the URL's query, every occurrence, keeping the other
+ * parameters as written and leaving no bare `?` behind.
+ */
+export function withoutQueryParam(url: string, key: string): string {
+  const { base, params, fragment } = splitUrl(url);
+  const kept = params.filter((param) => paramName(param) !== key);
+  return `${base}${kept.length > 0 ? `?${kept.join("&")}` : ""}${fragment}`;
+}
+
+/** The URL with its query and fragment dropped. */
+export function withoutQuery(url: string): string {
+  return splitUrl(url).base;
+}
+
+/**
  * The URL for the Claude plugin's `server_url` setting.
  *
  * The plugin's hooks call the server themselves, so the entry's tool
@@ -91,7 +106,7 @@ export function withQueryParam(url: string, key: string, value: string): string 
  * a digest of the memories the hooks already deliver.
  */
 export function pluginServerUrl(url: string): string {
-  const { base } = splitUrl(url);
+  const base = withoutQuery(url);
   return queryParam(url, "guardrails")?.toLowerCase() === "off" ? `${base}?guardrails=off` : base;
 }
 
@@ -232,9 +247,16 @@ export function codexTomlBlock(name: string, url: string): string {
 /**
  * The variable Hermes reads an entry's key from — the name `hermes mcp add`
  * derives from the server name, so the entry matches one Hermes would write.
+ *
+ * Hermes also strips the underscores a leading or trailing `-` or `_`
+ * leaves (`kagura_` gives `MCP_KAGURA_API_KEY`), so this does too.
  */
 export function hermesEnvVar(name: string): string {
-  return `MCP_${name.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+  const suffix = name
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `MCP_${suffix}_API_KEY`;
 }
 
 /** The `mcp_servers.<name>` block for Hermes's `config.yaml`. */
