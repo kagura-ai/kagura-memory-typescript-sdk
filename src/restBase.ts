@@ -413,11 +413,17 @@ export class KaguraRestClient {
    * 429 → quota error with a tolerant `Retry-After` parse. A typed
    * refusal (the member seat cap, a daily quota) keeps the server's
    * message and adds its gate payload; a bare 429 keeps the fixed text.
+   * A 429 stays a {@link KaguraQuotaError} even when its body reads as a
+   * plan refusal.
    */
   protected error429(response: RestResponse): KaguraError {
-    return (
-      this.gateRefusal(response) ??
-      new KaguraQuotaError("Quota exceeded. Try again later.", retryAfterSeconds(response.headers))
+    const gated = this.gateRefusal(response);
+    if (gated instanceof KaguraQuotaError) {
+      return gated;
+    }
+    return new KaguraQuotaError(
+      "Quota exceeded. Try again later.",
+      retryAfterSeconds(response.headers),
     );
   }
 
@@ -427,15 +433,17 @@ export class KaguraRestClient {
    * memory-cloud v0.75.0 annotates every such refusal with `details.gate`,
    * and the class follows the gate rather than the status: the
    * resource-token cap is a quota that answers 403. An older server sends
-   * no gate, so the `FEAT-001` / `QUOTA-001` code decides. A body that is
-   * neither (a role denial, a pre-v0.75 `HTTP-403` plan message) gets
-   * `null`, and the hook maps it as it always did.
+   * no gate, so the `FEAT-001` / `QUOTA-001` / `QUOTA-002` /
+   * `CONNECTOR-001` code decides. A body that is neither (a role denial, a
+   * pre-v0.75 `HTTP-403` plan message) gets `null`, and the hook maps it
+   * as it always did.
    *
    * Every 403 hook, the subclass overrides included, asks this first, so
    * a plan refusal never reads as a credential problem; so does every 429
-   * hook but SecretClient's, which keeps 429 generic by design. The
-   * message is the server's own: it names the feature or cap and the plan
-   * that lifts it.
+   * hook but SecretClient's, which keeps 429 generic by design, and a 429
+   * hook keeps only a {@link KaguraQuotaError}. The message is the
+   * server's own, scrubbed of credential markers: it names the feature or
+   * cap and the plan that lifts it.
    */
   protected gateRefusal(response: RestResponse): KaguraError | null {
     const envelope = parseErrorEnvelope(response.text);

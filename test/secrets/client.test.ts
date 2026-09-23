@@ -348,6 +348,22 @@ describe("error mapping", () => {
     expect((error as Error).message).not.toMatch(/may not have a grant/);
   });
 
+  it("scrubs a plan refusal's message carrying credential markers (#40)", async () => {
+    const rest = new FakeRest();
+    rest.status = 403;
+    rest.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Not on your plan. Echo: Authorization: Bearer kagura_leaked_key_value",
+      details: { gate: "plan", feature: "secrets" },
+    });
+    const error = await makeClient(rest)
+      .listSecrets()
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect((error as Error).message).toBe("HTTP 403");
+  });
+
   it("maps 429 through the generic branch, not KaguraQuotaError", async () => {
     const rest = new FakeRest();
     rest.status = 429;

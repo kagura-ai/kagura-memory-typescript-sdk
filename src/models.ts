@@ -587,6 +587,8 @@ export interface RollbackSummary {
    * Merges left in place because a later write changed or removed the
    * edge (server v0.61.0+). Each is also listed in `errors`, so a
    * rollback is complete only when this is 0.
+   *
+   * @default 0
    */
   merges_unreversible?: number;
   /** @default 0 */
@@ -596,9 +598,11 @@ export interface RollbackSummary {
   /**
    * Actions left standing by design — the memory was pinned, forgotten,
    * or removed since the run. Not errors.
+   *
+   * @default 0
    */
   importance_kept?: number;
-  /** See `importance_kept`. */
+  /** See `importance_kept`. @default 0 */
   promotions_kept?: number;
   /** @default 0 */
   archives_restored?: number;

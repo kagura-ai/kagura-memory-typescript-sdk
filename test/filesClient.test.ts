@@ -334,6 +334,24 @@ describe("403 workspace hint (#115)", () => {
     expect((error as Error).message).not.toContain("workspace not accessible");
   });
 
+  it("scrubs a plan refusal's message carrying credential markers (#40)", async () => {
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = {
+      status: 403,
+      body: {
+        error: "FEAT-001",
+        message: "Not on your plan. Echo: Authorization: Bearer kagura_leaked_key_value",
+        details: { gate: "plan", feature: "file_storage" },
+      },
+    };
+    const client = makeClient(server);
+    const error = await client
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect((error as Error).message).toBe("HTTP 403");
+  });
+
   it("maps the storage cap (429 QUOTA-001) to a KaguraQuotaError payload (#40)", async () => {
     const server = new FakeServer();
     server.routes["/api/v1/files/reserve"] = {

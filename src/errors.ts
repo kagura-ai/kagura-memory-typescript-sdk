@@ -111,13 +111,46 @@ export class KaguraConnectionError extends KaguraError {}
 /** Requested resource not found (HTTP 404). */
 export class KaguraNotFoundError extends KaguraError {}
 
-/** Rate limit exceeded. */
+/**
+ * Rate limit exceeded: an HTTP 429 on `KaguraClient`'s own transport.
+ *
+ * That covers the per-minute rate limit and the daily call quotas alike,
+ * and the class is the same for both, so existing handlers keep catching
+ * it. From server v0.75.0 a daily quota carries the gate payload a
+ * {@link KaguraQuotaError} does (`quotaType: "api_mcp_daily"` or
+ * `"api_rest_daily"`); on a per-minute limit every one of those fields is
+ * `null`.
+ */
 export class KaguraRateLimitError extends KaguraError {
   readonly retryAfter: number | null;
+  readonly gate: string | null;
+  readonly quotaType: string | null;
+  readonly current: number | null;
+  readonly limit: number | null;
+  readonly usedToday: number | null;
+  readonly resetsAt: string | null;
+  readonly feature: string | null;
+  readonly requiredPlan: string | null;
+  readonly requiredPlanDisplay: string | null;
+  readonly currentPlan: string | null;
 
-  constructor(message: string, retryAfter: number | null = null, options?: KaguraErrorOptions) {
+  constructor(
+    message: string,
+    retryAfter: number | null = null,
+    options: KaguraQuotaErrorOptions = {},
+  ) {
     super(message, options);
-    this.retryAfter = retryAfter;
+    this.gate = options.gate ?? null;
+    this.quotaType = options.quotaType ?? null;
+    this.usedToday = options.usedToday ?? null;
+    this.current = options.current ?? this.usedToday;
+    this.limit = options.limit ?? null;
+    this.resetsAt = options.resetsAt ?? null;
+    this.feature = options.feature ?? null;
+    this.requiredPlan = options.requiredPlan ?? null;
+    this.requiredPlanDisplay = options.requiredPlanDisplay ?? null;
+    this.currentPlan = options.currentPlan ?? null;
+    this.retryAfter = retryAfter ?? secondsUntil(this.resetsAt);
   }
 }
 
@@ -130,17 +163,21 @@ export class KaguraContextError extends KaguraError {}
 /**
  * A quota or cap was reached.
  *
- * Raised for REST 429s (the resource-token events-per-hour quota among
- * them), for the SDK's own context-limit pre-check, and for every typed
- * quota refusal: MCP `quota_exceeded` and REST `QUOTA-001`, including the
- * resource-token cap, which answers 403 rather than 429.
+ * Raised for a REST client's 429s (the resource-token events-per-hour
+ * quota among them; `SecretClient` keeps 429 generic, and `KaguraClient`'s
+ * own transport raises {@link KaguraRateLimitError}), for the SDK's own
+ * context-limit pre-check, and for every typed quota refusal: MCP
+ * `quota_exceeded` and REST `QUOTA-001` / `QUOTA-002` / `CONNECTOR-001`,
+ * including the resource-token cap, which answers 403 rather than 429.
  *
  * The gate fields are `null` unless the server sent them. `gate` is
- * `"quota"` only for a cap a higher tier raises; a limit no tier lifts
- * (the 1 MB memory-size guard) arrives without one. `retryAfter` is the
- * `Retry-After` header when there was one, else it is derived from
- * `resetsAt` on a time-windowed quota such as `memories_per_day`; a fixed
- * cap has neither, because waiting will not lift it.
+ * `"quota"` on every typed cap, whether or not a higher tier raises it:
+ * an upgrade helps only when `requiredPlan` is non-null. An untyped
+ * limit, such as the 1 MB memory-size guard, arrives with no gate.
+ * `retryAfter` is the `Retry-After` header when there was one, else it is
+ * derived from `resetsAt` on a time-windowed quota such as
+ * `memories_per_day`; a fixed cap has neither, because waiting will not
+ * lift it.
  */
 export class KaguraQuotaError extends KaguraError {
   readonly retryAfter: number | null;

@@ -350,10 +350,12 @@ describe("status mapping", () => {
   });
 
   it("chooses the class from the gate before the code", async () => {
+    // The gate and the code disagree here, so checking the code first
+    // would give a KaguraPlanError.
     const server = new FakeRest();
     server.status = 403;
     server.body = JSON.stringify({
-      error: "CONNECTOR-001",
+      error: "FEAT-001",
       message: "Connector seat limit reached.",
       details: { gate: "quota", quota_type: "connectors", current: 2, limit: 2 },
     });
@@ -362,6 +364,108 @@ describe("status mapping", () => {
     const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
     expect(err).toBeInstanceOf(KaguraQuotaError);
     expect((err as KaguraQuotaError).quotaType).toBe("connectors");
+  });
+
+  it("types a refusal by its gate when the code is none the SDK knows", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "HTTP-403",
+      message: "Feature 'team_invitations' not available on M plan.",
+      details: { gate: "plan", feature: "team_invitations", required_plan: "pro" },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).feature).toBe("team_invitations");
+  });
+
+  it("maps a pre-v0.75 403 CONNECTOR-001 to KaguraQuotaError by its code", async () => {
+    // v0.74 sent the connector seat cap with its own code and legacy counts.
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached. Your plan allows 2 connector(s).",
+      details: { max_connectors: 2, active_connectors: 2 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/connectors"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.message).toBe("Connector seat limit reached. Your plan allows 2 connector(s).");
+    expect(quota.gate).toBeNull();
+    expect(quota.quotaType).toBeNull();
+  });
+
+  it("maps a pre-v0.75 429 QUOTA-001 by its code, with the payload", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Storage limit reached.",
+      details: { quota_type: "storage_bytes", current: 1024, limit: 1024 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    // The server's message and counts, not the bare 429's fixed text.
+    expect(quota.message).toBe("Storage limit reached.");
+    expect(quota.gate).toBeNull();
+    expect(quota.quotaType).toBe("storage_bytes");
+    expect(quota.current).toBe(1024);
+    expect(quota.limit).toBe(1024);
+  });
+
+  it("maps a pre-v0.75 429 QUOTA-002 by its code, keeping the server's message", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-002",
+      message: "Daily embedding spend cap reached.",
+      details: { quota_type: "embedding_spend_daily" },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).message).toBe("Daily embedding spend cap reached.");
+    expect((err as KaguraQuotaError).quotaType).toBe("embedding_spend_daily");
+  });
+
+  it("keeps every 429 a KaguraQuotaError, even one whose body reads as a plan refusal", async () => {
+    // No server sends this today, but a 429 has always been a quota here.
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Feature 'resources' not available on L plan.",
+      details: { gate: "plan", feature: "resources" },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err).not.toBeInstanceOf(KaguraPlanError);
+  });
+
+  it("scrubs a gate refusal's message carrying credential markers", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Not on your plan. Echo: Authorization: Bearer kagura_leaked_key_value",
+      details: { gate: "plan", feature: "resources" },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).message).toBe("HTTP 403");
   });
 
   it("keeps a FEAT-001 behind an allowlist or deployment switch a KaguraPlanError", async () => {

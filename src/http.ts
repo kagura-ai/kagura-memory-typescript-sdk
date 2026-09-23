@@ -200,11 +200,13 @@ export interface GateCodes {
 
 /**
  * MCP envelope codes. `feature_not_available` is the analysis tools'
- * twin of `plan_required`, as REST `FEAT-001` is of both.
+ * twin of `plan_required`, as REST `FEAT-001` is of both, and
+ * `setup_connector` forwards the connector seat cap's REST code
+ * `CONNECTOR-001` as is.
  */
 export const MCP_GATE_CODES: GateCodes = {
   plan: ["plan_required", "feature_not_available"],
-  quota: ["quota_exceeded"],
+  quota: ["quota_exceeded", "CONNECTOR-001"],
 };
 
 /**
@@ -227,21 +229,62 @@ function numberField(block: Record<string, unknown>, key: string): number | null
 }
 
 /**
- * Build the typed error for a plan or quota refusal, or `null` if it is
- * neither.
+ * Which refusal `block` is: `"plan"`, `"quota"`, or `null` for neither.
  *
  * `block` holds the gate fields: the MCP envelope itself, or a REST
- * body's `details`. Its `gate` (memory-cloud v0.75.0+) picks the class
- * whenever it is one the SDK knows, because the code alone can mislead: the
+ * body's `details`. Its `gate` (memory-cloud v0.75.0+) decides whenever
+ * it is one the SDK knows, because the code alone can mislead: the
  * resource-token cap is a quota that answers 403, and the connector seat
  * cap keeps a code of its own. `allowlist` and `deployment` are the other
- * two reasons a feature is unavailable, so they stay a
- * {@link KaguraPlanError} — the class an older server's bare `FEAT-001`
- * already gets. With no gate, `code` decides against the surface's
- * `codes`.
- *
- * Wire keys are snake_case; a missing or wrong-typed one reads as `null`
- * rather than trusting the shape.
+ * two reasons a feature is unavailable, so they count as `"plan"` — the
+ * kind an older server's bare `FEAT-001` already gets. With no gate,
+ * `code` decides against the surface's `codes`.
+ */
+function gateKind(
+  block: Record<string, unknown>,
+  code: string | null,
+  codes: GateCodes,
+): "plan" | "quota" | null {
+  const gate = stringField(block, "gate");
+  if (gate === "quota") {
+    return "quota";
+  }
+  if (gate === "plan" || gate === "allowlist" || gate === "deployment") {
+    return "plan";
+  }
+  if (code !== null && codes.quota.includes(code)) {
+    return "quota";
+  }
+  if (code !== null && codes.plan.includes(code)) {
+    return "plan";
+  }
+  return null;
+}
+
+/**
+ * The gate payload in `block`, camelCased. Wire keys are snake_case; a
+ * missing or wrong-typed one reads as `null` rather than trusting the
+ * shape.
+ */
+function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
+  return {
+    gate: stringField(block, "gate"),
+    feature: stringField(block, "feature"),
+    requiredPlan: stringField(block, "required_plan"),
+    requiredPlanDisplay: stringField(block, "required_plan_display"),
+    currentPlan: stringField(block, "current_plan"),
+    quotaType: stringField(block, "quota_type"),
+    current: numberField(block, "current"),
+    limit: numberField(block, "limit"),
+    usedToday: numberField(block, "used_today"),
+    resetsAt: stringField(block, "resets_at"),
+  };
+}
+
+/**
+ * Build the typed error for a plan or quota refusal, or `null` if it is
+ * neither: {@link KaguraPlanError} or {@link KaguraQuotaError}, as
+ * `gateKind` decides, carrying the payload `block` holds.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -250,36 +293,14 @@ export function gateError(
   message: string,
   retryAfter: number | null = null,
 ): KaguraError | null {
-  const gate = stringField(block, "gate");
-  let kind: "plan" | "quota" | null = null;
-  if (gate === "quota") {
-    kind = "quota";
-  } else if (gate === "plan" || gate === "allowlist" || gate === "deployment") {
-    kind = "plan";
-  } else if (code !== null && codes.quota.includes(code)) {
-    kind = "quota";
-  } else if (code !== null && codes.plan.includes(code)) {
-    kind = "plan";
-  }
+  const kind = gateKind(block, code, codes);
   if (kind === null) {
     return null;
   }
-  const options: KaguraQuotaErrorOptions = {
-    gate,
-    feature: stringField(block, "feature"),
-    requiredPlan: stringField(block, "required_plan"),
-    requiredPlanDisplay: stringField(block, "required_plan_display"),
-    currentPlan: stringField(block, "current_plan"),
-  };
-  if (kind === "plan") {
-    return new KaguraPlanError(message, options);
-  }
-  options.quotaType = stringField(block, "quota_type");
-  options.current = numberField(block, "current");
-  options.limit = numberField(block, "limit");
-  options.usedToday = numberField(block, "used_today");
-  options.resetsAt = stringField(block, "resets_at");
-  return new KaguraQuotaError(message, retryAfter, options);
+  const options = gateOptions(block);
+  return kind === "plan"
+    ? new KaguraPlanError(message, options)
+    : new KaguraQuotaError(message, retryAfter, options);
 }
 
 /**
@@ -317,6 +338,10 @@ export function parseErrorEnvelope(
  * KaguraConnectionError. The server-supplied detail is appended when
  * present, otherwise `fallbackMessage` is used so the status is never
  * left bare. This function always throws.
+ *
+ * A 429 that is a typed quota refusal (the daily call quota) keeps its
+ * class, which existing handlers catch, but carries the quota's gate
+ * payload; any other 429 leaves it `null`.
  */
 export function throwForKaguraStatus(
   status: number,
@@ -329,9 +354,13 @@ export function throwForKaguraStatus(
   }
   const detail = extractDetail(bodyText) || fallbackMessage || "";
   if (status === 429) {
+    const envelope = parseErrorEnvelope(bodyText);
     throw new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       retryAfterSeconds(headers),
+      envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
+        ? gateOptions(envelope.details)
+        : {},
     );
   }
   // Avoid a doubled "HTTP 500: HTTP 500" when the body carries no detail.

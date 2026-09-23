@@ -252,8 +252,8 @@ keyed on the error code and the envelope's fields, never on the message:
 | Class | Raised for | Carries |
 |-------|------------|---------|
 | `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings | — |
-| `KaguraPlanError` | MCP `plan_required`; REST 403 `FEAT-001` — the plan lacks a feature | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
-| `KaguraQuotaError` | MCP `quota_exceeded`; REST `QUOTA-001` (the resource-token cap is a **403**) and other 429s | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
+| `KaguraPlanError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+| `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`; REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
 | `KaguraPermissionError` | MCP `permission_denied` — the caller's role is too low | `requiredRole` |
 | `KaguraError` | any other code | — |
@@ -264,9 +264,18 @@ class from it first, falling back to the code for older servers. The
 payload fields are `null` whenever the server did not send them. Show
 `requiredPlanDisplay` (`"XL"`) to a user and decide with `requiredPlan`;
 both are `null` when no plan lifts the refusal, which is what an
-`allowlist` or `deployment` gate means. `retryAfter` is derived from
-`resetsAt` on a time-windowed quota such as `memories_per_day`, and is
-`null` on a fixed cap that waiting will not lift.
+`allowlist` or `deployment` gate means. A `quota` gate is set on every
+typed cap, including one no tier raises, so an upgrade helps only when
+`requiredPlan` is non-null. `retryAfter` is derived from `resetsAt` on a
+time-windowed quota such as `memories_per_day`, and is `null` on a fixed
+cap that waiting will not lift.
+
+An HTTP 429 keeps the class it always had on two surfaces.
+`KaguraClient`'s own transport raises `KaguraRateLimitError` for the
+per-minute rate limit and the daily call quota alike; from v0.75.0 the
+quota also sets the `KaguraQuotaError` fields on it (`quotaType` is
+`api_mcp_daily` or `api_rest_daily`), and they stay `null` on a
+per-minute limit. `SecretClient` renders a 429 as `KaguraConnectionError`.
 
 ```ts
 import { KaguraPlanError, KaguraQuotaError } from "kagura-memory";

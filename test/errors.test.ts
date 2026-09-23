@@ -167,6 +167,25 @@ describe("gate errors (#40)", () => {
     expect(bare.summary).toEqual({});
   });
 
+  it("KaguraRateLimitError keeps its signature and defaults the gate payload to null", () => {
+    const cause = new Error("root");
+    const e = new KaguraRateLimitError("slow down", 60, { cause });
+    expect(e.retryAfter).toBe(60);
+    expect(e.cause).toBe(cause);
+    expect(e.gate).toBeNull();
+    expect(e.quotaType).toBeNull();
+    expect(e.current).toBeNull();
+    expect(e.requiredPlan).toBeNull();
+
+    const quota = new KaguraRateLimitError("daily", null, {
+      gate: "quota",
+      quotaType: "api_mcp_daily",
+    });
+    expect(quota).not.toBeInstanceOf(KaguraQuotaError);
+    expect(quota.gate).toBe("quota");
+    expect(quota.quotaType).toBe("api_mcp_daily");
+  });
+
   it("KaguraPermissionError carries requiredRole", () => {
     expect(new KaguraPermissionError("denied", "editor").requiredRole).toBe("editor");
     expect(new KaguraPermissionError("denied").requiredRole).toBeNull();

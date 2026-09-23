@@ -13,7 +13,9 @@
  * - {@link KaguraPlanError}: The plan lacks the `resources` feature
  *   (403 `FEAT-001`, e.g. from `createToken`)
  * - {@link KaguraQuotaError}: Quota exceeded (429), or the active-token
- *   cap reached (403 `QUOTA-001`, `quotaType: "resource_tokens"`)
+ *   cap reached (403 `QUOTA-001`, `quotaType: "resource_tokens"`; server
+ *   v0.75.0+, older servers answer 403 `HTTP-403`, a
+ *   {@link KaguraConnectionError})
  */
 
 import type { ResolvedAuth } from "./auth/types.js";
@@ -209,7 +211,8 @@ export class ResourceClient extends KaguraRestClient {
    * @returns Created token including plaintext token (shown only once).
    * @throws KaguraPlanError when the plan lacks the `resources` feature.
    * @throws KaguraQuotaError at the plan's active-token cap — a 403, not a
-   *   429; `limit` is the cap. Revoke a token or upgrade.
+   *   429; `limit` is the cap. Revoke a token or upgrade. Server v0.75.0+;
+   *   older servers answer 403 `HTTP-403`, a KaguraConnectionError.
    */
   async createToken(options: CreateTokenOptions): Promise<ResourceTokenCreateResponse> {
     const body: Record<string, unknown> = { resource_id: options.resourceId };

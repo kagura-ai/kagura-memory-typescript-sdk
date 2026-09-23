@@ -633,37 +633,94 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
   });
 
   it("chooses the class from the gate, not the code", async () => {
-    // An analysis tool's feature_not_available is the MCP twin of FEAT-001;
-    // a cap whose code the SDK does not know is still a quota when the gate
-    // says so.
+    // The first code disagrees with its gate and the second is none the SDK
+    // knows, so each is typed only if the gate is read, and read first.
     const server = new FakeServer();
-    server.toolResults.analyze_context = {
-      status: "error",
-      error: "feature_not_available",
-      message: "Analyses are not enabled for this workspace.",
-      gate: "allowlist",
-      feature: "memory_analysis",
-    };
     server.toolResults.setup_connector = {
       status: "error",
-      error: "CONNECTOR-001",
+      error: "plan_required",
       message: "Connector seat limit reached.",
       gate: "quota",
       quota_type: "connectors",
       current: 2,
       limit: 2,
     };
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "analysis_disabled",
+      message: "Analyses are not enabled for this workspace.",
+      gate: "allowlist",
+      feature: "memory_analysis",
+    };
     const client = makeClient(server);
+
+    const quota = await client.callRawTool("setup_connector").catch((e: unknown) => e);
+    expect(quota).toBeInstanceOf(KaguraQuotaError);
+    expect((quota as KaguraQuotaError).quotaType).toBe("connectors");
 
     const plan = await client.callRawTool("analyze_context").catch((e: unknown) => e);
     expect(plan).toBeInstanceOf(KaguraPlanError);
     // allowlist: no tier lifts it, so there is no plan to offer.
     expect((plan as KaguraPlanError).gate).toBe("allowlist");
     expect((plan as KaguraPlanError).requiredPlan).toBeNull();
+  });
 
-    const quota = await client.callRawTool("setup_connector").catch((e: unknown) => e);
-    expect(quota).toBeInstanceOf(KaguraQuotaError);
-    expect((quota as KaguraQuotaError).quotaType).toBe("connectors");
+  it("maps a pre-v0.75 feature_not_available envelope by its code", async () => {
+    // The analysis tools' twin of plan_required, sent with no gate before v0.75.
+    const server = new FakeServer();
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "feature_not_available",
+      message: "Memory analysis is not available on your plan.",
+      feature: "memory_analysis",
+    };
+    const err = await failure(server, (c) => c.callRawTool("analyze_context"));
+
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).gate).toBeNull();
+    expect((err as KaguraPlanError).feature).toBe("memory_analysis");
+  });
+
+  it("maps a pre-v0.75 CONNECTOR-001 envelope from setup_connector by its code", async () => {
+    // setup_connector forwards the connector seat cap's REST code as is.
+    const server = new FakeServer();
+    server.toolResults.setup_connector = {
+      status: "error",
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached. Your plan allows 2 connector(s).",
+      max_connectors: 2,
+      active_connectors: 2,
+    };
+    const err = await failure(server, (c) => c.callRawTool("setup_connector"));
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).gate).toBeNull();
+  });
+
+  it("keeps a transport 429 a KaguraRateLimitError, with the daily quota's payload", async () => {
+    // v0.75 answers the daily MCP call quota at the HTTP layer, in the REST
+    // envelope. The class stays the one existing handlers catch.
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({
+        error: "QUOTA-001",
+        message: "Daily MCP quota exceeded: 1001/1000. Resets at midnight UTC.",
+        details: { gate: "quota", quota_type: "api_mcp_daily", retry_after: 86400 },
+      }),
+      { status: 429, headers: { "Retry-After": "86400" } },
+    );
+    const err = await failure(server, (c) => c.listContexts());
+
+    expect(err).toBeInstanceOf(KaguraRateLimitError);
+    expect(err).not.toBeInstanceOf(KaguraQuotaError);
+    const limited = err as KaguraRateLimitError;
+    expect(limited.message).toBe(
+      "Rate limit exceeded (HTTP 429): Daily MCP quota exceeded: 1001/1000. " +
+        "Resets at midnight UTC.",
+    );
+    expect(limited.gate).toBe("quota");
+    expect(limited.quotaType).toBe("api_mcp_daily");
+    expect(limited.retryAfter).toBe(86400);
   });
 
   it("ignores wrong-typed gate fields instead of trusting the shape", async () => {
