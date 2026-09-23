@@ -207,38 +207,50 @@ npx kagura-memory auth login --invite <link-or-token>
 
 Without it, a new user who starts from `auth login` is refused at sign-up:
 the approval page sends a signed-out visitor to the login page, which does
-not carry an invite. With it, the CLI first asks the server how to present
-the invite (`GET /api/v1/system/info`, which takes no credentials):
+not carry an invite. With it, once the device code is issued, the CLI asks
+the server how to present the invite (`GET /api/v1/system/info`, which
+takes no credentials, allowed 5 seconds):
 
-- **The server supports the hand-off** (memory-cloud 0.76.0 or later): one
-  link, `<frontend>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>`,
-  that signs up with the invite and lands on the approval page with the
-  code filled in. The browser opens that link. Below it, "If you land on the
+- **The server supports the hand-off** (memory-cloud 0.76.0 or later,
+  `v0.76.0` and build suffixes included): one link,
+  `<frontend>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>`, that
+  signs up with the invite and lands on the approval page with the code
+  filled in. The browser opens that link. Below it, "If you land on the
   dashboard instead, approve here:" and the approval URL cover a user who
   is already signed in.
 - **An older or unrecognised version, or the check failed**: two steps, in
   order. The plain `/join/<token>` link, which the browser opens, then the
   approval URL, and how long the code stays valid.
-- **The server does not take invites** (`features.beta_invites` off): a
-  one-line note, then the ordinary prompt.
+- **The server does not take invites** (a `features` object without
+  `beta_invites: true`): a one-line note, then the ordinary prompt. A body
+  with no `features` object says nothing about invites, so the version
+  decides.
 
 `<frontend>` is the device response's approval URL with its final
 `/device` removed, so a frontend under a base path gets its `/join` beside
 its `/device`. When that URL does not end in `/device`, the CLI does not
 guess where `/join` lives: it takes the two steps, with your own link as
 step 1, or tells you to open the invite you were sent when you gave a bare
-token.
+token. It takes the two steps too when memory-cloud's `/join` would drop
+the `return_to` (a path starting with `//`, as a frontend URL configured
+with a trailing slash produces, or one holding a backslash or a control
+character), which would otherwise leave the new user on the dashboard.
 
-The invite is checked before any request, and a malformed one exits 2. A
-pasted link must be HTTPS, as `--server` must (plain HTTP only on
-localhost), and a `/join` link is never built on a plain-HTTP frontend: the
+The invite is checked before any request. A malformed one exits 2 with
+`Error: Invalid value for '--invite': <reason>`, the Python CLI's reason,
+which never quotes the value. A pasted link must be written out in full,
+`https://<host>/…/join/<token>` (a browser would repair `https:/host/…`;
+the CLI does not), and must be HTTPS, as `--server` must (plain HTTP only
+on localhost). A `/join` link is never built on a plain-HTTP frontend: the
 token would travel in the clear. A link for a different server than the one
-being logged into aborts before the device code is polled, so no profile is
-written; the error suggests logging in with `--server` instead. The token is
-never saved, in `credentials.json` or anywhere else, and never appears in an
-error message: it is printed only inside a link. Every other `auth`
-subcommand rejects `--invite` with exit 2 rather than ignoring it.
-`--no-browser` works as it does without an invite.
+being logged into aborts before the server is asked about invites and
+before the device code is polled, so no profile is written; the error
+suggests logging in with `--server` instead. The token is never saved, in
+`credentials.json` or anywhere else, and never appears in an error message:
+it is printed only inside a link. Every other `auth` subcommand rejects
+`--invite` with exit 2 rather than ignoring it. `--no-browser` works as it
+does without an invite, and when the browser cannot be opened the CLI says
+which link above to open by hand.
 
 #### Logging in from TypeScript
 
@@ -307,7 +319,8 @@ const token = "<token>"; // the last path segment of https://…/join/<token>
 await login({
   onUserCode: ({ verificationUri, verificationUriComplete }) => {
     // null when /join cannot be placed: the approval URL does not end in
-    // /device, or is plain HTTP off localhost.
+    // /device, is plain HTTP off localhost, or is not a return_to that
+    // memory-cloud's /join keeps.
     const link = buildInviteLink(verificationUri, verificationUriComplete, token);
     if (link !== null) console.log(`Sign up and approve: ${link}`);
     // A signed-in user, or a server older than memory-cloud 0.76.0, ends

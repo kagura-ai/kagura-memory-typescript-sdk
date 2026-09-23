@@ -130,11 +130,12 @@ Default scope is "${DEFAULT_SCOPE}"; --read-only requests "${READ_ONLY_SCOPE}".
 Narrowing a scope on refresh is silent; widening needs consent, so it
 re-runs the device flow.`;
 
-/** `--invite`, parsed and checked against the server before login starts. */
+/** `--invite`, parsed; how the server takes it is asked once the code is issued. */
 interface InviteHandoff {
   /** The token appears only inside a printed `/join` link, never bare. */
   invite: ParsedInvite;
-  support: InviteSupport;
+  /** The API base the device flow runs against, where `/system/info` is asked. */
+  server: string;
 }
 
 /**
@@ -144,7 +145,8 @@ interface InviteHandoff {
  * `authorizeDevice` fills a missing one with the bare `verificationUri`.
  * Built on that, the link would land on an empty code form, so the code is
  * put back: `verificationUri`'s path plus `?user_code=`, the shape
- * memory-cloud itself builds.
+ * memory-cloud itself builds. The Python CLI passes the bare URI on; this
+ * is deliberately one step better.
  */
 function approvalWithCode(auth: DeviceAuthorizationResponse): string {
   if (auth.verificationUriComplete && auth.verificationUriComplete !== auth.verificationUri) {
@@ -163,98 +165,144 @@ function approvalWithCode(auth: DeviceAuthorizationResponse): string {
 }
 
 /**
- * Print the code and URL, then optionally try to open a browser.
+ * Open `url` unless `--no-browser`; say so when that, or the opener, fails.
+ * `what` names the link above to open by hand. The Python CLI's lines.
+ */
+async function openBrowserOrExplain(
+  deps: CliDeps,
+  url: string,
+  openBrowserFlag: boolean,
+  what = "the URL",
+): Promise<void> {
+  if (!openBrowserFlag) {
+    deps.write("  (--no-browser: not opening a browser; polling will continue here.)");
+    return;
+  }
+  if (!(await deps.openBrowser(url))) {
+    deps.write(
+      `  Could not auto-open the browser. Open ${what} above manually. ` +
+        "Polling will continue here.",
+    );
+  }
+}
+
+/**
+ * Print the code and URL first, then optionally try to open a browser.
  *
- * With `--invite`, the prompt follows the Python CLI's
- * (kagura-memory-python-sdk#259): the one link when the server can return
- * to the approval page after sign-up and `/join` can be placed beside
- * `/device`; otherwise two steps, the `/join` link and then the approval
- * URL; and a note plus the ordinary prompt when the server takes no
- * invites. The browser opens the invite link, never the approval URL
- * ahead of it.
+ * Unconditionally, and before any launch attempt: if the browser opens
+ * silently or fails, the operator can still copy the code by eye.
+ */
+async function printDevicePrompt(
+  deps: CliDeps,
+  auth: DeviceAuthorizationResponse,
+  openBrowserFlag: boolean,
+): Promise<void> {
+  const approveUrl = auth.verificationUriComplete || auth.verificationUri;
+  deps.write("");
+  deps.write(`! First copy your one-time code: ${auth.userCode}`);
+  deps.write("  Open this URL in your browser to approve:");
+  deps.write(`    ${approveUrl}`);
+  deps.write("");
+  await openBrowserOrExplain(deps, approveUrl, openBrowserFlag);
+}
+
+/**
+ * The `--invite` prompt: the code first, then the link or links in order.
+ *
+ * The Python CLI's (kagura-memory-python-sdk#259). `hand_off` prints the
+ * one link when `/join` can be placed beside `/device` and would keep
+ * `return_to`, then the approval URL for a user already signed in;
+ * otherwise two steps, the `/join` link and then the approval URL.
+ * `disabled` prints a note and the ordinary prompt. The browser opens the
+ * invite link, never the approval URL ahead of it.
+ */
+async function printInvitePrompt(
+  deps: CliDeps,
+  auth: DeviceAuthorizationResponse,
+  invite: ParsedInvite,
+  support: InviteSupport,
+  openBrowserFlag: boolean,
+): Promise<void> {
+  if (support === "disabled") {
+    deps.write("");
+    deps.write("  Note: this server does not accept invites, so --invite has no effect.");
+    await printDevicePrompt(deps, auth, openBrowserFlag);
+    return;
+  }
+
+  const approveUrl = auth.verificationUriComplete || auth.verificationUri;
+  const link =
+    support === "hand_off"
+      ? buildInviteLink(auth.verificationUri, approvalWithCode(auth), invite.token)
+      : null;
+
+  deps.write("");
+  deps.write(`! First copy your one-time code: ${auth.userCode}`);
+  if (link !== null) {
+    deps.write("  Open this link to accept your invite and sign in:");
+    deps.write(`    ${link}`);
+    deps.write("  After sign-up you land on the approval page with the code filled in.");
+    // An already-signed-in user, or a /join that still ends on the
+    // dashboard, leaves the code pending; this approves it directly.
+    deps.write("  If you land on the dashboard instead, approve here:");
+    deps.write(`    ${approveUrl}`);
+    deps.write("");
+    await openBrowserOrExplain(deps, link, openBrowserFlag, "the invite link");
+    return;
+  }
+
+  // return_to would be ignored or dropped, so step 1 is /join alone,
+  // placed beside /device. Where it cannot be, step 1 is the link the user
+  // gave (never a guessed host), and for a bare token no link at all.
+  const base = inviteBaseUrl(auth.verificationUri);
+  const joinLink = base !== null ? `${base}/join/${invite.token}` : invite.link;
+  const minutes = Math.max(1, Math.round(auth.expiresIn / 60));
+  // Worded to hold on every server, including one with the hand-off whose
+  // /join could not be placed, or whose /system/info could not be read.
+  deps.write("  Accept your invite before you approve the code, in this order:");
+  deps.write(
+    joinLink !== null
+      ? `    1. Open your invite link and sign up:   ${joinLink}`
+      : "    1. Open the invite link you were sent and sign up.",
+  );
+  deps.write(`    2. Then open this URL and approve:       ${approveUrl}`);
+  deps.write(`  Polling continues here until the code expires (in ${minutes} min).`);
+  deps.write("");
+  // Nothing to open for a bare token: approval first would send a
+  // signed-out user to a login that drops the invite.
+  if (joinLink !== null) {
+    await openBrowserOrExplain(deps, joinLink, openBrowserFlag, "step 1");
+  }
+}
+
+/**
+ * `onUserCode` for the device flow: the prompt, and with `--invite`, the
+ * checks that choose it.
+ *
+ * login() awaits this callback, so a throw here stops it before it polls
+ * or writes a profile. The Python CLI's order: the invite's origin against
+ * the device response first, so a link for another server aborts without
+ * asking that server anything more; then `/system/info`.
  */
 function devicePrompt(deps: CliDeps, openBrowserFlag: boolean, handoff?: InviteHandoff) {
   return async (auth: DeviceAuthorizationResponse): Promise<void> => {
-    const approveUrl = auth.verificationUriComplete || auth.verificationUri;
-    let url: string | null = approveUrl;
-    let steps = ["  Then approve at:", `    ${approveUrl}`];
-
-    if (handoff !== undefined) {
-      // First, whichever way the invite is shown: login() awaits this
-      // callback, so a throw here stops it before it polls or writes a
-      // profile.
-      try {
-        checkInviteOrigin(handoff.invite, auth.verificationUri);
-      } catch (e) {
-        throw new KaguraAuthError(
-          `${excMessage(e)}\n  Log in to the invite's server instead: ` +
-            "kagura-memory auth login --server <its MCP URL> --invite <link>",
-          { cause: e },
-        );
-      }
-    }
-
-    if (handoff?.support === "off") {
-      deps.write("");
-      deps.write("  Note: this server does not accept invites, so --invite has no effect.");
-    } else if (handoff !== undefined) {
-      const { invite, support } = handoff;
-      const link =
-        support === "one-link"
-          ? buildInviteLink(auth.verificationUri, approvalWithCode(auth), invite.token)
-          : null;
-      if (link !== null) {
-        url = link;
-        steps = [
-          "  Open this link to accept your invite and sign in:",
-          `    ${link}`,
-          "  After sign-up you land on the approval page with the code filled in.",
-          // An already-signed-in user, or a /join that still ends on the
-          // dashboard, leaves the code pending; this approves it directly.
-          "  If you land on the dashboard instead, approve here:",
-          `    ${approveUrl}`,
-        ];
-      } else {
-        // return_to would be ignored, so step 1 is /join alone, placed
-        // beside /device. Where it cannot be, step 1 is the link the user
-        // gave (never a guessed host), and for a bare token no link at all.
-        const base = inviteBaseUrl(auth.verificationUri);
-        url = base !== null ? `${base}/join/${invite.token}` : invite.link;
-        const minutes = Math.max(1, Math.round(auth.expiresIn / 60));
-        steps = [
-          // Worded to hold on every server, including one with the
-          // hand-off whose /join could not be placed.
-          "  Accept your invite before you approve the code, in this order:",
-          url !== null
-            ? `    1. Open your invite link and sign up:   ${url}`
-            : "    1. Open the invite link you were sent and sign up.",
-          `    2. Then open this URL and approve:       ${approveUrl}`,
-          `  Polling continues here until the code expires (in ${minutes} min).`,
-        ];
-      }
-    }
-
-    // Unconditionally, and before any launch attempt: if the browser opens
-    // silently or fails, the operator can still copy the code by eye.
-    deps.write("");
-    deps.write(`  First copy your one-time code: ${auth.userCode}`);
-    for (const line of steps) {
-      deps.write(line);
-    }
-    deps.write("");
-
-    if (url === null) {
-      // Nothing to open: approval first would send a signed-out user to a
-      // login that drops the invite.
+    if (handoff === undefined) {
+      await printDevicePrompt(deps, auth, openBrowserFlag);
       return;
     }
-    if (!openBrowserFlag) {
-      deps.write("  (--no-browser: not opening a browser; still polling here.)");
-      return;
+    try {
+      checkInviteOrigin(handoff.invite, auth.verificationUri);
+    } catch (e) {
+      // "<its MCP URL>" where Python says "<its API URL>": this CLI's
+      // --server takes the MCP URL and derives the API from it.
+      throw new KaguraAuthError(
+        `${excMessage(e)}\n  Log in to the invite's server instead: ` +
+          "kagura-memory auth login --server <its MCP URL> --invite <link>",
+        { cause: e },
+      );
     }
-    if (!(await deps.openBrowser(url))) {
-      deps.write("  (Could not open a browser — use the URL above.)");
-    }
+    const support = await checkInviteSupport(handoff.server, deps.fetch);
+    await printInvitePrompt(deps, auth, handoff.invite, support, openBrowserFlag);
   };
 }
 
@@ -307,11 +355,12 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
     return 2;
   }
 
-  let handoff: InviteHandoff | undefined;
-  if (invite !== undefined) {
-    const server = baseUrlFromMcp(resolveLoginMcpUrl(args.values.server));
-    handoff = { invite, support: await checkInviteSupport(server, deps.fetch) };
-  }
+  // The server is asked how it takes the invite only once the device code
+  // is issued (devicePrompt), as in the Python CLI.
+  const handoff: InviteHandoff | undefined =
+    invite === undefined
+      ? undefined
+      : { invite, server: baseUrlFromMcp(resolveLoginMcpUrl(args.values.server)) };
 
   const options: LoginOptions = {
     onUserCode: devicePrompt(deps, !args.flags.has("no-browser"), handoff),
@@ -490,7 +539,9 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
  * used — plausibly so on `refresh`, which can re-run the device flow — and
  * a flag that looks like it changes behaviour but does not is worse than
  * one that is rejected (the argument `setup claude` makes too). The
- * message names the flag, never its value.
+ * message names the flag, never its value. Click, whose subcommands do
+ * not declare it, says "No such option: --invite" with the same exit 2;
+ * this wording also says where the flag belongs.
  */
 function refuseInvite(run: Command["run"]): Command["run"] {
   return async (deps, args) => {

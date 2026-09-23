@@ -85,7 +85,7 @@ export interface LoginOptions {
  * The MCP URL `login()` authenticates against, validated.
  *
  * Exported so the CLI's `--invite` feature check reaches the server the
- * device flow is about to use, before the flow starts.
+ * device flow uses.
  */
 export function resolveLoginMcpUrl(
   mcpUrl: string | undefined,

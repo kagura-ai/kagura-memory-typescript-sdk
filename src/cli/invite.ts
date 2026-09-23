@@ -5,52 +5,54 @@
  * The link itself is `buildInviteLink` in `auth/deviceFlow.ts`, a pure
  * helper an embedding app can call too. What the CLI adds is this probe:
  * whether the server takes invites at all, and whether its `/join` page
- * honours `return_to` so one link can do the whole job.
+ * honours `return_to` so one link can do the whole job. The Python SDK's
+ * `fetch_system_info` and `invite_support`.
  */
 
 import { SDK_VERSION } from "../version.js";
 
 /**
- * The first memory-cloud release whose `/join/<token>` honours `return_to`
- * (memory-cloud #1655, milestoned v0.76.0).
+ * The first memory-cloud release whose `/join/<token>` honours `return_to`.
  *
- * If the hand-off ships in a later release, bump this: a server below it is
- * sent the two-step fallback, which works everywhere, so the cost of a
- * value that is too high is one extra click — too low, and a new user is
- * signed up and stranded on the dashboard.
+ * memory-cloud v0.76.0 ships the `/join` → `/device` hand-off
+ * (memory-cloud#1655). It came with no capability flag, so the server
+ * version is the switch: from 0.76.0 {@link inviteSupport} answers
+ * `"hand_off"`, and 0.75.x and older get the two-step fallback.
  */
 export const MIN_INVITE_HANDOFF_VERSION = "0.76.0";
 
-const MIN_INVITE_HANDOFF_TUPLE = MIN_INVITE_HANDOFF_VERSION.split(".").map(Number);
+/**
+ * How long the `/system/info` probe may take.
+ *
+ * It runs once the device code is issued, so a hung server must not eat
+ * into the user's approval window.
+ */
+export const INVITE_PROBE_TIMEOUT_MS = 5_000;
 
-// Best effort: the device code is not issued until this settles, so a hung
-// server must not hold the login up for fetch's unbounded default.
-const PROBE_TIMEOUT_MS = 10_000;
+const SEMVER_PREFIX_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
 
 /**
  * How the invite is presented.
  *
- * - `one-link` — `/join/<token>?return_to=…` signs up and lands on approval.
- * - `two-step` — the plain `/join/<token>` link, then the approval URL.
- * - `off` — the server does not take invite links; log in without one.
+ * - `hand_off` — `/join/<token>?return_to=…` signs up and lands on approval.
+ * - `two_step` — the plain `/join/<token>` link, then the approval URL.
+ * - `disabled` — the server does not take invite links; log in without one.
  */
-export type InviteSupport = "one-link" | "two-step" | "off";
+export type InviteSupport = "hand_off" | "two_step" | "disabled";
 
 /**
- * `"0.76.0"` → `[0, 76, 0]`, or `null` when unparseable.
- *
- * The same reading as `KaguraClient.checkServerVersion`: the first three
- * dot-separated components, each strictly digits — `Number("")` is 0 and
- * `Number("1e2")` is 100, so NaN alone would not catch them.
+ * `[major, minor, patch]` from a `v?MAJOR.MINOR.PATCH` prefix, so a `v`
+ * and any suffix (`-rc.1`, `+build.7`) are accepted; `null` otherwise
+ * (`"0.76"`, `"nightly"`).
  */
-function versionTuple(version: unknown): number[] | null {
-  if (typeof version !== "string") return null;
-  const components = version.split(".").slice(0, 3);
-  if (!components.every((c) => /^\d+$/.test(c))) return null;
-  return components.map(Number);
+export function parseVersionPrefix(version: string): [number, number, number] | null {
+  const m = SEMVER_PREFIX_RE.exec(version);
+  return m === null ? null : [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
-function atLeast(version: number[], min: number[]): boolean {
+const MIN_INVITE_HANDOFF_TUPLE = parseVersionPrefix(MIN_INVITE_HANDOFF_VERSION)!;
+
+function atLeast(version: readonly number[], min: readonly number[]): boolean {
   for (let i = 0; i < min.length; i++) {
     const have = version[i] ?? 0;
     const want = min[i] ?? 0;
@@ -60,42 +62,71 @@ function atLeast(version: number[], min: number[]): boolean {
 }
 
 /**
- * Ask `{server}/api/v1/system/info` how to present an invite.
+ * GET the public `{server}/api/v1/system/info` and return the raw JSON
+ * object.
  *
- * Unauthenticated — the route takes no credentials — and never throws: a
- * failed request, an error status or a body that is not a JSON object all
- * mean "unknown", which gets the two-step fallback because it works on
- * every server. `features.beta_invites` false or absent is `off`, whatever
- * the version says.
+ * Unauthenticated — the route takes no credentials, and there are none yet
+ * during login. Best effort, and never throws: a failed or timed-out
+ * request, a status other than 200, or a body that is not a non-empty JSON
+ * object all yield `null`.
  */
-export async function checkInviteSupport(
+export async function fetchSystemInfo(
   server: string,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
-): Promise<InviteSupport> {
+): Promise<Record<string, unknown> | null> {
   let body: unknown;
   try {
     const response = await fetchImpl(`${server.replace(/\/+$/, "")}/api/v1/system/info`, {
       method: "GET",
       headers: { "User-Agent": `kagura-memory-sdk/${SDK_VERSION}`, Accept: "application/json" },
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(INVITE_PROBE_TIMEOUT_MS),
     });
-    if (!response.ok) return "two-step";
+    if (response.status !== 200) return null;
     body = JSON.parse(await response.text());
   } catch {
-    return "two-step";
+    return null;
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return "two-step";
+    return null;
   }
+  return Object.keys(body).length > 0 ? (body as Record<string, unknown>) : null;
+}
 
-  const info = body as { version?: unknown; features?: unknown };
+/**
+ * Decide how `--invite` is presented, from a raw `/system/info` body.
+ *
+ * A `features` object without `beta_invites: true` means invites are off,
+ * as memory-cloud's own web app reads it: the flag is default-off, and a
+ * server older than the flag (before 0.70.0) has no `/join` route. With no
+ * `features` object the body says nothing about invites, so the version
+ * decides.
+ *
+ * @returns `disabled` when `features` is an object whose `beta_invites` is
+ *   not `true`; `hand_off` when the version is at least
+ *   {@link MIN_INVITE_HANDOFF_VERSION}; otherwise `two_step` (no info, or
+ *   an older or unparseable version), because it works on every server.
+ */
+export function inviteSupport(info: Record<string, unknown> | null): InviteSupport {
+  if (info === null) {
+    return "two_step";
+  }
   const features = info.features;
-  const invites =
-    typeof features === "object" && features !== null
-      ? (features as Record<string, unknown>).beta_invites
-      : undefined;
-  if (invites !== true) return "off";
+  if (
+    typeof features === "object" &&
+    features !== null &&
+    !Array.isArray(features) &&
+    (features as Record<string, unknown>).beta_invites !== true
+  ) {
+    return "disabled";
+  }
+  const version = typeof info.version === "string" ? parseVersionPrefix(info.version) : null;
+  return version !== null && atLeast(version, MIN_INVITE_HANDOFF_TUPLE) ? "hand_off" : "two_step";
+}
 
-  const version = versionTuple(info.version);
-  return version !== null && atLeast(version, MIN_INVITE_HANDOFF_TUPLE) ? "one-link" : "two-step";
+/** {@link inviteSupport} of what {@link fetchSystemInfo} finds on `server`. */
+export async function checkInviteSupport(
+  server: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<InviteSupport> {
+  return inviteSupport(await fetchSystemInfo(server, fetchImpl));
 }

@@ -268,6 +268,29 @@ describe("cli: login", () => {
     expect(urlAt).toBeLessThan(launchAt);
   });
 
+  it("words the prompt as the Python CLI does", async () => {
+    const h = harness();
+    await runCli(["login"], h.deps);
+    const onUserCode = (h.loginCalls[0] as { onUserCode: (a: unknown) => Promise<void> })
+      .onUserCode;
+    // The stubbed login() has already reported success; only the prompt counts.
+    const before = h.out.length;
+    await onUserCode({
+      userCode: "WDJB-MJHT",
+      verificationUri: "https://x.test/device",
+      verificationUriComplete: "https://x.test/device?user_code=WDJB-MJHT",
+    });
+
+    expect(h.out.slice(before)).toEqual([
+      "",
+      "! First copy your one-time code: WDJB-MJHT",
+      "  Open this URL in your browser to approve:",
+      "    https://x.test/device?user_code=WDJB-MJHT",
+      "",
+    ]);
+    expect(h.opened).toEqual(["https://x.test/device?user_code=WDJB-MJHT"]);
+  });
+
   it("does not open a browser with --no-browser", async () => {
     const h = harness();
     await runCli(["login", "--no-browser"], h.deps);
@@ -276,7 +299,7 @@ describe("cli: login", () => {
     await onUserCode({ userCode: "X", verificationUri: "https://x.test/a" });
 
     expect(h.opened).toEqual([]);
-    expect(h.out.join("\n")).toMatch(/not opening a browser/);
+    expect(h.out.at(-1)).toBe("  (--no-browser: not opening a browser; polling will continue here.)");
   });
 
   it("says so when the browser cannot be opened", async () => {
@@ -285,7 +308,9 @@ describe("cli: login", () => {
     const onUserCode = (h.loginCalls[0] as { onUserCode: (a: unknown) => Promise<void> })
       .onUserCode;
     await onUserCode({ userCode: "X", verificationUri: "https://x.test/a" });
-    expect(h.out.join("\n")).toMatch(/Could not open a browser/);
+    expect(h.out.at(-1)).toBe(
+      "  Could not auto-open the browser. Open the URL above manually. Polling will continue here.",
+    );
   });
 
   it("falls back to the workspace id when the name is absent", async () => {
@@ -432,9 +457,13 @@ describe("cli: login --invite (#44)", () => {
     const h = inviteHarness(SUPPORTED);
     expect(await runCli(["auth", "login", ...SERVER_ARGS, "--invite", invite], h.deps)).toBe(0);
 
-    // The feature check goes to the login server; the link is built on
-    // the frontend origin the device response names.
-    expect(h.urls[0]).toBe("https://api.test/api/v1/system/info");
+    // The feature check goes to the login server, once the device code is
+    // issued, as in the Python CLI; the link is built on the frontend
+    // origin the device response names.
+    expect(h.urls.slice(0, 2)).toEqual([
+      "https://api.test/api/v1/oauth/device/authorize",
+      "https://api.test/api/v1/system/info",
+    ]);
     expect(h.out).toContain(`    ${INVITE_LINK}`);
     expect(h.opened).toEqual([INVITE_LINK]);
   });
@@ -443,7 +472,7 @@ describe("cli: login --invite (#44)", () => {
     const h = inviteHarness(SUPPORTED);
     await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps);
 
-    const codeAt = h.out.findIndex((l) => l.includes("one-time code: WDJB-MJHT"));
+    const codeAt = h.out.indexOf("! First copy your one-time code: WDJB-MJHT");
     expect(codeAt).toBeGreaterThanOrEqual(0);
     // Worded as the Python CLI's (kagura-memory-python-sdk#259).
     expect(h.out.slice(codeAt + 1, codeAt + 7)).toEqual([
@@ -487,9 +516,9 @@ describe("cli: login --invite (#44)", () => {
     const h = inviteHarness(SUPPORTED);
     expect(await runCli(["login", "--invite", INVITE], h.deps)).toBe(0);
 
-    // The feature check and the device flow reach the same server.
-    expect(h.urls[0]).toBe("https://api.test/api/v1/system/info");
-    expect(h.urls[1]).toBe("https://api.test/api/v1/oauth/device/authorize");
+    // The device flow and the feature check reach the same server.
+    expect(h.urls[0]).toBe("https://api.test/api/v1/oauth/device/authorize");
+    expect(h.urls[1]).toBe("https://api.test/api/v1/system/info");
     expect(h.opened).toEqual([INVITE_LINK]);
   });
 
@@ -580,7 +609,9 @@ describe("cli: login --invite (#44)", () => {
     // The way out: log in to the server the invite belongs to.
     expect(err).toContain("--server <its MCP URL> --invite <link>");
     expect(err).not.toContain(INVITE);
-    expect(h.urls.some((u) => u.includes("/oauth/token"))).toBe(false);
+    // The origin is checked before the feature check, so the wrong server
+    // is not asked anything more.
+    expect(h.urls).toEqual(["https://api.test/api/v1/oauth/device/authorize"]);
     expect(h.opened).toEqual([]);
     expect(fs.existsSync(credentialsPath)).toBe(false);
   });
@@ -595,24 +626,41 @@ describe("cli: login --invite (#44)", () => {
     const noticeAt = h.out.indexOf(
       "  Note: this server does not accept invites, so --invite has no effect.",
     );
-    const codeAt = h.out.findIndex((l) => l.includes("one-time code: WDJB-MJHT"));
+    const codeAt = h.out.indexOf("! First copy your one-time code: WDJB-MJHT");
     expect(noticeAt).toBeGreaterThanOrEqual(0);
     expect(codeAt).toBeGreaterThan(noticeAt);
-    expect(h.out.slice(codeAt + 1, codeAt + 3)).toEqual(["  Then approve at:", `    ${APPROVE}`]);
+    expect(h.out.slice(codeAt + 1, codeAt + 3)).toEqual([
+      "  Open this URL in your browser to approve:",
+      `    ${APPROVE}`,
+    ]);
     expect(h.opened).toEqual([APPROVE]);
     // Not used, so not shown.
     expect(h.out.join("\n")).not.toContain(INVITE);
   });
 
   it.each([
+    ["no features object", { name: "memory-cloud", version: "0.76.0" }],
+    ["a v-prefixed release with a build suffix", { ...SUPPORTED, version: "v0.76.0+build.7" }],
+  ])("hands off on a server reporting %s", async (_label, info) => {
+    // Only a features object without beta_invites: true says invites are
+    // off; without one, the version decides.
+    const h = inviteHarness(info);
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+    expect(h.out).toContain(`    ${INVITE_LINK}`);
+    expect(h.opened).toEqual([INVITE_LINK]);
+  });
+
+  it.each([
     ["an older server", OLDER],
     ["an unparseable version", { ...SUPPORTED, version: "nightly" }],
+    ["an empty /system/info body", {}],
+    ["no features object on an older server", { name: "memory-cloud", version: "0.75.2" }],
     ["a failed /system/info request", new TypeError("connect ECONNREFUSED")],
   ])("prints the two-step fallback for %s", async (_label, info) => {
     const h = inviteHarness(info);
     expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
 
-    const codeAt = h.out.findIndex((l) => l.includes("one-time code: WDJB-MJHT"));
+    const codeAt = h.out.indexOf("! First copy your one-time code: WDJB-MJHT");
     expect(codeAt).toBeGreaterThanOrEqual(0);
     // Worded as the Python CLI's; the expiry comes from expires_in (600 s).
     expect(h.out.slice(codeAt + 1, codeAt + 5)).toEqual([
@@ -673,6 +721,33 @@ describe("cli: login --invite (#44)", () => {
     });
   });
 
+  it("takes two steps when /join would drop return_to", async () => {
+    // A FRONTEND_URL with a trailing slash: return_to would start with
+    // "//", which memory-cloud's /join discards, stranding the new user on
+    // the dashboard.
+    const h = inviteHarness(SUPPORTED, {
+      verification_uri: "https://app.test//device",
+      verification_uri_complete: "https://app.test//device?user_code=WDJB-MJHT",
+    });
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+
+    expect(h.out).toContain("  Accept your invite before you approve the code, in this order:");
+    expect(h.out.join("\n")).not.toContain("return_to");
+  });
+
+  it.each([
+    ["one link", SUPPORTED, "the invite link"],
+    ["two steps", OLDER, "step 1"],
+    ["invites off", INVITES_OFF, "the URL"],
+  ])("says which link to open when the browser fails (%s)", async (_label, info, what) => {
+    const h = inviteHarness(info);
+    h.deps.openBrowser = async () => false;
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+    expect(h.out).toContain(
+      `  Could not auto-open the browser. Open ${what} above manually. Polling will continue here.`,
+    );
+  });
+
   it("never builds a /join link on a plain-HTTP frontend off localhost", async () => {
     const h = inviteHarness(SUPPORTED, {
       verification_uri: "http://app.test/device",
@@ -705,7 +780,7 @@ describe("cli: login --invite (#44)", () => {
     ).toBe(0);
     expect(h.out).toContain(line);
     expect(h.opened).toEqual([]);
-    expect(h.out.join("\n")).toMatch(/not opening a browser/);
+    expect(h.out).toContain("  (--no-browser: not opening a browser; polling will continue here.)");
   });
 
   it("never writes the token to the credentials file or any other file", async () => {
