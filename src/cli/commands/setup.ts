@@ -36,6 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
+import type { KaguraConfig } from "../../config.js";
 import { validateHttpsUrl } from "../../http.js";
 import { isUuid, parseUuid } from "../../uuid.js";
 import { rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
@@ -202,9 +203,9 @@ const CODEX_GUARDRAILS: FlagSpec = {
   help:
     "Set the URL's ?guardrails= (server v0.74.0+). Codex reads the MCP instructions, which then " +
     "carry that context's tool guardrail digest. Defaults to --context-id, or to 'off' while the " +
-    "kagura-memory plugin's guardrail hooks are on, unless --mcp-url already sets it. Use a " +
-    "context whose editor list you control. 'off' also removes the guardrails block from " +
-    "get_context_info.",
+    "kagura-memory plugin's guardrail hooks are on, unless the MCP URL (--mcp-url or the " +
+    "configured mcp_url) already sets it. Use a context whose editor list you control. 'off' " +
+    "also removes the guardrails block from get_context_info.",
 };
 /** Hermes and OpenClaw take the flag so a script can pass it to every harness alike. */
 function guardrailsNotWritten(title: string): FlagSpec {
@@ -334,7 +335,11 @@ function readJsonLenient(target: string): Record<string, unknown> | null {
   }
 }
 
-/** A harness config's text, or "" when it does not exist yet; Python's words when it cannot be read. */
+/**
+ * Codex's config.toml text, or "" when it does not exist yet; Python's
+ * words when it cannot be read. Python reads that file itself to find an
+ * entry, and stops there.
+ */
 function readText(target: string): string {
   try {
     return fs.readFileSync(target, "utf-8");
@@ -342,6 +347,27 @@ function readText(target: string): string {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return "";
     const reason = e instanceof Error ? e.message : String(e);
     throw new CliError(`Cannot read ${pathLabel(target)} (${reason}); fix it and re-run.`);
+  }
+}
+
+/**
+ * A Hermes or OpenClaw config's text, only to scan it: "" when it does not
+ * exist or cannot be read. Python finds their entries through the harness
+ * CLI alone and never reads these files, so one that cannot be read stops
+ * nothing here either; a note says the scan could not look.
+ */
+function readTextToScan(target: string, name: string, notes: string[]): string {
+  try {
+    return fs.readFileSync(target, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      const reason = e instanceof Error ? e.message : String(e);
+      notes.push(
+        `Note: setup could not read ${pathLabel(target)} (${reason}), so it did not look there for a ` +
+          `${name} entry.`,
+      );
+    }
+    return "";
   }
 }
 
@@ -1429,7 +1455,21 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
   if (profile !== undefined && !args.flags.has("url-form")) throw refuseProfile(harness, profile);
 
   // For the URL and context fallbacks alone: no key is taken from it.
-  const { config } = resolveConfig(deps, undefined, false);
+  // Python never reads it, so with --mcp-url one that cannot be loaded
+  // stops nothing; the context fallback only fills in the report. The
+  // loader's reason is left out: a JSON.parse message quotes the file,
+  // and so can quote a key in it.
+  const notes: string[] = [];
+  let config: KaguraConfig = {};
+  try {
+    ({ config } = resolveConfig(deps, undefined, false));
+  } catch (e) {
+    if (urlArg === undefined) throw e;
+    notes.push(
+      "Note: the configuration (.kagura.json) could not be loaded, so setup went on without it: " +
+        "--mcp-url gives the URL.",
+    );
+  }
   const baseUrl =
     urlArg ?? (typeof config.mcp_url === "string" && config.mcp_url ? config.mcp_url : DEFAULT_MCP_URL);
   if (urlArg === undefined) requireHttps(baseUrl, false);
@@ -1440,7 +1480,6 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
   // lacks: accepted, so a script still runs, and said to change nothing.
   const label = LABEL[harness];
   const apiKey = args.values["api-key"];
-  const notes: string[] = [];
   if (apiKey !== undefined) {
     notes.push(
       `Note: --api-key is not stored or used: the ${label} entry reads the key from $${keyEnv}, ` +
@@ -1531,9 +1570,11 @@ async function runHarnessCommand(
   secrets: string[],
 ): Promise<void> {
   const result = await deps.execFile(file, argv, HARNESS_EXEC);
-  if (result.code === 0) return;
   const command = `\`${[program, ...argv.slice(0, 2)].join(" ")}\``;
+  // Before the exit code: a run killed at the timeout failed, as in
+  // Python, whatever code it reported.
   if (result.timedOut) throw new CliError(`${command} failed: timed out after ${HARNESS_TIMEOUT_S}s`);
+  if (result.code === 0) return;
   let detail = result.stderr.trim() || result.stdout.trim();
   for (const secret of secrets) detail = detail.split(secret).join("<redacted>");
   throw new CliError(`${command} failed: ${detail || `exit code ${result.code}`}`);
@@ -1656,7 +1697,8 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const found = tomlHasServer(readText(configPath), name);
 
   // Codex reads the server's instructions, so guardrails take effect
-  // here. A value already in --mcp-url is kept as written.
+  // here. A value already in the URL, from --mcp-url or the configured
+  // mcp_url, is kept as written.
   const notes: string[] = [];
   let guardrails = input.guardrails;
   if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
@@ -1808,8 +1850,8 @@ async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const home = hermesHome();
   const configPath = path.join(home, "config.yaml");
   const where = pathLabel(configPath);
-  const text = readText(configPath);
   const notes: string[] = [];
+  const text = readTextToScan(configPath, name, notes);
   const url = urlForNoInstructions(input, notes);
 
   // With a top-level mcp_servers key already there, the whole block pasted
@@ -1861,8 +1903,8 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
   // $OPENCLAW_STATE_DIR too, which Python's paths leave out.
   const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
   const configPath = process.env.OPENCLAW_CONFIG_PATH || path.join(stateDir, "openclaw.json");
-  const found = json5HasServer(readText(configPath), name);
   const notes: string[] = [];
+  const found = json5HasServer(readTextToScan(configPath, name, notes), name);
   const url = urlForNoInstructions(input, notes);
 
   // `add` refuses a name that exists, so replacing one goes through `set`,
@@ -1951,8 +1993,8 @@ const codex: Command = {
     "  --guardrails CONTEXT_ID puts that context's tool guardrail digest in\n" +
     "  them. While the kagura-memory Codex plugin's guardrail hooks are on for\n" +
     "  the entry, they deliver guardrails themselves, and the URL gets\n" +
-    "  ?guardrails=off instead. A guardrails value already in --mcp-url is\n" +
-    "  kept.\n\n" +
+    "  ?guardrails=off instead. A guardrails value already in the MCP URL\n" +
+    "  (--mcp-url or the configured mcp_url) is kept.\n\n" +
     GUARDRAILS_ADVICE,
   spec: {
     flags: [

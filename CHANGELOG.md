@@ -81,8 +81,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as the Python CLI's do (python-sdk#260): the variable the entry reads
   the key from, `KAGURA_API_KEY` by default. It goes into `codex mcp add
   --bearer-token-env-var`, OpenClaw's `Authorization=Bearer ${VAR}`
-  header, the printed block and the notes. A name that is not upper-case
-  letters, digits and `_` is a usage error (exit 2) with Python's message.
+  header, the printed block and the notes. The name starts with an
+  upper-case letter or `_`, and goes on with upper-case letters, digits or
+  `_`; any other is a usage error (exit 2) with Python's message.
   `setup hermes` refuses the option (exit 2), since Hermes names the
   variable itself (`MCP_<NAME>_API_KEY`).
 
@@ -189,10 +190,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as in the Python CLI (python-sdk#260). They wrote the key into Hermes's
   `.env` as `MCP_<NAME>_API_KEY` and into OpenClaw's `.env` as
   `KAGURA_API_KEY`, even a key found only in `KAGURA_API_KEY`, and wrote
-  `.kagura.json` (with the key, except on Codex) and its `.gitignore`
-  line. None of that happens now. A missing key is no longer an error,
-  where these setups exited 1 with `no API key`. The entry still only
-  names the variable, and a closing note says where to put the key:
+  `.kagura.json` with the key (Codex left out only a key it found in
+  `KAGURA_API_KEY`) and its `.gitignore` line. None of that happens now.
+  A missing key is no longer an error, where these setups exited 1 with
+  `no API key`. The entry still only names the variable, and a closing
+  note says where to put the key:
   - Codex: `export KAGURA_API_KEY=<your-api-key>` (or the `--api-key-env`
     variable) in the shell profile that starts Codex.
   - Hermes: `MCP_KAGURA_MEMORY_API_KEY=<your-api-key>` in the `.env`
@@ -203,9 +205,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   A `.env` line or `.kagura.json` an earlier release wrote is left as it
   is, and the entries it serves go on working. Remove the key from
-  `.kagura.json` if nothing else there needs it. `--api-key` and
-  `--project-dir` are still accepted, so v0.10 scripts run, but they do
-  nothing, and a note says so; `--project-dir` no longer has to exist.
+  `.kagura.json` if nothing else there needs it, including one that
+  `setup codex --api-key` wrote. `--api-key` and `--project-dir` are still
+  accepted, so v0.10 scripts run, but they do nothing, and a note says so;
+  `--project-dir` no longer has to exist. `--api-key` beside `--profile`
+  is still the usage error (exit 2) it was. The configuration is read
+  only for the `mcp_url` and `context_id` fallbacks, so with `--mcp-url`,
+  a `.kagura.json` that cannot be loaded no longer stops these setups
+  (exit 1): they go on with a note, as Python never reads it.
   The JSON report keeps its fields, and `wrote` and `gitignore_added` are
   now empty. `setup claude` is unchanged.
 
@@ -245,7 +252,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `openclaw mcp show`, so without the CLI it prints the block and exits 0.
   This port now does the same, where it exited 1. Its scan of the file then
   only adds `in place of the existing one` to the message. A Codex entry
-  stops setup either way, since both CLIs read `config.toml` for it.
+  stops setup either way, since both CLIs read `config.toml` for it. A
+  `config.yaml` or `openclaw.json` that cannot be read no longer stops
+  setup either (it exited 1), since Python never reads those: a note says
+  setup could not look there. An unreadable `config.toml` still stops
+  `setup codex`, in Python's words.
 
 - **`--name` takes at most 64 characters, and the message is Python's**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
@@ -285,7 +296,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - A failing `codex` or `openclaw`: `` `codex mcp add` failed: <what it
     printed> ``, or `exit code N`, or `timed out after 120s`. Any key it
     echoes is still masked. Both now get Python's 120-second timeout,
-    where they got 60.
+    where they got 60. A run that reaches it fails as timed out whatever
+    the CLI then exits with, where one that caught the signal and exited
+    0 was reported as done. Every harness CLI, `claude` included, is now
+    killed there with SIGKILL, as Python kills it, not SIGTERM.
   - Hermes is `Hermes Agent`, and paths under the home directory are
     written `~/…`, in messages. The JSON fields keep full paths.
   - `--help` has Python's summaries and option help. `--guardrails` is

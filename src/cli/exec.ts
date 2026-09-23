@@ -22,7 +22,8 @@ export interface ExecOptions {
    */
   cwd?: string;
   /**
-   * How long the program may run before it is killed; EXEC_TIMEOUT_MS when
+   * How long the program may run before it is killed, with SIGKILL as
+   * Python's `subprocess.run(timeout=…)` kills it; EXEC_TIMEOUT_MS when
    * unset. `setup claude` gives `claude` Python's 30 s, and `setup codex`
    * and `setup openclaw` give their CLIs Python's 120 s.
    */
@@ -34,7 +35,10 @@ export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
-  /** Set, to true, when the program was killed for running past its timeout. */
+  /**
+   * Set, to true, when the program was killed for running past its
+   * timeout, whatever code it then reported: that run failed.
+   */
   timedOut?: true;
 }
 
@@ -131,6 +135,9 @@ export function execFile(
         shell: false,
         windowsHide: true,
         timeout: options.timeoutMs ?? EXEC_TIMEOUT_MS,
+        // Not SIGTERM, which a CLI can catch and then exit as it likes, or
+        // ignore and so hang `setup` past the timeout.
+        killSignal: "SIGKILL",
       });
     } catch (e) {
       settle(127, e instanceof Error ? e.message : String(e));
@@ -142,12 +149,13 @@ export function execFile(
     // 128+n for a signal, as in `secret exec`: "it died" stays
     // distinguishable from "it exited 0". Nothing here kills the child but
     // spawn's own timeout, which marks it `killed`; a signal from anywhere
-    // else leaves that unset.
+    // else leaves that unset. So `killed` alone says it timed out, whatever
+    // code or signal the close reports.
     child.on("close", (code, signal) =>
       settle(
         code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0)),
         "",
-        signal !== null && child.killed === true,
+        child.killed === true,
       ),
     );
   });

@@ -228,12 +228,52 @@ describe("setup codex", () => {
     expect(await runCli(setup("codex", "--mcp-url", "http://localhost:8080/mcp"), local.deps)).toBe(0);
   });
 
+  it.each(["HTTP://example.com/mcp", "Http://example.com/mcp", " http://example.com/mcp"])(
+    "refuses %j too: a URL's scheme has no case, and a parser drops the space",
+    async (url) => {
+      // Python's startswith("http://") check lets each of these through.
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "--mcp-url", url), h.deps)).toBe(2);
+      expect(h.err.join("\n")).toContain("Error: Invalid value for '--mcp-url': MCP URL must use HTTPS");
+      expect(h.runs).toEqual([]);
+    },
+  );
+
   it("refuses a plain-HTTP configured mcp_url too, before anything runs", async () => {
     const h = harness(codex, { mcp_url: "http://example.com/mcp" });
     expect(await runCli(["setup", "codex"], h.deps)).toBe(1);
     expect(h.err.join("\n")).toContain("MCP URL must use HTTPS for security (got: http://example.com/mcp)");
     expect(h.err.join("\n")).toContain("--mcp-url");
     expect(h.runs).toEqual([]);
+  });
+
+  describe("a configuration it cannot load", () => {
+    // The real loader reads ./.kagura.json first. This one would make
+    // JSON.parse quote the start of the key.
+    const BROKEN = `{"api_key": ${KEY}}`;
+
+    it("stops nothing with --mcp-url, which Python reads alone, and quotes none of it", async () => {
+      process.chdir(sandbox);
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), BROKEN);
+      const h = harness(codex, "disk");
+      expect(await runCli(setup("codex"), h.deps)).toBe(0);
+      expect(h.runs).toHaveLength(1);
+      expect(notes(h)).toContain(
+        "Note: the configuration (.kagura.json) could not be loaded, so setup went on without it: " +
+          "--mcp-url gives the URL.",
+      );
+      for (const text of [h.out.join("\n"), h.err.join("\n")]) expect(text).not.toContain(KEY.slice(0, 10));
+      expect(fs.readFileSync(path.join(sandbox, ".kagura.json"), "utf-8")).toBe(BROKEN);
+    });
+
+    it("stops setup without --mcp-url, whose fallback is its mcp_url", async () => {
+      process.chdir(sandbox);
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), "{not json");
+      const h = harness(codex, "disk");
+      expect(await runCli(["setup", "codex"], h.deps)).toBe(1);
+      expect(h.err.join("\n")).toContain("Error: Invalid JSON or encoding in .kagura.json");
+      expect(h.runs).toEqual([]);
+    });
   });
 
   it("falls back to the configured mcp_url, then the default", async () => {
@@ -288,6 +328,18 @@ describe("setup codex", () => {
       expect(err).toContain("kagura-mcp");
       expect(err).toContain("`pip install kagura-memory && kagura setup codex --profile work`");
       expect(err).toContain("--url-form");
+      expect(h.runs).toEqual([]);
+    });
+
+    it("is still refused beside --api-key, even with --url-form, as it was before 0.11.0", async () => {
+      // Both are inert here, but the pair was a usage error in v0.10, and
+      // Python's harness setups take no --api-key at all (exit 2 too).
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "--url-form", "--profile", "work", "--api-key", KEY), h.deps)).toBe(2);
+      expect(h.err).toContain(
+        "Error: --profile (OAuth) and --api-key (static token) are mutually exclusive; pick one.",
+      );
+      expect(h.err.join("\n")).not.toContain(KEY);
       expect(h.runs).toEqual([]);
     });
 
@@ -486,6 +538,15 @@ describe("setup codex", () => {
       expect(notes(h)).not.toContain(HOOKS_NOTE);
     });
 
+    it("keeps one in the configured mcp_url too, which --mcp-url defaults to", async () => {
+      // `setup claude` writes the URL as given, query included.
+      hooksOn();
+      const h = harness(codex, { mcp_url: `${MCP_URL}?guardrails=${CONTEXT}` });
+      await runCli(["setup", "codex"], h.deps);
+      expect(addedUrl(h)).toBe(`${MCP_URL}?guardrails=${CONTEXT}`);
+      expect(notes(h)).not.toContain(HOOKS_NOTE);
+    });
+
     it("joins with & when the URL already has a query", async () => {
       hooksOn();
       const h = harness(codex);
@@ -591,13 +652,16 @@ describe("setup codex", () => {
       expect(h.err).toContain("Error: `codex mcp add` failed: exit code 2");
     });
 
-    it("says when it timed out", async () => {
+    it.each([137, 1, 0])("says when it timed out, even with exit code %i", async (code) => {
+      // Python kills it and reports the timeout, whatever the CLI did with
+      // the signal; a 0 from a killed run is no success.
       const h = harness({
         onPath: codex.onPath!,
-        exec: () => ({ code: 143, stdout: "", stderr: "", timedOut: true }),
+        exec: () => ({ code, stdout: "", stderr: "got-term", timedOut: true }),
       });
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
       expect(h.err).toContain("Error: `codex mcp add` failed: timed out after 120s");
+      expect(h.out).toEqual([]);
     });
 
     it("never echoes a key it prints back", async () => {
@@ -657,6 +721,21 @@ describe("setup hermes", () => {
       HERMES_KEY_NOTE,
       "Check it with: hermes mcp test kagura-memory",
     ]);
+  });
+
+  it.each([
+    ["without", {}],
+    ["with", hermes],
+  ])("prints the whole block %s hermes on PATH when it cannot read config.yaml, and exits 0", async (_, programs) => {
+    // Python never reads config.yaml: it asks `hermes mcp list`, and without
+    // hermes prints the block. A directory in its place fails any reader.
+    fs.mkdirSync(configYaml(), { recursive: true });
+    const h = harness(programs);
+    expect(await runCli(setup("hermes"), h.deps)).toBe(0);
+    expect(h.err.join("\n")).toContain("Add this kagura-memory entry to it:\n\nmcp_servers:\n  kagura-memory:");
+    expect(notes(h).join("\n")).toMatch(
+      /^Note: setup could not read ~\/\.hermes\/config\.yaml \(.+\), so it did not look there for a kagura-memory entry\.$/m,
+    );
   });
 
   it("says `hermes` is not on PATH when it is not", async () => {
@@ -1039,8 +1118,10 @@ describe("setup openclaw", () => {
     });
   });
 
-  it("leaves the project's .kagura.json alone, even one it could not parse", async () => {
-    // Harness setups neither read nor write a project file.
+  it("neither reads nor writes --project-dir's .kagura.json, even one it could not parse", async () => {
+    // --project-dir is inert. The configuration setup does read, for the
+    // URL and context fallbacks, is the current directory's or the home
+    // directory's: see "a configuration it cannot load" under setup codex.
     fs.writeFileSync(path.join(sandbox, ".kagura.json"), "{not json");
     const h = harness(openclaw);
     expect(await runCli(setup("openclaw", "--project-dir", sandbox), h.deps)).toBe(0);
@@ -1078,6 +1159,25 @@ describe("setup openclaw", () => {
       expect(await runCli(setup("openclaw"), h.deps)).toBe(0);
       expect(h.err.join("\n")).toContain("Add this kagura-memory entry to it in place of the existing one:");
     });
+  });
+
+  it("goes on when it cannot read openclaw.json, as Python never reads it", async () => {
+    // A directory in its place fails any reader. Python asks `openclaw mcp
+    // show`, and without openclaw prints the block.
+    fs.mkdirSync(configJson(), { recursive: true });
+    const NOTE =
+      /^Note: setup could not read ~\/\.openclaw\/openclaw\.json \(.+\), so it did not look there for a kagura-memory entry\.$/m;
+
+    const printed = harness({});
+    expect(await runCli(setup("openclaw"), printed.deps)).toBe(0);
+    expect(printed.err.join("\n")).toContain("Add this kagura-memory entry to it:");
+    expect(notes(printed).join("\n")).toMatch(NOTE);
+
+    // With openclaw, the add runs, and openclaw says whatever it makes of the file.
+    const ran = harness(openclaw);
+    expect(await runCli(setup("openclaw"), ran.deps)).toBe(0);
+    expect(ran.runs[0]!.slice(1, 3)).toEqual(["mcp", "add"]);
+    expect(notes(ran).join("\n")).toMatch(NOTE);
   });
 
   it("exits 1 when openclaw refuses, as Python words it", async () => {

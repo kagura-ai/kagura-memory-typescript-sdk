@@ -111,19 +111,22 @@ describe("execFile", () => {
     expect(options.cwd).toBe(dir);
   });
 
-  it("kills the program after the timeout it is given, 60 s by default", async () => {
-    // A wedged CLI must not hang `setup`; `claude` gets Python's 30 s.
-    const timeouts: unknown[] = [];
+  it("kills the program with SIGKILL after the timeout it is given, 60 s by default", async () => {
+    // A wedged CLI must not hang `setup`; `claude` gets Python's 30 s. And
+    // SIGKILL, as Python's subprocess.run kills it: a CLI can catch SIGTERM
+    // and exit as it likes, or ignore it and run on.
+    const spawned: Record<string, unknown>[] = [];
     for (const options of [{}, { timeoutMs: 30_000 }]) {
       const child = fakeChild();
       const pending = execFile("/bin/claude", [], options, ((...args: unknown[]) => {
-        timeouts.push((args[2] as Record<string, unknown>).timeout);
+        spawned.push(args[2] as Record<string, unknown>);
         return child;
       }) as never);
       child.emit("close", 0, null);
       await pending;
     }
-    expect(timeouts).toEqual([60_000, 30_000]);
+    expect(spawned.map((o) => o.timeout)).toEqual([60_000, 30_000]);
+    expect(spawned.map((o) => o.killSignal)).toEqual(["SIGKILL", "SIGKILL"]);
   });
 
   it("reports the exit code of a failing program", async () => {
@@ -162,7 +165,16 @@ describe("execFile", () => {
     // killed; `setup` then reports Python's "timed out after 120s".
     const child = Object.assign(fakeChild(), { killed: true });
     const pending = execFile("x", [], { timeoutMs: 120_000 }, (() => child) as never);
-    child.emit("close", null, "SIGTERM");
-    await expect(pending).resolves.toMatchObject({ code: 128 + os.constants.signals.SIGTERM, timedOut: true });
+    child.emit("close", null, "SIGKILL");
+    await expect(pending).resolves.toMatchObject({ code: 128 + os.constants.signals.SIGKILL, timedOut: true });
+  });
+
+  it.each([0, 1])("says it timed out when the killed program still reports exit code %i", async (code) => {
+    // One that exits on its own just as the kill lands, or catches the
+    // signal where it can: it still ran past its timeout.
+    const child = Object.assign(fakeChild(), { killed: true });
+    const pending = execFile("x", [], { timeoutMs: 120_000 }, (() => child) as never);
+    child.emit("close", code, null);
+    await expect(pending).resolves.toMatchObject({ code, timedOut: true });
   });
 });
