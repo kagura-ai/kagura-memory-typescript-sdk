@@ -18,6 +18,7 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "../src/errors.js";
 import {
@@ -504,6 +505,66 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     expect((err as KaguraConnectionError).message).toContain("Pro plan");
   });
 
+  it("maps the v0.75 team-invitations FEAT-001 to KaguraFeatureNotAvailableError", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message:
+        "Feature 'team_invitations' not available on M plan. " +
+        "Upgrade to L plan to access this feature.",
+      details: {
+        gate: "plan",
+        feature: "team_invitations",
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
+    expect(plan.feature).toBe("team_invitations");
+    expect(plan.requiredPlanDisplay).toBe("L");
+    // The server's own message, without the generic "HTTP 403: " prefix.
+    expect(plan.message).toBe(
+      "Feature 'team_invitations' not available on M plan. " +
+        "Upgrade to L plan to access this feature.",
+    );
+  });
+
+  it("maps a pre-v0.75 FEAT-001 (public-bound member key) to KaguraFeatureNotAvailableError", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Public-bound keys require the XL plan.",
+      details: { feature: "resources" },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.mintMemberKey(WS, "google_2", "ci", 30));
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("resources");
+  });
+
+  it("maps a 403 QUOTA-001 to KaguraQuotaError, not an ownership error", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Token limit reached.",
+      details: { gate: "quota", quota_type: "resource_tokens", current: 3, limit: 3 },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.listMembers(WS));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).quotaType).toBe("resource_tokens");
+  });
+
   it("scrubs a 403 detail carrying credential markers, falling back to the hint", async () => {
     // A hostile/buggy 403 echoing credentials must not be printed verbatim.
     const server = new FakeRest();
@@ -514,6 +575,21 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     const err = await caught(client.listMembers(WS));
     expect((err as KaguraConnectionError).message).not.toContain("kagura_leaked_key_value");
     expect((err as KaguraConnectionError).message).toContain("OWNER's API key");
+  });
+
+  it("scrubs a plan refusal's message carrying credential markers (#40)", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Not on your plan. Echo: Authorization: Bearer kagura_leaked_key_value",
+      details: { gate: "plan", feature: "team_invitations" },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).message).toBe("HTTP 403");
   });
 
   it("names the static credential source and workspace prefix in the uniform-403 hint", async () => {
@@ -576,6 +652,70 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     expect(err).toBeInstanceOf(KaguraQuotaError);
     expect((err as KaguraQuotaError).message).toContain("Member limit reached");
     expect((err as KaguraQuotaError).retryAfter).toBe(30);
+  });
+
+  it("reads a 429's details.retry_after when no Retry-After header came", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "RATE-001",
+      message: "Too many requests. Please try again later.",
+      details: { retry_after: 60 },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).message).toBe("Too many requests. Please try again later.");
+    expect((err as KaguraQuotaError).retryAfter).toBe(60);
+  });
+
+  it("keeps a 429 a KaguraQuotaError even when its body reads as a plan refusal (#40)", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Feature 'team_invitations' not available on M plan.",
+      details: { gate: "plan", feature: "team_invitations" },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).message).toBe(
+      "Feature 'team_invitations' not available on M plan.",
+    );
+  });
+
+  it("maps the v0.75 member seat cap (429 QUOTA-001) to a KaguraQuotaError payload", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Member limit reached (5 seats). Current members: 4, Pending invitations: 1.",
+      details: {
+        gate: "quota",
+        quota_type: "members",
+        current: 5,
+        limit: 5,
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.message).toContain("Member limit reached");
+    expect(quota.gate).toBe("quota");
+    expect(quota.quotaType).toBe("members");
+    expect(quota.current).toBe(5);
+    expect(quota.limit).toBe(5);
+    expect(quota.requiredPlanDisplay).toBe("L");
+    // A seat cap does not reset on a timer.
+    expect(quota.retryAfter).toBeNull();
   });
 
   it("names the failing field from a 422 validation envelope", async () => {

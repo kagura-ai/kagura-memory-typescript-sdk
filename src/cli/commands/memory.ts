@@ -204,7 +204,7 @@ const reference: Command = {
 const FORGET_K = kFlag("Max memories to delete in query mode", "10");
 
 const forget: Command = {
-  summary: "Delete memories (soft delete, recoverable for 30 days).",
+  summary: "Delete memories (soft delete; kept until the server's retention window passes, default 30 days).",
   spec: {
     flags: [
       CONTEXT_ID,

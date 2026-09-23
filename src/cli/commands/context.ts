@@ -156,7 +156,7 @@ const FETCH_FACTOR: FlagSpec = {
 const RERANKER: FlagSpec = {
   name: "reranker",
   type: "value",
-  metavar: "[voyage|cohere]",
+  metavar: "[voyage|cohere|self_hosted]",
   help: "Reranker provider",
 };
 
@@ -193,7 +193,9 @@ const searchConfig: Command = {
     ]);
     const rawReranker = args.values.reranker;
     const rerankerProvider =
-      rawReranker === undefined ? undefined : parseChoice(RERANKER, rawReranker, ["voyage", "cohere"]);
+      rawReranker === undefined
+        ? undefined
+        : parseChoice(RERANKER, rawReranker, ["voyage", "cohere", "self_hosted"]);
     const rerankerModel = args.values["reranker-model"];
 
     const patch = {

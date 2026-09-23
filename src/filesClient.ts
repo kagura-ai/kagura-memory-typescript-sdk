@@ -267,15 +267,19 @@ export class FilesClient extends KaguraRestClient {
   /**
    * 403 → a workspace-mismatch hint (issue #115): surface the credential
    * source and requested workspace prefix without leaking the api_key.
+   * A plan or quota refusal is typed first — no workspace is wrong there.
    */
   protected override error403(response: RestResponse, context: RequestContext): KaguraError {
-    return new KaguraConnectionError(
-      formatWorkspace403Hint({
-        authSource: this.authSource,
-        sourceWorkspaceHint: this.workspaceIdHint,
-        requestedWorkspace: extractRequestedWorkspace(context.requestJson, context.requestParams),
-        serverDetail: extractDetail(response.text),
-      }),
+    return (
+      this.gateRefusal(response) ??
+      new KaguraConnectionError(
+        formatWorkspace403Hint({
+          authSource: this.authSource,
+          sourceWorkspaceHint: this.workspaceIdHint,
+          requestedWorkspace: extractRequestedWorkspace(context.requestJson, context.requestParams),
+          serverDetail: extractDetail(response.text),
+        }),
+      )
     );
   }
 

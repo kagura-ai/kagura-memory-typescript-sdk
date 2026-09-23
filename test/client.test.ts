@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KaguraClient, MIN_SERVER_VERSION } from "../src/client.js";
 import {
@@ -6,9 +6,13 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraPartialRollbackError,
+  KaguraPermissionError,
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
+import type { ListContextsResponse, SearchConfig } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
 
 describe("construction", () => {
@@ -468,6 +472,482 @@ describe("domain error translation (#180 semantics)", () => {
   });
 });
 
+describe("typed plan / quota / rollback / permission errors (#40)", () => {
+  async function failure(
+    server: FakeServer,
+    call: (c: KaguraClient) => Promise<unknown>,
+  ): Promise<unknown> {
+    return call(makeClient(server)).then(
+      () => {
+        throw new Error("expected the call to reject");
+      },
+      (e: unknown) => e,
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("maps a v0.75 quota_exceeded envelope by its gate, with the payload", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-23T23:00:00Z"));
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Daily memory limit reached (100/day).",
+      gate: "quota",
+      quota_type: "memories_per_day",
+      current: 100,
+      limit: 100,
+      used_today: 100,
+      requested: 1,
+      required_plan: "basic",
+      required_plan_display: "M",
+      current_plan: "free",
+      resets_at: "2026-09-24T00:00:00+00:00",
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    // Same text the generic mapping produced, so message matching still works.
+    expect(quota.message).toBe(
+      "remember failed (quota_exceeded): Daily memory limit reached (100/day).",
+    );
+    expect(quota.gate).toBe("quota");
+    expect(quota.quotaType).toBe("memories_per_day");
+    expect(quota.current).toBe(100);
+    expect(quota.limit).toBe(100);
+    expect(quota.usedToday).toBe(100);
+    expect(quota.requiredPlan).toBe("basic");
+    expect(quota.requiredPlanDisplay).toBe("M");
+    expect(quota.currentPlan).toBe("free");
+    expect(quota.resetsAt).toBe("2026-09-24T00:00:00+00:00");
+    expect(quota.retryAfter).toBe(3600);
+  });
+
+  it("maps a pre-v0.75 quota_exceeded envelope by its code", async () => {
+    // v0.68-v0.74: no gate, no canonical `current` — only the legacy counts.
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Memory limit reached.",
+      quota_type: "memory_limit",
+      limit: 1000,
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.gate).toBeNull();
+    expect(quota.quotaType).toBe("memory_limit");
+    expect(quota.limit).toBe(1000);
+    expect(quota.current).toBeNull();
+    expect(quota.retryAfter).toBeNull();
+  });
+
+  it("reads used_today as current when an older server sends no current", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Daily memory limit reached.",
+      quota_type: "memories_per_day",
+      limit: 100,
+      used_today: 100,
+    };
+    const err = (await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    )) as KaguraQuotaError;
+    expect(err.usedToday).toBe(100);
+    expect(err.current).toBe(100);
+  });
+
+  it("maps a v0.75 plan_required envelope by its gate, with the payload", async () => {
+    const server = new FakeServer();
+    server.toolResults.setup_resource = {
+      status: "error",
+      error: "plan_required",
+      message:
+        "Feature 'resources' not available on L plan. Upgrade to XL plan to access this feature.",
+      gate: "plan",
+      feature: "resources",
+      required_plan: "promax",
+      required_plan_display: "XL",
+      current_plan: "pro",
+    };
+    const err = await failure(server, (c) => c.setupResource({ resourceId: "r" }));
+
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
+    expect(plan.message).toMatch(/^setup_resource failed \(plan_required\): Feature 'resources'/);
+    expect(plan.gate).toBe("plan");
+    expect(plan.feature).toBe("resources");
+    expect(plan.requiredPlan).toBe("promax");
+    expect(plan.requiredPlanDisplay).toBe("XL");
+    expect(plan.currentPlan).toBe("pro");
+  });
+
+  it("maps a pre-v0.75 plan_required envelope by its code", async () => {
+    // v0.68-v0.74 sent only `required_plan` beside the code.
+    const server = new FakeServer();
+    server.toolResults.update_context = {
+      status: "error",
+      error: "plan_required",
+      message: "Public contexts require the L plan.",
+      required_plan: "pro",
+    };
+    const err = await failure(server, (c) => c.updateContext({ contextId: "c", isPublic: true }));
+
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    const plan = err as KaguraFeatureNotAvailableError;
+    expect(plan.gate).toBeNull();
+    expect(plan.requiredPlan).toBe("pro");
+    expect(plan.feature).toBeNull();
+    expect(plan.requiredPlanDisplay).toBeNull();
+  });
+
+  it("maps create_context's v0.75 shared-context refusal to KaguraFeatureNotAvailableError", async () => {
+    // Before v0.75 this was a validation_error; it is a plan gate now.
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: true, contexts: [] };
+    server.toolResults.create_context = {
+      status: "error",
+      error: "plan_required",
+      message: "Feature 'shared_contexts' not available on S plan.",
+      gate: "plan",
+      feature: "shared_contexts",
+      required_plan: "basic",
+      required_plan_display: "M",
+      current_plan: "free",
+    };
+    const err = await failure(server, (c) => c.createContext({ name: "team", isPrivate: false }));
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("shared_contexts");
+  });
+
+  it("chooses the class from the gate, not the code", async () => {
+    // The first code disagrees with its gate and the second is none the SDK
+    // knows, so each is typed only if the gate is read, and read first.
+    const server = new FakeServer();
+    server.toolResults.setup_connector = {
+      status: "error",
+      error: "plan_required",
+      message: "Connector seat limit reached.",
+      gate: "quota",
+      quota_type: "connectors",
+      current: 2,
+      limit: 2,
+    };
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "analysis_disabled",
+      message: "Analyses are not enabled for this workspace.",
+      gate: "allowlist",
+      feature: "memory_analysis",
+    };
+    const client = makeClient(server);
+
+    const quota = await client.callRawTool("setup_connector").catch((e: unknown) => e);
+    expect(quota).toBeInstanceOf(KaguraQuotaError);
+    expect((quota as KaguraQuotaError).quotaType).toBe("connectors");
+
+    const plan = await client.callRawTool("analyze_context").catch((e: unknown) => e);
+    expect(plan).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    // allowlist: no tier lifts it, so there is no plan to offer.
+    expect((plan as KaguraFeatureNotAvailableError).gate).toBe("allowlist");
+    expect((plan as KaguraFeatureNotAvailableError).requiredPlan).toBeNull();
+  });
+
+  it("maps a pre-v0.75 feature_not_available envelope by its code", async () => {
+    // The analysis tools' twin of plan_required, sent with no gate before v0.75.
+    const server = new FakeServer();
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "feature_not_available",
+      message: "Memory analysis is not available on your plan.",
+      feature: "memory_analysis",
+    };
+    const err = await failure(server, (c) => c.callRawTool("analyze_context"));
+
+    expect(err).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect((err as KaguraFeatureNotAvailableError).gate).toBeNull();
+    expect((err as KaguraFeatureNotAvailableError).feature).toBe("memory_analysis");
+  });
+
+  it("maps a pre-v0.75 CONNECTOR-001 envelope from setup_connector by its code", async () => {
+    // setup_connector forwards the connector seat cap's REST code as is.
+    const server = new FakeServer();
+    server.toolResults.setup_connector = {
+      status: "error",
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached. Your plan allows 2 connector(s).",
+      max_connectors: 2,
+      active_connectors: 3,
+    };
+    const err = await failure(server, (c) => c.callRawTool("setup_connector"));
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.gate).toBeNull();
+    // The legacy seat counts stand in for the canonical current / limit.
+    expect(quota.current).toBe(3);
+    expect(quota.limit).toBe(2);
+  });
+
+  it("reads the analysis quota's pre-v0.75 limit_today as limit", async () => {
+    // v0.74 analysis_gates: used_today / limit_today, no current / limit.
+    const server = new FakeServer();
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Analysis daily quota exceeded: 3/3 runs today (addon bonus 0).",
+      quota_type: "memory_analysis",
+      used_today: 4,
+      limit_today: 3,
+      addon_bonus: 0,
+      remaining_today: 0,
+    };
+    const err = (await failure(server, (c) =>
+      c.callRawTool("analyze_context"),
+    )) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.quotaType).toBe("memory_analysis");
+    expect(err.usedToday).toBe(4);
+    expect(err.current).toBe(4);
+    expect(err.limit).toBe(3);
+  });
+
+  it("prefers the canonical current / limit over the legacy names v0.75 keeps beside them", async () => {
+    const server = new FakeServer();
+    server.toolResults.setup_connector = {
+      status: "error",
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached.",
+      gate: "quota",
+      quota_type: "connectors",
+      current: 3,
+      limit: 5,
+      active_connectors: 98,
+      max_connectors: 99,
+    };
+    const err = (await failure(server, (c) =>
+      c.callRawTool("setup_connector"),
+    )) as KaguraQuotaError;
+    expect(err.current).toBe(3);
+    expect(err.limit).toBe(5);
+  });
+
+  it("reads ingest_events' retry_after_seconds as retryAfter", async () => {
+    // The resource events-per-hour quota: no gate, no resets_at, only a
+    // top-level retry hint.
+    const server = new FakeServer();
+    server.toolResults.ingest_events = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Event quota exceeded: 10/10 events per hour",
+      retry_after_seconds: 3600,
+    };
+    const err = (await failure(server, (c) =>
+      c.callRawTool("ingest_events"),
+    )) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.retryAfter).toBe(3600);
+    expect(err.message).toBe(
+      "ingest_events failed (quota_exceeded): Event quota exceeded: 10/10 events per hour",
+    );
+  });
+
+  it("keeps a transport 429 a KaguraRateLimitError, with the daily quota's payload", async () => {
+    // v0.75 answers the daily MCP call quota at the HTTP layer, in the REST
+    // envelope. The class stays the one existing handlers catch.
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({
+        error: "QUOTA-001",
+        message: "Daily MCP quota exceeded: 1001/1000. Resets at midnight UTC.",
+        details: { gate: "quota", quota_type: "api_mcp_daily", retry_after: 86400 },
+      }),
+      { status: 429, headers: { "Retry-After": "86400" } },
+    );
+    const err = await failure(server, (c) => c.listContexts());
+
+    expect(err).toBeInstanceOf(KaguraRateLimitError);
+    expect(err).not.toBeInstanceOf(KaguraQuotaError);
+    const limited = err as KaguraRateLimitError;
+    expect(limited.message).toBe(
+      "Rate limit exceeded (HTTP 429): Daily MCP quota exceeded: 1001/1000. " +
+        "Resets at midnight UTC.",
+    );
+    expect(limited.gate).toBe("quota");
+    expect(limited.quotaType).toBe("api_mcp_daily");
+    expect(limited.retryAfter).toBe(86400);
+  });
+
+  it("falls back to the body's retry_after on a transport 429 with no Retry-After", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({
+        error: "RATE-001",
+        message: "Rate limit exceeded: 61/60 requests per minute",
+        details: { retry_after: 60, limit: 60, remaining: 0 },
+      }),
+      { status: 429 },
+    );
+    const err = (await failure(server, (c) => c.listContexts())) as KaguraRateLimitError;
+
+    expect(err).toBeInstanceOf(KaguraRateLimitError);
+    expect(err.retryAfter).toBe(60);
+    // A per-minute limit is no typed quota, so its `limit` is not read.
+    expect(err.limit).toBeNull();
+  });
+
+  it("ignores wrong-typed gate fields instead of trusting the shape", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "limit",
+      gate: "quota",
+      quota_type: 42,
+      limit: "100",
+      current: null,
+      resets_at: 0,
+    };
+    const err = (await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    )) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.quotaType).toBeNull();
+    expect(err.limit).toBeNull();
+    expect(err.current).toBeNull();
+    expect(err.resetsAt).toBeNull();
+  });
+
+  it("maps partial_rollback to KaguraPartialRollbackError carrying the summary", async () => {
+    const server = new FakeServer();
+    const summary = {
+      edges_deleted: 3,
+      merges_reversed: 1,
+      merges_unreversible: 1,
+      importance_restored: 0,
+      promotions_reversed: 0,
+      importance_kept: 0,
+      promotions_kept: 0,
+      archives_restored: 2,
+      errors: ["Action 9 (merge): edge was changed by a later write"],
+    };
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "partial_rollback",
+      message:
+        "Rollback completed with 1 error(s). " +
+        "Report marked as 'failed' — inspect errors and retry if needed.",
+      report_id: "r1",
+      rollback_summary: summary,
+    };
+    const err = await failure(server, (c) =>
+      c.rollbackSleepRun({ contextId: "c", reportId: "r1" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraPartialRollbackError);
+    const partial = err as KaguraPartialRollbackError;
+    expect(partial.message).toMatch(/^rollback_sleep_run failed \(partial_rollback\): /);
+    expect(partial.reportId).toBe("r1");
+    expect(partial.summary).toEqual(summary);
+  });
+
+  it("gives partial_rollback an empty summary when the server omits it", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "partial_rollback",
+      message: "partial",
+    };
+    const err = (await failure(server, (c) =>
+      c.rollbackSleepRun({ contextId: "c", reportId: "r1" }),
+    )) as KaguraPartialRollbackError;
+    expect(err).toBeInstanceOf(KaguraPartialRollbackError);
+    expect(err.reportId).toBeNull();
+    expect(err.summary).toEqual({});
+  });
+
+  it("maps permission_denied to KaguraPermissionError carrying requiredRole", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "permission_denied",
+      message: "Cannot remember: tool guardrails require context editor or above.",
+      required_role: "editor",
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x", details: { tool_trigger: {} } }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraPermissionError).requiredRole).toBe("editor");
+    expect((err as KaguraPermissionError).message).toBe(
+      "remember failed (permission_denied): " +
+        "Cannot remember: tool guardrails require context editor or above.",
+    );
+  });
+
+  it("refuses a workspace viewer's forget outright rather than skipping its target", async () => {
+    // handle_forget checks the workspace role before it looks at any target.
+    const server = new FakeServer();
+    server.toolResults.forget = {
+      status: "error",
+      error: "permission_denied",
+      message: "Viewers have read-only access. Cannot delete memories.",
+      your_role: "viewer",
+      required_role: "member",
+    };
+    const err = await failure(server, (c) => c.forget({ contextId: "c", memoryId: "m1" }));
+
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraPermissionError).requiredRole).toBe("member");
+  });
+
+  it("maps updateSearchConfig's missing context to KaguraPermissionError, not KaguraNotFoundError", async () => {
+    // update_search_config answers every access failure, a missing context
+    // included, with permission_denied and no required_role.
+    const server = new FakeServer();
+    server.toolResults.update_search_config = {
+      status: "error",
+      error: "permission_denied",
+      message: "Context not found",
+    };
+    const err = await failure(server, (c) =>
+      c.updateSearchConfig({ contextId: "00000000-0000-0000-0000-000000000000" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect(err).not.toBeInstanceOf(KaguraNotFoundError);
+    expect((err as KaguraPermissionError).requiredRole).toBeNull();
+  });
+
+  it("leaves other codes on the generic KaguraError", async () => {
+    const server = new FakeServer();
+    server.toolResults.update_context = {
+      status: "error",
+      error: "cannot_make_private",
+      message: "Cannot make private: context has a resource_id.",
+    };
+    const err = await failure(server, (c) => c.updateContext({ contextId: "c", isPublic: false }));
+    expect(err).toBeInstanceOf(KaguraError);
+    expect(err).not.toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect(err).not.toBeInstanceOf(KaguraQuotaError);
+    expect(err).not.toBeInstanceOf(KaguraPermissionError);
+  });
+});
+
 describe("remember", () => {
   it("sends defaults and omits unset optionals", async () => {
     const server = new FakeServer();
@@ -672,6 +1152,75 @@ describe("recall", () => {
   });
 });
 
+describe("recallUpcoming", () => {
+  it("sends include_details only when includeDetails is true (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.recallUpcoming({ contextId: "c", from: "now" });
+    await client.recallUpcoming({ contextId: "c", includeDetails: true });
+    await client.recallUpcoming({ contextId: "c", includeDetails: false });
+
+    // Since server v0.73.0 items carry `trigger` by default; the flag is the
+    // only way back to the full `details` object.
+    expect(server.toolCallArgs(0)).toEqual({ context_id: "c", k: 20, from: "now" });
+    expect(server.toolCallArgs(1)).toEqual({ context_id: "c", k: 20, include_details: true });
+    expect(server.toolCallArgs(2)).not.toHaveProperty("include_details");
+  });
+});
+
+describe("listContexts (#42)", () => {
+  it("stays callable with no arguments and sends no flags", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    expect(server.toolCallArgs()).toEqual({});
+  });
+
+  it("maps each option to its snake_case wire name", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts({
+      nameContains: "notes",
+      includeSummary: true,
+      includeDetails: true,
+      includeStats: true,
+    });
+    expect(server.toolCallArgs()).toEqual({
+      name_contains: "notes",
+      include_summary: true,
+      include_details: true,
+      include_stats: true,
+    });
+  });
+
+  it("omits flags that are false or unset", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts({ includeSummary: false, includeDetails: false, includeStats: false });
+    await client.listContexts({ nameContains: "notes" });
+    expect(server.toolCallArgs(0)).toEqual({});
+    expect(server.toolCallArgs(1)).toEqual({ name_contains: "notes" });
+  });
+
+  it("returns the envelope typed, including the empty-workspace hint", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = {
+      status: "success",
+      contexts: [],
+      count: 0,
+      total: 0,
+      limit: 5,
+      can_create: true,
+      hint: "No contexts are visible to you yet.",
+    };
+    const client = makeClient(server);
+    const result: ListContextsResponse = await client.listContexts();
+    expect(result.contexts).toEqual([]);
+    expect(result.can_create).toBe(true);
+    expect(result.hint).toBe("No contexts are visible to you yet.");
+  });
+});
+
 describe("memory mutation guards", () => {
   it("updateMemory requires exactly one of memoryId/externalId", async () => {
     const client = makeClient(new FakeServer());
@@ -704,6 +1253,55 @@ describe("memory mutation guards", () => {
     const client = makeClient(server);
     await client.updateMemory({ contextId: "c", memoryId: "m1", details: {} });
     expect(server.toolCallArgs(0)).toHaveProperty("details", {});
+  });
+
+  it("updateMemory maps dismissSupersedeCandidate and omits it unless true (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateMemory({ contextId: "c", memoryId: "m1", dismissSupersedeCandidate: true });
+    await client.updateMemory({ contextId: "c", memoryId: "m1", dismissSupersedeCandidate: false });
+    await client.updateMemory({ contextId: "c", memoryId: "m1", summary: "s" });
+
+    expect(server.toolCallArgs(0)).toEqual({
+      context_id: "c",
+      memory_id: "m1",
+      dismiss_supersede_candidate: true,
+    });
+    expect(server.toolCallArgs(1)).not.toHaveProperty("dismiss_supersede_candidate");
+    expect(server.toolCallArgs(2)).not.toHaveProperty("dismiss_supersede_candidate");
+  });
+
+  it("updateMemory rejects dismissSupersedeCandidate with externalId before any request (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(
+      client.updateMemory({
+        contextId: "c",
+        externalId: "doc-1",
+        summary: "s",
+        content: "c",
+        type: "note",
+        dismissSupersedeCandidate: true,
+      }),
+    ).rejects.toThrow(/dismissSupersedeCandidate requires memoryId/);
+    // Not even the MCP session was opened.
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("updateMemory rejects dismissSupersedeCandidate with an empty externalId too (#42)", async () => {
+    // `""` slips past the truthy exactly-one check but is still sent as
+    // external_id, which the server counts as present and rejects.
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(
+      client.updateMemory({
+        contextId: "c",
+        memoryId: "m1",
+        externalId: "",
+        dismissSupersedeCandidate: true,
+      }),
+    ).rejects.toThrow(/dismissSupersedeCandidate requires memoryId/);
+    expect(server.requests).toHaveLength(0);
   });
 
   it("forget requires memoryId or query, and only query mode sends k", async () => {
@@ -743,6 +1341,61 @@ describe("createContext quota pre-check", () => {
     );
   });
 
+  it("carries the counts but no gate or plan fields, which list_contexts does not send (#40)", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: false, count: 5, limit: 5 };
+    const client = makeClient(server);
+    const err = (await client
+      .createContext({ name: "new" })
+      .catch((e: unknown) => e)) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.quotaType).toBe("contexts");
+    expect(err.current).toBe(5);
+    expect(err.limit).toBe(5);
+    // The pre-check is the SDK's inference, not a server gate block, so the
+    // plan is unknown here, which the docs must not read as "no plan lifts it".
+    expect(err.gate).toBeNull();
+    expect(err.requiredPlan).toBeNull();
+    expect(err.requiredPlanDisplay).toBeNull();
+    expect(err.currentPlan).toBeNull();
+    const called = server.requests.some(
+      (r) => (r.body?.params as { name?: string })?.name === "create_context",
+    );
+    expect(called).toBe(false);
+  });
+
+  it("carries the server's gate block when create_context itself refuses past the pre-check", async () => {
+    // A concurrent create can win the race between the two calls; the
+    // server's own refusal then names the plan that lifts the cap.
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: true, count: 0, limit: 1 };
+    server.toolResults.create_context = {
+      status: "error",
+      error: "quota_exceeded",
+      message:
+        "Context limit reached. Your S plan allows 1 context(s) per workspace. " +
+        "Upgrade to M plan for more contexts.",
+      help: "Delete unused contexts or upgrade your plan.",
+      gate: "quota",
+      quota_type: "contexts",
+      current: 1,
+      limit: 1,
+      required_plan: "basic",
+      required_plan_display: "M",
+      current_plan: "free",
+    };
+    const client = makeClient(server);
+    const err = (await client
+      .createContext({ name: "new" })
+      .catch((e: unknown) => e)) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.gate).toBe("quota");
+    expect(err.quotaType).toBe("contexts");
+    expect(err.requiredPlan).toBe("basic");
+    expect(err.requiredPlanDisplay).toBe("M");
+    expect(err.currentPlan).toBe("free");
+  });
+
   it("renders ? for missing or null count/limit (#183)", async () => {
     const server = new FakeServer();
     server.toolResults.list_contexts = { can_create: false, count: null };
@@ -759,6 +1412,16 @@ describe("createContext quota pre-check", () => {
     await expect(client.createContext({ name: "new" })).rejects.toThrow(KaguraQuotaError);
     // The create_context tool must NOT have been called after the quota block.
     expect(server.requests.some((r) => (r.body?.params as { name?: string })?.name === "create_context")).toBe(false);
+  });
+
+  it("lets the server decide when list_contexts could not read the quota (limit 0)", async () => {
+    // list_contexts answers a failed quota lookup with limit 0 and
+    // can_create false; every plan allows at least one context.
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: false, count: 0, limit: 0 };
+    server.toolResults.create_context = { status: "success", id: "ctx-0" };
+    const client = makeClient(server);
+    await expect(client.createContext({ name: "new" })).resolves.toMatchObject({ id: "ctx-0" });
   });
 
   it("allows creation when can_create is absent (defaults to true)", async () => {
@@ -781,6 +1444,81 @@ describe("createContext quota pre-check", () => {
       is_private: true,
       display_name: "Notes",
     });
+  });
+});
+
+describe("updateSearchConfig", () => {
+  it("sends only the context id when nothing else is set", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateSearchConfig({ contextId: "c" });
+    expect(server.toolCallArgs()).toEqual({ context_id: "c" });
+  });
+
+  it("maps the reinforce and routing options to snake_case (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateSearchConfig({
+      contextId: "c",
+      reinforceEnabled: true,
+      reinforceMaxBoost: 0.2,
+      reinforceRequireHostArbitration: true,
+      routingMode: "log_only",
+    });
+    expect(server.toolCallArgs()).toEqual({
+      context_id: "c",
+      reinforce_enabled: true,
+      reinforce_max_boost: 0.2,
+      reinforce_require_host_arbitration: true,
+      routing_mode: "log_only",
+    });
+  });
+
+  it("sends false and 0, which are settings rather than absent flags (#42)", async () => {
+    // New contexts start with reinforce enabled, so `false` is the whole
+    // point of passing it — it must reach the wire, not be dropped.
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateSearchConfig({
+      contextId: "c",
+      reinforceEnabled: false,
+      reinforceMaxBoost: 0,
+      reinforceRequireHostArbitration: false,
+    });
+    expect(server.toolCallArgs()).toEqual({
+      context_id: "c",
+      reinforce_enabled: false,
+      reinforce_max_boost: 0,
+      reinforce_require_host_arbitration: false,
+    });
+  });
+
+  it("returns the echoed config typed as SearchConfig (#42)", async () => {
+    // get_context_info does not return the reinforce and routing fields, so
+    // this echo is the only typed place to read them back.
+    const server = new FakeServer();
+    server.toolResults.update_search_config = {
+      status: "success",
+      message: "Search configuration updated.",
+      context_id: "c",
+      config: {
+        semantic_weight: 0.6,
+        bm25_weight: 0.4,
+        fetch_factor: 3,
+        use_rerank: false,
+        reranker_provider: "voyage",
+        reranker_model: "rerank-2",
+        reinforce_enabled: false,
+        reinforce_max_boost: 0.15,
+        reinforce_require_host_arbitration: false,
+        routing_mode: "off",
+      },
+    };
+    const client = makeClient(server);
+    const result = await client.updateSearchConfig({ contextId: "c", reinforceEnabled: false });
+    const config: SearchConfig = result.config;
+    expect(config.reinforce_enabled).toBe(false);
+    expect(config.routing_mode).toBe("off");
   });
 });
 
@@ -899,6 +1637,130 @@ describe("recallNearby (#5)", () => {
   });
 });
 
+describe("loadGuardrails (#41)", () => {
+  const item = {
+    summary: "s",
+    type: "rule",
+    importance: 0.9,
+    source_type: "manual",
+    created_at: "2026-09-01T00:00:00Z",
+    updated_at: "2026-09-01T00:00:00Z",
+  };
+  const payload = {
+    status: "success",
+    format: 1,
+    version: "v1-abc",
+    pinned: [
+      {
+        ...item,
+        memory_id: "m-pin",
+        context_summary: "why",
+        delivery_mode: "always",
+        tool_trigger: null,
+        authored_by_caller: true,
+      },
+    ],
+    tool_triggered: [
+      {
+        ...item,
+        memory_id: "m-tool",
+        context_summary: null,
+        delivery_mode: "on_recall",
+        tool_trigger: { tool: "Bash", on: "pre", match: "gh pr merge", action: "block" },
+        authored_by_caller: false,
+      },
+    ],
+    total_available: 2,
+    truncated: false,
+    cap: 50,
+    pinned_cap: 100,
+    pinned_total_available: 1,
+    pinned_truncated: false,
+    tool_triggered_total_available: 1,
+    tool_triggered_truncated: false,
+    context_id: "ctx",
+    context_name: "demo",
+  };
+
+  it("sends only context_id when cap is unset and returns the typed response", async () => {
+    const server = new FakeServer();
+    server.toolResults.load_guardrails = payload;
+    const client = makeClient(server);
+    const result = await client.loadGuardrails({ contextId: "ctx" });
+
+    expect(server.requests[1]!.body!.params).toMatchObject({ name: "load_guardrails" });
+    // No client-side default: omitting cap leaves the server's (50) in charge.
+    expect(server.toolCallArgs()).toEqual({ context_id: "ctx" });
+    expect(result.tool_triggered[0]!.tool_trigger?.action).toBe("block");
+    expect(result.pinned[0]!.tool_trigger).toBeNull();
+    expect(result.tool_triggered_truncated).toBe(false);
+  });
+
+  it("forwards cap when set and omits an explicit undefined", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.loadGuardrails({ contextId: "ctx", cap: 5 });
+    await client.loadGuardrails({ contextId: "ctx", cap: undefined });
+
+    expect(server.toolCallArgs(0)).toEqual({ context_id: "ctx", cap: 5 });
+    expect(server.toolCallArgs(1)).toEqual({ context_id: "ctx" });
+  });
+
+  it("throws KaguraNotFoundError for an unknown context", async () => {
+    const server = new FakeServer();
+    server.toolResults.load_guardrails = {
+      status: "error",
+      error: "context_not_found",
+      message: "Context not found",
+    };
+    const client = makeClient(server);
+    await expect(client.loadGuardrails({ contextId: "nope" })).rejects.toBeInstanceOf(
+      KaguraNotFoundError,
+    );
+  });
+});
+
+describe("getContextInfo guardrails (#41)", () => {
+  const context = { id: "ctx", name: "demo" };
+
+  it("keeps absent, null, and a block distinguishable", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+
+    server.toolResults.get_context_info = {
+      status: "success",
+      context,
+      guardrails: {
+        items: [
+          {
+            memory_id: "m1",
+            summary: "s",
+            importance: 0.8,
+            authored_by_caller: true,
+            source_type: "manual",
+          },
+        ],
+        total_available: 1,
+        truncated: false,
+        tool_triggered_version: "v1-abc",
+      },
+    };
+    const withBlock = await client.getContextInfo({ contextId: "ctx" });
+    expect(withBlock.guardrails?.items[0]!.memory_id).toBe("m1");
+    expect(withBlock.guardrails?.tool_triggered_version).toBe("v1-abc");
+
+    // null (the read failed) and absent (?guardrails=off) mean different
+    // things, so the SDK must not normalize one into the other.
+    server.toolResults.get_context_info = { status: "success", context, guardrails: null };
+    const failed = await client.getContextInfo({ contextId: "ctx" });
+    expect(failed.guardrails).toBeNull();
+
+    server.toolResults.get_context_info = { status: "success", context };
+    const off = await client.getContextInfo({ contextId: "ctx" });
+    expect("guardrails" in off).toBe(false);
+  });
+});
+
 describe("REST endpoints", () => {
   it("getServerInfo hits the REST base URL derived from the MCP URL", async () => {
     const server = new FakeServer();
@@ -930,7 +1792,26 @@ describe("REST endpoints", () => {
     const client = makeClient(server);
     const info = await client.checkServerVersion();
     expect(info.version).toBe("0.1.0");
-    expect(MIN_SERVER_VERSION).toBe("0.17.1");
+    expect(MIN_SERVER_VERSION).toBe("0.75.0");
+  });
+
+  it("checkServerVersion warns below MIN_SERVER_VERSION and is silent at it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const [version, warns] of [
+        ["0.74.9", true],
+        ["0.75.0", false],
+        ["0.76.0", false],
+      ] as const) {
+        warn.mockClear();
+        const server = new FakeServer();
+        server.restResults["/api/v1/system/info"] = { name: "mc", version };
+        await makeClient(server).checkServerVersion();
+        expect(warn.mock.calls.length > 0, version).toBe(warns);
+      }
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("listMemories normalizes q and builds query params", async () => {

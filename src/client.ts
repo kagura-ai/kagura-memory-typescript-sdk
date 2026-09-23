@@ -9,11 +9,18 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraPartialRollbackError,
+  KaguraPermissionError,
+  // Referenced only from JSDoc {@link} on the plan-gated options.
+  KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "./errors.js";
 import {
   baseUrlFromMcp,
+  bodyRetryAfter,
   extractDetail,
+  gateError,
+  MCP_GATE_CODES,
   mcpSessionExpired,
   mcpSessionHeader,
   SDK_VERSION,
@@ -29,29 +36,37 @@ import type {
   Edge,
   EmbeddingModelsResponse,
   EmbeddingStatus,
+  ListContextsResponse,
   ListTagsResponse,
+  LoadGuardrailsResponse,
   MemoryListResponse,
   // Referenced only from JSDoc {@link} on the details/recallNearby options.
   MemoryLocation,
   MemoryStatsResponse,
   RecallNearbyResponse,
   RollbackResult,
+  RollbackSummary,
+  SearchConfig,
   ServerInfo,
   SleepReport,
   SleepReportDetail,
+  // Referenced only from JSDoc {@link} on the details options.
+  ToolTrigger,
   UsageInfo,
 } from "./models.js";
 
 /**
- * Minimum memory-cloud server version this SDK was tested against.
+ * The memory-cloud server version this SDK targets and was tested against.
  *
  * The check is opt-in: callers must explicitly invoke
  * {@link KaguraClient.checkServerVersion} to log an advisory warning when
  * the connected server is older. Plain construction and tool calls never
- * throw on version mismatch; older servers may silently ignore unknown
- * parameters.
+ * throw on version mismatch. An older server still answers, but it may
+ * silently ignore options it predates, omit fields it predates, and report
+ * a tool it predates as not found; the methods say which server version
+ * a feature needs.
  */
-export const MIN_SERVER_VERSION = "0.17.1";
+export const MIN_SERVER_VERSION = "0.75.0";
 
 const MIN_SERVER_VERSION_TUPLE = MIN_SERVER_VERSION.split(".").slice(0, 3).map(Number);
 
@@ -67,6 +82,8 @@ export type MemoryStatsSortField =
   | "created_at"
   | "last_used_at";
 export type SearchMode = "hybrid" | "semantic" | "keyword";
+/** Query-intent router gate for a context's recall (`updateSearchConfig`). */
+export type RoutingMode = "off" | "log_only" | "active";
 export type SourceType = "file" | "url" | "vault" | "api" | "manual";
 
 /** Agent lifecycle state — `updateAgent`'s fail-closed kill switch. */
@@ -123,6 +140,16 @@ export interface RememberOptions {
    * reachable from {@link recallNearby}. `lat`/`lon` must be JSON numbers —
    * argument coercion does not recurse into `details`, so string-typed
    * numerics are rejected server-side with HTTP 422.
+   *
+   * `tool_trigger` is a reserved key: a {@link ToolTrigger} here makes the
+   * memory a tool guardrail, served by {@link loadGuardrails}. It is
+   * validated on write, and only a context editor or above on a user
+   * credential (not an agent one) may set it — otherwise the call throws
+   * {@link KaguraError}. The same gate covers changing or deleting a
+   * guardrail later. {@link forget} skips one silently rather than throwing
+   * when the caller may otherwise write to the workspace; a workspace
+   * viewer may not delete anything, and its `forget` throws
+   * {@link KaguraPermissionError} instead.
    */
   details?: Record<string, unknown>;
   /** Open-ended context metadata JSON. */
@@ -160,9 +187,26 @@ export interface RecallOptions {
    */
   useRerank?: boolean;
   /**
-   * Optional filters: `type`, `tags`, `tags_match` ("any"/"all"),
-   * `created_after`/`created_before`, `updated_after`/`updated_before`,
-   * `trust_tier` ("trusted" excludes external/connector-ingested memories).
+   * Optional filters, sent in wire form; keys AND together:
+   *
+   * - `type`, `scope`: exact match.
+   * - `tags`: matches any listed tag; `tags_match: "all"` requires every
+   *   one. `tags_normalize: true` (server v0.65.0+) also matches spellings
+   *   that differ only in case, hyphen/underscore/space or a simple plural.
+   * - `importance`: `{ gte | lte | gt | lt: 0.0-1.0 }`.
+   * - `created_after` / `created_before` / `updated_after` /
+   *   `updated_before`: ISO 8601.
+   * - `source_uri_prefix` (e.g. `"vault://my-vault/"`) and `source_type`.
+   * - `trust_tier: "trusted"` excludes external/connector-ingested
+   *   memories.
+   * - `near: { lat, lon, radius_m? }` and `within: { polygon: [{ lat, lon },
+   *   ...] }` (server v0.54.0+) keep memories whose `details.location`
+   *   falls inside; memories with no location never match.
+   *
+   * When a tag filter matches nothing, the response can carry
+   * `tag_suggestions` (server v0.65.0+): stored tags close to each
+   * requested one, as `{ [requestedTag]: ["stored-tag (count)", ...] }`.
+   * The filter itself is never widened.
    */
   filters?: Record<string, unknown>;
   searchMode?: SearchMode;
@@ -198,11 +242,50 @@ export interface UpdateMemoryOptions {
    * does not deep-merge. Round-trip any keys you want to keep (notably
    * `location`, see {@link MemoryLocation}) or they are silently dropped.
    *
+   * That includes `tool_trigger` ({@link ToolTrigger}): leaving it out of
+   * `updateMemory({ details })` turns the memory's guardrail off. The key
+   * is reserved and validated on write, and any update to a guardrail
+   * memory — not only one that names the key — needs context editor or
+   * above on a user credential; see {@link RememberOptions.details}.
+   *
    * Omitted from the request when `undefined`; pass `{}` to clear.
    */
   details?: Record<string, unknown>;
   /** `"always"` pins, `"on_recall"` unpins; omit to leave unchanged. */
   deliveryMode?: DeliveryMode;
+  /**
+   * Reject this memory's current `supersede_candidate` (server v0.65.0+)
+   * — for two memories that are deliberately separate, so the suggestion
+   * stops resurfacing on recall and reference. Nothing is deleted or
+   * shadowed. To accept a candidate instead, create a `"supersedes"` edge.
+   *
+   * In-place mode only: requires `memoryId`. Only `true` is sent.
+   */
+  dismissSupersedeCandidate?: boolean;
+}
+
+export interface ListContextsOptions {
+  /**
+   * Only contexts whose name or display name contains this text
+   * (case-insensitive, max 100 chars; blank means no filter).
+   *
+   * Server v0.73.0+. Older servers ignore it without an error and return
+   * every context, so do not rely on it to narrow the list there.
+   */
+  nameContains?: string;
+  /**
+   * Add each context's `summary`, capped at 300 characters (server
+   * v0.73.0+; older servers ignore it but always send the full `summary`).
+   */
+  includeSummary?: boolean;
+  /**
+   * Add the full `summary` and `embedding_model`. Large on a big
+   * workspace, so pair it with `nameContains`. Wins over `includeSummary`.
+   * Server v0.73.0+; older servers ignore it but always send both fields.
+   */
+  includeDetails?: boolean;
+  /** Add `memory_count` per context. Works on every supported server. */
+  includeStats?: boolean;
 }
 
 export interface CreateContextOptions {
@@ -216,9 +299,18 @@ export interface CreateContextOptions {
   usageGuide?: string;
   /** Resource identifier for external data ingestion. */
   resourceId?: string;
-  /** Privacy flag (default: true). */
+  /**
+   * Privacy flag (default: true). A shared (`false`) context needs the
+   * `shared_contexts` feature; from server v0.75.0 a plan without it
+   * throws {@link KaguraFeatureNotAvailableError} (older servers: a generic
+   * `validation_error`).
+   */
   isPrivate?: boolean;
-  /** Embedding model (immutable after creation); see listEmbeddingModels(). */
+  /**
+   * Embedding model; see listEmbeddingModels(). No API call changes it
+   * after creation. On server v0.66.0+ a deployment operator can migrate a
+   * context to another model.
+   */
   embeddingModel?: string;
 }
 
@@ -229,7 +321,11 @@ export interface UpdateContextOptions {
   summary?: string;
   usageGuide?: string;
   resourceId?: string;
-  /** Public visibility (required for resource tokens). */
+  /**
+   * Public visibility (required for resource tokens). Making a context
+   * public is plan-gated on the `public_contexts` feature (server
+   * v0.68.0+): `true` on a plan without it throws {@link KaguraFeatureNotAvailableError}.
+   */
   isPublic?: boolean;
   /** Locked contexts cannot be deleted. */
   isLocked?: boolean;
@@ -327,11 +423,11 @@ export interface UpdateAgentOptions {
 
 /**
  * The subtractive scope trio shared by {@link BindAgentContextOptions}
- * and {@link UpdateAgentBindingOptions} — the ONE type to extend when
- * memory-cloud #1286 ships the reserved `allowedMemoryTypes` /
- * `allowedSourceTypes` filters (the server accepts only null for them
- * until per-memory enforcement lands, so they are deliberately not
- * declared yet; adding them later is non-breaking).
+ * and {@link UpdateAgentBindingOptions} — the ONE type to extend with the
+ * per-memory `allowed_memory_types` / `allowed_source_types` filters.
+ * Server v0.51.0 (memory-cloud #1299) enforces them and
+ * {@link AgentBinding} reads them back, but no option sets them yet; pass
+ * them through `callRawTool` until one does (adding it is non-breaking).
  */
 export interface AgentBindingScopeOptions {
   /** Whether the agent may read this context (server default: true). */
@@ -364,9 +460,30 @@ export interface UpdateSearchConfigOptions {
   fetchFactor?: number;
   /** Enable AI reranking; a `recall` that omits `useRerank` follows it (server v0.69.0+). */
   useRerank?: boolean;
-  /** "voyage", "cohere", or "ollama". */
+  /**
+   * `"voyage"`, `"cohere"`, or `"self_hosted"` (a local OpenAI-compatible
+   * backend such as Ollama or vLLM; needs no API key).
+   */
   rerankerProvider?: string;
   rerankerModel?: string;
+  /**
+   * Bounded adoption + feedback re-rank: memories that get referenced and
+   * marked helpful gain a small standing boost. New contexts start enabled.
+   */
+  reinforceEnabled?: boolean;
+  /** Bound on the reinforce adjustment (0.0-0.5, server default 0.15). */
+  reinforceMaxBoost?: number;
+  /**
+   * Count only host-arbitrated feedback, so an untrusted agent's own
+   * `feedback({ helpful: true })` cannot boost its ranking.
+   */
+  reinforceRequireHostArbitration?: boolean;
+  /**
+   * `"off"` (server default); `"log_only"` records the routing decision
+   * with no ranking change; `"active"` routes a `recall` that omits
+   * `searchMode`. An explicit `searchMode` always wins.
+   */
+  routingMode?: RoutingMode;
 }
 
 /**
@@ -699,7 +816,9 @@ export class KaguraClient {
    * recognizes get a specific class. A code from a tool with no wrapper
    * (`secret_not_found`, say) lands on the generic {@link KaguraError}, so
    * match on the message or add the code to `raiseForMcpError` when you
-   * confirm it against the server.
+   * confirm it against the server. Plan and quota refusals are the
+   * exception: a v0.75.0+ server tags them with a `gate`, so they get
+   * {@link KaguraFeatureNotAvailableError} / {@link KaguraQuotaError} from any tool.
    *
    * Use `getToolDefinitions()` to discover what the connected server offers.
    *
@@ -718,6 +837,13 @@ export class KaguraClient {
    * The server's MCP tools return `{"status": "error", "error": <code>,
    * "message": <str>, ...}` for domain errors the JSON-RPC transport
    * cannot represent. HTTP-level errors are handled by the request layer.
+   *
+   * Classes are keyed on the code and the envelope's own fields, never on
+   * the message, whose wording the server has changed before. Plan and
+   * quota refusals go by the envelope's `gate` first (server v0.75.0+),
+   * then by the code; their message stays the generic one, so matching on
+   * it keeps working. A quota's `retry_after_seconds` (the resource
+   * events-per-hour quota on `ingest_events`) becomes its `retryAfter`.
    */
   private static raiseForMcpError(result: ToolResult, operation: string): void {
     if (result.status !== "error") {
@@ -734,7 +860,34 @@ export class KaguraClient {
     ) {
       throw new KaguraNotFoundError(`${operation}: ${message}`);
     }
-    throw new KaguraError(`${operation} failed (${code}): ${message}`);
+    const failure = `${operation} failed (${code}): ${message}`;
+    const gated = gateError(
+      result,
+      code,
+      MCP_GATE_CODES,
+      failure,
+      bodyRetryAfter(result, "retry_after_seconds"),
+    );
+    if (gated !== null) {
+      throw gated;
+    }
+    if (code === "partial_rollback") {
+      const summary = result.rollback_summary;
+      throw new KaguraPartialRollbackError(
+        failure,
+        typeof result.report_id === "string" ? result.report_id : null,
+        typeof summary === "object" && summary !== null && !Array.isArray(summary)
+          ? (summary as RollbackSummary)
+          : {},
+      );
+    }
+    if (code === "permission_denied") {
+      throw new KaguraPermissionError(
+        failure,
+        typeof result.required_role === "string" ? result.required_role : null,
+      );
+    }
+    throw new KaguraError(failure);
   }
 
   /** Store a memory. Returns the API response with `memory_id`. */
@@ -783,6 +936,14 @@ export class KaguraClient {
 
   /**
    * Search memories. Returns the API response with a `results` list.
+   *
+   * When the semantic half of a hybrid search (the default `searchMode`)
+   * is unavailable, server v0.66.0+ falls back to keyword-only search —
+   * `searchMode: "semantic"` still fails — and adds `degraded: true` and
+   * `degraded_reason` (`"embedding_unavailable"` or
+   * `"vector_search_unavailable"`) instead of failing. Both keys are absent
+   * on a normal search. A degraded result has a different `confidence`
+   * basis, and an empty one means "search impaired", not "nothing stored".
    *
    * @throws Error if `query` is empty/whitespace; if neither `contextId`
    *   nor `contextIds` is provided; if `contextIds` has fewer than 2 or
@@ -837,6 +998,11 @@ export class KaguraClient {
    * List Time Memories whose scheduled window overlaps a range, soonest
    * first. A deterministic time query over `type="time"` memories — not
    * semantic search, no Hebbian side-effects.
+   *
+   * Since server v0.73.0 each item carries `trigger` (the memory's
+   * `details.trigger`) instead of the full `details` object, so
+   * `item.details` is `undefined` by default. Pass `includeDetails: true`
+   * to get `details` back, or call {@link reference} for one memory.
    */
   async recallUpcoming(options: {
     contextId: string;
@@ -846,6 +1012,8 @@ export class KaguraClient {
     until?: string;
     /** Maximum results (default 20, server max 100). */
     k?: number;
+    /** Return each item's full `details` instead of its `trigger` (default false). */
+    includeDetails?: boolean;
   }): Promise<ToolResult> {
     const args: Record<string, unknown> = {
       context_id: options.contextId,
@@ -856,6 +1024,9 @@ export class KaguraClient {
     }
     if (options.until !== undefined) {
       args.until = options.until;
+    }
+    if (options.includeDetails) {
+      args.include_details = true;
     }
     return this.callToolChecked("recall_upcoming", args);
   }
@@ -927,6 +1098,32 @@ export class KaguraClient {
       args.cap = options.cap;
     }
     return this.callToolChecked("load_pinned", args);
+  }
+
+  /**
+   * Deterministically load a context's guardrail set for a client-side
+   * hook — {@link loadPinned}'s twin (server v0.74.0+).
+   *
+   * Two lanes, each capped on its own: `pinned` (`delivery_mode="always"`)
+   * and `tool_triggered`, every memory carrying `details.tool_trigger`
+   * ({@link ToolTrigger}). `cap` bounds the tool-triggered lane only, so a
+   * large pinned set never crowds guardrails out. Trusted-tier rows only;
+   * the patterns come back as data — the server never runs them.
+   *
+   * Never silently dropped: check `tool_triggered_truncated` /
+   * `pinned_truncated` before treating the set as complete.
+   */
+  async loadGuardrails(options: {
+    contextId: string;
+    /** Override the tool-triggered cap (1-1000); omit for server default. */
+    cap?: number;
+  }): Promise<LoadGuardrailsResponse> {
+    const args: Record<string, unknown> = { context_id: options.contextId };
+    if (options.cap !== undefined) {
+      args.cap = options.cap;
+    }
+    const result = await this.callToolChecked("load_guardrails", args);
+    return result as unknown as LoadGuardrailsResponse;
   }
 
   /**
@@ -1031,8 +1228,8 @@ export class KaguraClient {
    * `enforcement_mode="enforce"`.
    *
    * Requires memory-cloud v0.49.0+ — older servers return an MCP
-   * "tool not found" error ({@link MIN_SERVER_VERSION} is deliberately
-   * not bumped; only the agent control plane needs the newer server).
+   * "tool not found" error. That predates {@link MIN_SERVER_VERSION}, so
+   * any server {@link checkServerVersion} does not warn about has it.
    *
    * @throws KaguraError on name conflict, agent quota, or insufficient
    *   role (owner/admin required).
@@ -1139,9 +1336,9 @@ export class KaguraClient {
   /**
    * Build the omit-when-undefined binding scope trio shared by
    * {@link bindAgentContext} and {@link updateAgentBinding} — the port of
-   * the Python SDK's `_binding_scope_payload`. When memory-cloud #1286
-   * ships the reserved filters, extend {@link AgentBindingScopeOptions}
-   * and map the new fields here.
+   * the Python SDK's `_binding_scope_payload`. To expose the per-memory
+   * filters (server v0.51.0+), extend {@link AgentBindingScopeOptions} and
+   * map the new fields here.
    */
   private static bindingScopeArgs(options: AgentBindingScopeOptions): Record<string, unknown> {
     const args: Record<string, unknown> = {};
@@ -1240,7 +1437,10 @@ export class KaguraClient {
    * Components are **fail-soft**: a failing component reports
    * `{"status": "error", ...}` under `components` while the rest still
    * return, with the top-level `degraded` flag set. Identity and
-   * authorization failures are total and throw instead.
+   * authorization failures are total and throw instead. A keyword-only
+   * recall (see {@link recall}) sets the top-level flag too (server
+   * v0.66.0+), along with `components.recall.degraded`; its
+   * `degraded_reason` tells an impaired recall from a failed component.
    *
    * The REST companion (`POST /api/v1/agents/{agent_id}/bootstrap`) is
    * available via `AgentsClient` for API-key-only callers such as
@@ -1259,9 +1459,35 @@ export class KaguraClient {
     return result as unknown as AgentBootstrapResponse;
   }
 
-  /** List available contexts. */
-  async listContexts(): Promise<ToolResult> {
-    return this.callToolChecked("list_contexts", {});
+  /**
+   * List the contexts the caller can see, most recently used first.
+   *
+   * Since server v0.73.0 this is a slim name→id directory: each item is
+   * `{id, name, is_private, is_locked, last_used_at}` and carries no
+   * `summary` or `embedding_model` unless asked for. Narrow a large
+   * workspace with `listContexts({ nameContains, includeDetails: true })`,
+   * or read one context in full with {@link getContextInfo}.
+   *
+   * `count` is workspace quota usage, not the number returned — that is
+   * `total`. When the caller can see no context at all, `hint` says how
+   * to create one or get access.
+   */
+  async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
+    const args: Record<string, unknown> = {};
+    if (options.nameContains !== undefined) {
+      args.name_contains = options.nameContains;
+    }
+    if (options.includeSummary) {
+      args.include_summary = true;
+    }
+    if (options.includeDetails) {
+      args.include_details = true;
+    }
+    if (options.includeStats) {
+      args.include_stats = true;
+    }
+    const result = await this.callToolChecked("list_contexts", args);
+    return result as unknown as ListContextsResponse;
   }
 
   /**
@@ -1343,7 +1569,11 @@ export class KaguraClient {
    * Update an existing memory in-place (memoryId) or upsert by external
    * ID (externalId — requires summary, content, and type).
    *
-   * @throws Error unless exactly one of memoryId/externalId is provided.
+   * Reject a `supersede_candidate` the server suggested with
+   * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
+   *
+   * @throws Error unless exactly one of memoryId/externalId is provided,
+   *   or if `dismissSupersedeCandidate` is combined with `externalId`.
    */
   async updateMemory(options: UpdateMemoryOptions): Promise<ToolResult> {
     if (!options.memoryId && !options.externalId) {
@@ -1351,6 +1581,15 @@ export class KaguraClient {
     }
     if (options.memoryId && options.externalId) {
       throw new Error("Provide exactly one of memoryId or externalId");
+    }
+    // The server rejects this pair too; an upsert replaces the memory, so
+    // there is no stored suggestion left to dismiss. Tested for presence,
+    // not truthiness, because `""` is still sent as external_id below.
+    if (options.dismissSupersedeCandidate && options.externalId !== undefined) {
+      throw new Error(
+        "dismissSupersedeCandidate requires memoryId; an externalId upsert " +
+          "replaces the memory and its suggestion",
+      );
     }
 
     const args: Record<string, unknown> = { context_id: options.contextId };
@@ -1384,13 +1623,31 @@ export class KaguraClient {
     if (options.deliveryMode !== undefined) {
       args.delivery_mode = options.deliveryMode;
     }
+    if (options.dismissSupersedeCandidate) {
+      args.dismiss_supersede_candidate = true;
+    }
     return this.callToolChecked("update_memory", args);
   }
 
   /**
-   * Soft-delete memories (30-day retention) by specific memoryId or by
-   * search query.
+   * Soft-delete memories by specific memoryId or by search query. The
+   * rows are kept, but not restorable through the API, until the
+   * deployment's cleanup window passes
+   * (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days; Sleep
+   * retention can purge sooner, and `0` turns the sweep off).
    *
+   * The silent skip is per target, for a caller who may write to the
+   * workspace: a target that caller may not delete, or one already gone,
+   * is skipped rather than refused. Since server v0.74.0 that includes
+   * every tool guardrail when the caller is below context editor or on an
+   * agent credential. Check `deleted_count`, which can be 0 even for an
+   * explicit `memoryId`.
+   *
+   * A caller who may not write to the workspace at all is refused before
+   * any target is looked at, so nothing is skipped silently for it.
+   *
+   * @throws KaguraPermissionError for a workspace viewer, which has
+   *   read-only access (`requiredRole: "member"`).
    * @throws Error if neither memoryId nor query is provided.
    */
   async forget(options: {
@@ -1417,7 +1674,20 @@ export class KaguraClient {
   /**
    * Create a new context in the current workspace.
    *
+   * Checks the workspace's context limit first, with {@link listContexts},
+   * and throws without calling `create_context` when `can_create` is false
+   * — unless `limit` is 0, which is how the server reports that it could
+   * not read the quota; `create_context` then decides.
+   * That error comes from the SDK, not the server: it carries
+   * `quotaType: "contexts"` with `current` / `limit`, but `gate` and the
+   * plan fields stay `null` because `list_contexts` does not send them. A
+   * `null` `requiredPlan` there means the plan is unknown, not that no plan
+   * lifts the cap. The server's own refusal, which names the plan that
+   * lifts it, only arrives when a concurrent create gets past the check.
+   *
    * @throws KaguraQuotaError when the workspace context limit is reached.
+   * @throws KaguraFeatureNotAvailableError for a shared context (`isPrivate: false`) on a
+   *   plan without `shared_contexts` (server v0.75.0+).
    */
   async createContext(options: CreateContextOptions): Promise<ToolResult> {
     // Pre-check quota. Match the Python falsy check `not
@@ -1428,15 +1698,28 @@ export class KaguraClient {
     // a present `null` as "can create".
     const contexts = await this.listContexts();
     const canCreate = "can_create" in contexts ? contexts.can_create : true;
-    if (!canCreate) {
+    // `limit: 0` with `can_create: false` is how list_contexts reports a
+    // failed quota lookup (every plan allows at least one context), so the
+    // server's own check decides then, as in the Python SDK.
+    if (!canCreate && contexts.limit !== 0) {
       // Coerce missing/null count/limit to "?" so schema drift never
       // produces "null/null" in the message; a real 0 is preserved.
       const count = contexts.count ?? null;
       const limit = contexts.limit ?? null;
+      // The quotaType/current/limit the server's own refusal would carry.
+      // Its gate and plan fields are not in list_contexts, so they stay
+      // null: this is the SDK's inference, not the server's gate block.
+      // The Python SDK keeps the same pre-check, with no plan fields either.
       throw new KaguraQuotaError(
         `Context limit reached (${count === null ? "?" : String(count)}/` +
           `${limit === null ? "?" : String(limit)}). ` +
           "Delete unused contexts or upgrade your plan.",
+        null,
+        {
+          quotaType: "contexts",
+          current: typeof count === "number" ? count : null,
+          limit: typeof limit === "number" ? limit : null,
+        },
       );
     }
 
@@ -1501,6 +1784,13 @@ export class KaguraClient {
    * Atomically create Context + Resource entity + ingestion token in a
    * single server-side transaction. The returned `token` is plaintext and
    * shown once.
+   *
+   * Plan-gated on the `resources` feature (server v0.68.0+): a plan
+   * without it is refused with nothing created.
+   *
+   * @throws KaguraFeatureNotAvailableError when the plan lacks `resources`;
+   *   `requiredPlanDisplay` names the plan that has it.
+   * @throws KaguraQuotaError at the workspace's context or token cap.
    */
   async setupResource(options: SetupResourceOptions): Promise<ToolResult> {
     const args: Record<string, unknown> = {
@@ -1679,10 +1969,24 @@ export class KaguraClient {
   }
 
   /**
-   * Update hybrid search configuration for a context. Weights must sum
-   * to 1.0 (±0.01). Requires owner or editor permission.
+   * Update a context's search configuration: hybrid weights, reranker,
+   * reinforce re-rank, and query routing. Weights must sum to 1.0
+   * (±0.01). Requires owner or editor permission. Omitted fields keep
+   * their current values.
+   *
+   * The result echoes the whole configuration after the update under
+   * `config`. That is the only place the reinforce and routing fields
+   * come back: {@link getContextInfo}'s `search_config` leaves them out.
+   *
+   * @throws KaguraPermissionError when the caller may not write to the
+   *   context, and also when the context does not exist or the caller
+   *   cannot see it: the server answers every access failure here with
+   *   `permission_denied`, never `context_not_found`, and sends no
+   *   `required_role`, so `requiredRole` is `null` whatever the cause.
    */
-  async updateSearchConfig(options: UpdateSearchConfigOptions): Promise<ToolResult> {
+  async updateSearchConfig(
+    options: UpdateSearchConfigOptions,
+  ): Promise<ToolResult & { config: SearchConfig }> {
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.semanticWeight !== undefined) {
       args.semantic_weight = options.semanticWeight;
@@ -1702,10 +2006,26 @@ export class KaguraClient {
     if (options.rerankerModel !== undefined) {
       args.reranker_model = options.rerankerModel;
     }
-    return this.callToolChecked("update_search_config", args);
+    if (options.reinforceEnabled !== undefined) {
+      args.reinforce_enabled = options.reinforceEnabled;
+    }
+    if (options.reinforceMaxBoost !== undefined) {
+      args.reinforce_max_boost = options.reinforceMaxBoost;
+    }
+    if (options.reinforceRequireHostArbitration !== undefined) {
+      args.reinforce_require_host_arbitration = options.reinforceRequireHostArbitration;
+    }
+    if (options.routingMode !== undefined) {
+      args.routing_mode = options.routingMode;
+    }
+    const result = await this.callToolChecked("update_search_config", args);
+    return result as ToolResult & { config: SearchConfig };
   }
 
-  /** Get server name, version, environment, and feature flags. */
+  /**
+   * Get server name, version, environment, feature flags, and (server
+   * v0.69.0+) the reranker defaults new contexts start with.
+   */
   async getServerInfo(): Promise<ServerInfo> {
     return this.restGet<ServerInfo>("/api/v1/system/info");
   }
@@ -1871,9 +2191,26 @@ export class KaguraClient {
   }
 
   /**
-   * Reverse the effects of a completed Sleep Maintenance run. The server
-   * processes actions in reverse order with per-step commits — a partial
-   * failure means SOME actions may have been reversed before the error.
+   * Reverse the effects of a `completed` or `degraded` Sleep Maintenance
+   * run; any other status is refused. The server processes actions in
+   * reverse order with per-step commits — a partial failure means SOME
+   * actions may have been reversed before the error.
+   *
+   * A partial rollback throws {@link KaguraPartialRollbackError} rather
+   * than returning, and its `summary` is the {@link RollbackSummary} a
+   * clean run would have returned: the counts say what was reversed, and
+   * `summary.errors` names each action that was not (a merge a later write
+   * changed is counted in `merges_unreversible` and listed there too). The
+   * reversed steps stay committed and the report is marked `failed`.
+   *
+   * There is no retry: the server rolls back only a `completed` or
+   * `degraded` report, so calling this again on a `failed` one is refused
+   * with a plain {@link KaguraError} (`invalid_status`). The actions in
+   * `err.summary.errors` stay unreversed and need handling some other way.
+   *
+   * @throws KaguraPartialRollbackError when some actions could not be
+   *   reversed.
+   * @throws KaguraNotFoundError when the report or context does not exist.
    */
   async rollbackSleepRun(options: {
     contextId: string;

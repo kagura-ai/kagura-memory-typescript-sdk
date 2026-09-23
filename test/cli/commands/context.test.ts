@@ -186,8 +186,26 @@ describe("kagura-memory context search-config", () => {
     const { code, h } = await wire(["context", "search-config", "ctx-1", "--reranker", "ollama"]);
     expect(code).toBe(2);
     expect(h.err.join("\n")).toContain(
-      "Invalid value for '--reranker': 'ollama' is not one of 'voyage', 'cohere'.",
+      "Invalid value for '--reranker': 'ollama' is not one of 'voyage', 'cohere', 'self_hosted'.",
     );
+  });
+
+  it("accepts --reranker self_hosted, which the server takes since v0.42.0", async () => {
+    const { code, args } = await wire([
+      "context",
+      "search-config",
+      "ctx-1",
+      "--reranker",
+      "self_hosted",
+    ]);
+    expect(code).toBe(0);
+    expect(args).toMatchObject({ context_id: "ctx-1", reranker_provider: "self_hosted" });
+  });
+
+  it("names every reranker in the --reranker metavar", async () => {
+    const h = harness();
+    expect(await runCli(["context", "search-config", "--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toContain("--reranker [voyage|cohere|self_hosted]");
   });
 });
 

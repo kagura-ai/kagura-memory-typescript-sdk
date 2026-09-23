@@ -3,8 +3,12 @@
 import {
   KaguraAuthError,
   KaguraConnectionError,
+  KaguraError,
+  KaguraFeatureNotAvailableError,
+  KaguraQuotaError,
   KaguraRateLimitError,
 } from "./errors.js";
+import type { KaguraQuotaErrorOptions } from "./errors.js";
 
 export { SDK_VERSION } from "./version.js";
 
@@ -188,14 +192,210 @@ export function retryAfterSeconds(headers: Headers): number | null {
   return /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : null;
 }
 
+/** Error codes of the plan and quota refusals, per surface. */
+export interface GateCodes {
+  plan: readonly string[];
+  quota: readonly string[];
+}
+
+/**
+ * MCP envelope codes. `feature_not_available` is the analysis tools'
+ * twin of `plan_required`, as REST `FEAT-001` is of both, and
+ * `setup_connector` forwards the connector seat cap's REST code
+ * `CONNECTOR-001` as is.
+ */
+export const MCP_GATE_CODES: GateCodes = {
+  plan: ["plan_required", "feature_not_available"],
+  quota: ["quota_exceeded", "CONNECTOR-001"],
+};
+
+/**
+ * REST canonical-envelope codes. Beside `QUOTA-001`, the quota family has
+ * `QUOTA-002` (embedding spend) and `CONNECTOR-001` (connector seats).
+ */
+export const REST_GATE_CODES: GateCodes = {
+  plan: ["FEAT-001"],
+  quota: ["QUOTA-001", "QUOTA-002", "CONNECTOR-001"],
+};
+
+function stringField(block: Record<string, unknown>, key: string): string | null {
+  const value = block[key];
+  return typeof value === "string" ? value : null;
+}
+
+function numberField(block: Record<string, unknown>, key: string): number | null {
+  const value = block[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** The first of `keys` that holds a number in `block`, else `null`. */
+function firstNumberField(block: Record<string, unknown>, keys: readonly string[]): number | null {
+  for (const key of keys) {
+    const value = numberField(block, key);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * A retry hint sent in the body rather than as a `Retry-After` header:
+ * `block[key]` in whole seconds, rounded up, or `null` when it is absent,
+ * not a number, or negative.
+ *
+ * The resource events-per-hour quota is the case that needs it: REST sends
+ * `details.retry_after` with no header, and MCP sends `retry_after_seconds`
+ * at the top of the envelope.
+ */
+export function bodyRetryAfter(block: Record<string, unknown>, key: string): number | null {
+  const value = numberField(block, key);
+  return value === null || value < 0 ? null : Math.ceil(value);
+}
+
+/**
+ * Seconds to wait before retrying a REST error response: its numeric
+ * `Retry-After` header, else the `details.retry_after` of a canonical
+ * error body, else `null`.
+ */
+export function responseRetryAfter(headers: Headers, bodyText: string): number | null {
+  const header = retryAfterSeconds(headers);
+  if (header !== null) {
+    return header;
+  }
+  const envelope = parseErrorEnvelope(bodyText);
+  return envelope === null ? null : bodyRetryAfter(envelope.details, "retry_after");
+}
+
+/**
+ * Which refusal `block` is: `"plan"`, `"quota"`, or `null` for neither.
+ *
+ * `block` holds the gate fields: the MCP envelope itself, or a REST
+ * body's `details`. Its `gate` (memory-cloud v0.75.0+) decides whenever
+ * it is one the SDK knows, because the code alone can mislead: the
+ * resource-token cap is a quota that answers 403, and the connector seat
+ * cap keeps a code of its own. `allowlist` and `deployment` are the other
+ * two reasons a feature is unavailable, so they count as `"plan"` — the
+ * kind an older server's bare `FEAT-001` already gets. With no gate,
+ * `code` decides against the surface's `codes`.
+ */
+function gateKind(
+  block: Record<string, unknown>,
+  code: string | null,
+  codes: GateCodes,
+): "plan" | "quota" | null {
+  const gate = stringField(block, "gate");
+  if (gate === "quota") {
+    return "quota";
+  }
+  if (gate === "plan" || gate === "allowlist" || gate === "deployment") {
+    return "plan";
+  }
+  if (code !== null && codes.quota.includes(code)) {
+    return "quota";
+  }
+  if (code !== null && codes.plan.includes(code)) {
+    return "plan";
+  }
+  return null;
+}
+
+/**
+ * Where a refusal's counts live when the canonical `current` / `limit`
+ * are absent: the names servers older than v0.75.0 sent instead (v0.75.0
+ * adds the canonical pair and keeps these beside it). The daily memory and
+ * analysis quotas send `used_today`, the analysis one with `limit_today`;
+ * the workspace cap sends `owned_count` / `cap`, and the connector seat
+ * cap `active_connectors` / `max_connectors`.
+ */
+const LEGACY_CURRENT_KEYS = ["used_today", "owned_count", "active_connectors"] as const;
+const LEGACY_LIMIT_KEYS = ["limit_today", "cap", "max_connectors"] as const;
+
+/**
+ * The gate payload in `block`, camelCased. Wire keys are snake_case; a
+ * missing or wrong-typed one reads as `null` rather than trusting the
+ * shape. `current` and `limit` fall back to the legacy count names an
+ * older server sent instead.
+ */
+function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
+  return {
+    gate: stringField(block, "gate"),
+    feature: stringField(block, "feature"),
+    requiredPlan: stringField(block, "required_plan"),
+    requiredPlanDisplay: stringField(block, "required_plan_display"),
+    currentPlan: stringField(block, "current_plan"),
+    quotaType: stringField(block, "quota_type"),
+    current: firstNumberField(block, ["current", ...LEGACY_CURRENT_KEYS]),
+    limit: firstNumberField(block, ["limit", ...LEGACY_LIMIT_KEYS]),
+    usedToday: numberField(block, "used_today"),
+    resetsAt: stringField(block, "resets_at"),
+  };
+}
+
+/**
+ * Build the typed error for a plan or quota refusal, or `null` if it is
+ * neither: {@link KaguraFeatureNotAvailableError} or {@link KaguraQuotaError}, as
+ * `gateKind` decides, carrying the payload `block` holds. `retryAfter` is
+ * the caller's reading of the response's retry hint; with none, a quota
+ * error derives it from `resets_at`.
+ */
+export function gateError(
+  block: Record<string, unknown>,
+  code: string | null,
+  codes: GateCodes,
+  message: string,
+  retryAfter: number | null = null,
+): KaguraError | null {
+  const kind = gateKind(block, code, codes);
+  if (kind === null) {
+    return null;
+  }
+  const options = gateOptions(block);
+  return kind === "plan"
+    ? new KaguraFeatureNotAvailableError(message, options)
+    : new KaguraQuotaError(message, retryAfter, options);
+}
+
+/**
+ * Split a canonical `{"error", "message", "details"}` REST body into its
+ * code and details block; `null` for any other body.
+ */
+export function parseErrorEnvelope(
+  bodyText: string,
+): { code: string | null; details: Record<string, unknown> } | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return null;
+  }
+  const rec = body as Record<string, unknown>;
+  const details = rec.details;
+  return {
+    code: typeof rec.error === "string" ? rec.error : null,
+    details:
+      typeof details === "object" && details !== null && !Array.isArray(details)
+        ? (details as Record<string, unknown>)
+        : {},
+  };
+}
+
 /**
  * Translate a non-2xx HTTP response into the matching Kagura error.
  *
  * Maps 401 → KaguraAuthError, 429 → KaguraRateLimitError (honoring a
- * numeric `Retry-After` header), and every other status →
+ * numeric `Retry-After` header, else the body's `details.retry_after`),
+ * and every other status →
  * KaguraConnectionError. The server-supplied detail is appended when
  * present, otherwise `fallbackMessage` is used so the status is never
  * left bare. This function always throws.
+ *
+ * A 429 that is a typed quota refusal (the daily call quota) keeps its
+ * class, which existing handlers catch, but carries the quota's gate
+ * payload; any other 429 leaves it `null`.
  */
 export function throwForKaguraStatus(
   status: number,
@@ -208,9 +408,13 @@ export function throwForKaguraStatus(
   }
   const detail = extractDetail(bodyText) || fallbackMessage || "";
   if (status === 429) {
+    const envelope = parseErrorEnvelope(bodyText);
     throw new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
-      retryAfterSeconds(headers),
+      responseRetryAfter(headers, bodyText),
+      envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
+        ? gateOptions(envelope.details)
+        : {},
     );
   }
   // Avoid a doubled "HTTP 500: HTTP 500" when the body carries no detail.

@@ -6,6 +6,313 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Plan, quota, partial-rollback and permission refusals are typed
+  errors now, and keep their payload**
+  ([#40](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/40)).
+  The server has sent machine-readable refusals for a while, but the SDK
+  collapsed every MCP code it did not know into a bare `KaguraError` and
+  every REST 403 into `KaguraConnectionError("HTTP 403: …")` — a class that
+  suggests a network problem — and dropped the fields that said what to do.
+  Callers could not tell the daily memory cap from the total one, read a
+  reset time, or learn which plan lifts a refusal without parsing prose
+  whose wording has already changed once.
+
+  | Class | Raised for | Carries |
+  |---|---|---|
+  | `KaguraFeatureNotAvailableError` (new) | MCP `plan_required` / `feature_not_available`, REST 403 `FEAT-001` | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+  | `KaguraQuotaError` (extended) | MCP `quota_exceeded` / `CONNECTOR-001`, REST `QUOTA-001` / `QUOTA-002` / `CONNECTOR-001` | the above plus `quotaType`, `current`, `limit`, `usedToday`, `resetsAt` |
+  | `KaguraPartialRollbackError` (new) | `rollbackSleepRun` reversing only part of a run | `reportId`, `summary` |
+  | `KaguraPermissionError` (new) | MCP `permission_denied`: usually a role too low, but on `updateSearchConfig` also a context that does not exist or that the caller cannot see | `requiredRole` (only some tools send it: `null` on `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools) |
+
+  All of them extend `KaguraError`, so existing `instanceof KaguraError`
+  handling still catches them, and the MCP ones keep the exact message the
+  generic mapping produced. `KaguraQuotaError`'s constructor is unchanged
+  apart from accepting the new fields in its options; they default to
+  `null`, and `retryAfter` is derived from `resetsAt` when no `Retry-After`
+  was sent. The option shapes are exported as the types
+  `KaguraErrorOptions`, `KaguraGateOptions` and `KaguraQuotaErrorOptions`,
+  and `KaguraRestClient` gains a protected `gateRefusal(response)` hook: a
+  subclass of your own that overrides `error403` or `error429` should
+  return `this.gateRefusal(response)` first when it is not `null`, as the
+  built-in clients do, or its plan and quota refusals stay untyped.
+
+- **The class follows memory-cloud v0.75.0's `gate`, not the status or
+  the code alone.** v0.75.0 tags every plan and quota refusal with
+  `gate` (`plan`, `quota`, `allowlist`, `deployment`) — at the top level of
+  an MCP envelope, under `details` on REST — and the SDK reads it first,
+  falling back to the code for older servers. From an older server, which
+  sends no canonical `current` / `limit`, the counts are read from the
+  legacy names each cap sent: `used_today` / `limit_today` (the daily
+  memory and analysis quotas), `owned_count` / `cap` (the workspace cap)
+  and `active_connectors` / `max_connectors` (the connector seat cap).
+  That matters because a 403 is
+  not always a plan refusal: the resource-token cap on
+  `ResourceClient.createToken` is a `QUOTA-001` that still answers **403**,
+  and becomes a `KaguraQuotaError`. v0.75.0 also turned `createContext`'s
+  shared-context refusal from a `validation_error` into `plan_required`, so
+  it is a `KaguraFeatureNotAvailableError` against a new server. A `FEAT-001` behind an
+  `allowlist` or `deployment` switch stays a `KaguraFeatureNotAvailableError` — the class
+  an older server's bare `FEAT-001` already gets — with `requiredPlan`
+  `null`, because no upgrade lifts it. `gate: "quota"`, by contrast, marks
+  every typed cap, including one no tier raises, so an upgrade helps only
+  when `requiredPlan` is not `null`. That reading needs a `gate`: with
+  none (an older server, or `createContext`'s own context-limit check), a
+  `null` `requiredPlan` means the plan is unknown.
+
+  Every REST client's 403 hook checks for a gate refusal before its own
+  message, so a plan refusal no longer picks up `FilesClient`'s
+  workspace-mismatch hint or the secret store's "you may not have a grant".
+  REST 429s were already `KaguraQuotaError`, and stay one even when the body
+  reads as a plan refusal; a typed one (the member seat cap is now
+  `QUOTA-001` with `quotaType: "members"`) now keeps the server's message
+  and its counts. Two 429 paths deliberately keep their class:
+  `SecretClient` renders 429 through the generic branch as it always has,
+  and `KaguraClient`'s own transport 429 stays `KaguraRateLimitError`. That
+  one covers the daily call quota as well as the per-minute limit, so it
+  now carries the same fields as `KaguraQuotaError` — `quotaType` is
+  `api_mcp_daily` or `api_rest_daily` on a v0.75.0+ quota, and every field
+  is `null` on a per-minute limit.
+
+- **A partial `rollbackSleepRun` hands back its summary.** It used to throw
+  and lose the `rollback_summary` the README told callers to read.
+  `err.summary` is the same `RollbackSummary` a clean run returns, which
+  gains `merges_unreversible`, `importance_kept` and `promotions_kept`.
+  The report is `failed` afterwards, and the server will not roll back a
+  `failed` report again, so there is no retry: the actions listed in
+  `err.summary.errors` need handling some other way.
+
+- **`createContext`'s context-limit error carries its counts.** The SDK
+  checks `listContexts()` before it calls `create_context`, and throws its
+  own `KaguraQuotaError` when `can_create` is false, as the Python SDK
+  does. That error now fills in `quotaType: "contexts"`, `current` and
+  `limit`. It has no `gate` and no plan fields, because `list_contexts`
+  does not send them, so it says less than the server's own context-cap
+  refusal, which names the plan that lifts the cap. The server's refusal
+  arrives when a concurrent create gets past the check, and when
+  `list_contexts` reports `limit: 0` — its answer to a failed quota
+  lookup — in which case the pre-check now steps aside and lets
+  `create_context` decide, as the Python SDK does.
+
+- **`KaguraClient.loadGuardrails({ contextId, cap? })`**
+  ([#41](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/41),
+  server v0.74.0+): the guardrail set a client-side tool hook matches
+  against, mirroring `loadPinned`. Before this, `load_guardrails` was
+  reachable only through `callRawTool`, untyped. It returns two lanes, each
+  capped on its own: the pinned set, and every memory carrying
+  `details.tool_trigger`. `cap` bounds only the tool-triggered lane, so a
+  large pinned set can never crowd guardrails out. `cap` is sent only when
+  set, so the server default applies otherwise. Returns a typed
+  `LoadGuardrailsResponse`. New model types: `ToolTrigger`, `GuardrailItem`,
+  `LoadGuardrailsResponse` and `ContextGuardrails`.
+
+- **`ContextInfo.guardrails`**: the trimmed guardrail block that
+  `get_context_info` now returns. It has three states, and the type keeps
+  them apart. The key is absent when the MCP URL carries `?guardrails=off`
+  or the server is too old to send it. It is `null` when the server's read
+  failed, which does not mean the context has no guardrails. Otherwise it is
+  a `ContextGuardrails`. The SDK passes the field through unchanged, so a
+  failed read is never reported as "no guardrails".
+
+- **The rules for writing a guardrail are now documented**
+  (`RememberOptions.details`, `UpdateMemoryOptions.details`, `forget`).
+  Writing a `tool_trigger` already worked, because `details` is forwarded
+  verbatim, but nothing said the key is reserved. The server validates it on
+  write, and only a context editor or above, using a user credential, may
+  set, change or delete one. Because `updateMemory({ details })` replaces
+  `details` wholesale, leaving `tool_trigger` out silently turns the
+  guardrail off. For a caller who may write to the workspace, `forget`
+  skips any target it may not delete, or one already gone, instead of
+  refusing it; that now includes every guardrail for a caller without
+  those rights. So `deleted_count` can be 0 even for an explicit
+  `memoryId`. A workspace viewer may not delete at all, and its `forget` is
+  refused with `KaguraPermissionError` (`requiredRole: "member"`).
+
+- **Server tool inputs the typed wrappers could not set**
+  ([#42](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/42)).
+  Each was reachable only through `callRawTool` until now:
+
+  - `listContexts(options?)` takes `nameContains`, `includeSummary` and
+    `includeDetails` (server v0.73.0+), and `includeStats`. It still works
+    with no argument. A server older than v0.73.0 ignores `nameContains`
+    without an error and returns every context, so the filter only narrows
+    the list on v0.73.0 and later.
+  - `recallUpcoming({ includeDetails })`.
+  - `UpdateMemoryOptions.dismissSupersedeCandidate` rejects a
+    `supersede_candidate` the server suggested (server v0.65.0+). It needs
+    `memoryId`. Combined with `externalId` it throws before any request is
+    sent, which matches the server's own rule: an upsert replaces the
+    memory, so there is no suggestion left to dismiss.
+  - `UpdateSearchConfigOptions` gains `reinforceEnabled`,
+    `reinforceMaxBoost`, `reinforceRequireHostArbitration` and
+    `routingMode` (new `RoutingMode` type), and the `SearchConfig` model
+    gains the same four fields. `updateSearchConfig()` now types the
+    `config` it echoes as `SearchConfig`, because that echo is the only
+    place the four come back: `getContextInfo()`'s `search_config` leaves
+    them out. The `rerankerProvider` doc named `"ollama"`, which the
+    server has not accepted since v0.42.0. It now lists `voyage`, `cohere`
+    and `self_hosted`.
+
+  Boolean flags are sent only when `true`, as `recall`'s are, because
+  `false` is the server default. The search-config fields are sent
+  whenever they are defined: new contexts start with reinforce enabled, so
+  `reinforceEnabled: false` is the reason to pass it at all.
+
+  **Server v0.73.0 changed two default responses, and upgrading the SDK
+  does not change them back.** `list_contexts` items are now
+  `{id, name, is_private, is_locked, last_used_at}`; `summary` and
+  `embedding_model` come back only with `includeSummary` or
+  `includeDetails`. `recall_upcoming` items carry `trigger` instead of
+  `details`, so `item.details` is `undefined` unless you pass
+  `includeDetails: true`. Code that reads either field from the default
+  shape has been getting `undefined` since that server release, and these
+  options are how to ask for the fields again.
+
+- **`ListContextsResponse` and `ContextListItem`**, the typed
+  `list_contexts` envelope. It includes the optional `hint` that server
+  v0.75.0 adds when the caller can see no context. `count` and `total` are
+  easy to confuse: `count` is the workspace's quota usage and ignores
+  `nameContains`, while `total` is the number of items returned.
+
+- **Fields the server was already sending are typed now**
+  ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)).
+  The models are interfaces with no runtime validation, so nothing was
+  lost at runtime, but a caller had to cast to read these. All of them are
+  optional, so a response from an older server still type-checks.
+
+  - `ServerInfo.search_defaults`, a new `SearchDefaults`: the reranker a
+    new context starts with (server v0.69.0+). `ServerFeatures` gains the
+    eight flags it did not know, `plan_page`, `byok`, `cost_display`,
+    `managed_connectors`, `managed_llm`, `referrals`, `beta_invites` and
+    `reranking`, plus an index signature, so a flag a later server adds
+    still type-checks.
+  - `SleepRunStatus` gains `"degraded"` (server v0.43.0+): the run
+    finished, but some of its judge-LLM calls failed. `SleepReport` gains
+    `llm_call_failures`, the count behind that grade, and
+    `SleepReportDetail` gains `merge_retention_result` (server v0.45.0+).
+  - `IndexerSkippedReason` gains `"memories_per_day_exceeded"` (server
+    v0.68.0+): the workspace's daily memory quota ran out and the batch
+    waits for the UTC reset.
+  - `Edge.origin` (server v0.52.0+) says who asserted an edge: `hebbian`,
+    `semantic` or `declared`. Only `hebbian` edges decay.
+  - `MemoryListItem.location` (server v0.54.0+), the coordinates of the
+    memory's `details.location`, and
+    `AuditVerifyResponse.erasure_pseudonymized` (server v0.55.0+), the audit
+    rows whose hash changed because a data erasure pseudonymized them.
+
+  A `switch` over `SleepRunStatus` or `IndexerSkippedReason` that ends in
+  an exhaustiveness check stops compiling until it handles the new value,
+  which the server has been sending since the versions above.
+
+### Changed
+
+- **REST plan and quota refusals are no longer `KaguraConnectionError`**
+  ([#40](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/40)).
+  A 403 `FEAT-001`, `QUOTA-001` or `CONNECTOR-001` used to be a
+  `KaguraConnectionError`: `HTTP 403: <message>` from the base mapping
+  (`ResourceClient`, `AgentsClient`), the server's message from
+  `WorkspaceClient`, `HTTP 403: <message>` or the workspace-mismatch hint
+  from `FilesClient`, and `Access denied (HTTP 403): …` with the grant text
+  from `SecretClient`. It is now a `KaguraFeatureNotAvailableError` or `KaguraQuotaError`
+  whose message is the server's own, with no prefix or hint. Code that
+  catches `KaguraConnectionError`, or matches `HTTP 403` in the message, on
+  these calls stops matching them; catch the typed class, or `KaguraError`.
+  A typed 429 on the base mapping stays a `KaguraQuotaError`, but its
+  message is now the server's instead of `Quota exceeded. Try again later.`
+  A `RATE-001` 429 keeps the server's message too, scrubbed of credential
+  markers: the resource events-per-hour quota on
+  `ResourceClient.ingestEvent` / `ingestEvents` now reads "Event quota
+  exceeded: N/M events per hour".
+
+- **`listContexts()` returns `ListContextsResponse` instead of
+  `ToolResult`.** The runtime value is the same object. Code that reads a
+  key the type does not declare, or assigns the result to a
+  `Record<string, unknown>`, no longer compiles and needs a cast.
+
+- **`MIN_SERVER_VERSION` is `"0.75.0"`**
+  ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)),
+  up from `"0.17.1"`. The typed surface outgrew 0.17.1 long ago:
+  `recallNearby` needs v0.53.0, and the gate-based error classes above read
+  a field only v0.75.0 sends. The constant stays advisory. Only
+  `checkServerVersion()` reads it, and that call warns on an older server
+  and never throws, so nothing refuses to run against one; an older server
+  ignores options it predates and leaves out fields it predates, as before.
+  The README now says which server version the SDK targets.
+
+- **`UsageInfo.mcp_calls_per_day` is a `UsageQuota`**, `{used, limit}`,
+  which is what `get_usage` has always sent. It was typed limit-only, so
+  today's call count was unreadable without a cast. Reading `.limit`
+  compiles as before; a `UsageInfo` built by hand, such as a test fixture,
+  now needs `used`. `UsageQuotaLimitOnly` no longer describes any response.
+  It is deprecated but still exported.
+
+- **`ResourceEventRecord.id` is a `string`, not a `number`.** This is a
+  correctness fix and it can break a build. The server has always sent the
+  event's BigInt id as a decimal string, so that it keeps its precision
+  above 2^53 - 1, which means code that treated it as a number was
+  already handling a string at runtime. Compare it as a string, or parse it
+  with `BigInt()`, not `Number()`. `event_metadata` on the same record is
+  typed `| null` too, because the server sends `null` for an event stored
+  without metadata. `ResourceEventItem.id`, in `getIndexerStatus`'s
+  `recent_events`, stays a number because the server sends a number there.
+
+### Fixed
+
+- **`retryAfter` reads the retry hint a body carries**
+  ([#40](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/40)).
+  It came only from a `Retry-After` header or from `resetsAt`, so the
+  resource events-per-hour quota, which sends neither, left it `null` even
+  though the server says to wait an hour. With no header, a 429 now falls
+  back to the body's `details.retry_after` (a REST client's
+  `KaguraQuotaError`, and `KaguraClient`'s own `KaguraRateLimitError`),
+  and an MCP quota refusal to its `retry_after_seconds` (`ingest_events`
+  through `callRawTool`).
+
+- **`kagura-memory context search-config --reranker self_hosted`** was
+  refused locally ("is not one of 'voyage', 'cohere'") and never reached
+  the server, which has accepted `self_hosted` since v0.42.0. The flag now
+  takes all three providers, as the Python CLI's does.
+
+- **Docs that no longer matched the server**
+  ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)):
+
+  - A soft-deleted memory is kept, but not restorable through the API,
+    until the deployment's cleanup window passes
+    (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), not for a
+    fixed 30 days. Server v0.66.0 made the window
+    configurable. Fixed in `forget`, the README and
+    `kagura-memory forget --help`.
+  - `createContext`'s `embeddingModel` was called immutable. No API call
+    changes it, but since server v0.66.0 an operator can migrate a
+    context to another model.
+  - `RecallOptions.filters` now lists every filter the server accepts,
+    including `scope`, `importance`, `tags_normalize` (v0.65.0),
+    `source_uri_prefix`, `source_type`, and the `near` / `within` geo
+    filters (v0.54.0), and says when `tag_suggestions` comes back.
+    `recall()` documents `degraded` and `degraded_reason` (v0.66.0). They
+    mark a keyword-only fallback, where an empty result means the search was
+    impaired, not that nothing is stored. Only a hybrid search (the
+    default) falls back; `searchMode: "semantic"` still fails. In
+    `getAgentBootstrap` a keyword-only recall sets both
+    `components.recall.degraded` and the envelope's `degraded`, and
+    `degraded_reason` tells it apart from a failed component.
+  - The `Edge` doc named three edge types the server does not have
+    (`semantic_similarity`, `declared_link`, `tag_cooccurrence`) and left
+    out four it does. It now lists the server's eight. The test fixture
+    that used `semantic_similarity` uses `related_to` now.
+  - `rollbackSleepRun` accepts a `degraded` run as well as a `completed`
+    one.
+  - The per-memory binding filters, `allowed_memory_types` and
+    `allowed_source_types`, were described as reserved and always `null`.
+    Server v0.51.0 enforces them. The docs now say so, and say that no
+    typed option sets them yet.
+  - `TagInfo` said MCP `recall` fills `sample_summary` in `related_tags`.
+    Since server v0.73.0 those items carry only `tag` and `count`.
+  - `SecretValueResponse.ciphertext` stays typed `string` even though the
+    server's schema allows `null`. That `null` is reserved for an offload
+    that no write path uses yet, and the doc now says so.
+
 ## [0.8.1] - 2026-09-23
 
 ### Fixed

@@ -12,6 +12,12 @@
 import { describe, expect, it } from "vitest";
 
 import * as sdk from "../src/index.js";
+import type {
+  ContextGuardrails,
+  GuardrailItem,
+  LoadGuardrailsResponse,
+  ToolTrigger,
+} from "../src/index.js";
 
 describe("public surface: interactive login (#9)", () => {
   it("exports the one-call login orchestrator", () => {
@@ -72,6 +78,30 @@ describe("public surface: existing entry points", () => {
   });
 });
 
+describe("public surface: tool guardrails (#41)", () => {
+  it("exports loadGuardrails on the client", () => {
+    expect(typeof sdk.KaguraClient.prototype.loadGuardrails).toBe("function");
+  });
+
+  it("exports the guardrail wire types from the entry point", () => {
+    // Compile-time half: these annotations fail typecheck if index.ts
+    // stops re-exporting the types.
+    const trigger: ToolTrigger = { tool: "Bash" };
+    const items: GuardrailItem[] = [];
+    const block: ContextGuardrails = {
+      items: [],
+      total_available: 0,
+      truncated: false,
+      tool_triggered_version: "",
+    };
+    const lanes: Pick<LoadGuardrailsResponse, "pinned" | "tool_triggered"> = {
+      pinned: items,
+      tool_triggered: items,
+    };
+    expect([trigger.tool, block.truncated, lanes.pinned]).toEqual(["Bash", false, []]);
+  });
+});
+
 describe("public surface: secret store (#28)", () => {
   it("exports the fourth REST client", () => {
     // #28 was filed because SecretClient was the one member of the
@@ -114,5 +144,20 @@ describe("public surface: secret store (#28)", () => {
     expect(sdk.KaguraSecretError.prototype instanceof sdk.KaguraError).toBe(true);
     expect(sdk.KaguraCryptoError.prototype instanceof sdk.KaguraSecretError).toBe(true);
     expect(sdk.KaguraKeyCustodyError.prototype instanceof sdk.KaguraSecretError).toBe(true);
+  });
+});
+
+describe("public surface: typed gate errors (#40)", () => {
+  it.each([
+    "KaguraFeatureNotAvailableError",
+    "KaguraPartialRollbackError",
+    "KaguraPermissionError",
+    "KaguraQuotaError",
+  ])("exports %s as a KaguraError", (name) => {
+    const cls = (sdk as unknown as Record<string, { prototype: unknown }>)[name];
+    expect(typeof cls).toBe("function");
+    // Existing `catch (e) { if (e instanceof KaguraError) ... }` code must
+    // keep catching every one of them.
+    expect(cls!.prototype instanceof sdk.KaguraError).toBe(true);
   });
 });

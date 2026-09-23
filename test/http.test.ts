@@ -217,6 +217,44 @@ describe("throwForKaguraStatus", () => {
     }
   });
 
+  it("carries a typed quota's gate payload on the 429 (#40)", () => {
+    const body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Daily REST quota exceeded: 1001/1000. Resets at midnight UTC.",
+      details: { gate: "quota", quota_type: "api_rest_daily", retry_after: 86400 },
+    });
+    try {
+      throwForKaguraStatus(429, new Headers({ "Retry-After": "86400" }), body);
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(KaguraRateLimitError);
+      const limited = e as KaguraRateLimitError;
+      expect(limited.gate).toBe("quota");
+      expect(limited.quotaType).toBe("api_rest_daily");
+      expect(limited.retryAfter).toBe(86400);
+    }
+  });
+
+  it("leaves the payload null on a per-minute rate limit (#40)", () => {
+    // RATE-001 is no quota: its details.limit is requests per minute, not a cap.
+    const body = JSON.stringify({
+      error: "RATE-001",
+      message: "Rate limit exceeded: 61/60 requests per minute",
+      details: { retry_after: 60, limit: 60, remaining: 0 },
+    });
+    try {
+      throwForKaguraStatus(429, new Headers({ "Retry-After": "60" }), body);
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(KaguraRateLimitError);
+      const limited = e as KaguraRateLimitError;
+      expect(limited.gate).toBeNull();
+      expect(limited.quotaType).toBeNull();
+      expect(limited.limit).toBeNull();
+      expect(limited.retryAfter).toBe(60);
+    }
+  });
+
   it("maps other statuses to KaguraConnectionError with the detail", () => {
     expect(() =>
       throwForKaguraStatus(422, new Headers(), JSON.stringify({ detail: "bad field" })),
