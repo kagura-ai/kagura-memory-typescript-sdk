@@ -31,6 +31,12 @@ describe("baseUrlFromMcp", () => {
     expect(baseUrlFromMcp("https://x.test")).toBe("https://x.test");
   });
 
+  it("never matches /mcp inside the scheme or the host", () => {
+    expect(baseUrlFromMcp("https://mcp/mcp")).toBe("https://mcp");
+    expect(baseUrlFromMcp("https://mcp")).toBe("https://mcp");
+    expect(baseUrlFromMcp("http://mcp:8080/mcp?profile=core")).toBe("http://mcp:8080");
+  });
+
   it("does not strip an /mcp substring inside a longer segment", () => {
     expect(baseUrlFromMcp("https://x.test/mcpx/foo")).toBe("https://x.test/mcpx/foo");
   });

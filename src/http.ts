@@ -21,8 +21,12 @@ export function baseUrlFromMcp(mcpUrl: string): string {
   // URL, which misses a slash sitting before the query (`/?profile=core`).
   const end = mcpUrl.search(/[?#]/);
   const path = end === -1 ? mcpUrl : mcpUrl.slice(0, end).replace(/\/+$/, "");
-  const m = /\/mcp(?=\/|$)/.exec(path);
-  return m ? path.slice(0, m.index) : path;
+  // Search the path only: the `//` of `https://mcp/mcp` would otherwise
+  // read as a `/mcp` segment and cut the URL down to `https:/`.
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(path);
+  const from = authority ? authority[0].length : 0;
+  const m = /\/mcp(?=\/|$)/.exec(path.slice(from));
+  return m ? path.slice(0, from + m.index) : path;
 }
 
 function formatValidationErrors(errors: unknown[]): string {

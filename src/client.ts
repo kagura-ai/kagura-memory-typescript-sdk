@@ -59,6 +59,13 @@ const MIN_SERVER_VERSION_TUPLE = MIN_SERVER_VERSION.split(".").slice(0, 3).map(N
 export type ToolResult = Record<string, unknown>;
 
 export type DeliveryMode = "always" | "on_recall" | "on_trigger";
+/** Sort fields `getMemoryStats` accepts on server v0.34.0+ (#1046). */
+export type MemoryStatsSortField =
+  | "access_count"
+  | "reference_count"
+  | "importance"
+  | "created_at"
+  | "last_used_at";
 export type SearchMode = "hybrid" | "semantic" | "keyword";
 export type SourceType = "file" | "url" | "vault" | "api" | "manual";
 
@@ -392,6 +399,8 @@ export class KaguraClient {
   private sessionId: string | null = null;
   /** The in-flight `initialize`, shared by every caller (see initializeSession). */
   private sessionOpening: Promise<string> | null = null;
+  /** Bumped by close(), so a handshake it interrupted cannot re-adopt its session. */
+  private sessionEpoch = 0;
   private requestIdCounter = 1;
 
   constructor(options: KaguraClientOptions = {}) {
@@ -468,14 +477,25 @@ export class KaguraClient {
     }
     // Dropped once settled, so a failed handshake is retried by the next
     // call rather than replayed to it.
-    this.sessionOpening ??= this.openSession().finally(() => {
-      this.sessionOpening = null;
-    });
+    if (!this.sessionOpening) {
+      const opening = this.openSession().finally(() => {
+        // close() may have dropped this handshake and a newer one started.
+        if (this.sessionOpening === opening) {
+          this.sessionOpening = null;
+        }
+      });
+      this.sessionOpening = opening;
+    }
     return this.sessionOpening;
   }
 
-  /** Run the `initialize` handshake and keep the session id it returns. */
+  /**
+   * Run the `initialize` handshake and keep the session id it returns —
+   * unless close() ran meanwhile, in which case the id serves only the
+   * calls already waiting on it.
+   */
   private async openSession(): Promise<string> {
+    const epoch = this.sessionEpoch;
     const body = {
       jsonrpc: "2.0",
       id: this.nextRequestId(),
@@ -496,7 +516,9 @@ export class KaguraClient {
     if (!sessionId) {
       throw new KaguraConnectionError("No session ID returned from server");
     }
-    this.sessionId = sessionId;
+    if (epoch === this.sessionEpoch) {
+      this.sessionId = sessionId;
+    }
     return sessionId;
   }
 
@@ -1730,11 +1752,11 @@ export class KaguraClient {
   async getMemoryStats(options: {
     contextId: string;
     /**
-     * Sort field (default `"access_count"`, the server's own default).
-     * Server v0.34.0 (#1046) dropped `use_count`; the server answers any
-     * other value with HTTP 400.
+     * Sort field (default `"access_count"`, the server's own default); see
+     * {@link MemoryStatsSortField}. Server v0.34.0 (#1046) dropped
+     * `use_count` and answers any field outside that set with HTTP 400.
      */
-    sortBy?: "access_count" | "reference_count" | "importance" | "created_at" | "last_used_at";
+    sortBy?: MemoryStatsSortField | (string & {});
     /** "asc" or "desc" (default "desc"). */
     sortOrder?: "asc" | "desc";
     /** Maximum results (1-200, default 50). */
@@ -1871,6 +1893,8 @@ export class KaguraClient {
 
   /** Release resources. (fetch has no persistent connection to close; kept for API parity.) */
   async close(): Promise<void> {
+    this.sessionEpoch++;
     this.sessionId = null;
+    this.sessionOpening = null;
   }
 }

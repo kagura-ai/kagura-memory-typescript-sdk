@@ -38,7 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and fragment are now dropped before `/mcp` is stripped, and dropped from a
   URL with no `/mcp` segment too, since they configure the MCP endpoint and
   never the REST API. The MCP URL itself keeps its query, and URLs without
-  one derive the same base as before.
+  one derive the same base as before, except that a host literally named
+  `mcp` (`https://mcp/mcp`) no longer reads as a `/mcp` segment.
 
 - **A long-lived `KaguraClient` recovers when a server drops its MCP
   session**
@@ -59,7 +60,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither is a 404 `-32601` Method-not-found, which is not about the
   session. The currently deployed server (v0.75.0) re-adopts an unknown
   session id instead of answering 404, so against it the recovery never
-  fires; it is there for a server that enforces the spec.
+  fires; it is there for a server that enforces the spec. `close()` during
+  an in-flight `initialize` now also wins: the interrupted handshake serves
+  only the calls already waiting on it, and the next call opens a fresh
+  session.
 
 - **Concurrent calls share one `initialize`.** Calls that found no session
   at the same moment each sent their own handshake, so N parallel first
@@ -70,11 +74,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it. A failed handshake is not cached: every waiter gets the error and the
   next call tries again.
 
-- **MCP 4xx errors carry the server's message.** The MCP transport answers
-  a request it rejects before dispatch with a JSON-RPC `error` body rather
-  than a `detail` envelope, and the error extractor did not read that
-  shape. So `HTTP 404` becomes `HTTP 404: MCP session not found or
-  expired. …`, and any other JSON-RPC 4xx shows its `error.message` too.
+- **JSON-RPC error bodies carry the server's message.** The MCP transport
+  answers a request it rejects before dispatch with a JSON-RPC `error` body
+  rather than a `detail` envelope, and the shared error extractor did not
+  read that shape, so such an error surfaced as a bare `HTTP <status>`. It
+  now ends with the body's `error.message`: a session that stays expired
+  across the retry reads `MCP session expired; the client re-initialized
+  once and the retry still got HTTP 404: MCP session not found or expired.
+  …`. The extractor is shared, so a REST client that meets the same shape
+  (from a proxy, say) shows it too; memory-cloud's REST routes never send
+  it.
 
 - **`getMemoryStats()` no longer fails with HTTP 400 when called with its
   defaults**
@@ -82,10 +91,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it sent `sort_by=use_count`, a field memory-cloud
   v0.34.0 (#1046) dropped; the server rejects any sort field outside
   `access_count`, `reference_count`, `importance`, `created_at` and
-  `last_used_at`. The default is now `access_count`, the server's own, and
-  `sortBy` is typed as that union so a stale value fails to compile.
-  `MemoryStatItem` gains the `reference_count` the server sends, and
-  `use_count`, which it no longer sends, becomes optional and deprecated.
+  `last_used_at`. The default is now `access_count`, the server's own. The
+  five fields are exported as `MemoryStatsSortField` and offered as
+  completions for `sortBy`, which still takes any `string`.
+  `MemoryStatItem` gains an optional `reference_count` (sent by server
+  v0.34.0+), and `use_count`, which those servers no longer send, becomes
+  optional and deprecated — code that assigns `item.use_count` to a `number`
+  now needs a fallback.
 
 ## [0.8.0] - 2026-08-01
 

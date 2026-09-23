@@ -302,6 +302,41 @@ describe("concurrent MCP session opens (#39)", () => {
     expect(server.calls().slice(-5)).toEqual(Array(5).fill(["tools/call", "session-456"]));
   });
 
+  it("close() during an in-flight initialize is not undone by it", async () => {
+    const server = new FakeServer();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (server.requests.length === 1) {
+        await gate; // hold the first initialize reply
+      }
+      return response;
+    };
+    const client = makeClient(server, { fetch });
+
+    const first = client.listContexts();
+    while (server.requests.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await client.close();
+    release();
+    await first;
+    server.sessionId = "session-456";
+    await client.listContexts();
+
+    // The handshake close() interrupted served the call that started it,
+    // but the next call opens a fresh session instead of reusing it.
+    expect(server.calls()).toEqual([
+      ["initialize", undefined],
+      ["tools/call", "session-123"],
+      ["initialize", undefined],
+      ["tools/call", "session-456"],
+    ]);
+  });
+
   it("keeps a session another call re-opened when a late 404 names the old one", async () => {
     const server = new FakeServer();
     let release!: () => void;

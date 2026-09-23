@@ -168,8 +168,8 @@ export interface MemoryStatItem {
   use_count?: number;
   /** Surfacing count: recall results, explore and reference all count. */
   access_count: number;
-  /** Adoption count: only reference() counts (server v0.34.0, #1046). */
-  reference_count: number;
+  /** Adoption count: only reference() counts (server v0.34.0+, #1046). */
+  reference_count?: number;
   /** ISO 8601 datetime string. */
   last_used_at?: string | null;
   embedding_status: string;
