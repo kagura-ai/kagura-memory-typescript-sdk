@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_MCP_URL } from "../../../src/auth/resolve.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
+import { classifyMcpEntry, holdsCredential, unsetHeaderVars } from "../../../src/cli/commands/setup.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import type { KaguraConfig } from "../../../src/config.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
@@ -95,6 +96,9 @@ beforeEach(() => {
     "OPENCLAW_CONFIG_PATH",
     // setup falls back to it for the key; the developer's own must not leak in.
     "KAGURA_API_KEY",
+    // The variable a user-scope entry sends: setup says whether this shell
+    // has it, and doctor warns when it is unset.
+    "KAGURA_MCP_API_KEY",
   ]) {
     delete process.env[name];
   }
@@ -218,9 +222,12 @@ describe("kagura-memory doctor", () => {
       fs.writeFileSync(path.join(process.env.HOME!, ".claude.json"), JSON.stringify(data));
     }
     /** The mcp-section checks of `doctor --json`, run in `dir` (the sandbox by default). */
-    async function mcpChecks(dir = sandbox): Promise<{ status: string; message: string; details?: unknown }[]> {
+    async function mcpChecks(
+      dir = sandbox,
+      programs: Programs = {},
+    ): Promise<{ status: string; message: string; details?: unknown }[]> {
       process.chdir(dir);
-      const h = harness();
+      const h = harness(undefined, programs);
       await runCli(["doctor", "--json"], h.deps);
       const report = JSON.parse(h.out.join("\n")) as { checks: { section: string; status: string; message: string }[] };
       // The mcp_url check comes first and is not about the entry.
@@ -251,6 +258,76 @@ describe("kagura-memory doctor", () => {
       });
       const checks = await mcpChecks();
       expect(checks[0]).toMatchObject({ status: "pass", message: "MCP Mode: stdio (local scope, ~/.claude.json)" });
+    });
+
+    it.each([
+      ["an absolute path", { type: "stdio", command: "/home/u/.venv/bin/kagura-mcp", args: [] }],
+      ["a Windows .exe", { type: "stdio", command: "C:\\venv\\Scripts\\kagura-mcp.exe" }],
+      ["a launcher's argument", { command: "uvx", args: ["--from", "kagura-memory", "kagura-mcp"] }],
+    ])("knows the Python proxy by %s, as Python's classifier does", async (_label, entry) => {
+      // These worked in Claude Code and were reported as unusable.
+      writeMcpJson({ "kagura-memory": entry });
+      const [mode] = await mcpChecks();
+      expect(`${mode!.status} ${mode!.message}`).toBe("pass MCP Mode: stdio (project scope, .mcp.json)");
+    });
+
+    it.each([
+      [{ "kagura-mcp": "/venv/bin/kagura-mcp" }, "pass kagura-mcp found on PATH"],
+      [{}, "fail kagura-mcp not found on PATH"],
+    ])("checks PATH for kagura-mcp when the entry in use launches it (%j)", async (onPath, line) => {
+      // A missing proxy is exactly what breaks a stdio entry at launch.
+      writeClaudeJson({ mcpServers: { "kagura-memory": BEARER } });
+      writeMcpJson({ "kagura-memory": { command: "kagura-mcp", args: ["--profile", "default"] } });
+      const checks = (await mcpChecks(sandbox, { onPath })).map((c) => `${c.status} ${c.message}`);
+      // Last, after the hidden-entry warnings, as in Python.
+      expect(checks).toEqual([
+        "pass MCP Mode: stdio (project scope, .mcp.json)",
+        "warn kagura-memory is also defined in user scope (~/.claude.json), but Claude Code uses the project-scope entry here",
+        line,
+      ]);
+    });
+
+    it("runs no PATH check, and says nothing of one, for an entry that is not stdio", async () => {
+      writeMcpJson({ "kagura-memory": BEARER });
+      expect((await mcpChecks()).map((c) => c.message).join("\n")).not.toMatch(/kagura-mcp/);
+    });
+
+    it("warns for each variable the entry's headers send that is unset here, in Python's order", async () => {
+      process.env.SET_ONE = "x";
+      process.env.EMPTY_ONE = "";
+      writeClaudeJson({ mcpServers: { "kagura-memory": BEARER } });
+      writeMcpJson({
+        "kagura-memory": {
+          type: "url",
+          url: "https://x.test/mcp",
+          headers: {
+            Authorization: "Bearer ${KAGURA_MCP_API_KEY}",
+            "X-A": "${SET_ONE}/${EMPTY_ONE}/${WITH_DEFAULT:-d}/${KAGURA_MCP_API_KEY}",
+            "X-B": 7,
+          },
+        },
+      });
+      const unset = (name: string) =>
+        `warn The kagura-memory entry sends \${${name}} in a header, but ${name} is not set here: ` +
+        "set it in the environment that starts Claude Code, or the server rejects the request";
+      const checks = await mcpChecks();
+      // After the type "url" hint, before the hidden entries.
+      expect(checks.map((c) => `${c.status} ${c.message}`)).toEqual([
+        "pass MCP Mode: static-token (project scope, .mcp.json)",
+        'warn The kagura-memory entry has type "url", which Claude Code does not accept; ' +
+          're-run `kagura-memory setup claude` to write it as "http"',
+        unset("KAGURA_MCP_API_KEY"),
+        unset("EMPTY_ONE"),
+        "warn kagura-memory is also defined in user scope (~/.claude.json), but Claude Code uses the project-scope entry here",
+      ]);
+      expect(checks[2]!.details).toEqual({ scope: "project", source: ".mcp.json", env: "KAGURA_MCP_API_KEY" });
+    });
+
+    it("does not warn about the variable once it is set, nor about a hidden entry's", async () => {
+      process.env.KAGURA_MCP_API_KEY = "kagura_x";
+      writeClaudeJson({ mcpServers: { "kagura-memory": { ...BEARER, headers: { Authorization: "Bearer ${UNSET_HIDDEN}" } } } });
+      writeMcpJson({ "kagura-memory": { ...BEARER, headers: { Authorization: "Bearer ${KAGURA_MCP_API_KEY}" } } });
+      expect((await mcpChecks()).map((c) => c.message).join("\n")).not.toMatch(/is not set here/);
     });
 
     it("warns once for each entry the one in use hides", async () => {
@@ -369,6 +446,72 @@ describe("kagura-memory doctor", () => {
       const checks = await mcpChecks();
       expect(checks[0]).toMatchObject({ status: "fail", message: expect.stringMatching(/^\.mcp\.json is not valid JSON/) });
     });
+  });
+});
+
+describe("reading a kagura-memory entry, as Python's claude_code module does", () => {
+  // Python's tables (tests/test_claude_code.py), case for case.
+  const STDIO = { type: "stdio", command: "kagura-mcp", args: ["--profile", "default"] };
+  const BEARER = { type: "http", url: "https://h/mcp", headers: { Authorization: "Bearer kagura_abc" } };
+
+  it.each([
+    [STDIO, "stdio"],
+    [{ command: "kagura-mcp", args: [] }, "stdio"], // Claude Code's default type
+    [{ ...STDIO, command: "/home/u/.venv/bin/kagura-mcp" }, "stdio"], // absolute path
+    [{ ...STDIO, command: "C:\\venv\\Scripts\\kagura-mcp.exe" }, "stdio"],
+    [{ command: "uvx", args: ["--from", "kagura-memory", "kagura-mcp"] }, "stdio"],
+    [{ type: "stdio", command: "kagura-mcp-other" }, "absent"],
+    [{ type: "stdio", command: "uvx", args: "kagura-mcp" }, "absent"], // args not a list
+    [BEARER, "static-token"],
+    [{ ...BEARER, type: "url" }, "static-token"], // legacy SDK form
+    [{ ...BEARER, type: "streamable-http" }, "static-token"],
+    [{ type: "http", url: "https://h/mcp" }, "url"],
+    [{ type: "url", url: "https://h/mcp" }, "url"],
+    [{ type: "http", url: "https://h/mcp", headers: ["Authorization"] }, "url"],
+    [{ type: "sse", url: "https://h/sse" }, "absent"],
+    [{ type: "stdio", command: "other" }, "absent"],
+    ["not-a-dict", "absent"],
+  ] as const)("classifies %j as %s", (entry, mode) => {
+    expect(classifyMcpEntry(entry)).toBe(mode);
+  });
+
+  it.each([
+    ["Bearer ${KAGURA_MCP_API_KEY}", false],
+    ["${TOKEN}", false],
+    ["  Bearer   ${TOKEN} ", false],
+    ["Bearer kagura_abc", true],
+    ["Bearer ${TOKEN:-kagura_abc}", true], // the default may be a key
+    ["Bearer kagura_${SUFFIX}", true],
+    ["kagura_abc ${TOKEN}", true],
+    ["Bearer ${A} ${B}", true],
+    ["", true],
+    [123, true],
+  ] as const)("holdsCredential for an Authorization of %j is %s", (authorization, holds) => {
+    const entry = { type: "http", url: "https://h/mcp", headers: { authorization } };
+    expect(holdsCredential(entry)).toBe(holds);
+  });
+
+  it("holdsCredential looks only at Authorization, and only in an object's headers", () => {
+    expect(holdsCredential(STDIO)).toBe(false);
+    expect(holdsCredential({ type: "http", headers: { "X-Trace": "abc" } })).toBe(false);
+    expect(holdsCredential("not-a-dict")).toBe(false);
+  });
+
+  it("unsetHeaderVars names each unset variable once, in order, skipping defaults", () => {
+    process.env.SET_ONE = "x";
+    process.env.EMPTY_ONE = "";
+    const entry = {
+      headers: {
+        Authorization: "Bearer ${KAGURA_MCP_API_KEY}",
+        "X-A": "${SET_ONE}/${EMPTY_ONE}/${WITH_DEFAULT:-d}/${KAGURA_MCP_API_KEY}",
+        "X-B": 7,
+      },
+    };
+    expect(unsetHeaderVars(entry)).toEqual(["KAGURA_MCP_API_KEY", "EMPTY_ONE"]);
+    expect(unsetHeaderVars(STDIO)).toEqual([]);
+
+    process.env.KAGURA_MCP_API_KEY = "k";
+    expect(unsetHeaderVars(entry)).toEqual(["EMPTY_ONE"]);
   });
 });
 
@@ -577,6 +720,59 @@ describe("kagura-memory setup claude", () => {
     expect(h.err.join("\n")).toMatch(/Invalid value for '--scope'/);
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
+
+  const INERT = [
+    "--session-hook",
+    "--no-session-hook",
+    "--sync-hook",
+    "--no-sync-hook",
+    "--commands",
+    "--no-commands",
+    "--no-auto-context",
+  ];
+
+  it("accepts the Python CLI's hook, command and auto-context flags, and they change nothing", async () => {
+    // So a script written for `kagura setup claude` still runs here.
+    const plain = harness({});
+    expect(await runCli(claude(), plain.deps)).toBe(0);
+    const files = [".kagura.json", ".mcp.json", ".gitignore"].map((f) => fs.readFileSync(path.join(sandbox, f), "utf-8"));
+    for (const f of [".kagura.json", ".mcp.json", ".gitignore"]) fs.rmSync(path.join(sandbox, f));
+
+    const h = harness({});
+    expect(await runCli(claude(...INERT.filter((f) => f.startsWith("--no-"))), h.deps)).toBe(0);
+    expect([".kagura.json", ".mcp.json", ".gitignore"].map((f) => fs.readFileSync(path.join(sandbox, f), "utf-8"))).toEqual(
+      files,
+    );
+    expect(fs.readdirSync(sandbox).sort()).toEqual([".git", ".gitignore", ".kagura.json", ".mcp.json", "home"]);
+    expect(JSON.parse(h.out.join("\n")).notes).toEqual(JSON.parse(plain.out.join("\n")).notes);
+  });
+
+  it("says so when a flag asks for a hook or command this port does not install", async () => {
+    const h = harness({});
+    expect(await runCli(claude("--session-hook", "--commands"), h.deps)).toBe(0);
+    expect(JSON.parse(h.out.join("\n")).notes).toContain(
+      "--session-hook and --commands do nothing here: this port installs no hooks or slash commands",
+    );
+  });
+
+  it("documents the entry forms, the server floors and the inert flags in --help", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "claude", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    // The user-scope entry's variable, and no word of a key on argv.
+    expect(text).toContain("${KAGURA_MCP_API_KEY}");
+    expect(text).not.toMatch(/argument list/);
+    expect(text).toMatch(/--guardrails CONTEXT_ID\|off\s+.*server v0\.74\.0\+/);
+    expect(text).toMatch(/--tool-profile NAME\s+.*server v0\.73\.0\+.*'full' and 'core'/);
+    for (const flag of INERT) {
+      expect(text).toMatch(new RegExp(`${flag}\\s+Accepted for compatibility; this port ` + "(installs no|never prompts)"));
+    }
+  });
+
+  it("does not take the hook flags on the other harnesses", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "codex", "--api-key", KEY, "--no-session-hook"], h.deps)).toBe(2);
+  });
 });
 
 describe("setup claude --guardrails and --tool-profile", () => {
@@ -663,13 +859,34 @@ describe("setup claude scopes", () => {
   const claudeJson = () => path.join(process.env.HOME!, ".claude.json");
   const onClaude: Programs = { onPath: { claude: "/usr/bin/claude" } };
   const mcpRuns = (h: Harness) => h.runs.filter((r) => r[1] === "mcp");
-  /** The user-scope entry setup writes for `https://x.test/mcp`. */
-  const newEntry = { type: "http", url: "https://x.test/mcp", headers: { Authorization: `Bearer ${KEY}` } };
+  /** What a user-scope entry carries in place of the key. */
+  const REF = "${KAGURA_MCP_API_KEY}";
+  /**
+   * The user-scope entry setup writes for `https://x.test/mcp`: the variable
+   * Claude Code reads the key from when it connects, never the key.
+   */
+  const newEntry = { type: "http", url: "https://x.test/mcp", headers: { Authorization: `Bearer ${REF}` } };
   const OLD_KEY = "kagura_old_key_9876543210";
-  const oldEntry = { type: "http", url: "https://old", headers: { Authorization: `Bearer ${OLD_KEY}` } };
-  /** What the add-json command looks like printed, the key left to the shell. */
+  /** An entry with a key baked in, as this bin wrote before #55 and Python before #258. */
+  const bakedEntry = { type: "http", url: "https://old", headers: { Authorization: `Bearer ${OLD_KEY}` } };
+  /** A different entry that holds no credential, so it can go back on a command line. */
+  const oldEntry = { command: "kagura-mcp", args: ["--profile", "work"] };
+  /** The add-json command, ready to run as printed: the single quotes keep `${…}` literal. */
   const addJsonLine = (url: string) =>
-    `claude mcp add-json --scope user kagura-memory '{"type":"http","url":"${url}","headers":{"Authorization":"Bearer '"$KAGURA_API_KEY"'"}}'`;
+    `claude mcp add-json --scope user kagura-memory '{"type":"http","url":"${url}","headers":{"Authorization":"Bearer ${REF}"}}'`;
+  /** Python's note on where the key comes from, as one JSON note. */
+  const ENV_NOTE =
+    "The entry sends the API key from $KAGURA_MCP_API_KEY, which Claude Code reads when it connects, " +
+    "so the key is neither in the entry nor on a command line. Set it in the environment that starts " +
+    "Claude Code, e.g. `export KAGURA_MCP_API_KEY=<your-api-key>` in your shell profile.";
+  /** The same note on stderr, wrapped as Python prints it. */
+  const ENV_NOTE_LINES = [
+    "  The entry sends the API key from $KAGURA_MCP_API_KEY, which Claude Code reads when it",
+    "  connects, so the key is neither in the entry nor on a command line. Set it in",
+    "  the environment that starts Claude Code, e.g. `export KAGURA_MCP_API_KEY=<your-api-key>`",
+    "  in your shell profile.",
+  ];
+  const notesOf = (h: Harness): string[] => JSON.parse(h.out.join("\n")).notes as string[];
 
   /** The key Claude Code files the project's local scope under: its real path. */
   const realSandbox = () => fs.realpathSync(sandbox);
@@ -692,8 +909,47 @@ describe("setup claude scopes", () => {
     expect(fs.existsSync(claudeJson())).toBe(false);
 
     const report = JSON.parse(h.out.join("\n"));
+    // The argv holds no secret now, so the command is shown as it ran.
     expect(report.applied_with).toBe(addJsonLine("https://x.test/mcp"));
     expect(report.wrote).toEqual([path.join(sandbox, ".kagura.json")]);
+    // .kagura.json keeps the key at both scopes: this bin reads it there.
+    expect(readJson(path.join(sandbox, ".kagura.json")).api_key).toBe(KEY);
+    expect(report.notes).toEqual([
+      "Added kagura-memory at user scope (~/.claude.json)",
+      ENV_NOTE,
+      "$KAGURA_MCP_API_KEY is not set in this shell.",
+    ]);
+  });
+
+  it.each([
+    [undefined, "$KAGURA_MCP_API_KEY is not set in this shell."],
+    ["", "$KAGURA_MCP_API_KEY is not set in this shell."],
+    [KEY, "$KAGURA_MCP_API_KEY is already set to this key in this shell."],
+    [
+      "kagura_other_key",
+      "Warning: $KAGURA_MCP_API_KEY in this shell holds a different key, which Claude Code " +
+        "started from here would send.",
+    ],
+  ])("says whether this shell has the variable (KAGURA_MCP_API_KEY=%j), never printing it", async (value, line) => {
+    if (value !== undefined) process.env.KAGURA_MCP_API_KEY = value;
+    const h = harness({}, onClaude);
+    expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(0);
+    const notes = notesOf(h);
+    // Exactly one of the three lines, right after the note it qualifies.
+    expect(notes.slice(1, 3)).toEqual([ENV_NOTE, line]);
+    expect(notes.filter((n) => n.includes("in this shell"))).toHaveLength(1);
+    const output = [...h.out, ...h.err].join("\n");
+    expect(output).not.toContain(KEY);
+    expect(output).not.toContain("kagura_other_key");
+  });
+
+  it("says nothing of the variable at project scope, where the key is in .mcp.json", async () => {
+    const h = harness({}, onClaude);
+    expect(await runCli(claude(), h.deps)).toBe(0);
+    expect(readJson(path.join(sandbox, ".mcp.json")).mcpServers["kagura-memory"].headers).toEqual({
+      Authorization: `Bearer ${KEY}`,
+    });
+    expect([...h.out, ...h.err].join("\n")).not.toContain("KAGURA_MCP_API_KEY");
   });
 
   it("gives every `claude` run Python's 30 s timeout", async () => {
@@ -721,11 +977,24 @@ describe("setup claude scopes", () => {
       ["mcp", "add-json"],
     ]);
     expect(mcpRuns(h)[0]).toEqual(["/usr/bin/claude", "mcp", "remove", "--scope", "user", "kagura-memory"]);
+    expect(notesOf(h)[0]).toBe("Replaced the existing user-scope kagura-memory entry (~/.claude.json)");
+  });
+
+  it("replaces an entry with a baked key by the variable form, the old key on no command line", async () => {
+    // The interop case: an entry this bin (before #55) or Python (before
+    // #258) wrote reads as different, and is replaced by the reference.
+    seedClaudeJson({ mcpServers: { "kagura-memory": bakedEntry } });
+    const h = harness({}, onClaude);
+    expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(0);
+    expect(mcpRuns(h).map((r) => r[2])).toEqual(["remove", "add-json"]);
+    expect(JSON.parse(mcpRuns(h)[1]![6]!)).toEqual(newEntry);
+    expect(h.runs.flat().join(" ")).not.toContain(OLD_KEY);
   });
 
   it("leaves an identical user-scope entry alone, and needs no claude for it", async () => {
     // Key order and an empty value (`claude mcp add` stores "env": {}) do
-    // not make an entry different, as in Python's same_mcp_entry.
+    // not make an entry different, as in Python's same_mcp_entry — so the
+    // entry either CLI writes reads as up to date to the other.
     const before = seedClaudeJson({
       mcpServers: { "kagura-memory": { env: {}, headers: newEntry.headers, url: newEntry.url, type: "http" } },
     });
@@ -734,7 +1003,11 @@ describe("setup claude scopes", () => {
     expect(h.runs).toEqual([]);
     expect(fs.readFileSync(claudeJson(), "utf-8")).toBe(before);
     const report = JSON.parse(h.out.join("\n"));
-    expect(report.notes).toContain("User-scope kagura-memory entry already up to date (~/.claude.json)");
+    expect(report.notes).toEqual([
+      "User-scope kagura-memory entry already up to date (~/.claude.json)",
+      ENV_NOTE,
+      "$KAGURA_MCP_API_KEY is not set in this shell.",
+    ]);
     expect(report.applied_with).toBeNull();
     expect(report.wrote).toEqual([path.join(sandbox, ".kagura.json")]);
   });
@@ -759,39 +1032,79 @@ describe("setup claude scopes", () => {
     const err = h.err.join("\n");
     expect(err).toMatch(/add-json.*failed \(exit 1\)/);
     expect(err).toContain("The previous user-scope 'kagura-memory' entry was put back.");
+    expect(err).not.toContain("could not be restored");
     expect(err).not.toContain(KEY);
-    expect(err).not.toContain(OLD_KEY);
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 
-  it("says the old user-scope entry is gone when the restore fails too, and how to add the new one", async () => {
+  it("says the old user-scope entry is gone when the restore fails too, and prints how to re-add it", async () => {
     seedClaudeJson({ mcpServers: { "kagura-memory": oldEntry } });
+    const errors = ["new entry rejected", "Invalid configuration"];
+    const h = harness(
+      {},
+      {
+        onPath: { claude: "/usr/bin/claude" },
+        exec: (_file, argv) =>
+          argv[1] === "add-json" ? { code: 1, stdout: "", stderr: errors.shift()! } : { code: 0, stdout: "", stderr: "" },
+      },
+    );
+    expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(1);
+    expect(mcpRuns(h).map((r) => r[2])).toEqual(["remove", "add-json", "add-json"]);
+    // Python's lines; the old entry holds no key, so it is printed as it was.
+    expect(h.err.slice(0, 2)).toEqual([
+      "  Re-add the previous user-scope kagura-memory entry yourself:",
+      `    claude mcp add-json --scope user kagura-memory '${JSON.stringify(oldEntry)}'`,
+    ]);
+    const err = h.err.join("\n");
+    // The first error is kept; the restore's is named in the reason.
+    expect(err).toMatch(/^Error: `claude mcp add-json .*` failed \(exit 1\):\n {2}new entry rejected\n/m);
+    expect(err).toContain("The previous user-scope kagura-memory entry was removed and could not be restored (");
+    expect(err).toContain("Invalid configuration");
+    expect(err).toContain("); the command above re-adds it.");
+    expect(err).not.toContain(KEY);
+  });
+
+  it("never puts back an entry that holds a key: it prints the re-add command, key masked", async () => {
+    // Restoring it would pass the old key on claude's command line, where
+    // every local user can read it in the process list.
+    seedClaudeJson({ mcpServers: { "kagura-memory": bakedEntry } });
     const h = harness(
       {},
       {
         onPath: { claude: "/usr/bin/claude" },
         exec: (_file, argv) =>
           argv[1] === "add-json"
-            ? { code: 1, stdout: "", stderr: `Invalid config: ${argv[5]}` }
+            ? { code: 1, stdout: "", stderr: "new entry rejected" }
             : { code: 0, stdout: "", stderr: "" },
       },
     );
     expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(1);
-    expect(mcpRuns(h).map((r) => r[2])).toEqual(["remove", "add-json", "add-json"]);
+    // No restore was run.
+    expect(mcpRuns(h).map((r) => r[2])).toEqual(["remove", "add-json"]);
+    expect(h.runs.flat().join(" ")).not.toContain(OLD_KEY);
+    expect(h.err.slice(0, 2)).toEqual([
+      "  Re-add the previous user-scope kagura-memory entry yourself:",
+      "    claude mcp add-json --scope user kagura-memory " +
+        `'{"type":"http","url":"https://old","headers":{"Authorization":"Bearer <your-api-key>"}}'`,
+    ]);
     const err = h.err.join("\n");
-    expect(err).toMatch(/add-json.*failed \(exit 1\)/);
-    expect(err).toMatch(/previous user-scope 'kagura-memory' entry was removed/);
-    expect(err).toContain(addJsonLine("https://x.test/mcp"));
-    expect(err).not.toContain(KEY);
+    expect(err).toContain(
+      "could not be restored (the entry holds an API key, which setup never passes on a command line); " +
+        "the command above re-adds it.",
+    );
     expect(err).not.toContain(OLD_KEY);
+    expect(err).not.toContain(KEY);
   });
 
   it("--scope user without claude on PATH prints the command to run, then fails as Python does", async () => {
     const h = harness({});
     expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(1);
-    expect(h.err.slice(0, 2)).toEqual([
+    // The command names the variable, not the key, and the note says where
+    // to set it; which this shell has does not matter to a pasted command.
+    expect(h.err.slice(0, 6)).toEqual([
       "  Add the user-scope entry yourself, then re-run this setup:",
       `    ${addJsonLine("https://x.test/mcp")}`,
+      ...ENV_NOTE_LINES,
     ]);
     const err = h.err.join("\n");
     expect(err).toContain(
@@ -799,13 +1112,14 @@ describe("setup claude scopes", () => {
         "it needs a shell). A user-scope entry lives in ~/.claude.json, which Claude Code owns, so " +
         "setup writes it only through `claude mcp add-json`. Nothing was written.",
     );
+    expect(err).not.toMatch(/in this shell/);
     expect(err).not.toContain(KEY);
     expect(h.runs).toEqual([]);
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 
   it("without claude, prints the remove before the add when an entry is replaced", async () => {
-    seedClaudeJson({ mcpServers: { "kagura-memory": oldEntry } });
+    seedClaudeJson({ mcpServers: { "kagura-memory": bakedEntry } });
     const h = harness({});
     expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(1);
     expect(h.err.slice(0, 3)).toEqual([
@@ -816,30 +1130,80 @@ describe("setup claude scopes", () => {
     expect(h.err.join("\n")).not.toContain(OLD_KEY);
   });
 
-  it("the printed command is a working shell command", async () => {
-    // Splicing "$KAGURA_API_KEY" between two single-quoted halves is the
-    // one POSIX spelling that expands the variable and nothing else.
+  it("the printed command keeps the variable for Claude Code to expand, whatever the URL holds", async () => {
+    // Single-quoted whole, so the shell expands nothing: add-json stores
+    // `${KAGURA_MCP_API_KEY}` as written, and Claude Code expands it from
+    // its own environment each time it connects.
     const h = harness({});
     await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp?a=1&b=2"), h.deps);
     expect(h.err.join("\n")).toContain(addJsonLine("https://x.test/mcp?a=1&b=2"));
+    expect(h.err.join("\n")).not.toContain("$KAGURA_API_KEY");
   });
 
-  it("reports a failing add-json with its output, key redacted", async () => {
+  it("reports a failing add-json with its output, a key in it redacted", async () => {
     const h = harness(
       {},
       {
         onPath: { claude: "/usr/bin/claude" },
         exec: (_file, argv) =>
           argv[1] === "add-json"
-            ? { code: 1, stdout: "", stderr: `Invalid config: ${argv[5]}` }
+            ? { code: 1, stdout: "", stderr: `Invalid config: ${argv[5]} (${KEY})` }
             : { code: 0, stdout: "", stderr: "" },
       },
     );
-    expect(await runCli(claude("--scope", "user"), h.deps)).toBe(1);
+    expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(1);
     const err = h.err.join("\n");
     expect(err).toMatch(/add-json.*failed \(exit 1\)/);
-    expect(err).toContain("<redacted>");
+    // The entry it echoes names the variable; the key it could only have
+    // found elsewhere is still cut out.
+    expect(err).toContain(`Bearer ${REF}`);
+    expect(err).toContain("(<redacted>)");
     expect(err).not.toContain(KEY);
+  });
+
+  describe("the key never reaches claude's argv or any output", () => {
+    // Python's sentinel test (test_setup_claude_scope.py): a failing claude
+    // quotes its whole argv back, as a CLI error might.
+    const SENTINEL = "kagura_SENTINEL_never_on_argv_5d0c9e";
+    const baked = { ...newEntry, headers: { Authorization: `Bearer ${SENTINEL}` } };
+
+    it.each([
+      ["add", null, 0],
+      ["add-fails", null, 1],
+      ["replace-baked", baked, 0],
+      ["restore-baked", baked, 1],
+      ["unchanged", newEntry, 0],
+      ["no-claude", null, 1],
+      ["env-set", null, 0],
+    ] as const)("%s", async (scenario, existing, code) => {
+      if (existing !== null) seedClaudeJson({ mcpServers: { "kagura-memory": existing } });
+      if (scenario === "env-set") process.env.KAGURA_MCP_API_KEY = SENTINEL;
+      const options: unknown[] = [];
+      const h = harness(
+        {},
+        {
+          onPath: scenario === "no-claude" ? {} : { claude: "/usr/bin/claude" },
+          exec: (_file, argv) =>
+            argv[1] === "add-json" && (scenario === "add-fails" || scenario === "restore-baked")
+              ? { code: 1, stdout: "", stderr: `rejected: ${argv.join(" ")}` }
+              : { code: 0, stdout: "[]", stderr: "" },
+        },
+      );
+      const exec = h.deps.execFile;
+      h.deps.execFile = async (file, argv, opts) => {
+        options.push(opts);
+        return exec(file, argv, opts);
+      };
+      const args = ["setup", "claude", "--api-key", SENTINEL, "--mcp-url", "https://x.test/mcp"];
+      expect(await runCli([...args, "--project-dir", sandbox, "-c", CONTEXT, "--scope", "user"], h.deps)).toBe(code);
+
+      expect([...h.out, ...h.err].join("\n")).not.toContain(SENTINEL);
+      for (const run of h.runs) expect(run.join(" ")).not.toContain(SENTINEL);
+      expect(JSON.stringify(options)).not.toContain(SENTINEL);
+      const adds = mcpRuns(h).filter((r) => r[2] === "add-json").map((r) => JSON.parse(r[6]!));
+      if (["add", "replace-baked", "env-set"].includes(scenario)) expect(adds).toEqual([newEntry]);
+      if (scenario === "unchanged") expect(adds).toEqual([]);
+    });
   });
 
   it("stops when local scope already defines kagura-memory, in Python's words", async () => {
@@ -1048,6 +1412,65 @@ describe("setup claude scopes", () => {
     expect(h.err.join("\n")).toContain("claude mcp remove --scope local kagura-memory");
   });
 
+  describe("names the .claude.json it read, as Python's claude_json_label does", () => {
+    const cases = [
+      ["under the home directory", () => path.join(process.env.HOME!, "cfg"), () => "~/cfg/.claude.json"],
+      // Not under HOME (the sandbox's own home), so the full path.
+      ["elsewhere", () => path.join(sandbox, "claude-config"), () => path.join(sandbox, "claude-config", ".claude.json")],
+    ] as const;
+
+    it.each(cases)("in setup's notes and errors, $CLAUDE_CONFIG_DIR %s", async (_where, dir, label) => {
+      process.env.CLAUDE_CONFIG_DIR = dir();
+      fs.mkdirSync(dir(), { recursive: true });
+
+      const added = harness({}, onClaude);
+      expect(await runCli(claude("--scope", "user"), added.deps)).toBe(0);
+      expect(notesOf(added)[0]).toBe(`Added kagura-memory at user scope (${label()})`);
+
+      const missing = harness({});
+      fs.writeFileSync(
+        path.join(dir(), ".claude.json"),
+        JSON.stringify({ mcpServers: { "kagura-memory": bakedEntry } }),
+      );
+      expect(await runCli(claude("--scope", "user"), missing.deps)).toBe(1);
+      expect(missing.err.join("\n")).toContain(`A user-scope entry lives in ${label()}, which Claude Code owns`);
+
+      fs.writeFileSync(
+        path.join(dir(), ".claude.json"),
+        JSON.stringify({ mcpServers: { "kagura-memory": { ...newEntry, url: DEFAULT_MCP_URL } } }),
+      );
+      const unchanged = harness({});
+      expect(await runCli(claude("--scope", "user"), unchanged.deps)).toBe(0);
+      expect(notesOf(unchanged)[0]).toBe(`User-scope kagura-memory entry already up to date (${label()})`);
+
+      const shadowed = harness({});
+      fs.writeFileSync(
+        path.join(dir(), ".claude.json"),
+        JSON.stringify({ projects: { [realSandbox()]: { mcpServers: { "kagura-memory": {} } } } }),
+      );
+      expect(await runCli(claude(), shadowed.deps)).toBe(1);
+      expect(shadowed.err).toContain(`    local scope (${label()}) — remove it with:`);
+    });
+
+    it.each(cases)("in doctor's report, $CLAUDE_CONFIG_DIR %s", async (_where, dir, label) => {
+      process.env.CLAUDE_CONFIG_DIR = dir();
+      fs.mkdirSync(dir(), { recursive: true });
+      process.chdir(sandbox);
+
+      const none = harness();
+      await runCli(["doctor"], none.deps);
+      expect(none.out).toContain(`INFO No kagura-memory MCP entry found (.mcp.json, ${label()})`);
+
+      fs.writeFileSync(
+        path.join(dir(), ".claude.json"),
+        JSON.stringify({ mcpServers: { "kagura-memory": { type: "http", url: "https://x.test/mcp" } } }),
+      );
+      const found = harness();
+      await runCli(["doctor"], found.deps);
+      expect(found.out).toContain(`PASS MCP Mode: url (user scope, ${label()})`);
+    });
+  });
+
   it("ignores another project's local entry", async () => {
     seedClaudeJson({ projects: { "/elsewhere": { mcpServers: { "kagura-memory": {} } } } });
     const h = harness({});
@@ -1222,11 +1645,24 @@ describe("setup claude plugin awareness", () => {
         "digest. 'off' also removes the guardrails block from get_context_info, so set it only once " +
         "the hooks deliver guardrails.",
     );
-    expect(text).toContain("Plugin settings (/plugin > kagura-memory > Configure; the API key is yours):");
-    expect(text).toContain("server_url = https://x.test/mcp");
-    expect(text).not.toContain("server_url = https://x.test/mcp?");
-    expect(text).toContain(`context_id = ${CONTEXT}`);
+    const all = JSON.parse(h.out.join("\n")).notes as string[];
+    const settingsAt = all.findIndex((n) => n.startsWith("Plugin settings"));
+    // The settings, then Python's caveat on the one context and its
+    // guidance on the key, each its own note.
+    expect(all.slice(settingsAt)).toEqual([
+      `Plugin settings (/plugin > kagura-memory > Configure): server_url = https://x.test/mcp, context_id = ${CONTEXT}`,
+      "The plugin has ONE guardrail context for every project: use this one only if it holds the " +
+        "guardrails you want everywhere.",
+      "api_key: enter it yourself, a user API key (kagura_...). The plugin's hooks authenticate only with one.",
+    ]);
     expect(text).not.toContain(KEY);
+  });
+
+  it("still asks for -c in the plugin settings when no context is known", async () => {
+    // Python always resolves one; this bin makes no network call.
+    const h = harness({}, pluginList([{ id: "kagura-memory@m", enabled: true }]));
+    await runCli(claude(), h.deps);
+    expect(notes(h)).toContain("context_id = (none; pass -c)");
   });
 
   it("keeps guardrails=off in the plugin's server_url and stops recommending it", async () => {

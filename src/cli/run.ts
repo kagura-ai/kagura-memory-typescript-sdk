@@ -33,6 +33,7 @@ import {
   checkInviteOrigin,
   inviteBaseUrl,
   parseInvite,
+  revokeToken,
   type DeviceAuthorizationResponse,
   type ParsedInvite,
 } from "../auth/deviceFlow.js";
@@ -58,40 +59,117 @@ import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
-import { SETUP_GROUP } from "./commands/setup.js";
+import { SETUP_GROUP, classifyMcpEntry, findClaudeEntries } from "./commands/setup.js";
 import type { ExecOptions, ExecResult } from "./exec.js";
 import { checkInviteSupport, type InviteSupport } from "./invite.js";
-import { CliUsageError } from "./parse.js";
-import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
+import { formatJson } from "./output.js";
+import { CliError, CliUsageError } from "./parse.js";
+import { parseArgs, type FlagSpec, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
 /**
- * Every option the `auth` subcommands accept, pooled.
- *
- * Pooled rather than per-subcommand because the pool is small and entirely
- * unambiguous — no two `auth` subcommands give the same flag different
- * meanings — and because `cmdLogin`/`cmdLogout` already reject the
- * combinations that are individually valid but mutually exclusive.
- * `--invite` is the exception that gets refused rather than ignored where
- * it is not read; see {@link refuseInvite}.
+ * The `auth` options, one spec per subcommand, holding only the flags it
+ * reads — as Python declares them per command, so click refuses the rest.
+ * A flag another subcommand takes is an unknown option here (exit 2),
+ * rather than one that parses and then does nothing. Help texts are
+ * Python's, where the behaviour is the same.
  */
-const AUTH_SPEC: ParseSpec = {
+function profileFlag(help: string): FlagSpec {
+  return { name: "profile", type: "value", rejectEmpty: true, help };
+}
+
+const NO_BROWSER: FlagSpec = {
+  name: "no-browser",
+  type: "switch",
+  help: "Don't try to open a browser — just print the URL and code.",
+};
+
+const INVITE: FlagSpec = {
+  name: "invite",
+  type: "value",
+  metavar: "LINK_OR_TOKEN",
+  // A token may begin with "-"; see FlagSpec.dashValue.
+  dashValue: true,
+  help:
+    "Sign up with an invite: the https://<host>/join/<token> link you were sent, or its bare " +
+    "token. Checked locally; never stored.",
+};
+
+/**
+ * `--invite` where it is not read: declared, so its value — a sign-up
+ * credential — is consumed rather than reported, and quoted, as an
+ * unknown option, and hidden from `--help`; {@link refuseInvite} then
+ * refuses it.
+ */
+const INVITE_REFUSED: FlagSpec = { ...INVITE, hidden: true };
+
+const LOGIN_SPEC: ParseSpec = {
   flags: [
-    { name: "profile", type: "value", rejectEmpty: true, help: "Profile to act on (default: the file's default)" },
+    profileFlag("Profile name to store credentials under (default: 'default')."),
+    // The MCP URL, not Python's API URL: this bin derives the API from it.
     { name: "server", type: "value", rejectEmpty: true, metavar: "URL", help: "MCP server URL to authenticate against" },
-    { name: "scope", type: "value", rejectEmpty: true, help: 'Space-separated scopes, e.g. "memory:read memory:write"' },
-    { name: "read-only", type: "switch", help: "Request memory:read only" },
-    { name: "no-browser", type: "switch", help: "Print the code and URL without opening a browser" },
     {
-      name: "invite",
+      name: "scope",
       type: "value",
-      metavar: "LINK_OR_TOKEN",
-      // A token may begin with "-"; see FlagSpec.dashValue.
-      dashValue: true,
-      help: "login: sign up with a beta invite (/join/<token> link or bare token)",
+      rejectEmpty: true,
+      help: `OAuth scope (default: '${DEFAULT_SCOPE}'). Override only if you need a custom scope set.`,
     },
-    { name: "all", type: "switch", help: "logout: remove every stored profile" },
-    { name: "yes", type: "switch", help: "logout: skip the confirmation prompt" },
+    {
+      name: "read-only",
+      type: "switch",
+      help: `Request read-only scope ('${READ_ONLY_SCOPE}') instead of the default read+write.`,
+    },
+    NO_BROWSER,
+    INVITE,
   ],
+};
+
+const REFRESH_SPEC: ParseSpec = {
+  flags: [
+    profileFlag("Profile to refresh (default: default profile)."),
+    {
+      name: "scope",
+      type: "value",
+      rejectEmpty: true,
+      help:
+        "Request this scope (default: keep the current grant unchanged). Pass space-separated " +
+        "values to ask for multiple (e.g. 'memory:read memory:write'). If wider than the current " +
+        "grant, re-runs the device flow.",
+    },
+    // Not in Python: a widening refresh re-runs the device flow here too,
+    // and this is how that run's prompt is told not to open a browser.
+    NO_BROWSER,
+    INVITE_REFUSED,
+  ],
+};
+
+const STATUS_SPEC: ParseSpec = {
+  flags: [profileFlag("Profile to inspect (default: default profile)."), INVITE_REFUSED],
+};
+
+const USE_SPEC: ParseSpec = { flags: [INVITE_REFUSED] };
+
+const LOGOUT_SPEC: ParseSpec = {
+  flags: [
+    profileFlag("Profile to log out (default: default profile)."),
+    { name: "all", type: "switch", help: "Delete every profile and remove the credentials file." },
+    { name: "yes", short: "y", type: "switch", help: "Skip the confirmation prompt." },
+    INVITE_REFUSED,
+  ],
+};
+
+const LIST_SPEC: ParseSpec = {
+  flags: [
+    {
+      name: "json",
+      type: "switch",
+      help: "Emit machine-readable JSON (for scripting / CI) instead of one line per profile.",
+    },
+    INVITE_REFUSED,
+  ],
+};
+
+const TOKEN_SPEC: ParseSpec = {
+  flags: [profileFlag("Profile to use (default: default profile)."), INVITE_REFUSED],
 };
 
 export interface CliDeps extends CommandDeps {
@@ -351,8 +429,8 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   const readOnly = args.flags.has("read-only");
   const scope = args.values.scope;
   if (readOnly && scope !== undefined) {
-    deps.writeError("--read-only and --scope are mutually exclusive; pick one.");
-    return 2;
+    // Exit 1: Python raises a ClickException here, not a UsageError.
+    throw new CliError("--read-only and --scope are mutually exclusive; pick one.");
   }
 
   // The server is asked how it takes the invite only once the device code
@@ -393,6 +471,44 @@ async function cmdRefresh(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pr
   return 0;
 }
 
+/**
+ * The Claude Code entry in use in the current directory, and each one it
+ * hides — Python's `_print_mcp_json_mode`, its lines.
+ *
+ * Nothing when no scope defines one, or when the one in use is no form
+ * this recognises (its hidden ones then go unlisted too), so `auth status`
+ * stays quiet outside a project set up for Claude Code.
+ */
+function claudeCodeLines(): string[] {
+  const entries = findClaudeEntries(process.cwd());
+  const used = entries[0];
+  if (used === undefined) return [];
+  const label = `Claude Code (${used.source}, ${used.scope} scope)`;
+  const lines: string[] = [];
+  switch (classifyMcpEntry(used.config)) {
+    case "stdio":
+      lines.push(`${label}: refresh-aware (kagura-mcp stdio proxy)`);
+      break;
+    case "static-token":
+      lines.push(
+        `${label}: legacy static API-key token (no auto-refresh)`,
+        // Python points at its own `setup claude --profile`; this bin has
+        // no such setup, since the kagura-mcp proxy ships with Python.
+        "  Migrate to refresh-aware with the Python CLI: kagura setup claude --profile <name>",
+      );
+      break;
+    case "url":
+      lines.push(`${label}: url form (no Authorization header)`);
+      break;
+    default:
+      return [];
+  }
+  for (const hidden of entries.slice(1)) {
+    lines.push(`  (hides the ${hidden.scope}-scope entry in ${hidden.source})`);
+  }
+  return lines;
+}
+
 function cmdStatus(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
   const cf = loadCredentialsFile(deps.credentialsPath);
   const names = Object.keys(cf.profiles);
@@ -411,14 +527,15 @@ function cmdStatus(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
     for (const line of describeProfile(only, creds, cf.defaultProfile === only)) {
       deps.write(line);
     }
-    return 0;
-  }
-
-  for (const name of names) {
-    for (const line of describeProfile(name, cf.profiles[name]!, cf.defaultProfile === name)) {
-      deps.write(line);
+  } else {
+    for (const name of names) {
+      for (const line of describeProfile(name, cf.profiles[name]!, cf.defaultProfile === name)) {
+        deps.write(line);
+      }
     }
   }
+  // Once, after the profile block or blocks, where Python prints it.
+  for (const line of claudeCodeLines()) deps.write(line);
   return 0;
 }
 
@@ -435,6 +552,41 @@ async function cmdUse(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promis
   return 0;
 }
 
+/** Python's `make_oauth_client` timeout, for the revocation. */
+const REVOKE_TIMEOUT_MS = 30_000;
+
+/**
+ * Revoke a profile's access token on its server, best effort, as the
+ * Python CLI does before it deletes the profile. Never throws: false when
+ * the server could not be reached, timed out, or refused.
+ */
+function revokeProfile(deps: CliDeps, creds: OAuthCredentials): Promise<boolean> {
+  const base = deps.fetch ?? globalThis.fetch;
+  // Bounded as Python's client is: a dead server must not hang logout.
+  const fetch: typeof globalThis.fetch = (input, init) =>
+    base(input, { ...init, signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS) });
+  return revokeToken(creds.server, { token: creds.accessToken, clientId: creds.clientId, fetch });
+}
+
+/** Python's `_warn_if_api_key_env`: the variable outlives every profile. */
+function noteApiKeyEnv(deps: CliDeps): void {
+  if (process.env.KAGURA_API_KEY) {
+    deps.write(
+      "  Note: KAGURA_API_KEY is set in your environment — the env var will still authenticate " +
+        "kagura-memory commands until you unset it.",
+    );
+  }
+}
+
+/**
+ * `kagura auth logout` — revoke on the server, best effort, then delete
+ * the profile.
+ *
+ * Two deliberate differences from Python remain: this asks before it
+ * removes anything (`--yes`/`-y` skips it) where Python refuses `--all`
+ * without `--yes`, and an untargeted logout with nothing stored succeeds
+ * (see below) where Python exits 1.
+ */
 async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
   const all = args.flags.has("all");
   const target = args.values.profile;
@@ -466,30 +618,74 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
   }
 
   if (all) {
+    // Python revokes each and says nothing of a failure here.
+    for (const creds of Object.values(cf.profiles)) await revokeProfile(deps, creds);
     deleteCredentialsFile(deps.credentialsPath);
     deps.write("All profiles removed.");
+    noteApiKeyEnv(deps);
     return 0;
   }
-  // deleteProfile is a no-op on an absent profile; say so rather than
-  // reporting a removal that did not happen.
-  const existed = cf.profiles[name] !== undefined;
+  const creds = cf.profiles[name];
+  if (creds === undefined) {
+    // Nothing to revoke or remove; say so rather than report a removal
+    // that did not happen.
+    deps.write(`No profile named '${name}'.`);
+    return 1;
+  }
+  // Local logout succeeds whatever the server says, as in Python.
+  if (!(await revokeProfile(deps, creds))) {
+    deps.write(
+      "  Warning: server-side revoke failed (network or 5xx). The local profile was still deleted. " +
+        "The refresh_token may remain valid until it expires naturally.",
+    );
+  }
   await deleteProfile(name, deps.credentialsPath);
-  deps.write(existed ? `Profile '${name}' removed.` : `No profile named '${name}'.`);
-  return existed ? 0 : 1;
+  deps.write(`Profile '${name}' removed.`);
+  noteApiKeyEnv(deps);
+  return 0;
+}
+
+/**
+ * A UTC instant as Python's `datetime.isoformat()` writes it: `+00:00`,
+ * and a fraction only when there is one.
+ */
+function pythonIsoUtc(date: Date): string {
+  const iso = date.toISOString();
+  const millis = iso.slice(20, 23);
+  return `${iso.slice(0, 19)}${millis === "000" ? "" : `.${millis}000`}+00:00`;
 }
 
 /**
  * `kagura auth list` — one line per profile, default marked with `*`.
  *
  * `status` prints the full block; this is the version you can eyeball or
- * pipe into a picker.
+ * pipe into a picker. `--json` is Python's payload.
  */
-function cmdList(deps: CliDeps): number {
+function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
   const cf = loadCredentialsFile(deps.credentialsPath);
+  if (args.flags.has("json")) {
+    // Python's `_profiles_as_json`: file order, no token, and `[]` (exit 0)
+    // when there is no profile. `expired` is the access token's state;
+    // `refreshable` says whether the profile is still usable.
+    const payload = Object.entries(cf.profiles).map(([name, creds]) => ({
+      profile: name,
+      default: name === cf.defaultProfile,
+      user_email: creds.userEmail,
+      workspace_name: creds.workspaceName,
+      workspace_id: creds.workspaceId,
+      server: creds.server,
+      scope: creds.scope,
+      expired: isExpired(creds),
+      refreshable: Boolean(creds.refreshToken),
+      expires_at: pythonIsoUtc(creds.expiresAt),
+    }));
+    deps.write(formatJson(payload));
+    return 0;
+  }
   const names = Object.keys(cf.profiles).sort();
   if (names.length === 0) {
-    deps.write("No profiles. Run: kagura-memory auth login");
-    return 0;
+    // Exit 1, as Python's ClickException.
+    throw new CliError("No profiles. Run: kagura-memory auth login");
   }
   for (const name of names) {
     const creds = cf.profiles[name]!;
@@ -534,12 +730,13 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
 /**
  * Refuse `--invite` on an `auth` subcommand that does not read it.
  *
- * AUTH_SPEC is pooled, so every subcommand parses the flag; only `login`
- * uses it. Ignored elsewhere, it would read as though the invite had been
- * used — plausibly so on `refresh`, which can re-run the device flow — and
- * a flag that looks like it changes behaviour but does not is worse than
- * one that is rejected (the argument `setup claude` makes too). The
- * message names the flag, never its value. Click, whose subcommands do
+ * Every other flag a subcommand does not read is an unknown option. This
+ * one is declared, hidden, on each of them ({@link INVITE_REFUSED}) so its
+ * value, a sign-up credential, is consumed rather than quoted back in the
+ * unknown-option error — `--invite=<token>`, or a token that begins with
+ * `-`, would otherwise be. Ignored, it would read as though the invite had
+ * been used, plausibly so on `refresh`, which can re-run the device flow.
+ * The message names the flag, never its value. Click, whose subcommands do
  * not declare it, says "No such option: --invite" with the same exit 2;
  * this wording also says where the flag belongs.
  */
@@ -564,38 +761,45 @@ const AUTH_GROUP: CommandGroup = {
         "  login from one link, on a server that supports it. An older server\n" +
         "  gets two steps instead, and one that takes no invites a notice. The\n" +
         "  invite is never saved, and is printed only inside a link.",
-      spec: AUTH_SPEC,
+      spec: LOGIN_SPEC,
       run: (deps, args) => cmdLogin(deps as CliDeps, args),
     },
     refresh: {
       summary: "Rotate access_token (optionally requesting a new scope).",
-      spec: AUTH_SPEC,
+      spec: REFRESH_SPEC,
       run: refuseInvite((deps, args) => cmdRefresh(deps as CliDeps, args)),
     },
     status: {
       summary: "Show the current profile, server, scope, expiry, and workspace.",
-      spec: AUTH_SPEC,
+      description:
+        "  Then the kagura-memory entry Claude Code uses in the current directory,\n" +
+        "  and each one it hides, when a scope defines one.",
+      spec: STATUS_SPEC,
       run: refuseInvite(async (deps, args) => cmdStatus(deps as CliDeps, args)),
     },
     use: {
       summary: "Set the default profile used when none is selected.",
       args: "PROFILE",
-      spec: AUTH_SPEC,
+      spec: USE_SPEC,
       run: refuseInvite((deps, args) => cmdUse(deps as CliDeps, args)),
     },
     logout: {
-      summary: "Delete a stored profile (or all of them).",
-      spec: AUTH_SPEC,
+      summary: "Revoke server-side and delete the local profile (or all of them).",
+      description:
+        "  The server-side revoke is best effort: the profile is deleted even when\n" +
+        "  it fails. Asks first unless --yes; with nothing stored, a logout that\n" +
+        "  names no profile succeeds.",
+      spec: LOGOUT_SPEC,
       run: refuseInvite((deps, args) => cmdLogout(deps as CliDeps, args)),
     },
     list: {
       summary: "List every stored profile; the default is marked with `*`.",
-      spec: AUTH_SPEC,
-      run: refuseInvite(async (deps) => cmdList(deps as CliDeps)),
+      spec: LIST_SPEC,
+      run: refuseInvite(async (deps, args) => cmdList(deps as CliDeps, args)),
     },
     token: {
       summary: "Emit the raw access_token to stdout (for CI / scripts).",
-      spec: AUTH_SPEC,
+      spec: TOKEN_SPEC,
       run: refuseInvite((deps, args) => cmdToken(deps as CliDeps, args)),
     },
   },

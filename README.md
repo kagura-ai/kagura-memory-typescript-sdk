@@ -129,13 +129,15 @@ then uses.
 Bearer header. The key comes from `--api-key`, else the `api_key` in
 `.kagura.json`, else `KAGURA_API_KEY`. `.kagura.json` gets the URL as
 given; the parameters that `--guardrails` and `--tool-profile` set go on
-the entry's URL only. The key is never printed, and outside
-Claude Code it never goes into the harness's config file. `setup codex`
-also leaves a key it found in `KAGURA_API_KEY` out of `.kagura.json`.
+the entry's URL only. The key is never printed, and no harness CLI gets
+it on its command line; of the harness configs, only a project
+`.mcp.json` holds it.
+`setup codex` also leaves a key it found in `KAGURA_API_KEY` out of
+`.kagura.json`.
 
 | Subcommand | How the entry is applied | Where the key lives |
 |---|---|---|
-| `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json --scope user …` | in the entry |
+| `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json --scope user …` | `--scope project`: in `.mcp.json`; `--scope user`: `KAGURA_MCP_API_KEY`, exported where Claude Code starts |
 | `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `KAGURA_API_KEY`, exported in the shell that starts Codex |
 | `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` always prompts | `$HERMES_HOME/.env`, as `MCP_KAGURA_MEMORY_API_KEY` (`MCP_<NAME>_API_KEY` with `--name`) |
 | `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe` | `$OPENCLAW_STATE_DIR/.env` (default `~/.openclaw/.env`), as `KAGURA_API_KEY` |
@@ -152,13 +154,30 @@ On Windows, a CLI installed only as an npm `.cmd` shim counts as not
 found: Node runs one only through a shell, which would re-parse the
 arguments.
 
-`--guardrails <context-id|off>` sets the URL's `guardrails` parameter on
-`setup claude` and `setup codex`. Hermes and OpenClaw do not pass the
-server's instructions to the model, so there `off` is refused and a
-context id is dropped, whether it comes from the flag or from the URL.
-`--tool-profile` (claude, codex) sets `profile` and refuses an empty name;
-the server applies a `?tools=` allowlist already on the URL instead, so
-that case gets a warning. Both go at the end of the query, `guardrails`
+With `--scope user`, the Claude Code entry does not hold the key: it
+sends `Authorization: Bearer ${KAGURA_MCP_API_KEY}`, which Claude Code
+fills in from its own environment each time it connects. The key is never
+on the `claude mcp add-json` command line, where any local user could read
+it in the process list, and never in `~/.claude.json`. Set the variable in
+the environment that starts Claude Code, e.g. `export
+KAGURA_MCP_API_KEY=kagura_xxx` in your shell profile; setup says whether
+the current shell has it, and `doctor` warns when it is unset. It is a
+separate variable from `KAGURA_API_KEY`, which the SDK ranks above
+`.kagura.json` and OAuth profiles for every command. The entry is the one
+the Python CLI writes, so a run of either CLI finds the other's entry up
+to date. `--scope project` still writes the key into `.mcp.json`, so keep
+that file out of version control (setup adds it to `.gitignore`).
+
+`--guardrails <context-id|off>` (memory-cloud v0.74.0+) sets the URL's
+`guardrails` parameter on `setup claude` and `setup codex`. Hermes and
+OpenClaw do not pass the server's instructions to the model, so there
+`off` is refused and a context id is dropped, whether it comes from the
+flag or from the URL. `--tool-profile` (claude, codex; memory-cloud
+v0.73.0+) sets `profile` and refuses an empty name. The server knows
+`full` and `core` (case-sensitive) and fails `tools/list` for any other
+name, which leaves the harness with no Kagura tools. It applies a
+`?tools=` allowlist already on the URL instead, so that case gets a
+warning. Both go at the end of the query, `guardrails`
 first, replacing any value already there, as the Python CLI writes them.
 A `setup claude` run that leaves out a `guardrails` or `profile` value
 the entry it replaces had says so in a note. `--name`, `--force` and
@@ -176,19 +195,33 @@ any parent; `setup claude` and `doctor` read them the same way.
 and prints the `claude mcp remove --scope …` command for it, after a `cd`
 into the directory that command must run in when that is not the current
 one. An entry the new one hides, in a weaker scope or in a parent's
-`.mcp.json`, is noted.
+`.mcp.json`, is noted. Messages name `~/.claude.json` by the file actually
+read: `$CLAUDE_CONFIG_DIR/.claude.json` when that is set.
 With `--scope user`, an identical user-scope entry is left as it is and a
 different one is replaced: `claude mcp remove` runs before `claude mcp
-add-json`, and if the add then fails, the old entry is put back (if that
-fails too, the error prints the command to add the new one by hand).
-Without `claude` on `PATH`, `--scope user` prints the commands to run and
-writes nothing, unless the user-scope entry is already identical. When
-`claude plugin list --json` shows the Kagura Memory plugin enabled, the
-notes list the plugin settings to enter. `doctor` reports the entry
-Claude Code uses in the current directory, with its scope and file, and
-warns about each entry that one hides. For a `type: "url"` entry, which
-earlier releases wrote and Claude Code skips, it names the fix for the
-entry's scope.
+add-json`, and if the add then fails, the old entry is put back. An old
+entry that holds a key (as this CLI wrote before 0.11.0) is never put
+back, since that would pass the key on a command line; when it is not put
+back, or putting it back fails, setup prints the command that re-adds it,
+the key masked as `<your-api-key>`.
+Without `claude` on `PATH`, `--scope user` prints the commands to run, and
+where to set `KAGURA_MCP_API_KEY`, and writes nothing, unless the
+user-scope entry is already identical. When `claude plugin list --json`
+shows the Kagura Memory plugin enabled, the notes list the plugin settings
+to enter, and say that the plugin has one guardrail context for every
+project and authenticates only with a user API key. `setup claude` writes
+`.kagura.json` and the MCP entry only; it installs none of the Python
+CLI's hooks or `/kagura-recall` and `/kagura-remember` commands. Their
+flags (`--[no-]session-hook`, `--[no-]sync-hook`, `--[no-]commands`) and
+`--no-auto-context` are accepted, so a script written for the Python CLI
+still runs, and change nothing. `doctor` reports the entry Claude Code
+uses in the current directory, with its scope and file, and warns about
+each entry that one hides. It also warns when a header of that entry
+sends a `${VAR}` that is unset in the current environment, and for a
+`kagura-mcp` stdio entry (the Python CLI's `--profile` form) checks that
+`kagura-mcp` is on `PATH`. For a `type: "url"` entry, which earlier
+releases wrote and Claude Code skips, it names the fix for the entry's
+scope.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
@@ -225,6 +258,24 @@ header, 60 when it is missing or not a number of seconds), with the
 server's reason, when it gives one, on the next line.
 `login()` and `authorizeDevice` throw the same message as a
 `KaguraAuthError`.
+
+**`auth` subcommands.** Each takes only the options it reads, as in the
+Python CLI: any other is an unknown option (exit 2), and `--help` lists
+only its own. `auth status` ends with the `kagura-memory` entry Claude
+Code uses in the current directory and each entry it hides, in the Python
+CLI's words (nothing when no scope defines one). `auth list --json` emits
+Python's fields per profile (`profile`, `default`, `user_email`,
+`workspace_name`, `workspace_id`, `server`, `scope`, `expired`,
+`refreshable`, `expires_at`), never a token, and `[]` when there is none;
+`auth list` without profiles exits 1. `auth logout` revokes the access
+token on the server before it deletes the profile, best effort: the
+profile is deleted even when that fails, with Python's warning (with
+`--all`, silently, as in Python). It notes when `KAGURA_API_KEY` is still
+set. Unlike the Python CLI, it asks before removing anything unless
+`--yes` (`-y`) is given, rather than refusing `--all` without it, and a
+logout that names no profile succeeds when nothing is stored, so
+`logout --yes` stays idempotent in setup scripts. `auth login` with both
+`--read-only` and `--scope` exits 1, as Python does.
 
 #### Signing up with an invite
 

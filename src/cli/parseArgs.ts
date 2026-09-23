@@ -80,6 +80,15 @@ export interface FlagSpec {
    * that was swallowed by mistake.
    */
   dashValue?: boolean;
+  /**
+   * Parse the flag but leave it out of `--help`.
+   *
+   * For a flag a command declares only to refuse it: `--invite` on the
+   * `auth` subcommands other than `login`. Parsed, its value is consumed
+   * rather than reported — and so quoted — as an unknown option; listed,
+   * it would advertise an option the command does not take.
+   */
+  hidden?: boolean;
 }
 
 export interface ParseSpec {

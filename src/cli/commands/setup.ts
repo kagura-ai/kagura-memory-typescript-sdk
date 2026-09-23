@@ -5,7 +5,8 @@
  * with whatever is already there and gitignored, plus a `kagura-memory`
  * MCP entry for its harness: the URL and a Bearer header.
  *
- *   claude    `.mcp.json` (project scope) or `claude mcp add-json` (user)
+ *   claude    `.mcp.json` (project scope), or `claude mcp add-json` (user
+ *             scope), reading the key from KAGURA_MCP_API_KEY
  *   codex     `codex mcp add`, reading the key from KAGURA_API_KEY
  *   hermes    the key in its `.env`; the `config.yaml` block printed
  *   openclaw  `openclaw mcp add`; the key in its `.env`
@@ -89,7 +90,7 @@ const GUARDRAILS: FlagSpec = {
   name: "guardrails",
   type: "value",
   metavar: "CONTEXT_ID|off",
-  help: "Set the URL's guardrails parameter: a context id, or off",
+  help: "Set the URL's guardrails parameter (server v0.74.0+): a context id, or off",
 };
 // Hermes and OpenClaw take the flag so a script can pass it to every
 // harness alike, but nothing it sets reaches their entry.
@@ -97,19 +98,43 @@ const GUARDRAILS_NOT_WRITTEN: FlagSpec = {
   ...GUARDRAILS,
   help: "Validated, not written: off is refused and a context id dropped",
 };
+// Python's floor and names (memory-cloud's PROFILES); worded to hold for
+// codex, which shares the flag.
 const TOOL_PROFILE: FlagSpec = {
   name: "tool-profile",
   type: "value",
   metavar: "NAME",
-  help: "Set the URL's profile parameter (e.g. core); a ?tools= allowlist wins",
+  help:
+    "Set the URL's profile parameter (server v0.73.0+): the server knows 'full' and 'core' " +
+    "(case-sensitive) and fails tools/list for any other name, leaving no Kagura tools; " +
+    "a ?tools= allowlist wins",
 };
 const SCOPE: FlagSpec = {
   name: "scope",
   type: "value",
   metavar: "[project|user]",
-  help: "project (.mcp.json) or user (claude mcp add-json)",
+  help:
+    "project (.mcp.json) or user (claude mcp add-json); a user entry sends $KAGURA_MCP_API_KEY: " +
+    "set it where Claude Code starts",
   defaultLabel: "project",
 };
+// The Python CLI's hook, command and context-selection flags. This port
+// installs no hooks or slash commands and never picks or creates a
+// context, so they are accepted — a script written for `kagura setup
+// claude` still runs — and change nothing; the help says so, as for -y.
+const NO_HOOKS = "Accepted for compatibility; this port installs no hooks";
+const NO_COMMANDS = "Accepted for compatibility; this port installs no commands";
+/** The ones that ask for something this port does not do, so a run notes it. */
+const ASKS_FOR_HOOKS = ["session-hook", "sync-hook", "commands"] as const;
+const PYTHON_ONLY_FLAGS: FlagSpec[] = [
+  { name: "session-hook", type: "switch", help: NO_HOOKS },
+  { name: "no-session-hook", type: "switch", help: NO_HOOKS },
+  { name: "sync-hook", type: "switch", help: NO_HOOKS },
+  { name: "no-sync-hook", type: "switch", help: NO_HOOKS },
+  { name: "commands", type: "switch", help: NO_COMMANDS },
+  { name: "no-commands", type: "switch", help: NO_COMMANDS },
+  { name: "no-auto-context", type: "switch", help: "Accepted for compatibility; this port never prompts" },
+];
 const NAME: FlagSpec = {
   name: "name",
   type: "value",
@@ -507,8 +532,9 @@ function printBlock(deps: CommandDeps, heading: string, block: string): void {
 /**
  * Run a harness CLI, failing with its own message.
  *
- * `claude mcp add-json` carries the key in its argv, and a CLI may echo
- * its argv back in an error, so the key is cut out of whatever is shown.
+ * No argv here carries the key, but a CLI may echo back whatever it read,
+ * its environment or config included, so the key is still cut out of
+ * whatever is shown.
  */
 async function runHarnessCli(
   deps: CliDeps,
@@ -542,10 +568,113 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function claudeEntry(url: string, apiKey: string): Record<string, unknown> {
+/**
+ * The variable a user-scope entry takes the key from — Python's
+ * `MCP_API_KEY_ENV`.
+ *
+ * Claude Code expands `${VAR}` in an entry's headers from its own
+ * environment each time it connects, so the key goes neither on the
+ * `claude mcp add-json` command line, where every local user can read it
+ * in the process list, nor into `~/.claude.json`. Not {@link KEY_ENV_VAR}:
+ * the SDK ranks `KAGURA_API_KEY` above `.kagura.json` and OAuth profiles,
+ * so exporting it for Claude Code would change the credentials of every
+ * command of this bin too.
+ */
+export const CLAUDE_KEY_ENV_VAR = "KAGURA_MCP_API_KEY";
+
+/** What a user-scope entry carries in place of the key — Python's `_API_KEY_REF`. */
+const API_KEY_REF = `\${${CLAUDE_KEY_ENV_VAR}}`;
+
+/**
+ * Python's note on where a user-scope entry gets the key, as it wraps it;
+ * without its `--profile` aside, since this port has no OAuth setup.
+ */
+const KEY_ENV_NOTE: readonly string[] = [
+  `The entry sends the API key from $${CLAUDE_KEY_ENV_VAR}, which Claude Code reads when it`,
+  "connects, so the key is neither in the entry nor on a command line. Set it in",
+  `the environment that starts Claude Code, e.g. \`export ${CLAUDE_KEY_ENV_VAR}=<your-api-key>\``,
+  "in your shell profile.",
+];
+
+/**
+ * Whether this shell has {@link CLAUDE_KEY_ENV_VAR}, and what it holds —
+ * Python's lines, which never print the key. Empty counts as unset.
+ */
+function keyEnvState(apiKey: string): string {
+  const current = process.env[CLAUDE_KEY_ENV_VAR];
+  if (!current) return `$${CLAUDE_KEY_ENV_VAR} is not set in this shell.`;
+  if (current === apiKey) return `$${CLAUDE_KEY_ENV_VAR} is already set to this key in this shell.`;
+  return (
+    `Warning: $${CLAUDE_KEY_ENV_VAR} in this shell holds a different key, which Claude Code ` +
+    "started from here would send."
+  );
+}
+
+/**
+ * The API-key entry — Python's `_static_token_entry`. At user scope
+ * `token` is {@link API_KEY_REF}, never the key itself.
+ */
+function claudeEntry(url: string, token: string): Record<string, unknown> {
   // `http`: Claude Code's transports are stdio, sse, http and ws. Earlier
   // releases wrote `url`, which is none of them.
-  return { type: "http", url, headers: { Authorization: `Bearer ${apiKey}` } };
+  return { type: "http", url, headers: { Authorization: `Bearer ${token}` } };
+}
+
+/** Claude Code's `${VAR}` / `${VAR:-default}` expansion in MCP config values. */
+const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}/g;
+/** An Authorization value that is only a reference: `${VAR}` after an optional scheme. */
+const AUTH_REF_ONLY = /^(?:[A-Za-z][A-Za-z0-9-]*\s+)?\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+
+/**
+ * Whether an `Authorization` header of `entry` holds a credential itself —
+ * Python's `holds_credential`.
+ *
+ * `Bearer ${VAR}` (a scheme, then one variable without a default) does
+ * not: Claude Code fills it in when it connects. Anything else does,
+ * including a `${VAR:-default}`, whose default may be a key. Such an entry
+ * never goes on a command line.
+ */
+export function holdsCredential(entry: unknown): boolean {
+  const headers = isObject(entry) ? entry.headers : undefined;
+  if (!isObject(headers)) return false;
+  return Object.entries(headers).some(
+    ([key, value]) =>
+      key.toLowerCase() === "authorization" && !(typeof value === "string" && AUTH_REF_ONLY.test(value.trim())),
+  );
+}
+
+/**
+ * The variables `entry`'s headers reference without a default and that
+ * are unset (or empty) here, in order of appearance, each once — Python's
+ * `unset_header_vars`. Claude Code sends such a reference as literal text,
+ * so the server rejects the request. Only meaningful when this
+ * environment is the one Claude Code starts from.
+ */
+export function unsetHeaderVars(entry: unknown): string[] {
+  const headers = isObject(entry) ? entry.headers : undefined;
+  if (!isObject(headers)) return [];
+  const names: string[] = [];
+  for (const value of Object.values(headers)) {
+    if (typeof value !== "string") continue;
+    for (const [, name, fallback] of value.matchAll(ENV_REF)) {
+      if (!fallback && !process.env[name!] && !names.includes(name!)) names.push(name!);
+    }
+  }
+  return names;
+}
+
+/**
+ * `entry` with a baked key replaced by a placeholder, for printing —
+ * Python's `_redact_entry`. A `${VAR}` reference is kept: it is what the
+ * user should run.
+ */
+function redactEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const headers = entry.headers;
+  if (!isObject(headers) || !holdsCredential(entry)) return entry;
+  const masked = Object.fromEntries(
+    Object.entries(headers).map(([k, v]) => [k, k.toLowerCase() === "authorization" ? "Bearer <your-api-key>" : v]),
+  );
+  return { ...entry, headers: masked };
 }
 
 /** `claude mcp add-json --scope user kagura-memory`, in Python's argv order; the JSON follows. */
@@ -577,23 +706,12 @@ function claudeCommandIn(argv: string[], dir: string | null): string {
   return `cd ${shellQuote(dir)} && ${command}`;
 }
 
-/**
- * The user-scope `claude mcp add-json` command, runnable, with the key as
- * `"$KAGURA_API_KEY"` spliced between two single-quoted halves — the one
- * POSIX spelling that expands the variable and nothing else.
- */
-function claudeAddJsonDisplay(url: string): string {
-  const marker = "@@KEY@@";
-  const [before, after] = JSON.stringify(claudeEntry(url, marker)).split(marker) as [string, string];
-  return `${claudeCommand([...CLAUDE_ADD_JSON])} ${shellQuote(before)}"$${KEY_ENV_VAR}"${shellQuote(after)}`;
-}
-
 /** One `kagura-memory` definition Claude Code sees for a project. */
 export interface ClaudeEntry {
   scope: ClaudeScope;
   /**
-   * Where it lives, for messages: `~/.claude.json`, `.mcp.json` for the
-   * project's own file, or a parent directory's `.mcp.json` by its path.
+   * Where it lives, for messages: {@link claudeJsonLabel}, `.mcp.json` for
+   * the project's own file, or a parent directory's `.mcp.json` by its path.
    */
   source: string;
   config: Record<string, unknown>;
@@ -615,6 +733,72 @@ function pathLabel(target: string): string {
   const rel = path.relative(os.homedir(), target);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return target;
   return `~/${rel.split(path.sep).join("/")}`;
+}
+
+/**
+ * Claude Code's global config — Python's `claude_json_path`:
+ * `$CLAUDE_CONFIG_DIR` or the home directory, then `.claude.json`.
+ */
+function claudeJsonPath(): string {
+  return path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), ".claude.json");
+}
+
+/**
+ * {@link claudeJsonPath} for messages — Python's `claude_json_label`:
+ * `~/.claude.json` by default, the full path when `$CLAUDE_CONFIG_DIR`
+ * points outside the home directory.
+ */
+export function claudeJsonLabel(): string {
+  return pathLabel(claudeJsonPath());
+}
+
+/** How a `kagura-memory` entry authenticates; see {@link classifyMcpEntry}. */
+export type McpMode = "stdio" | "static-token" | "url" | "absent";
+
+/**
+ * Remote types Claude Code accepts (`streamable-http` is an alias of
+ * `http`), plus `url`, which `setup claude` wrote before and Claude Code
+ * does not accept: recognised alike, so an old entry is still classified.
+ */
+const HTTP_TYPES: ReadonlySet<unknown> = new Set(["http", "streamable-http", "url"]);
+
+/** The `kagura-mcp` proxy's names, as a command or a launcher's argument. */
+const PROXY_NAMES: ReadonlySet<string> = new Set(["kagura-mcp", "kagura-mcp.exe"]);
+
+/**
+ * Whether the command, or an argument of a launcher, is `kagura-mcp` —
+ * Python's `_runs_proxy`: by name or by path (`/venv/bin/kagura-mcp`, as a
+ * `claude mcp add` entry often has, split on `/` and `\` alike), and
+ * `uvx … kagura-mcp …`. An `args` that is not an array counts as absent.
+ */
+function runsProxy(entry: Record<string, unknown>): boolean {
+  const args = Array.isArray(entry.args) ? entry.args : [];
+  return [entry.command, ...args].some(
+    (a) => typeof a === "string" && PROXY_NAMES.has(a.split(/[\\/]/).pop()!),
+  );
+}
+
+/**
+ * Classify a `kagura-memory` entry — Python's `classify_mcp_entry`, shared
+ * by `setup claude`, `doctor` and `auth status`.
+ *
+ * - `stdio`: the refresh-aware `kagura-mcp` proxy (no type or `stdio`).
+ * - `static-token`: the http form with an `Authorization` header.
+ * - `url`: the http form without one (e.g. Claude Code's own OAuth).
+ * - `absent`: anything else, a non-object included.
+ */
+export function classifyMcpEntry(entry: unknown): McpMode {
+  if (!isObject(entry)) return "absent";
+  const kind = entry.type;
+  // Claude Code reads an entry without a type as stdio.
+  if ((kind === undefined || kind === null || kind === "stdio") && runsProxy(entry)) return "stdio";
+  if (HTTP_TYPES.has(kind)) {
+    const headers = entry.headers;
+    return isObject(headers) && Object.keys(headers).some((k) => k.toLowerCase() === "authorization")
+      ? "static-token"
+      : "url";
+  }
+  return "absent";
 }
 
 /** `directory` and each of its parents, up to the filesystem root. */
@@ -698,8 +882,8 @@ function closestMcpJson(project: string): { file: string; servers: unknown } {
  */
 export function findClaudeEntries(projectDir: string): ClaudeEntry[] {
   const project = realProjectPath(projectDir);
-  const stateDir = process.env.CLAUDE_CONFIG_DIR || os.homedir();
-  const statePath = path.join(stateDir, ".claude.json");
+  const statePath = claudeJsonPath();
+  const stateLabel = claudeJsonLabel();
   const state = readJsonLenient(statePath) ?? {};
 
   let local: unknown;
@@ -718,9 +902,9 @@ export function findClaudeEntries(projectDir: string): ClaudeEntry[] {
   const mcpJson = closestMcpJson(project);
   const mcpJsonLabel = path.dirname(mcpJson.file) === project ? ".mcp.json" : pathLabel(mcpJson.file);
   const candidates: [ClaudeScope, string, string, unknown][] = [
-    ["local", "~/.claude.json", statePath, local],
+    ["local", stateLabel, statePath, local],
     ["project", mcpJsonLabel, mcpJson.file, mcpJson.servers],
-    ["user", "~/.claude.json", statePath, state.mcpServers],
+    ["user", stateLabel, statePath, state.mcpServers],
   ];
   const entries: ClaudeEntry[] = [];
   for (const [scope, source, file, servers] of candidates) {
@@ -829,22 +1013,6 @@ const QUERY_FLAGS = [
   ["--tool-profile", "profile"],
 ] as const;
 
-/** The `kagura-mcp` proxy's names, as a command or a launcher's argument. */
-const PROXY_NAMES: ReadonlySet<string> = new Set(["kagura-mcp", "kagura-mcp.exe"]);
-
-/**
- * Whether an entry is the `kagura-mcp` stdio proxy — Python's
- * `classify_mcp_entry(...) == "stdio"`: no type or `stdio`, and the
- * command, or an argument of a launcher such as `uvx`, named `kagura-mcp`.
- */
-function runsProxy(entry: Record<string, unknown>): boolean {
-  if (entry.type !== undefined && entry.type !== null && entry.type !== "stdio") return false;
-  const args = Array.isArray(entry.args) ? entry.args : [];
-  return [entry.command, ...args].some(
-    (a) => typeof a === "string" && PROXY_NAMES.has(a.split(/[\\/]/).pop()!),
-  );
-}
-
 /**
  * The `--guardrails` / `--tool-profile` values an entry puts on the MCP
  * URL — Python's `_query_flags`: from the `kagura-mcp` arguments of a
@@ -854,7 +1022,7 @@ function runsProxy(entry: Record<string, unknown>): boolean {
  */
 function queryFlags(entry: Record<string, unknown>): Map<string, string> {
   const found = new Map<string, string>();
-  if (runsProxy(entry)) {
+  if (classifyMcpEntry(entry) === "stdio") {
     const args: unknown[] = Array.isArray(entry.args) ? entry.args : [];
     const argv = args.filter((a): a is string => typeof a === "string");
     for (const [flag] of QUERY_FLAGS) {
@@ -915,34 +1083,44 @@ function toolsAllowlistWarning(url: string, toolProfile: string | undefined): st
  * `add-json` refuses a name user scope already has, so the old entry is
  * removed first rather than kept — as with the .mcp.json entry, a stale
  * header from a previous key would keep authenticating as the old
- * identity — and put back if the add then fails.
+ * identity — and put back if the add then fails. Python's
+ * `_write_mcp_entry` and `_restore_user_entry`.
  */
 async function writeUserEntry(
   deps: CliDeps,
   claude: string,
   input: SetupInput,
-  url: string,
+  entry: Record<string, unknown>,
   replaces: Record<string, unknown> | null,
 ): Promise<void> {
   const run = (argv: string[], display: string) =>
     runHarnessCli(deps, claude, argv, display, input.apiKey, CLAUDE_EXEC);
-  const addDisplay = `${claudeCommand([...CLAUDE_ADD_JSON])} '<entry>'`;
+  // Python's _add_user_entry: the entry goes on claude's command line,
+  // which every local user can read in the process list while it runs, so
+  // one that holds a credential is never passed — the new entry never
+  // does, and an old one with a baked key is not put back.
+  const add = async (e: Record<string, unknown>) => {
+    if (holdsCredential(e)) {
+      throw new CliError("the entry holds an API key, which setup never passes on a command line");
+    }
+    await run(claudeAddJsonArgs(e), `${claudeCommand([...CLAUDE_ADD_JSON])} '<entry>'`);
+  };
   if (replaces !== null) await run(claudeRemoveArgs("user"), claudeCommand(claudeRemoveArgs("user")));
   try {
-    await run(claudeAddJsonArgs(claudeEntry(url, input.apiKey)), addDisplay);
+    await add(entry);
   } catch (e) {
     if (replaces === null || !(e instanceof CliError)) throw e;
     try {
-      // Its output is never shown: the old entry may carry an older key.
-      await run(claudeAddJsonArgs(replaces), addDisplay);
-    } catch {
+      await add(replaces);
+    } catch (restore) {
       // Neither entry is configured now, and the failure alone would not
-      // say so.
+      // say so. The command re-adds the old one, a baked key masked.
+      deps.writeError(`  Re-add the previous user-scope ${SERVER_NAME} entry yourself:`);
+      deps.writeError(`    ${claudeCommand(claudeAddJsonArgs(redactEntry(replaces)))}`);
+      const reason = (restore instanceof Error ? restore.message : String(restore)).replace(/\s*\n\s*/g, " ");
       throw new CliError(
-        `${e.message}\n` +
-          `  The previous user-scope '${SERVER_NAME}' entry was removed before this, so none is\n` +
-          `  configured now. With ${KEY_ENV_VAR} exported, add the new one with:\n` +
-          `    ${claudeAddJsonDisplay(url)}`,
+        `${e.message}\n  The previous user-scope ${SERVER_NAME} entry was removed and could not be ` +
+          `restored (${reason}); the command above re-adds it.`,
       );
     }
     throw new CliError(`${e.message}\n  The previous user-scope '${SERVER_NAME}' entry was put back.`);
@@ -953,8 +1131,18 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveInput(deps, args, "claude");
   const scope = parseChoice(SCOPE, args.values.scope ?? "project", CLAUDE_TARGET_SCOPES);
   const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile);
+  const asked = ASKS_FOR_HOOKS.filter((name) => args.flags.has(name)).map((name) => `--${name}`);
+  if (asked.length > 0) {
+    notes.push(
+      `${asked.join(" and ")} ${asked.length > 1 ? "do" : "does"} nothing here: ` +
+        "this port installs no hooks or slash commands",
+    );
+  }
   const url = mcpUrlWithQuery(input.baseUrl, { guardrails: input.guardrails, profile: input.toolProfile });
-  const entry = claudeEntry(url, input.apiKey);
+  // At user scope the entry goes on `claude mcp add-json`'s command line,
+  // so it names the variable Claude Code reads the key from instead; a
+  // project .mcp.json is a file, 0600 and gitignored, as in Python.
+  const entry = claudeEntry(url, scope === "user" ? API_KEY_REF : input.apiKey);
   const claude = deps.which("claude");
 
   // Where the entry lands, settled before anything is run or written —
@@ -986,13 +1174,18 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
     }
   }
   if (scope === "user" && !unchanged && claude === null) {
-    // This bin never edits ~/.claude.json itself: Claude Code owns it.
+    // This bin never edits ~/.claude.json itself: Claude Code owns it. The
+    // command is ready to run as printed: single-quoted, the reference
+    // reaches add-json as written, and no key is in it.
     deps.writeError("  Add the user-scope entry yourself, then re-run this setup:");
     if (replaces !== null) deps.writeError(`    ${claudeCommand(claudeRemoveArgs("user"))}`);
-    deps.writeError(`    ${claudeAddJsonDisplay(url)}`);
+    deps.writeError(`    ${claudeCommand(claudeAddJsonArgs(redactEntry(entry)))}`);
+    // Python's note, less the line on this shell: what matters is the
+    // environment the pasted command's Claude Code starts from.
+    for (const line of KEY_ENV_NOTE) deps.writeError(`  ${line}`);
     throw new CliError(
       "The Claude Code CLI (`claude`) was not found on PATH (a Windows .cmd shim is not run: it " +
-        "needs a shell). A user-scope entry lives in ~/.claude.json, which Claude Code owns, so " +
+        `needs a shell). A user-scope entry lives in ${claudeJsonLabel()}, which Claude Code owns, so ` +
         "setup writes it only through `claude mcp add-json`. Nothing was written.",
     );
   }
@@ -1004,15 +1197,24 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
   let appliedWith: string | null = null;
 
   if (scope === "user") {
+    const label = claudeJsonLabel();
     if (unchanged) {
-      notes.push(`User-scope ${SERVER_NAME} entry already up to date (~/.claude.json)`);
+      notes.push(`User-scope ${SERVER_NAME} entry already up to date (${label})`);
     } else {
       // `claude` first, so one that refuses the entry leaves every file as
-      // it was.
-      await writeUserEntry(deps, claude!, input, url, replaces);
-      appliedWith = claudeAddJsonDisplay(url);
-      if (replaces !== null) notes.push("replaced the existing user-scope entry");
+      // it was. (Python writes .kagura.json before it runs claude.)
+      await writeUserEntry(deps, claude!, input, entry, replaces);
+      // The argv holds no secret, so it is shown as it ran.
+      appliedWith = claudeCommand(claudeAddJsonArgs(entry));
+      notes.push(
+        replaces !== null
+          ? `Replaced the existing user-scope ${SERVER_NAME} entry (${label})`
+          : `Added ${SERVER_NAME} at user scope (${label})`,
+      );
     }
+    // After an add, a replace or an unchanged entry alike, as in Python.
+    notes.push(KEY_ENV_NOTE.join(" "), keyEnvState(input.apiKey));
+    // .kagura.json keeps the key at both scopes: this bin reads it there.
     wrote.push(writeKaguraJson(input));
   } else {
     wrote.push(writeKaguraJson(input));
@@ -1054,10 +1256,15 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
           "once the hooks deliver guardrails.",
       );
     }
+    // Python resolves a context always; this bin makes no call to pick one.
     notes.push(
-      "Plugin settings (/plugin > kagura-memory > Configure; the API key is yours): " +
+      "Plugin settings (/plugin > kagura-memory > Configure): " +
         `server_url = ${pluginServerUrl(url)}, ` +
         `context_id = ${input.contextId || "(none; pass -c)"}`,
+      "The plugin has ONE guardrail context for every project: use this one only if it holds the " +
+        "guardrails you want everywhere.",
+      // The hooks' own requirement, whichever entry this setup wrote.
+      "api_key: enter it yourself, a user API key (kagura_...). The plugin's hooks authenticate only with one.",
     );
   }
 
@@ -1356,21 +1563,26 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
 const claude: Command = {
   summary: "Set up Kagura Memory integration for Claude Code.",
   description:
-    '  Writes .kagura.json and a type "http" kagura-memory entry carrying the\n' +
-    "  key. --scope project writes .mcp.json (0600, gitignored); --scope user\n" +
-    "  runs `claude mcp add-json --scope user kagura-memory '<entry>'`, which\n" +
-    "  takes the entry as an argument, so the key is in that process's\n" +
-    "  argument list while it runs. A different user-scope entry is replaced\n" +
-    "  (`claude mcp remove` runs first, and the old entry is put back if the\n" +
-    "  add fails); an identical one is left as it is. ~/.claude.json is read,\n" +
-    "  never written: an entry in a stronger scope (local > project > user)\n" +
-    "  would hide the new one, so it stops the command. Local scope is the git\n" +
-    "  repository's (a linked worktree's main working tree), and project scope\n" +
-    "  the closest .mcp.json defining kagura-memory, here or in a parent\n" +
-    "  directory, as Claude Code reads them. A re-run without --guardrails or\n" +
-    "  --tool-profile drops an earlier value, and says so.\n\n" +
+    '  Writes .kagura.json and a type "http" kagura-memory entry. --scope\n' +
+    "  project puts the key in .mcp.json (0600, gitignored). --scope user runs\n" +
+    "  `claude mcp add-json --scope user kagura-memory '<entry>'` with an entry\n" +
+    "  that sends Bearer ${KAGURA_MCP_API_KEY}, which Claude Code reads from\n" +
+    "  its environment when it connects: the key is on no command line and\n" +
+    "  not in ~/.claude.json, and setup says whether this shell has the\n" +
+    "  variable. A different user-scope entry is replaced (`claude mcp remove`\n" +
+    "  runs first, and the old entry is put back if the add fails, unless it\n" +
+    "  holds a key: then its re-add command is printed, the key masked); an\n" +
+    "  identical one is left as it is. ~/.claude.json ($CLAUDE_CONFIG_DIR's\n" +
+    "  when set) is read, never written: an entry in a stronger scope (local >\n" +
+    "  project > user) would hide the new one, so it stops the command. Local\n" +
+    "  scope is the git repository's (a linked worktree's main working tree),\n" +
+    "  and project scope the closest .mcp.json defining kagura-memory, here or\n" +
+    "  in a parent directory, as Claude Code reads them. A re-run without\n" +
+    "  --guardrails or --tool-profile drops an earlier value, and says so.\n\n" +
+    "  This port installs no hooks or slash commands: the Python CLI's flags\n" +
+    "  for them, and --no-auto-context, are accepted and change nothing.\n\n" +
     GUARDRAILS_ADVICE,
-  spec: { flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE] },
+  spec: { flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ...PYTHON_ONLY_FLAGS] },
   run: (deps, args) => runClaude(deps as CliDeps, args),
 };
 

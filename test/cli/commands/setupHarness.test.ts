@@ -71,7 +71,15 @@ beforeEach(() => {
   process.env.USERPROFILE = home;
   // KAGURA_API_KEY too: setup falls back to it for the key, so the
   // developer's own must not stand in for a missing one.
-  for (const name of ["CODEX_HOME", "HERMES_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "KAGURA_API_KEY"]) {
+  for (const name of [
+    "CODEX_HOME",
+    "HERMES_HOME",
+    "OPENCLAW_STATE_DIR",
+    "OPENCLAW_CONFIG_PATH",
+    "KAGURA_API_KEY",
+    "CLAUDE_CONFIG_DIR",
+    "KAGURA_MCP_API_KEY",
+  ]) {
     delete process.env[name];
   }
 });
