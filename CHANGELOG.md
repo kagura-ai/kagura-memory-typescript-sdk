@@ -154,6 +154,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   easy to confuse: `count` is the workspace's quota usage and ignores
   `nameContains`, while `total` is the number of items returned.
 
+- **Fields the server was already sending are typed now**
+  ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)).
+  The models are interfaces with no runtime validation, so nothing was
+  lost at runtime, but a caller had to cast to read these. All of them are
+  optional, so a response from an older server still type-checks.
+
+  - `ServerInfo.search_defaults`, a new `SearchDefaults`: the reranker a
+    new context starts with (server v0.69.0+). `ServerFeatures` gains the
+    eight flags it did not know, `plan_page`, `byok`, `cost_display`,
+    `managed_connectors`, `managed_llm`, `referrals`, `beta_invites` and
+    `reranking`, plus an index signature, so a flag a later server adds
+    still type-checks.
+  - `SleepRunStatus` gains `"degraded"` (server v0.43.0+): the run
+    finished, but some of its judge-LLM calls failed. `SleepReport` gains
+    `llm_call_failures`, the count behind that grade, and
+    `SleepReportDetail` gains `merge_retention_result` (server v0.45.0+).
+  - `IndexerSkippedReason` gains `"memories_per_day_exceeded"` (server
+    v0.68.0+): the workspace's daily memory quota ran out and the batch
+    waits for the UTC reset.
+  - `Edge.origin` (server v0.52.0+) says who asserted an edge: `hebbian`,
+    `semantic` or `declared`. Only `hebbian` edges decay.
+  - `MemoryListItem.location` (server v0.54.0+), the coordinates of the
+    memory's `details.location`, and
+    `AuditVerifyResponse.erasure_pseudonymized` (server v0.55.0+), the audit
+    rows whose hash changed because a data erasure pseudonymized them.
+
+  A `switch` over `SleepRunStatus` or `IndexerSkippedReason` that ends in
+  an exhaustiveness check stops compiling until it handles the new value,
+  which the server has been sending since the versions above.
+
 ### Changed
 
 - **REST plan and quota refusals are no longer `KaguraConnectionError`**
@@ -174,6 +204,71 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ToolResult`.** The runtime value is the same object. Code that reads a
   key the type does not declare, or assigns the result to a
   `Record<string, unknown>`, no longer compiles and needs a cast.
+
+- **`MIN_SERVER_VERSION` is `"0.75.0"`**
+  ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)),
+  up from `"0.17.1"`. The typed surface outgrew 0.17.1 long ago:
+  `recallNearby` needs v0.53.0, and the gate-based error classes above read
+  a field only v0.75.0 sends. The constant stays advisory. Only
+  `checkServerVersion()` reads it, and that call warns on an older server
+  and never throws, so nothing refuses to run against one; an older server
+  ignores options it predates and leaves out fields it predates, as before.
+  The README now says which server version the SDK targets.
+
+- **`UsageInfo.mcp_calls_per_day` is a `UsageQuota`**, `{used, limit}`,
+  which is what `get_usage` has always sent. It was typed limit-only, so
+  today's call count was unreadable without a cast. Reading `.limit`
+  compiles as before; a `UsageInfo` built by hand, such as a test fixture,
+  now needs `used`. `UsageQuotaLimitOnly` no longer describes any response.
+  It is deprecated but still exported.
+
+- **`ResourceEventRecord.id` is a `string`, not a `number`.** This is a
+  correctness fix and it can break a build. The server has always sent the
+  event's BigInt id as a decimal string, so that it keeps its precision
+  above 2^53 - 1, which means code that treated it as a number was
+  already handling a string at runtime. Compare it as a string, or parse it
+  with `BigInt()`, not `Number()`. `event_metadata` on the same record is
+  typed `| null` too, because the server sends `null` for an event stored
+  without metadata. `ResourceEventItem.id`, in `getIndexerStatus`'s
+  `recent_events`, stays a number because the server sends a number there.
+
+### Fixed
+
+- **Docs that no longer matched the server**
+  ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)):
+
+  - A soft-deleted memory is recoverable until the deployment's cleanup
+    window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30
+    days), not for a fixed 30 days. Server v0.66.0 made the window
+    configurable. Fixed in `forget`, the README and
+    `kagura-memory forget --help`.
+  - `createContext`'s `embeddingModel` was called immutable. No API call
+    changes it, but since server v0.66.0 an operator can migrate a
+    context to another model.
+  - `RecallOptions.filters` now lists every filter the server accepts,
+    including `scope`, `importance`, `tags_normalize` (v0.65.0),
+    `source_uri_prefix`, `source_type`, and the `near` / `within` geo
+    filters (v0.54.0), and says when `tag_suggestions` comes back.
+    `recall()` documents `degraded` and `degraded_reason` (v0.66.0). They
+    mark a keyword-only fallback, where an empty result means the search was
+    impaired, not that nothing is stored. In `getAgentBootstrap` that flag
+    is on `components.recall`, and the envelope's own `degraded` stays
+    `false`, because the recall succeeded.
+  - The `Edge` doc named three edge types the server does not have
+    (`semantic_similarity`, `declared_link`, `tag_cooccurrence`) and left
+    out four it does. It now lists the server's eight. The test fixture
+    that used `semantic_similarity` uses `related_to` now.
+  - `rollbackSleepRun` accepts a `degraded` run as well as a `completed`
+    one.
+  - The per-memory binding filters, `allowed_memory_types` and
+    `allowed_source_types`, were described as reserved and always `null`.
+    Server v0.51.0 enforces them. The docs now say so, and say that no
+    typed option sets them yet.
+  - `TagInfo` said MCP `recall` fills `sample_summary` in `related_tags`.
+    Since server v0.73.0 those items carry only `tag` and `count`.
+  - `SecretValueResponse.ciphertext` stays typed `string` even though the
+    server's schema allows `null`. That `null` is reserved for an offload
+    that no write path uses yet, and the doc now says so.
 
 ## [0.8.1] - 2026-09-23
 

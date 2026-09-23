@@ -1,14 +1,24 @@
 import { describe, expect, it } from "vitest";
 
 import type {
+  AgentBootstrapResponse,
+  AuditVerifyResponse,
   ContextInfo,
   Edge,
+  IndexerStatusResponse,
   ListContextsResponse,
   ListTagsResponse,
   LoadGuardrailsResponse,
+  MemoryListResponse,
+  ResourceEventsListResponse,
+  RollbackResult,
   SearchConfig,
+  ServerInfo,
+  SleepReport,
   SleepReportDetail,
   ToolTrigger,
+  UsageInfo,
+  UsageQuotaLimitOnly,
 } from "../src/models.js";
 
 // Compile-focused tests: the value here is that realistic wire payloads
@@ -178,12 +188,14 @@ const listContexts: ListContextsResponse = {
   can_create: true,
 };
 
+// A Sleep-discovered edge: the relation and its provenance are separate.
 const edge: Edge = {
   source_id: "mem_a",
   target_id: "mem_b",
-  edge_type: "semantic_similarity",
+  edge_type: "related_to",
   weight: 1.5,
   confidence: 0.92,
+  origin: "semantic",
   created_at: "2026-06-30T12:00:00Z",
   last_updated: null,
 };
@@ -206,6 +218,7 @@ const sleepReport: SleepReportDetail = {
   error_message: null,
   edge_discovery_result: { candidates: 40 },
   dedup_result: null,
+  merge_retention_result: { purged: 0, retention_days: 30, cutoff: "2026-06-04 02:00" },
   actions: [
     {
       id: "act_1",
@@ -218,6 +231,149 @@ const sleepReport: SleepReportDetail = {
     },
   ],
   action_count: 1,
+};
+
+// A run whose judge-LLM calls partly failed: still a finished run.
+const degradedRun: SleepReport = {
+  report_id: "rpt_002",
+  status: "degraded",
+  memories_processed: 50,
+  edges_created: 2,
+  memories_merged: 0,
+  memories_promoted: 1,
+  llm_calls_made: 12,
+  llm_tokens_used: 4000,
+  llm_call_failures: 3,
+};
+
+const rollback: RollbackResult = {
+  report_id: "rpt_002",
+  status: "rolled_back",
+  rollback_summary: {
+    edges_deleted: 2,
+    merges_reversed: 0,
+    merges_unreversible: 0,
+    importance_restored: 0,
+    promotions_reversed: 0,
+    importance_kept: 0,
+    promotions_kept: 1,
+    archives_restored: 0,
+    errors: [],
+  },
+};
+
+// /api/v1/system/info as a v0.75.0 server sends it.
+const serverInfo: ServerInfo = {
+  name: "Kagura Memory Cloud",
+  version: "0.75.0",
+  description: "Remote MCP Server + Web Management",
+  environment: "production",
+  search_defaults: { use_rerank: false, reranker_provider: "voyage", reranker_model: "rerank-2" },
+  features: {
+    neural_memory: true,
+    research_tools: false,
+    plan_page: true,
+    byok: true,
+    cost_display: true,
+    managed_connectors: true,
+    managed_llm: true,
+    referrals: false,
+    beta_invites: false,
+    reranking: true,
+    // A flag a later server adds still type-checks.
+    some_future_flag: true,
+  },
+};
+
+const usage: UsageInfo = {
+  plan: "pro",
+  memories: { used: 1200, limit: 50000, percentage: 2.4 },
+  contexts: { used: 4, limit: 20 },
+  members: { used: 2, limit: 5 },
+  mcp_calls_per_day: { used: 317, limit: 10000 },
+};
+
+// Deprecated, but still exported so existing imports compile.
+const limitOnly: UsageQuotaLimitOnly = { limit: 10000 };
+
+const indexerStatus: IndexerStatusResponse = {
+  resource_id: "slack",
+  state: {
+    job_status: "idle",
+    active_version: 3,
+    last_offset: 120,
+    metrics: { applied_upserts: 0, skipped_reason: "memories_per_day_exceeded" },
+  },
+  recent_events: [{ id: 120, op: "upsert", doc_id: "msg-1" }],
+};
+
+const resourceEvents: ResourceEventsListResponse = {
+  events: [
+    {
+      // A BigInt past 2^53 - 1, which a JSON number could not hold exactly.
+      id: "9007199254740993",
+      op: "delete",
+      doc_id: "msg-1",
+      version: null,
+      importance: 0.6,
+      created_at: "2026-09-20T10:00:00Z",
+      payload: null,
+      event_metadata: null,
+      payload_bytes: 0,
+      payload_truncated: false,
+    },
+  ],
+  next_cursor: null,
+};
+
+const memoryList: MemoryListResponse = {
+  memories: [
+    {
+      id: "mem_a",
+      summary: "Coffee shop with reliable wifi",
+      type: "note",
+      scope: "persistent",
+      importance: 0.5,
+      created_at: "2026-09-01T00:00:00Z",
+      updated_at: "2026-09-01T00:00:00Z",
+      location: { lat: 35.6812, lon: 139.7671 },
+    },
+    {
+      id: "mem_b",
+      summary: "A memory with no place",
+      type: "note",
+      scope: "working",
+      importance: 0.5,
+      created_at: "2026-09-02T00:00:00Z",
+      updated_at: "2026-09-02T00:00:00Z",
+      location: null,
+    },
+  ],
+  total: 2,
+  has_more: false,
+};
+
+const auditVerify: AuditVerifyResponse = {
+  valid: true,
+  entries: 42,
+  head: "ab12",
+  erasure_pseudonymized: [7, 19],
+};
+
+// The recall component carries its own degraded flag; the envelope's
+// stays false because the recall succeeded.
+const bootstrap: AgentBootstrapResponse = {
+  status: "success",
+  degraded: false,
+  agent: { agent_id: "agent_1", name: "ci-agent" },
+  components: {
+    recall: {
+      status: "ok",
+      results: [],
+      degraded: true,
+      degraded_reason: "embedding_unavailable",
+    },
+  },
 };
 
 describe("models", () => {
@@ -256,7 +412,8 @@ describe("models", () => {
   });
 
   it("Edge compiles and reads", () => {
-    expect(edge.edge_type).toBe("semantic_similarity");
+    expect(edge.edge_type).toBe("related_to");
+    expect(edge.origin).toBe("semantic");
     expect(edge.weight).toBe(1.5);
   });
 
@@ -266,5 +423,53 @@ describe("models", () => {
     // Detail-only fields:
     expect(sleepReport.action_count).toBe(1);
     expect(sleepReport.actions?.[0]?.action_type).toBe("create_edge");
+    expect(sleepReport.merge_retention_result?.retention_days).toBe(30);
+    // Optional, so a report from an older server still type-checks:
+    expect(sleepReport.llm_call_failures).toBeUndefined();
+  });
+
+  it("SleepReport carries the degraded status and its failure count", () => {
+    expect(degradedRun.status).toBe("degraded");
+    expect(degradedRun.llm_call_failures).toBe(3);
+  });
+
+  it("RollbackResult carries the kept and unreversible counts", () => {
+    expect(rollback.rollback_summary.promotions_kept).toBe(1);
+    expect(rollback.rollback_summary.merges_unreversible).toBe(0);
+  });
+
+  it("ServerInfo carries every feature flag and the search defaults", () => {
+    expect(serverInfo.features?.reranking).toBe(true);
+    expect(serverInfo.features?.some_future_flag).toBe(true);
+    expect(serverInfo.search_defaults?.reranker_provider).toBe("voyage");
+  });
+
+  it("UsageInfo types the daily MCP calls as used/limit", () => {
+    expect(usage.mcp_calls_per_day.used).toBe(317);
+    expect(usage.mcp_calls_per_day.limit).toBe(limitOnly.limit);
+  });
+
+  it("IndexerStatusResponse accepts the daily-quota skip reason", () => {
+    expect(indexerStatus.state?.metrics.skipped_reason).toBe("memories_per_day_exceeded");
+  });
+
+  it("ResourceEventRecord.id is a string, unlike ResourceEventItem.id", () => {
+    expect(resourceEvents.events?.[0]?.id).toBe("9007199254740993");
+    expect(resourceEvents.events?.[0]?.event_metadata).toBeNull();
+    expect(typeof indexerStatus.recent_events?.[0]?.id).toBe("number");
+  });
+
+  it("MemoryListItem carries an optional location", () => {
+    expect(memoryList.memories?.[0]?.location?.lat).toBe(35.6812);
+    expect(memoryList.memories?.[1]?.location).toBeNull();
+  });
+
+  it("AuditVerifyResponse carries the erasure-pseudonymized rows", () => {
+    expect(auditVerify.erasure_pseudonymized).toEqual([7, 19]);
+  });
+
+  it("a keyword-only bootstrap recall is flagged on the component", () => {
+    expect(bootstrap.degraded).toBe(false);
+    expect(bootstrap.components?.recall?.degraded).toBe(true);
   });
 });

@@ -1623,7 +1623,26 @@ describe("REST endpoints", () => {
     const client = makeClient(server);
     const info = await client.checkServerVersion();
     expect(info.version).toBe("0.1.0");
-    expect(MIN_SERVER_VERSION).toBe("0.17.1");
+    expect(MIN_SERVER_VERSION).toBe("0.75.0");
+  });
+
+  it("checkServerVersion warns below MIN_SERVER_VERSION and is silent at it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const [version, warns] of [
+        ["0.74.9", true],
+        ["0.75.0", false],
+        ["0.76.0", false],
+      ] as const) {
+        warn.mockClear();
+        const server = new FakeServer();
+        server.restResults["/api/v1/system/info"] = { name: "mc", version };
+        await makeClient(server).checkServerVersion();
+        expect(warn.mock.calls.length > 0, version).toBe(warns);
+      }
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("listMemories normalizes q and builds query params", async () => {

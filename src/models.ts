@@ -32,12 +32,49 @@ export interface EmbeddingModelsResponse {
 // Server info & usage models (v0.6.1)
 // ---------------------------------------------------------------------------
 
-/** Feature flags reported by the server. */
+/**
+ * Deployment feature flags reported by the server.
+ *
+ * Each says whether the deployment offers a feature at all, not whether the
+ * caller's plan includes it. A v0.75.0 server sends all ten named here; the
+ * index signature keeps a flag a later server adds type-checking.
+ */
 export interface ServerFeatures {
   /** @default false */
   neural_memory?: boolean;
   /** @default false */
   research_tools?: boolean;
+  /** The web UI's Plan page (server v0.40.0+). */
+  plan_page?: boolean;
+  /** Bring-your-own provider keys and the workspace cost dashboard (server v0.42.0+). */
+  byok?: boolean;
+  /** Whether the web UI shows costs at all (server v0.69.0+). */
+  cost_display?: boolean;
+  /** Connectors run on a shared managed worker (server v0.59.1+). */
+  managed_connectors?: boolean;
+  /** Memory Analysis can run without a workspace LLM key (server v0.69.0+). */
+  managed_llm?: boolean;
+  /** Referral endpoints are enabled (server v0.63.0+). */
+  referrals?: boolean;
+  /** Beta invites are enabled (server v0.70.0+). */
+  beta_invites?: boolean;
+  /**
+   * Reranking is switched on and its default provider can run (server
+   * v0.69.0+). A plan can still exclude it.
+   */
+  reranking?: boolean;
+  [key: string]: boolean | undefined;
+}
+
+/**
+ * The reranker settings a new context starts with — the deployment default
+ * (server v0.69.0+). Provider and model names only; never a URL or a key.
+ */
+export interface SearchDefaults {
+  use_rerank: boolean;
+  /** Known values: `voyage`, `cohere`, `self_hosted`. */
+  reranker_provider: string;
+  reranker_model: string;
 }
 
 /** Server information from `/api/v1/system/info`. */
@@ -46,6 +83,8 @@ export interface ServerInfo {
   version: string;
   description?: string | null;
   environment?: string | null;
+  /** Server v0.69.0+. */
+  search_defaults?: SearchDefaults;
   features?: ServerFeatures;
 }
 
@@ -56,7 +95,13 @@ export interface UsageQuota {
   percentage?: number | null;
 }
 
-/** Quota with limit only (no usage counter). */
+/**
+ * Quota with limit only (no usage counter).
+ *
+ * @deprecated No server response has this shape: `get_usage` sends
+ * `mcp_calls_per_day` as `{used, limit}`, now typed {@link UsageQuota}.
+ * Kept so existing imports compile.
+ */
 export interface UsageQuotaLimitOnly {
   limit: number;
 }
@@ -67,7 +112,8 @@ export interface UsageInfo {
   memories: UsageQuota;
   contexts: UsageQuota;
   members: UsageQuota;
-  mcp_calls_per_day: UsageQuotaLimitOnly;
+  /** `used` counts today's MCP calls. */
+  mcp_calls_per_day: UsageQuota;
 }
 
 /**
@@ -285,6 +331,11 @@ export interface MemoryListItem {
   created_at: string;
   /** ISO 8601 datetime string. */
   updated_at: string;
+  /**
+   * The memory's `details.location` coordinates, without `label` or
+   * `text` (server v0.54.0+); `null` when it has none.
+   */
+  location?: Pick<MemoryLocation, "lat" | "lon"> | null;
 }
 
 /** Paginated response from `list_memories` (`GET /api/v1/memory/list`). */
@@ -436,7 +487,11 @@ export interface ResourceEventBatchResponse {
  * embedded in `IndexerStatusResponse.recent_events`.
  */
 export interface ResourceEventRecord {
-  id: number;
+  /**
+   * The event's BigInt id as a decimal string, so it keeps its precision
+   * above 2^53 - 1. Unlike {@link ResourceEventItem.id}, which is a number.
+   */
+  id: string;
   op: "upsert" | "delete";
   doc_id: string;
   version?: number | null;
@@ -445,7 +500,7 @@ export interface ResourceEventRecord {
   /** ISO 8601 datetime string. */
   created_at?: string | null;
   payload?: Record<string, unknown> | null;
-  event_metadata?: Record<string, unknown>;
+  event_metadata?: Record<string, unknown> | null;
   payload_bytes?: number | null;
   /** True when the server truncated `payload` for size. @default false */
   payload_truncated?: boolean;
@@ -535,13 +590,17 @@ export type IndexerJobStatus = "idle" | "queued" | "running" | "failed";
 /**
  * Reasons the indexer may record under `metrics.skipped_reason` when a run
  * was skipped. Server degrades unknown values to `null` on the wire.
+ *
+ * `memories_per_day_exceeded` (server v0.68.0+) means the workspace's daily
+ * memory quota ran out; the batch waits for the UTC reset.
  */
 export type IndexerSkippedReason =
   | "no_pending_events"
   | "schema_not_found"
   | "context_not_found"
   | "empty_valid_points"
-  | "resource_entity_missing";
+  | "resource_entity_missing"
+  | "memories_per_day_exceeded";
 
 /** Per-run indexer metrics, flattened from the server JSONB column. */
 export interface IndexerStateMetrics {
@@ -594,7 +653,21 @@ export interface IndexerStatusResponse {
 // Sleep Maintenance (issue #85)
 // ---------------------------------------------------------------------------
 
-export type SleepRunStatus = "running" | "completed" | "failed" | "cancelled" | "rolled_back";
+/**
+ * Lifecycle state of a Sleep Maintenance run.
+ *
+ * `degraded` (server v0.43.0+) is a run that finished although some of its
+ * judge-LLM calls failed; if they all fail the run is `failed`. A degraded
+ * run still made its changes, so it can be rolled back like a `completed`
+ * one.
+ */
+export type SleepRunStatus =
+  | "running"
+  | "completed"
+  | "degraded"
+  | "failed"
+  | "cancelled"
+  | "rolled_back";
 
 /** Summary of a Sleep Maintenance run, returned by `get_sleep_history`. */
 export interface SleepReport {
@@ -611,6 +684,13 @@ export interface SleepReport {
   memories_promoted: number;
   llm_calls_made: number;
   llm_tokens_used: number;
+  /**
+   * Judge-LLM calls that raised, across all phases — the count behind a
+   * `degraded` or `failed` status (server v0.43.0+).
+   *
+   * @default 0
+   */
+  llm_call_failures?: number;
 }
 
 /**
@@ -648,6 +728,8 @@ export interface SleepReportDetail extends SleepReport {
   importance_result?: Record<string, unknown> | null;
   consolidation_result?: Record<string, unknown> | null;
   reindex_result?: Record<string, unknown> | null;
+  /** Server v0.45.0+. */
+  merge_retention_result?: Record<string, unknown> | null;
   actions?: SleepAction[];
   action_count: number;
 }
@@ -705,16 +787,17 @@ export interface RollbackResult {
  * A neural memory edge between two memories.
  *
  * Represents a directed link from `source_id` to `target_id` with a
- * semantic `edge_type` and a `weight`/`confidence` pair. Edges are created
- * either by users (manual curation) or by server-side processes (Sleep
- * Maintenance, k-NN seeding, declared links, tag co-occurrence).
+ * semantic `edge_type` and a `weight`/`confidence` pair. The relation
+ * (`edge_type`) and who asserted it (`origin`) are separate axes: a
+ * `related_to` edge is `declared` when a user created it and `semantic`
+ * when Sleep Maintenance found it.
  *
  * Note: `edge_type` is intentionally typed as `string` (not a literal
- * union) because the server's `VALID_EDGE_TYPES` set is open-ended and
- * grows with new auto-discovery processes (currently 7 values:
- * `neural_association`, `related_to`, `depends_on`, `learned_from`,
- * `semantic_similarity`, `declared_link`, `tag_cooccurrence`). The server
- * is the authority on validation.
+ * union) because the server's `VALID_EDGE_TYPES` set grows over time. As
+ * of server v0.75.0 it has 8 values: `neural_association`, `related_to`,
+ * `depends_on`, `learned_from`, `continues_from`, `references_file`,
+ * `supersedes` and `contradicts`. The server is the authority on
+ * validation.
  */
 export interface Edge {
   source_id: string;
@@ -724,6 +807,14 @@ export interface Edge {
   weight: number;
   /** Range 0.0-1.0. */
   confidence: number;
+  /**
+   * Where the edge came from (server v0.52.0+): `hebbian` (runtime
+   * co-activation; the only origin that decays), `semantic` (Sleep
+   * Maintenance edge discovery) or `declared` (asserted explicitly — by
+   * `create_edge`, `remember`'s `supersedes`, or a connector). Typed
+   * `string` for forward compatibility.
+   */
+  origin?: string;
   /** ISO 8601 datetime string. */
   created_at?: string | null;
   /** ISO 8601 datetime string. */
@@ -794,9 +885,9 @@ export interface RecallNearbyResponse {
  *
  * Mirrors the wire shape of the server's `RelatedTagItem` as emitted by
  * the `list_tags` MCP tool. `sample_summary` from the server-side model is
- * intentionally omitted because `list_tags` does not populate it (only
- * `recall.related_tags` does). The schema is otherwise aligned so callers
- * can unify their tag-info type between the two surfaces.
+ * intentionally omitted: neither MCP `list_tags` nor MCP
+ * `recall.related_tags` (server v0.73.0+, which sends only `tag` and
+ * `count`) populates it; only the REST recall endpoint does.
  */
 export interface TagInfo {
   tag: string;
@@ -1079,9 +1170,11 @@ export interface Agent {
  * violations are only logged. `is_default` marks the agent's bootstrap
  * default binding (max one per agent).
  *
- * `allowed_memory_types` / `allowed_source_types` are reserved for
- * memory-cloud #1286 (per-memory enforcement) and arrive as `null`
- * today.
+ * `allowed_memory_types` / `allowed_source_types` narrow which memories
+ * the binding may read (server v0.51.0+, memory-cloud #1299): `null` allows
+ * all, `[]` denies all. They are enforced under `"enforce"` and
+ * only logged under `"shadow"`. The bind options do not set them yet; use
+ * `callRawTool` for that.
  */
 export interface AgentBinding {
   id: string;
@@ -1164,6 +1257,10 @@ export interface AgentBootstrapComponent {
  * component reports `status="error"` under `components` while the rest
  * still return, with the top-level `degraded` flag set.
  *
+ * A recall that fell back to keyword-only search is not a failure, so it
+ * does not set the top-level flag: check `components.recall.degraded`
+ * (and `degraded_reason`) as well.
+ *
  * `context` reuses {@link ContextDetail} — the server emits the block
  * byte-compatible with `get_context_info` (`search_config` is not
  * included in bootstrap).
@@ -1235,7 +1332,13 @@ export interface SecretValueResponse {
   name: string;
   version_number: number;
   alg: string;
-  /** Armored age ciphertext (`-----BEGIN AGE ENCRYPTED FILE-----`). */
+  /**
+   * Armored age ciphertext (`-----BEGIN AGE ENCRYPTED FILE-----`).
+   *
+   * The server's schema makes this nullable, with exactly one of it and
+   * `blob_ref` set, for a planned offload of large values. No write path
+   * sets `blob_ref` as of server v0.75.0, so it stays typed `string`.
+   */
   ciphertext: string;
   blob_ref?: string | null;
   recipients_snapshot: string[];
@@ -1250,6 +1353,12 @@ export interface AuditVerifyResponse {
   head?: string | null;
   broken_at?: number | null;
   reason?: string | null;
+  /**
+   * Audit rows whose hash no longer matches because a user's identity was
+   * erased from them — expected, not tampering (server v0.55.0+). Present,
+   * possibly empty, when `valid` is true; `null` on a failed check.
+   */
+  erasure_pseudonymized?: number[] | null;
 }
 
 // ---------------------------------------------------------------------------

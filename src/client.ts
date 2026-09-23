@@ -55,15 +55,17 @@ import type {
 } from "./models.js";
 
 /**
- * Minimum memory-cloud server version this SDK was tested against.
+ * The memory-cloud server version this SDK targets and was tested against.
  *
  * The check is opt-in: callers must explicitly invoke
  * {@link KaguraClient.checkServerVersion} to log an advisory warning when
  * the connected server is older. Plain construction and tool calls never
- * throw on version mismatch; older servers may silently ignore unknown
- * parameters.
+ * throw on version mismatch. An older server still answers, but it may
+ * silently ignore options it predates, omit fields it predates, and report
+ * a tool it predates as not found; the methods say which server version
+ * a feature needs.
  */
-export const MIN_SERVER_VERSION = "0.17.1";
+export const MIN_SERVER_VERSION = "0.75.0";
 
 const MIN_SERVER_VERSION_TUPLE = MIN_SERVER_VERSION.split(".").slice(0, 3).map(Number);
 
@@ -181,9 +183,26 @@ export interface RecallOptions {
    */
   useRerank?: boolean;
   /**
-   * Optional filters: `type`, `tags`, `tags_match` ("any"/"all"),
-   * `created_after`/`created_before`, `updated_after`/`updated_before`,
-   * `trust_tier` ("trusted" excludes external/connector-ingested memories).
+   * Optional filters, sent in wire form; keys AND together:
+   *
+   * - `type`, `scope`: exact match.
+   * - `tags`: matches any listed tag; `tags_match: "all"` requires every
+   *   one. `tags_normalize: true` (server v0.65.0+) also matches spellings
+   *   that differ only in case, hyphen/underscore/space or a simple plural.
+   * - `importance`: `{ gte | lte | gt | lt: 0.0-1.0 }`.
+   * - `created_after` / `created_before` / `updated_after` /
+   *   `updated_before`: ISO 8601.
+   * - `source_uri_prefix` (e.g. `"vault://my-vault/"`) and `source_type`.
+   * - `trust_tier: "trusted"` excludes external/connector-ingested
+   *   memories.
+   * - `near: { lat, lon, radius_m? }` and `within: { polygon: [{ lat, lon },
+   *   ...] }` (server v0.54.0+) keep memories whose `details.location`
+   *   falls inside; memories with no location never match.
+   *
+   * When a tag filter matches nothing, the response can carry
+   * `tag_suggestions` (server v0.65.0+): stored tags close to each
+   * requested one, as `{ [requestedTag]: ["stored-tag (count)", ...] }`.
+   * The filter itself is never widened.
    */
   filters?: Record<string, unknown>;
   searchMode?: SearchMode;
@@ -283,7 +302,11 @@ export interface CreateContextOptions {
    * `validation_error`).
    */
   isPrivate?: boolean;
-  /** Embedding model (immutable after creation); see listEmbeddingModels(). */
+  /**
+   * Embedding model; see listEmbeddingModels(). No API call changes it
+   * after creation. On server v0.66.0+ a deployment operator can migrate a
+   * context to another model.
+   */
   embeddingModel?: string;
 }
 
@@ -396,11 +419,11 @@ export interface UpdateAgentOptions {
 
 /**
  * The subtractive scope trio shared by {@link BindAgentContextOptions}
- * and {@link UpdateAgentBindingOptions} — the ONE type to extend when
- * memory-cloud #1286 ships the reserved `allowedMemoryTypes` /
- * `allowedSourceTypes` filters (the server accepts only null for them
- * until per-memory enforcement lands, so they are deliberately not
- * declared yet; adding them later is non-breaking).
+ * and {@link UpdateAgentBindingOptions} — the ONE type to extend with the
+ * per-memory `allowed_memory_types` / `allowed_source_types` filters.
+ * Server v0.51.0 (memory-cloud #1299) enforces them and
+ * {@link AgentBinding} reads them back, but no option sets them yet; pass
+ * them through `callRawTool` until one does (adding it is non-breaking).
  */
 export interface AgentBindingScopeOptions {
   /** Whether the agent may read this context (server default: true). */
@@ -903,6 +926,13 @@ export class KaguraClient {
   /**
    * Search memories. Returns the API response with a `results` list.
    *
+   * When the semantic half of the search is unavailable, server v0.66.0+
+   * falls back to keyword-only search and adds `degraded: true` and
+   * `degraded_reason` (`"embedding_unavailable"` or
+   * `"vector_search_unavailable"`) instead of failing. Both keys are absent
+   * on a normal search. A degraded result has a different `confidence`
+   * basis, and an empty one means "search impaired", not "nothing stored".
+   *
    * @throws Error if `query` is empty/whitespace; if neither `contextId`
    *   nor `contextIds` is provided; if `contextIds` has fewer than 2 or
    *   more than 20 IDs; or if `searchMode` is invalid.
@@ -1186,8 +1216,8 @@ export class KaguraClient {
    * `enforcement_mode="enforce"`.
    *
    * Requires memory-cloud v0.49.0+ — older servers return an MCP
-   * "tool not found" error ({@link MIN_SERVER_VERSION} is deliberately
-   * not bumped; only the agent control plane needs the newer server).
+   * "tool not found" error. That predates {@link MIN_SERVER_VERSION}, so
+   * any server {@link checkServerVersion} does not warn about has it.
    *
    * @throws KaguraError on name conflict, agent quota, or insufficient
    *   role (owner/admin required).
@@ -1294,9 +1324,9 @@ export class KaguraClient {
   /**
    * Build the omit-when-undefined binding scope trio shared by
    * {@link bindAgentContext} and {@link updateAgentBinding} — the port of
-   * the Python SDK's `_binding_scope_payload`. When memory-cloud #1286
-   * ships the reserved filters, extend {@link AgentBindingScopeOptions}
-   * and map the new fields here.
+   * the Python SDK's `_binding_scope_payload`. To expose the per-memory
+   * filters (server v0.51.0+), extend {@link AgentBindingScopeOptions} and
+   * map the new fields here.
    */
   private static bindingScopeArgs(options: AgentBindingScopeOptions): Record<string, unknown> {
     const args: Record<string, unknown> = {};
@@ -1395,7 +1425,9 @@ export class KaguraClient {
    * Components are **fail-soft**: a failing component reports
    * `{"status": "error", ...}` under `components` while the rest still
    * return, with the top-level `degraded` flag set. Identity and
-   * authorization failures are total and throw instead.
+   * authorization failures are total and throw instead. A keyword-only
+   * recall (see {@link recall}) is not a failure: it sets
+   * `components.recall.degraded`, not the top-level flag.
    *
    * The REST companion (`POST /api/v1/agents/{agent_id}/bootstrap`) is
    * available via `AgentsClient` for API-key-only callers such as
@@ -1585,8 +1617,9 @@ export class KaguraClient {
   }
 
   /**
-   * Soft-delete memories (30-day retention) by specific memoryId or by
-   * search query.
+   * Soft-delete memories by specific memoryId or by search query. They
+   * stay recoverable until the deployment's cleanup window passes
+   * (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days).
    *
    * A target the caller may not delete, or one already gone, is skipped
    * silently, not refused. Since server v0.74.0 that includes every tool
@@ -1948,7 +1981,10 @@ export class KaguraClient {
     return result as ToolResult & { config: SearchConfig };
   }
 
-  /** Get server name, version, environment, and feature flags. */
+  /**
+   * Get server name, version, environment, feature flags, and (server
+   * v0.69.0+) the reranker defaults new contexts start with.
+   */
   async getServerInfo(): Promise<ServerInfo> {
     return this.restGet<ServerInfo>("/api/v1/system/info");
   }
@@ -2114,9 +2150,10 @@ export class KaguraClient {
   }
 
   /**
-   * Reverse the effects of a completed Sleep Maintenance run. The server
-   * processes actions in reverse order with per-step commits — a partial
-   * failure means SOME actions may have been reversed before the error.
+   * Reverse the effects of a `completed` or `degraded` Sleep Maintenance
+   * run; any other status is refused. The server processes actions in
+   * reverse order with per-step commits — a partial failure means SOME
+   * actions may have been reversed before the error.
    *
    * A partial rollback throws {@link KaguraPartialRollbackError} rather
    * than returning, and its `summary` is the {@link RollbackSummary} a

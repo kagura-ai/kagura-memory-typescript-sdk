@@ -29,6 +29,12 @@ the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
 
+Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`).
+`checkServerVersion()` warns, and never throws, on an older server, which
+still answers: it ignores options it predates, leaves out fields it
+predates, and reports a tool it predates as not found. The method notes
+below say which server version a feature needs.
+
 ## Quick Start
 
 ```ts
@@ -308,10 +314,10 @@ when `undefined`.
 | Method | What it does |
 |--------|--------------|
 | `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
-| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. |
-| `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. A target the caller may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. |
+| `forget` | Soft-delete by `memoryId` or by `query`, recoverable until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). A target the caller may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. |
 | `listMemories` | Browse with substring, facet, and time-window filters. Omit `contextId` for the caller's cross-context view. |
 
 ### Deterministic lanes
@@ -342,7 +348,7 @@ the counterpart to `recall`'s probabilistic search.
 | Method | What it does |
 |--------|--------------|
 | `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. |
-| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraPlanError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` is immutable afterwards. |
+| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraPlanError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). |
 | `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed. |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraPlanError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
@@ -364,15 +370,15 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 |--------|--------------|
 | `getSleepHistory` | Recent runs, newest first. |
 | `getSleepReport` | One run in detail, including the per-action audit log. |
-| `rollbackSleepRun` | Reverse a completed run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. Read `err.summary` — the same counts a clean run returns, with `err.summary.errors` naming each action that was not reversed — before deciding to retry. |
+| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. Read `err.summary` — the same counts a clean run returns, with `err.summary.errors` naming each action that was not reversed — before deciding to retry. |
 
 ### Workspace and server
 
 | Method | What it does |
 |--------|--------------|
-| `getServerInfo` | Version and capabilities. |
-| `checkServerVersion` | Compare against `MIN_SERVER_VERSION`. Advisory: logs, never throws. |
-| `getUsage` | Workspace quota and usage. |
+| `getServerInfo` | Version, deployment feature flags, and (v0.69.0+) the reranker defaults new contexts start with, under `search_defaults`. |
+| `checkServerVersion` | Compare against `MIN_SERVER_VERSION` (0.75.0). Advisory: logs, never throws. |
+| `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. |
 | `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
@@ -407,6 +413,9 @@ const bootstrap = await client.getAgentBootstrap({
 if (bootstrap.degraded) {
   // some component failed fail-soft; inspect bootstrap.components
 }
+if (bootstrap.components?.recall?.degraded) {
+  // the recall ran keyword-only; it succeeded, so the flag above stays false
+}
 ```
 
 Deployed agents holding only an API key (e.g. an agent-bound member key)
@@ -420,8 +429,8 @@ const bootstrap = await agents.bootstrap({ agentId: "agent-uuid" });
 ```
 
 Requires memory-cloud **v0.49.0+** — older servers return MCP "tool not
-found" / REST 404 on this surface; everything else in the SDK keeps
-working against `MIN_SERVER_VERSION`.
+found" / REST 404 on this surface. The SDK as a whole targets v0.75.0
+(see [Installation](#installation)).
 
 ## The WHERE axis — geospatial memories
 
