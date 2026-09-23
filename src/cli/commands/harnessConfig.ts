@@ -1,7 +1,6 @@
 /**
- * Text helpers for `setup`: MCP URL query edits, the line-based `.env`
- * files Hermes and OpenClaw read, the blocks printed for a user to paste,
- * and read-only scans for an existing entry.
+ * Text helpers for `setup`: MCP URL query edits, the blocks printed for a
+ * user to paste, and read-only scans for an existing entry.
  *
  * None of this parses TOML, YAML or JSON5, and none of it rewrites those
  * files. The package takes no runtime dependencies, so a harness config is
@@ -12,9 +11,10 @@
  * replace an entry nobody asked it to touch.
  */
 
-import { CliError } from "../parse.js";
-
-/** The variable Codex and OpenClaw entries read the key from. */
+/**
+ * The variable Codex and OpenClaw entries read the key from unless
+ * `--api-key-env` names another — Python's `DEFAULT_KEY_ENV`.
+ */
 export const KEY_ENV_VAR = "KAGURA_API_KEY";
 
 interface SplitUrl {
@@ -121,41 +121,6 @@ export function withoutQuery(url: string): string {
 export function pluginServerUrl(url: string): string {
   const base = withoutQuery(url);
   return queryParam(url, "guardrails")?.trim().toLowerCase() === "off" ? `${base}?guardrails=off` : base;
-}
-
-/**
- * Set `name=value` in the text of a `.env` file.
- *
- * The first existing line for `name` is replaced in place (keeping an
- * `export` prefix) and any later ones are removed, so the new value is the
- * only one whichever occurrence a loader honours. Other lines, comments
- * and the file's line endings are left as they were.
- *
- * @throws CliError when the value holds a line break: written raw, it
- *   would end the line and start a second, attacker-shaped one.
- */
-export function upsertEnvLine(text: string, name: string, value: string): string {
-  if (/[\r\n]/.test(value)) {
-    throw new CliError(`refusing to write ${name}: the value contains a line break`);
-  }
-  const eol = text.includes("\r\n") ? "\r\n" : "\n";
-  const matcher = new RegExp(`^\\s*(export\\s+)?${name}\\s*=`);
-  const lines = text === "" ? [] : text.split(/\r?\n/);
-  // A final newline leaves one empty element; it is put back by the join.
-  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-
-  const out: string[] = [];
-  let placed = false;
-  for (const line of lines) {
-    const match = matcher.exec(line);
-    if (match === null) out.push(line);
-    else if (!placed) {
-      out.push(`${match[1] ?? ""}${name}=${value}`);
-      placed = true;
-    }
-  }
-  if (!placed) out.push(`${name}=${value}`);
-  return `${out.join(eol)}${eol}`;
 }
 
 function escapeRegExp(text: string): string {
@@ -288,18 +253,18 @@ export function json5HasServer(text: string, name: string): boolean {
 
 /**
  * The `[mcp_servers.<name>]` table for Codex: exactly `url` and
- * `bearer_token_env_var`.
+ * `bearer_token_env_var`, naming `keyEnv`.
  *
  * Not `bearer_token` — Codex rejects an inline token on an HTTP server and
  * the whole file then fails to load — and not `http_headers`, which would
  * put the key in the file. A JSON string literal is a valid TOML basic
  * string, escapes included.
  */
-export function codexTomlBlock(name: string, url: string): string {
+export function codexTomlBlock(name: string, url: string, keyEnv: string = KEY_ENV_VAR): string {
   return [
     `[mcp_servers.${name}]`,
     `url = ${JSON.stringify(url)}`,
-    `bearer_token_env_var = ${JSON.stringify(KEY_ENV_VAR)}`,
+    `bearer_token_env_var = ${JSON.stringify(keyEnv)}`,
   ].join("\n");
 }
 
@@ -340,21 +305,21 @@ export function hermesYamlBlock(name: string, url: string, envVar: string, entry
  * The OpenClaw entry.
  *
  * `transport` is explicit because OpenClaw otherwise assumes `sse`. The
- * header is a `${VAR}` reference: `mcp.servers.*.headers` does not take
+ * header is a `${keyEnv}` reference: `mcp.servers.*.headers` does not take
  * OpenClaw's secret references, and a literal key is what
  * `openclaw mcp doctor` warns about.
  */
-export function openclawEntry(url: string): Record<string, unknown> {
+export function openclawEntry(url: string, keyEnv: string = KEY_ENV_VAR): Record<string, unknown> {
   return {
     url,
     transport: "streamable-http",
-    headers: { Authorization: `Bearer \${${KEY_ENV_VAR}}` },
+    headers: { Authorization: `Bearer \${${keyEnv}}` },
   };
 }
 
 /** The entry nested at `mcp.servers.<name>`; JSON, which JSON5 accepts. */
-export function openclawBlock(name: string, url: string): string {
-  return JSON.stringify({ mcp: { servers: { [name]: openclawEntry(url) } } }, null, 2);
+export function openclawBlock(name: string, url: string, keyEnv: string = KEY_ENV_VAR): string {
+  return JSON.stringify({ mcp: { servers: { [name]: openclawEntry(url, keyEnv) } } }, null, 2);
 }
 
 /** POSIX-quote one argument, leaving plain words bare. */

@@ -151,6 +151,18 @@ describe("execFile", () => {
     const child = fakeChild();
     const pending = execFile("x", [], {}, (() => child) as never);
     child.emit("close", null, "SIGTERM");
-    await expect(pending).resolves.toMatchObject({ code: 128 + os.constants.signals.SIGTERM });
+    const result = await pending;
+    expect(result).toMatchObject({ code: 128 + os.constants.signals.SIGTERM });
+    // Not killed by execFile's own timeout: someone else sent the signal.
+    expect(result.timedOut).toBeUndefined();
+  });
+
+  it("says when the program was killed for running past its timeout", async () => {
+    // Node's spawn kills the child itself when `timeout` passes, and marks it
+    // killed; `setup` then reports Python's "timed out after 120s".
+    const child = Object.assign(fakeChild(), { killed: true });
+    const pending = execFile("x", [], { timeoutMs: 120_000 }, (() => child) as never);
+    child.emit("close", null, "SIGTERM");
+    await expect(pending).resolves.toMatchObject({ code: 128 + os.constants.signals.SIGTERM, timedOut: true });
   });
 });

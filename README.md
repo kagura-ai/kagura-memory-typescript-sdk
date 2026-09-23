@@ -118,7 +118,7 @@ npx kagura-memory auth login --profile work --read-only
 npx kagura-memory recall "OAuth setup" -c dev -k 10
 npx kagura-memory recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
-npx kagura-memory setup codex --dry-run   # key from .kagura.json or KAGURA_API_KEY
+npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
 npx kagura-memory doctor
 ```
 
@@ -127,33 +127,55 @@ The context id comes from `-c/--context-id`, or from `context_id` in
 shared with the Python CLI, so either tool can create a profile the other
 then uses.
 
-**Connecting a harness.** Each `setup` subcommand writes `.kagura.json`
-(0600, gitignored) and an MCP entry named `kagura-memory`: the URL plus a
-Bearer header. The key comes from `--api-key`, else the `api_key` in
-`.kagura.json`, else `KAGURA_API_KEY`. `.kagura.json` gets the URL as
-given; the parameters that `--guardrails` and `--tool-profile` set go on
-the entry's URL only. The key is never printed, and no harness CLI gets
-it on its command line. Of the files that hold the MCP entry, only a
-project `.mcp.json` holds the key as well; Hermes and OpenClaw read it
-from their own `.env`, as the table shows.
-`setup codex` also leaves a key it found in `KAGURA_API_KEY` out of
-`.kagura.json`.
+**Connecting a harness.** Each `setup` subcommand sets up an MCP entry
+named `kagura-memory`: the URL plus a Bearer header. The key is never
+printed, and no harness CLI gets it on its command line.
 
-| Subcommand | How the entry is applied | Where the key lives |
+`setup claude` also writes `.kagura.json` (0600, gitignored). Its key
+comes from `--api-key`, else the `api_key` in `.kagura.json`, else
+`KAGURA_API_KEY`. `.kagura.json` gets the URL as given; the parameters
+that `--guardrails` and `--tool-profile` set go on the entry's URL only.
+
+`setup codex`, `setup hermes` and `setup openclaw` never see, write, print
+or pass the key, as in the Python CLI. The entry names the environment
+variable the harness reads the key from, and the notes say where to put
+it; a missing key is no error. These three write no file themselves:
+no `.kagura.json`, no `.gitignore` line, no harness `.env`. The harness's
+own CLI writes the entry, or you add the printed block.
+
+| Subcommand | How the entry is applied | Where the key goes |
 |---|---|---|
 | `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json --scope user …` | `--scope project`: in `.mcp.json`; `--scope user`: `KAGURA_MCP_API_KEY`, exported where Claude Code starts |
-| `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `KAGURA_API_KEY`, exported in the shell that starts Codex |
-| `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` always prompts | `$HERMES_HOME/.env`, as `MCP_KAGURA_MEMORY_API_KEY` (`MCP_<NAME>_API_KEY` with `--name`) |
-| `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe` | `$OPENCLAW_STATE_DIR/.env` (default `~/.openclaw/.env`), as `KAGURA_API_KEY` |
+| `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `export KAGURA_API_KEY=…` in the shell profile that starts Codex |
+| `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` is interactive, and this port never prompts | `MCP_KAGURA_MEMORY_API_KEY=…` (`MCP_<NAME>_API_KEY` with `--name`) in the `.env` beside `config.yaml`, added with an editor |
+| `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe`, or `openclaw mcp set` to replace an entry | `KAGURA_API_KEY=…` in `$OPENCLAW_STATE_DIR/.env` (default `~/.openclaw/.env`), added with an editor |
+
+`--api-key-env VAR` renames `KAGURA_API_KEY` for Codex and OpenClaw
+(upper-case letters, digits and `_`). Hermes names its variable itself,
+so `setup hermes` refuses the option (exit 2). The entry goes into
+Codex's `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`), into
+Hermes's `config.yaml` in `$HERMES_HOME` or else the active Hermes
+profile's directory (`~/.hermes/profiles/<name>` when
+`~/.hermes/active_profile` names one, else `~/.hermes`), or into
+OpenClaw's `$OPENCLAW_CONFIG_PATH` (default `openclaw.json` in the state
+directory). The closing notes name the command that checks it:
+`codex mcp get kagura-memory`, `hermes mcp test kagura-memory` or
+`openclaw mcp doctor kagura-memory --probe`. `--mcp-url` defaults to the
+configured `mcp_url`, then `https://memory.kagura-ai.com/mcp`. A plain
+`http://` URL other than localhost is refused (exit 2), since the entry
+sends the key there with every request.
 
 This package has no TOML, YAML or JSON5 parser, so it never rewrites those
 files. When the harness's CLI is not on `PATH`, the block is printed on
-stderr with the file it belongs in (`$CODEX_HOME/config.toml`,
-`$HERMES_HOME/config.yaml`, or `$OPENCLAW_CONFIG_PATH`, by default
-`openclaw.json` in the OpenClaw state directory), and stdout stays one
-JSON document. When Hermes's `config.yaml` already has an `mcp_servers:`
-key, only the `kagura-memory` entry is printed, to go under it: a second
-top-level `mcp_servers:` would replace the first, and every server in it.
+stderr with the file it belongs in, and stdout stays one JSON document.
+When Hermes's `config.yaml` already has an `mcp_servers:` key, only the
+`kagura-memory` entry is printed, to go under it: a second top-level
+`mcp_servers:` would replace the first, and every server in it. An entry
+of the same name, which setup finds by scanning the file, stops the run
+(exit 1, nothing changed) unless you pass `--force`. For Codex that holds
+always; for Hermes and OpenClaw only with their CLI on `PATH`, since the
+Python CLI finds their entries only through it. Without the CLI, setup
+prints the block to go in place of the old entry and exits 0.
 On Windows, a CLI installed only as an npm `.cmd` shim counts as not
 found: Node runs one only through a shell, which would re-parse the
 arguments.
@@ -173,10 +195,18 @@ to date. `--scope project` still writes the key into `.mcp.json`, so keep
 that file out of version control (setup adds it to `.gitignore`).
 
 `--guardrails <context-id|off>` (memory-cloud v0.74.0+) sets the URL's
-`guardrails` parameter on `setup claude` and `setup codex`. Hermes and
-OpenClaw do not pass the server's instructions to the model, so there
-`off` is refused and a context id is dropped, whether it comes from the
-flag or from the URL. `--tool-profile` (claude, codex; memory-cloud
+`guardrails` parameter on `setup claude` and `setup codex`. On `setup
+codex`, when neither the flag nor `--mcp-url` sets one, it defaults to
+`off` while the Kagura plugin's Codex hooks are on for the entry (their
+`config.json` names its table in `mcp_server`, `kagura-memory` by
+default), and otherwise to `-c` when that is a UUID. With a context
+there, the notes give the Python CLI's
+`kagura guardrails digest … --target instructions` command, which
+previews what Codex receives. Hermes and OpenClaw do not read the
+server's instructions. There `--guardrails off` is refused (exit 2), and
+a context id is not written, whether it comes from the flag or from the
+URL. A `?guardrails=off` already in the URL is kept, with a warning, as
+in Python. `--tool-profile` (claude, codex; memory-cloud
 v0.73.0+) sets `profile` and refuses an empty name. The server knows
 `full` and `core` (case-sensitive) and fails `tools/list` for any other
 name, which leaves the harness with no Kagura tools. It applies a
@@ -186,9 +216,10 @@ first, replacing any value already there, as the Python CLI writes them.
 A `setup claude` run that leaves out a `guardrails` or `profile` value
 the entry it replaces had says so in a note. `--name`, `--force` and
 `--dry-run` (codex, hermes, openclaw) name the entry, replace an existing
-one, and show what would be configured without changing anything. A name
-starts with a letter or digit: it is a bare argument to `codex` and
-`openclaw`, which would read `--help` as an option.
+one, and show the command or block without changing anything. A name is
+1-64 letters, digits, `-` or `_`, as in Python, and here it also starts
+with a letter or digit: it is a bare argument to `codex` and `openclaw`,
+which would read `--help` as an option.
 
 Claude Code uses the `kagura-memory` entry from the strongest scope
 (local > project > user). It keys local scope by the git repository root
@@ -234,10 +265,12 @@ the zero-dependency promise. Not ported yet: `auth create-key`,
 (`member list|add|set-role|remove`, `invite create|list|revoke`);
 `guardrails load` and `guardrails digest`; `measure record` and
 `measure series`; the `-v/--verbose` and `--progress` options of
-`files upload` and `resource import`; and the `--url-form`,
-`--api-key-env` and `--agents-md` options of `setup codex`,
-`setup hermes` and `setup openclaw`, which this CLI rejects as unknown
-options. Use the Python CLI for all of these. The Claude Code extras of
+`files upload` and `resource import`; and the `--agents-md` option of
+`setup codex`, `setup hermes` and `setup openclaw`, the guardrail export,
+which needs `guardrails digest` first
+([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57))
+and which this CLI rejects as an unknown option. Use the Python CLI for
+all of these. The Claude Code extras of
 `kagura setup claude` are not ported either: its SessionStart and
 PostToolUse hooks and its `/kagura-recall` and `/kagura-remember`
 commands. `setup claude` here writes `.kagura.json` and the MCP entry
@@ -246,10 +279,10 @@ only, and takes their flags as inert (see above).
 **Only in this bin.** `secret keygen --reveal`: keygen prints the private
 key (see key custody below) and refuses to print it to a terminal without
 `--reveal`. `-c` is short for `--context-id` on every `setup` subcommand.
-`setup codex`, `setup hermes` and `setup openclaw` take `--api-key` and
-`--project-dir`, and `setup codex` also takes `--tool-profile`; the Python
-CLI has these three options only on `setup claude`. Every `setup` entry
-here is built from an API key, as described above.
+`setup codex` also takes `--tool-profile`, which the Python CLI has only on
+`setup claude`. `setup codex`, `setup hermes` and `setup openclaw` still
+accept `--api-key` and `--project-dir`, which they took before 0.11.0, so
+older scripts still run. Neither does anything now, and a note says so.
 
 **Three deliberate divergences.**
 
@@ -261,12 +294,40 @@ here is built from an API key, as described above.
   closed when neither is set. **A key custodied by the Python CLI is not
   readable here, and vice versa.**
 - `setup … --profile` (the OAuth path) writes an entry that launches
-  Python's `kagura-mcp` stdio proxy, which this package does not install;
-  every `setup` subcommand reports the fact instead of writing a config
-  that would fail at launch. The `--api-key` path works here.
+  Python's `kagura-mcp` stdio proxy, which this package does not install.
+  Every `setup` subcommand reports the fact, and names the Python CLI's
+  `kagura setup <harness> --profile` command, instead of writing a config
+  that would fail at launch. The `--api-key` path of `setup claude` works
+  here, and so does the URL form of the other three. With `--url-form`,
+  those three ignore `--profile`, with a note: the Python CLI uses it
+  there to check the login, list contexts and fetch the `AGENTS.md`
+  export, and this port never contacts the server.
 - `config show` does not reproduce Python's key mask
   (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12 characters
   and print the whole secret twice.
+
+**`setup codex`, `setup hermes` and `setup openclaw`** also differ from
+the Python CLI in these ways, each on purpose:
+
+- Every entry here is the URL form, so `--url-form` is accepted and
+  changes nothing, and `--mcp-url` falls back to the configured URL where
+  Python requires it.
+- A `-c` that is not a UUID is not used for guardrails, and a note says
+  so. Python looks a name up through `--profile`, and without one exits 2.
+- `setup codex --force` runs one `codex mcp add`, which overwrites the
+  entry. Python runs `codex mcp remove` first.
+- `setup hermes` never runs `hermes mcp add`, which prompts; it prints the
+  block, as Python does under `-y`.
+- An existing entry is found by scanning the file, and not described by
+  kind. A readable but malformed `config.toml` does not stop
+  `setup codex`.
+- On Hermes and OpenClaw, a context id in `--mcp-url`'s `?guardrails=` is
+  dropped, where Python keeps it. On Codex, a `?guardrails=` already in
+  `--mcp-url` beats the hooks and `-c` defaults.
+- OpenClaw's `.env` is in `$OPENCLAW_STATE_DIR` when that is set.
+- Output is one JSON document on stdout, with Python's sentences in
+  `notes` and the block on stderr. A non-ASCII URL is written as UTF-8
+  where Python writes `\uXXXX` escapes; both are valid.
 
 Some small divergences run the other way: this CLI refuses what click
 would accept.

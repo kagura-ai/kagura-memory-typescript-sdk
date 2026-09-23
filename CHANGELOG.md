@@ -76,6 +76,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `updateMemory` refuses it; the Python CLI lets that one through and
   sends the empty value.
 
+- **`setup codex` and `setup openclaw` take `--api-key-env VAR`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
+  as the Python CLI's do (python-sdk#260): the variable the entry reads
+  the key from, `KAGURA_API_KEY` by default. It goes into `codex mcp add
+  --bearer-token-env-var`, OpenClaw's `Authorization=Bearer ${VAR}`
+  header, the printed block and the notes. A name that is not upper-case
+  letters, digits and `_` is a usage error (exit 2) with Python's message.
+  `setup hermes` refuses the option (exit 2), since Hermes names the
+  variable itself (`MCP_<NAME>_API_KEY`).
+
+- **`setup codex|hermes|openclaw --url-form`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55))
+  is accepted, so a script written for the Python CLI's URL form runs
+  here. Every entry this port writes is that form, so the flag changes
+  nothing. With it, `--profile` is ignored with a note instead of refused:
+  the Python CLI uses it there to check the login, list contexts and fetch
+  the `AGENTS.md` export, and this port never contacts the server.
+
 ### Changed
 
 - **`setup claude --scope user` keeps the API key off `claude`'s command
@@ -165,6 +183,115 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   end `Body: <the raw JSON>`; it now ends `Body: <the description>`, as the
   Python SDK's does. A body with an `error` code reads as before.
 
+- **`setup codex`, `setup hermes` and `setup openclaw` never see, write,
+  print or pass the API key, and write no file**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
+  as in the Python CLI (python-sdk#260). They wrote the key into Hermes's
+  `.env` as `MCP_<NAME>_API_KEY` and into OpenClaw's `.env` as
+  `KAGURA_API_KEY`, even a key found only in `KAGURA_API_KEY`, and wrote
+  `.kagura.json` (with the key, except on Codex) and its `.gitignore`
+  line. None of that happens now. A missing key is no longer an error,
+  where these setups exited 1 with `no API key`. The entry still only
+  names the variable, and a closing note says where to put the key:
+  - Codex: `export KAGURA_API_KEY=<your-api-key>` (or the `--api-key-env`
+    variable) in the shell profile that starts Codex.
+  - Hermes: `MCP_KAGURA_MEMORY_API_KEY=<your-api-key>` in the `.env`
+    beside the `config.yaml` setup names, added with an editor.
+  - OpenClaw: `KAGURA_API_KEY=<your-api-key>` in `$OPENCLAW_STATE_DIR/.env`
+    (default `~/.openclaw/.env`), added with an editor; then
+    `openclaw mcp doctor kagura-memory --probe`.
+
+  A `.env` line or `.kagura.json` an earlier release wrote is left as it
+  is, and the entries it serves go on working. Remove the key from
+  `.kagura.json` if nothing else there needs it. `--api-key` and
+  `--project-dir` are still accepted, so v0.10 scripts run, but they do
+  nothing, and a note says so; `--project-dir` no longer has to exist.
+  The JSON report keeps its fields, and `wrote` and `gitignore_added` are
+  now empty. `setup claude` is unchanged.
+
+- **The `--profile` refusal names the Python command for every harness**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  Python v0.40.0 ships `kagura setup codex|hermes|openclaw --profile`, so
+  the refusal says `pip install kagura-memory && kagura setup <harness>
+  --profile <p>` for each of them again, or `--url-form` here, where it
+  named the Python route for `setup claude` alone. `setup hermes|openclaw
+  --profile p --guardrails off` is now the usage error (exit 2) it is in
+  Python, where the `--profile` refusal came first and exited 1.
+
+- **A `?guardrails=off` already in the MCP URL is kept on Hermes and
+  OpenClaw, with a warning**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
+  as the Python CLI does: `Warning: --mcp-url has ?guardrails=off, which
+  removes the guardrails block from get_context_info: <harness> then gets
+  no guardrails from Kagura.` It was a usage error (exit 2), from
+  `--mcp-url` or from the configured `mcp_url` alike. `--guardrails off`
+  itself is still refused, with Python's sentence: `Hermes Agent does not
+  read MCP instructions: its guardrails come only from the guardrails
+  block of get_context_info, which --guardrails off removes.`
+
+- **A plain-HTTP MCP URL is refused on the harness setups**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
+  as in Python: an `--mcp-url` that is `http://` and not localhost exits 2
+  with `Invalid value for '--mcp-url': MCP URL must use HTTPS for security
+  (got: …). HTTP is only allowed for localhost development.`, since the
+  entry sends the key there with every request. A configured `mcp_url`
+  like that exits 1 and says to pass `--mcp-url`. `setup claude` does not
+  check, as in Python.
+
+- **An existing Hermes or OpenClaw entry stops setup only when that
+  harness's CLI is on `PATH`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The Python CLI finds those entries only through `hermes mcp list` and
+  `openclaw mcp show`, so without the CLI it prints the block and exits 0.
+  This port now does the same, where it exited 1. Its scan of the file then
+  only adds `in place of the existing one` to the message. A Codex entry
+  stops setup either way, since both CLIs read `config.toml` for it.
+
+- **`--name` takes at most 64 characters, and the message is Python's**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
+  `Invalid value for '--name': use 1-64 letters, digits, '-' or '_',
+  starting with a letter or digit`. The first character still has to be a
+  letter or digit, which Python does not require: the name is a bare
+  argument to `codex` and `openclaw`, which would read `--help` as an
+  option.
+
+- **The harness setups speak in the Python CLI's words**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The notes, the stderr headings and the errors now follow Python's:
+  - An existing entry: `Nothing was written: a kagura-memory entry
+    already exists in ~/.codex/config.toml; re-run with --force to replace
+    it.`
+  - A dry run: `Dry run: nothing is written, run or fetched.` first, then
+    `Setup would stop here: …` where a real run would stop, and `Would run:
+    <command>`, or `With --force, would run: <command>`. For OpenClaw that
+    command is `openclaw mcp set`, the one a `--force` run uses.
+  - The printed block: `Setup does not edit ~/.codex/config.toml itself
+    (<reason>). Add this kagura-memory entry to it[ in place of the
+    existing one]:`.
+  - The closing notes of a real or printed run: `Done: codex wrote
+    kagura-memory to ~/.codex/config.toml.`, the key note, Codex's `Restart
+    Codex (or start a new session) to load the entry.`, OpenClaw's
+    Gateway note, and `Check it with: codex mcp get kagura-memory` (`hermes
+    mcp test …`, `openclaw mcp doctor … --probe`). A dry run ends before
+    them, as in Python.
+  - Codex guardrails: the plugin-hooks default says `The plugin's hooks
+    deliver guardrails, so the URL gets ?guardrails=off (…)`, and a context
+    in the URL gets Python's digest note, with the Python CLI's `kagura
+    guardrails digest <uuid> --target instructions` command that previews
+    what Codex receives.
+  - Hermes and OpenClaw: a `--guardrails` context gets `Warning: … does not
+    read MCP instructions, so --guardrails has no effect there and is not
+    written.`
+  - A failing `codex` or `openclaw`: `` `codex mcp add` failed: <what it
+    printed> ``, or `exit code N`, or `timed out after 120s`. Any key it
+    echoes is still masked. Both now get Python's 120-second timeout,
+    where they got 60.
+  - Hermes is `Hermes Agent`, and paths under the home directory are
+    written `~/…`, in messages. The JSON fields keep full paths.
+  - `--help` has Python's summaries and option help. `--guardrails` is
+    written `off|CONTEXT_ID`, and `--mcp-url` and `--context-id` say what
+    they do here.
+
 ### Fixed
 
 - **`doctor` and `auth status` know a `kagura-mcp` entry by path or
@@ -203,14 +330,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `auth create-key` / `list-keys` / `revoke-key`, `workspace member …` /
   `workspace invite …`, `guardrails load` / `digest`, `measure record` /
   `series`, `-v/--verbose` / `--progress` on `files upload` and
-  `resource import`, and `--url-form` / `--api-key-env` / `--agents-md` on
-  `setup codex`, `setup hermes` and `setup openclaw`. The intro no longer
-  says every flag name is the Python CLI's: the options only this bin has
-  (`secret keygen --reveal`, `-c` on `setup`, and `--api-key` /
-  `--project-dir` / `--tool-profile` on the three harness subcommands)
-  are listed under **Only in this bin**. The divergence paragraph named
-  one place where this CLI refuses what click accepts, an empty
-  `--profile=` or `--scope=`; it now also names `--lock --unlock`,
+  `resource import`, and `--agents-md` on `setup codex`, `setup hermes`
+  and `setup openclaw` (`--url-form` and `--api-key-env` are ported now;
+  see Added). The intro no longer says every flag name is the Python
+  CLI's: the options only this bin has (`secret keygen --reveal`, `-c` on
+  `setup`, and `--tool-profile` on `setup codex`) are listed under **Only
+  in this bin**, beside the `--api-key` and `--project-dir` the harness
+  subcommands now accept and ignore (see Changed). The divergence
+  paragraph named one place where this CLI refuses what click accepts, an
+  empty `--profile=` or `--scope=`; it now also names `--lock --unlock`,
   `--rerank --no-rerank`, `auth logout --all --profile`,
   `--dismiss-supersede-candidate` beside an empty `--external-id=`, a
   value that begins with a dash, and attached or grouped short options.
@@ -226,6 +354,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--memory-id` / `--external-id` (or, for `forget`, `--memory-id` /
   `--query`) is also missing or wrong. This CLI ran those checks first and
   exited 1 with their message; it now converts the option first.
+
+- **`setup hermes` follows Hermes's active profile**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  Hermes keeps `config.yaml` and `.env` in `~/.hermes/profiles/<name>` when
+  `~/.hermes/active_profile` names a profile other than `default`. Setup
+  read `~/.hermes` instead, so it checked the wrong file for an existing
+  entry and named the wrong one. It now finds the home as the Python CLI
+  does: `$HERMES_HOME`, else the active profile's, else `~/.hermes`.
+
+- **The Codex plugin-hooks default counts only hooks that read this
+  entry**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  Any `kagura-memory-*/config.json` under Codex's plugin data turned
+  `setup codex`'s guardrails to `off`, even a directory of that name, and
+  even for hooks set up for another table. As in the Python CLI, it now
+  takes a `config.json` that is a JSON object of at most 64 KiB, whose
+  `mcp_server` (`kagura-memory` when absent) is the `--name` being set up.
 
 ## [0.10.1] - 2026-09-23
 

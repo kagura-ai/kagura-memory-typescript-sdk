@@ -11,7 +11,6 @@ import {
   queryParam,
   shellCommand,
   tomlHasServer,
-  upsertEnvLine,
   withoutQuery,
   withoutQueryParam,
   yamlHasServer,
@@ -125,37 +124,6 @@ describe("pluginServerUrl", () => {
     );
     // Python strips the value before comparing it.
     expect(pluginServerUrl("https://x.test/mcp?guardrails=+off")).toBe("https://x.test/mcp?guardrails=off");
-  });
-});
-
-describe("upsertEnvLine", () => {
-  it("appends to an empty file", () => {
-    expect(upsertEnvLine("", "KAGURA_API_KEY", "k1")).toBe("KAGURA_API_KEY=k1\n");
-  });
-
-  it("appends after existing lines, adding the missing final newline", () => {
-    expect(upsertEnvLine("A=1", "KAGURA_API_KEY", "k1")).toBe("A=1\nKAGURA_API_KEY=k1\n");
-  });
-
-  it("replaces the existing line in place rather than adding a duplicate", () => {
-    const before = "A=1\nKAGURA_API_KEY=old\nB=2\n";
-    expect(upsertEnvLine(before, "KAGURA_API_KEY", "new")).toBe("A=1\nKAGURA_API_KEY=new\nB=2\n");
-  });
-
-  it("collapses repeated lines, so the new value is the only one", () => {
-    const before = "KAGURA_API_KEY=a\nB=2\nKAGURA_API_KEY=b\n";
-    expect(upsertEnvLine(before, "KAGURA_API_KEY", "new")).toBe("KAGURA_API_KEY=new\nB=2\n");
-  });
-
-  it("keeps an export prefix, CRLF endings, comments and look-alike names", () => {
-    const before = "# KAGURA_API_KEY=commented\r\nexport KAGURA_API_KEY = old\r\nKAGURA_API_KEY_2=x\r\n";
-    expect(upsertEnvLine(before, "KAGURA_API_KEY", "new")).toBe(
-      "# KAGURA_API_KEY=commented\r\nexport KAGURA_API_KEY=new\r\nKAGURA_API_KEY_2=x\r\n",
-    );
-  });
-
-  it("refuses a value with a line break, which would inject a second line", () => {
-    expect(() => upsertEnvLine("", "KAGURA_API_KEY", "k\nPATH=/tmp")).toThrow(/line break/);
   });
 });
 
@@ -273,6 +241,10 @@ describe("blocks", () => {
     expect(codexTomlBlock("kagura-memory", "https://x.test/mcp?guardrails=off")).toBe(
       '[mcp_servers.kagura-memory]\nurl = "https://x.test/mcp?guardrails=off"\nbearer_token_env_var = "KAGURA_API_KEY"',
     );
+    // --api-key-env names another variable.
+    expect(codexTomlBlock("kagura-memory", "https://x.test/mcp", "KAGURA_CODEX_KEY")).toBe(
+      '[mcp_servers.kagura-memory]\nurl = "https://x.test/mcp"\nbearer_token_env_var = "KAGURA_CODEX_KEY"',
+    );
   });
 
   it("hermes: derives the variable the way `hermes mcp add` does", () => {
@@ -317,6 +289,8 @@ describe("blocks", () => {
         },
       },
     });
+    const renamed = JSON.parse(openclawBlock("kagura-memory", "https://x.test/mcp", "OC_KEY"));
+    expect(renamed.mcp.servers["kagura-memory"].headers).toEqual({ Authorization: "Bearer ${OC_KEY}" });
   });
 });
 

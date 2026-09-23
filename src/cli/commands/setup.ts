@@ -1,15 +1,22 @@
 /**
  * `kagura-memory setup <harness>` — connect a coding agent to Kagura Memory.
  *
- * Every subcommand writes `.kagura.json` in the project directory, merged
- * with whatever is already there and gitignored, plus a `kagura-memory`
- * MCP entry for its harness: the URL and a Bearer header.
+ * Every subcommand sets up a `kagura-memory` MCP entry for its harness: the
+ * URL and a Bearer header.
  *
  *   claude    `.mcp.json` (project scope), or `claude mcp add-json` (user
- *             scope), reading the key from KAGURA_MCP_API_KEY
+ *             scope), reading the key from KAGURA_MCP_API_KEY; it also
+ *             writes `.kagura.json` in the project, merged with whatever
+ *             is already there and gitignored
  *   codex     `codex mcp add`, reading the key from KAGURA_API_KEY
- *   hermes    the key in its `.env`; the `config.yaml` block printed
- *   openclaw  `openclaw mcp add`; the key in its `.env`
+ *   hermes    the `config.yaml` block printed, reading the key from
+ *             MCP_<NAME>_API_KEY in Hermes's `.env`
+ *   openclaw  `openclaw mcp add`, reading the key from KAGURA_API_KEY in
+ *             OpenClaw's `.env`
+ *
+ * The last three never see, write, print or pass the key, as in the Python
+ * CLI (python-sdk#260): the entry names the variable, and the notes say
+ * where the user puts the key. They write no file themselves either.
  *
  * Python has a second, OAuth path that writes a *stdio* entry launching
  * its `kagura-mcp` proxy so no API key is ever written to disk. That proxy
@@ -29,6 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
+import { validateHttpsUrl } from "../../http.js";
 import { isUuid, parseUuid } from "../../uuid.js";
 import { rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import type { ExecOptions } from "../exec.js";
@@ -51,7 +59,6 @@ import {
   shellCommand,
   shellQuote,
   tomlHasServer,
-  upsertEnvLine,
   withoutQueryParam,
   yamlHasServer,
   yamlServersIndent,
@@ -92,12 +99,6 @@ const GUARDRAILS: FlagSpec = {
   metavar: "CONTEXT_ID|off",
   help: "Set the URL's guardrails parameter (server v0.74.0+): a context id, or off",
 };
-// Hermes and OpenClaw take the flag so a script can pass it to every
-// harness alike, but nothing it sets reaches their entry.
-const GUARDRAILS_NOT_WRITTEN: FlagSpec = {
-  ...GUARDRAILS,
-  help: "Validated, not written: off is refused and a context id dropped",
-};
 // Python's floor and names (memory-cloud's PROFILES); worded to hold for
 // codex, which shares the flag.
 const TOOL_PROFILE: FlagSpec = {
@@ -135,10 +136,16 @@ const PYTHON_ONLY_FLAGS: FlagSpec[] = [
   { name: "no-commands", type: "switch", help: NO_COMMANDS },
   { name: "no-auto-context", type: "switch", help: "Accepted for compatibility; this port never prompts" },
 ];
+const COMMON_FLAGS = [API_KEY, MCP_URL, CONTEXT_ID, PROFILE, PROJECT_DIR, NON_INTERACTIVE];
+
+// `setup codex | hermes | openclaw` take the Python CLI's option set and
+// help (python-sdk#260), less what needs the kagura-mcp proxy or the
+// AGENTS.md export, plus the two options v0.10 took, kept inert so its
+// scripts still run.
 const NAME: FlagSpec = {
   name: "name",
   type: "value",
-  help: "Server name for the entry",
+  help: "MCP server name in the harness config",
   defaultLabel: SERVER_NAME,
 };
 const FORCE: FlagSpec = {
@@ -149,11 +156,74 @@ const FORCE: FlagSpec = {
 const DRY_RUN: FlagSpec = {
   name: "dry-run",
   type: "switch",
-  help: "Print what would be configured; write and run nothing",
+  help: "Show the command or block and the entry; change nothing",
 };
+const HARNESS_PROFILE: FlagSpec = {
+  ...PROFILE,
+  help:
+    "OAuth profile (from `kagura auth login`) for the Python CLI's kagura-mcp entry, which this " +
+    "port cannot write: refused, and ignored with --url-form",
+};
+const URL_FORM: FlagSpec = {
+  name: "url-form",
+  type: "switch",
+  help:
+    "Accepted for compatibility; every entry this port writes is the URL form, which sends a " +
+    "long-lived API key from an environment variable",
+};
+const HARNESS_MCP_URL: FlagSpec = {
+  ...MCP_URL,
+  help:
+    "The MCP URL your API key works with (…/mcp/w/<workspace>); default: the configured " +
+    `mcp_url, else ${DEFAULT_MCP_URL}`,
+};
+const INERT_API_KEY: FlagSpec = {
+  ...API_KEY,
+  help: "Accepted for compatibility; not stored or used: the entry reads the key from an environment variable",
+};
+const INERT_PROJECT_DIR: FlagSpec = {
+  name: "project-dir",
+  type: "value",
+  metavar: "DIR",
+  help: "Accepted for compatibility; not used: the entry is per user, and no project file is written",
+};
+const CODEX_CONTEXT_ID: FlagSpec = {
+  ...CONTEXT_ID,
+  help: "Context ID, for the guardrails lane only: a UUID, since this port looks up no context names",
+};
+const UNUSED_CONTEXT_ID: FlagSpec = {
+  ...CONTEXT_ID,
+  help: "Context ID; not used here (the Python CLI's AGENTS.md export takes it)",
+};
+const CODEX_GUARDRAILS: FlagSpec = {
+  name: "guardrails",
+  type: "value",
+  metavar: "off|CONTEXT_ID",
+  help:
+    "Set the URL's ?guardrails= (server v0.74.0+). Codex reads the MCP instructions, which then " +
+    "carry that context's tool guardrail digest. Defaults to --context-id, or to 'off' while the " +
+    "kagura-memory plugin's guardrail hooks are on, unless --mcp-url already sets it. Use a " +
+    "context whose editor list you control. 'off' also removes the guardrails block from " +
+    "get_context_info.",
+};
+/** Hermes and OpenClaw take the flag so a script can pass it to every harness alike. */
+function guardrailsNotWritten(title: string): FlagSpec {
+  return {
+    name: "guardrails",
+    type: "value",
+    metavar: "off|CONTEXT_ID",
+    help:
+      `Never written: ${title} does not read MCP instructions. 'off' is refused (it would remove ` +
+      `the get_context_info guardrails block, ${title}'s only guardrail lane)`,
+  };
+}
+function apiKeyEnv(help: string): FlagSpec {
+  return { name: "api-key-env", type: "value", metavar: "VAR", help };
+}
 
-const COMMON_FLAGS = [API_KEY, MCP_URL, CONTEXT_ID, PROFILE, PROJECT_DIR, NON_INTERACTIVE];
-const HARNESS_FLAGS = [NAME, FORCE, DRY_RUN];
+/** The ones after the harness's own, in the Python CLI's order. */
+const HARNESS_TAIL = [URL_FORM, HARNESS_MCP_URL];
+const HARNESS_END = [FORCE, NON_INTERACTIVE, DRY_RUN, INERT_API_KEY, INERT_PROJECT_DIR];
 
 const GUARDRAILS_ADVICE =
   "  Pass --guardrails a context id only for a context whose editor list you\n" +
@@ -162,10 +232,11 @@ const GUARDRAILS_ADVICE =
 
 type Harness = "claude" | "codex" | "hermes" | "openclaw";
 
+/** Python's harness titles. */
 const LABEL: Record<Harness, string> = {
   claude: "Claude Code",
   codex: "Codex",
-  hermes: "Hermes",
+  hermes: "Hermes Agent",
   openclaw: "OpenClaw",
 };
 
@@ -178,31 +249,47 @@ const OAUTH_TARGET: Record<Harness, string> = {
 };
 
 /**
- * Harnesses that do not pass the server's `instructions` to the model.
+ * Harnesses that do not read the server's MCP `instructions`.
  *
  * There, `guardrails=<context>` changes nothing, and `off` would also
  * remove the `get_context_info` block — the one guardrail lane left.
  */
 const NO_INSTRUCTIONS: ReadonlySet<Harness> = new Set(["hermes", "openclaw"]);
 
-/** The refusal of `off`, however it was asked for, on a NO_INSTRUCTIONS harness. */
-function refuseGuardrailsOff(harness: Harness, what: string): CliUsageError {
+/** The refusal of `--guardrails off` on a NO_INSTRUCTIONS harness — Python's. */
+function refuseGuardrailsOff(harness: Harness): CliUsageError {
   return new CliUsageError(
-    `${what} is not available for ${LABEL[harness]}: it does not pass the server's\n` +
-      "  instructions to the model, and off would also remove the get_context_info block,\n" +
-      "  the only guardrail lane it has.",
+    `${LABEL[harness]} does not read MCP instructions: its guardrails come only from the ` +
+      "guardrails block of get_context_info, which --guardrails off removes.",
   );
 }
 
 /**
- * Why a harness CLI was not run.
- *
- * `which` passes over a Windows `.cmd` shim, which Node runs only through
- * a shell that would re-parse the argv; an npm-installed CLI there is one,
- * so a bare "not on PATH" would be untrue.
+ * The refusal of `--profile` where it would need the `kagura-mcp` proxy:
+ * writing that entry would name a Python console script this package does
+ * not install — the config would look right and fail at launch.
  */
-function notFound(program: string): string {
-  return `\`${program}\` was not found on PATH (a Windows .cmd shim is not run: it needs a shell)`;
+function refuseProfile(harness: Harness, profile: string): CliError {
+  const here =
+    harness === "claude"
+      ? "or set up the static-token form here with --api-key."
+      : "or set up the URL form here with --url-form.";
+  return new CliError(
+    `the OAuth (--profile) setup writes ${OAUTH_TARGET[harness]} that launches the \`kagura-mcp\` stdio\n` +
+      "  proxy, which ships with the Python package, not this one.\n" +
+      `  Use \`pip install kagura-memory && kagura setup ${harness} --profile ${profile}\`, ${here}`,
+  );
+}
+
+/**
+ * Python's reason for printing the block, `` `codex` is not on PATH ``.
+ *
+ * `which` also passes over a Windows `.cmd` shim, which Node runs only
+ * through a shell that would re-parse the argv; an npm-installed CLI there
+ * is one, so the bare reason would be untrue.
+ */
+function notOnPath(program: string): string {
+  return `\`${program}\` is not on PATH, or only as a Windows .cmd shim, which needs a shell`;
 }
 
 /** Parse a JSON file, treating "absent" and "empty" as `{}`. */
@@ -247,13 +334,14 @@ function readJsonLenient(target: string): Record<string, unknown> | null {
   }
 }
 
-/** A harness config's text, or "" when it does not exist yet. */
+/** A harness config's text, or "" when it does not exist yet; Python's words when it cannot be read. */
 function readText(target: string): string {
   try {
     return fs.readFileSync(target, "utf-8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return "";
-    throw new CliError(`cannot read ${target}: ${e instanceof Error ? e.message : String(e)}`);
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new CliError(`Cannot read ${pathLabel(target)} (${reason}); fix it and re-run.`);
   }
 }
 
@@ -278,18 +366,6 @@ function writePrivate(target: string, text: string): void {
 
 function writeJson(target: string, data: Record<string, unknown>): void {
   writePrivate(target, `${JSON.stringify(data, null, 2)}\n`);
-}
-
-/**
- * Set the key's line in a harness `.env`.
- *
- * The file is line-based, so unlike the harness configs it is written
- * here: one line replaced or appended, and every other line kept.
- */
-function writeEnvFile(target: string, name: string, value: string): void {
-  const text = upsertEnvLine(readText(target), name, value);
-  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  writePrivate(target, text);
 }
 
 /**
@@ -342,32 +418,31 @@ function parseToolProfile(raw: string | undefined): string | undefined {
 }
 
 /**
- * Validate `--name`.
+ * Validate `--name`: Python's 1-64 letters, digits, `-` or `_`.
  *
  * Codex accepts nothing else, and keeping to these characters lets the
  * name go bare into the printed TOML and YAML and into the variable
- * Hermes derives from it. The first one is a letter or digit because the
- * name is also a bare positional in the `codex` and `openclaw` argv: there
- * `--name=--help` would be read as an option, and the harness CLI would
- * print its help and exit 0 with nothing configured.
+ * Hermes derives from it. The first one is also a letter or digit, which
+ * Python does not require: the name is a bare positional in the `codex`
+ * and `openclaw` argv, where `--name=--help` would be read as an option,
+ * and the harness CLI would print its help and exit 0 with nothing
+ * configured.
  */
 function parseName(args: ParsedArgs): string {
   const name = args.values.name ?? SERVER_NAME;
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
     throw new CliUsageError(
-      `Invalid value for '--name': ${quote(name)} must start with a letter or digit and contain ` +
-        "only letters, digits, '-' and '_'.",
+      "Invalid value for '--name': use 1-64 letters, digits, '-' or '_', starting with a letter or digit",
     );
   }
   return name;
 }
 
+/** What `setup claude` resolves before touching anything. */
 interface SetupInput {
-  harness: Harness;
+  harness: "claude";
   projectDir: string;
   apiKey: string;
-  /** `--api-key` was passed, rather than the key found in config. */
-  keyFlag: boolean;
   /**
    * As given or configured, and so written to `.kagura.json`; the flags'
    * query parameters go on the entry's URL only.
@@ -387,8 +462,20 @@ interface SetupInput {
   kagura: Record<string, unknown>;
 }
 
-/** What every `setup` subcommand resolves before touching anything. */
-function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): SetupInput {
+/**
+ * `--profile` beside `--api-key`, refused as Python's `setup claude`
+ * refuses it.
+ */
+function refuseProfileWithKey(args: ParsedArgs): void {
+  if (args.values.profile !== undefined && args.values["api-key"] !== undefined) {
+    throw new CliUsageError(
+      "--profile (OAuth) and --api-key (static token) are mutually exclusive; pick one.",
+    );
+  }
+}
+
+/** What `setup claude` resolves before touching anything. */
+function resolveInput(deps: CommandDeps, args: ParsedArgs): SetupInput {
   rejectExtraArgs(args);
   // First, as click runs Python's option callbacks while it parses.
   const guardrails = parseGuardrails(args.values.guardrails);
@@ -396,32 +483,8 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): Se
   const apiKey = args.values["api-key"];
   const profile = args.values.profile;
 
-  if (profile !== undefined && apiKey !== undefined) {
-    throw new CliUsageError(
-      "--profile (OAuth) and --api-key (static token) are mutually exclusive; pick one.",
-    );
-  }
-  if (profile !== undefined) {
-    // Writing the stdio form would name `kagura-mcp`, a Python console
-    // script this package does not install — the config would look right
-    // and fail at launch.
-    // Only `kagura setup claude --profile` exists in the Python CLI today
-    // (python-sdk#260 adds the other harnesses), so name it for claude alone.
-    const pythonRoute =
-      harness === "claude"
-        ? `  Use \`pip install kagura-memory && kagura setup claude --profile ${profile}\`, ` +
-          "or set up the static-token form here with --api-key."
-        : "  Set up the static-token form here with --api-key.";
-    throw new CliError(
-      `the OAuth (--profile) setup writes ${OAUTH_TARGET[harness]} that launches the \`kagura-mcp\` stdio\n` +
-        "  proxy, which ships with the Python package, not this one.\n" +
-        pythonRoute,
-    );
-  }
-
-  if (guardrails === "off" && NO_INSTRUCTIONS.has(harness)) {
-    throw refuseGuardrailsOff(harness, "--guardrails off");
-  }
+  refuseProfileWithKey(args);
+  if (profile !== undefined) throw refuseProfile("claude", profile);
 
   const projectDir = path.resolve(args.values["project-dir"] ?? ".");
   if (!fs.existsSync(projectDir)) {
@@ -432,8 +495,8 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): Se
   // flags refreshes the files rather than blanking them.
   const { config } = resolveConfig(deps, undefined, false);
   // Then to KAGURA_API_KEY: the loader reads it only when no .kagura.json
-  // exists, and setup codex writes one without the key when the key came
-  // from that variable — its own re-run would otherwise find none.
+  // exists, and setup codex before 0.11.0 wrote one without the key when
+  // the key came from that variable.
   const configKey = typeof config.api_key === "string" ? config.api_key : "";
   const resolvedKey = apiKey ?? (configKey || process.env[KEY_ENV_VAR] || "");
   const baseUrl =
@@ -441,12 +504,6 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): Se
     (typeof config.mcp_url === "string" && config.mcp_url ? config.mcp_url : DEFAULT_MCP_URL);
   const contextFlag = Boolean(args.values["context-id"]);
   const contextId = args.values["context-id"] || config.context_id || "";
-
-  // The flag's off, carried in the URL instead — given with --mcp-url, or
-  // left in .kagura.json — would remove that one lane just the same.
-  if (NO_INSTRUCTIONS.has(harness) && queryParam(baseUrl, "guardrails")?.toLowerCase() === "off") {
-    throw refuseGuardrailsOff(harness, `guardrails=off in the MCP URL (${baseUrl})`);
-  }
 
   if (!resolvedKey) {
     // No word of `auth login`: setup writes an API-key entry, and an OAuth
@@ -456,10 +513,9 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): Se
     );
   }
   return {
-    harness,
+    harness: "claude",
     projectDir,
     apiKey: resolvedKey,
-    keyFlag: apiKey !== undefined,
     baseUrl,
     contextId,
     contextFlag,
@@ -469,14 +525,11 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): Se
   };
 }
 
-/**
- * Merge the URL, context and (unless `withKey` is false) the key into
- * `.kagura.json`; returns its path.
- */
-function writeKaguraJson(input: SetupInput, withKey = true): string {
+/** Merge the key, URL and context into `.kagura.json`; returns its path. */
+function writeKaguraJson(input: SetupInput): string {
   const target = path.join(input.projectDir, ".kagura.json");
   const kagura = { ...input.kagura };
-  if (withKey) kagura.api_key = input.apiKey;
+  kagura.api_key = input.apiKey;
   // As given, as Python writes it: --guardrails and --tool-profile belong
   // to the harness entry, not to this bin, and baseUrlFromMcp finds the
   // REST base in the path, so a query the user gave does no harm here.
@@ -497,7 +550,14 @@ interface Outcome {
   notes: string[];
 }
 
-function report(deps: CommandDeps, input: SetupInput, outcome: Outcome): number {
+/** What the report says about the run besides its outcome. */
+interface ReportSubject {
+  harness: Harness;
+  projectDir: string;
+  contextId: string;
+}
+
+function report(deps: CommandDeps, input: ReportSubject, outcome: Outcome): number {
   deps.write(
     formatJson({
       status: outcome.status,
@@ -1128,7 +1188,7 @@ async function writeUserEntry(
 }
 
 async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
-  const input = resolveInput(deps, args, "claude");
+  const input = resolveInput(deps, args);
   const scope = parseChoice(SCOPE, args.values.scope ?? "project", CLAUDE_TARGET_SCOPES);
   const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile);
   const asked = ASKS_FOR_HOOKS.filter((name) => args.flags.has(name)).map((name) => `--${name}`);
@@ -1274,205 +1334,483 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
 
 // --- codex, hermes, openclaw ----------------------------------------------
 
-interface HarnessPlan {
-  input: SetupInput;
+type HarnessName = Exclude<Harness, "claude">;
+
+/**
+ * Python's `_HARNESS_TIMEOUT_SEC`, for every `codex` and `openclaw` run:
+ * `openclaw mcp add` can start the server to probe it before it saves.
+ */
+const HARNESS_TIMEOUT_S = 120;
+const HARNESS_EXEC: ExecOptions = { timeoutMs: HARNESS_TIMEOUT_S * 1000 };
+
+/** Python's `_ENV_NAME_RE`: OpenClaw substitutes only upper-case `${VAR}` names. */
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
+/** What `setup codex | hermes | openclaw` resolve before touching anything. */
+interface HarnessInput {
+  harness: HarnessName;
   name: string;
+  /** `--project-dir`, resolved, for the report alone: nothing is read or written there. */
+  projectDir: string;
+  /** As given or configured; the flags' query parameters go on top. */
+  baseUrl: string;
+  /** Whether baseUrl came from `--mcp-url`, rather than the configuration. */
+  urlFlag: boolean;
+  contextId: string;
+  /** `-c` was passed, rather than read from the configuration. */
+  contextFlag: boolean;
+  /** `--guardrails`, validated and normalised; undefined when absent. */
+  guardrails: string | undefined;
+  /** `--tool-profile`, trimmed; undefined when absent or not taken. */
+  toolProfile: string | undefined;
+  /** The variable the entry reads the key from. */
+  keyEnv: string;
+  /** Every key this process knows of, cut out of whatever a harness CLI prints. */
+  secrets: string[];
+  force: boolean;
+  dryRun: boolean;
+  /** Notes on the flags that change nothing here. */
+  notes: string[];
+}
+
+/**
+ * Refuse a plain-HTTP MCP URL other than localhost — Python's check of
+ * `--mcp-url`, whose entry sends the key there with every request.
+ */
+function requireHttps(url: string, fromFlag: boolean): void {
+  try {
+    validateHttpsUrl(url, "MCP URL");
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    if (fromFlag) throw new CliUsageError(`Invalid value for '--mcp-url': ${reason}`);
+    // Python takes the URL from the flag alone; this port falls back to
+    // the configured one, which is no usage error.
+    throw new CliError(`the configured mcp_url is refused: ${reason} Pass --mcp-url for another.`);
+  }
+}
+
+/**
+ * The variable the entry reads the key from: `--api-key-env` (Codex and
+ * OpenClaw), the one Hermes derives from the name, or KAGURA_API_KEY —
+ * Python's `key_env`, validated as Python does.
+ */
+function parseKeyEnv(raw: string | undefined, harness: HarnessName, name: string): string {
+  if (harness === "hermes") {
+    const own = hermesEnvVar(name);
+    if (raw !== undefined) {
+      throw new CliUsageError(`${LABEL.hermes} names the variable itself (${own}); drop --api-key-env.`);
+    }
+    return own;
+  }
+  if (raw === undefined) return KEY_ENV_VAR;
+  if (!ENV_NAME.test(raw)) {
+    throw new CliUsageError(
+      "Invalid value for '--api-key-env': use an upper-case variable name, e.g. KAGURA_API_KEY",
+    );
+  }
+  return raw;
+}
+
+function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: HarnessName): HarnessInput {
+  // The name first: a usage error, as click reports before it runs anything.
+  const name = parseName(args);
+  rejectExtraArgs(args);
+  const guardrails = parseGuardrails(args.values.guardrails);
+  const toolProfile = parseToolProfile(args.values["tool-profile"]);
+  // Then Python's _check_flags, in its order, each a usage error. The
+  // --profile refusal (exit 1) comes last, so that `--profile p
+  // --guardrails off` is the usage error it is in Python.
+  const urlArg = args.values["mcp-url"];
+  if (urlArg !== undefined) requireHttps(urlArg, true);
+  const keyEnv = parseKeyEnv(args.values["api-key-env"], harness, name);
+  refuseProfileWithKey(args);
+  if (guardrails === "off" && NO_INSTRUCTIONS.has(harness)) throw refuseGuardrailsOff(harness);
+  const profile = args.values.profile;
+  if (profile !== undefined && !args.flags.has("url-form")) throw refuseProfile(harness, profile);
+
+  // For the URL and context fallbacks alone: no key is taken from it.
+  const { config } = resolveConfig(deps, undefined, false);
+  const baseUrl =
+    urlArg ?? (typeof config.mcp_url === "string" && config.mcp_url ? config.mcp_url : DEFAULT_MCP_URL);
+  if (urlArg === undefined) requireHttps(baseUrl, false);
+  const contextFlag = Boolean(args.values["context-id"]);
+  const contextId = args.values["context-id"] || config.context_id || "";
+
+  // The options v0.10 took, and the Python CLI's that need what this port
+  // lacks: accepted, so a script still runs, and said to change nothing.
+  const label = LABEL[harness];
+  const apiKey = args.values["api-key"];
+  const notes: string[] = [];
+  if (apiKey !== undefined) {
+    notes.push(
+      `Note: --api-key is not stored or used: the ${label} entry reads the key from $${keyEnv}, ` +
+        "and setup never handles the key.",
+    );
+  }
+  if (args.values["project-dir"] !== undefined) {
+    notes.push(
+      `Note: --project-dir is not used: the ${label} entry is per user, and harness setups write no ` +
+        ".kagura.json or .gitignore.",
+    );
+  }
+  // Python's URL form uses the profile to list contexts and fetch the
+  // AGENTS.md export, and checks it against the server; this port does
+  // neither, and never contacts the server.
+  if (profile !== undefined) {
+    notes.push("Note: --profile is not used: this port lists no contexts and writes no AGENTS.md export.");
+  }
+  if (contextFlag && NO_INSTRUCTIONS.has(harness)) {
+    notes.push(
+      `Note: --context-id is not used: ${label} does not read MCP instructions, and this port writes ` +
+        "no AGENTS.md export.",
+    );
+  }
+
+  const secrets = [apiKey, config.api_key, process.env[keyEnv], process.env[KEY_ENV_VAR]].filter(
+    (s): s is string => typeof s === "string" && s !== "",
+  );
+  return {
+    harness,
+    name,
+    projectDir: path.resolve(args.values["project-dir"] ?? "."),
+    baseUrl,
+    urlFlag: urlArg !== undefined,
+    contextId,
+    contextFlag,
+    guardrails,
+    toolProfile,
+    keyEnv,
+    // Longest first, so a key that contains another is cut whole.
+    secrets: [...new Set(secrets)].sort((a, b) => b.length - a.length),
+    force: args.flags.has("force"),
+    dryRun: args.flags.has("dry-run"),
+    notes,
+  };
+}
+
+interface HarnessPlan {
+  input: HarnessInput;
   /** The URL in the entry, query included. */
   url: string;
   /** The harness config file the entry belongs in. */
   configPath: string;
-  /** Whether configPath already has an entry of this name. */
-  exists: boolean;
-  force: boolean;
-  dryRun: boolean;
+  /** Whether this bin's scan of configPath found an entry of this name. */
+  found: boolean;
+  /**
+   * Whether that entry stops a run without --force. Python reads a Codex
+   * entry from config.toml itself, but finds a Hermes or OpenClaw one only
+   * through their CLI, and without it prints the block; so does this port,
+   * the scan then only saying to put the block in place of the old entry.
+   */
+  stops: boolean;
   /** The entry as the user would add it to configPath. */
   block: string;
-  /** Where in configPath the block goes, for messages; configPath itself when absent. */
-  blockTarget?: string;
-  /**
-   * The harness CLI that applies the entry without prompting, or null
-   * with the reason it is not used.
-   */
-  cli: { program: string; argv: string[] } | { program: null; reason: string };
-  /** Where the key goes, for a harness that reads it from a file. */
-  envFile: { path: string; name: string } | null;
-  /** Whether `.kagura.json` gets the key as well. */
-  keyInKaguraJson: boolean;
+  /** Where in configPath the block goes: "it", or a part of it. */
+  blockTarget: string;
+  /** The harness CLI that applies the entry, or why setup prints the block instead. */
+  cli: { program: string; file: string; argv: string[] } | { program: null; reason: string };
+  /** Notes for before the command, where Python prints them. */
   notes: string[];
+  /** Python's closing notes: after a real run or the printed block, not a dry run. */
+  after: string[];
 }
 
-/** Carry out a plan: apply the entry or print it, then write the local files. */
+/**
+ * Run `codex` or `openclaw` with Python's timeout, failing in Python's
+ * words: `` `codex mcp add` failed: `` and what it printed, its exit code
+ * when it printed nothing, or the timeout.
+ *
+ * No argv carries a key, but a CLI may echo whatever it read, its
+ * environment included, so every key this process knows of is cut out.
+ */
+async function runHarnessCommand(
+  deps: CliDeps,
+  file: string,
+  program: string,
+  argv: string[],
+  secrets: string[],
+): Promise<void> {
+  const result = await deps.execFile(file, argv, HARNESS_EXEC);
+  if (result.code === 0) return;
+  const command = `\`${[program, ...argv.slice(0, 2)].join(" ")}\``;
+  if (result.timedOut) throw new CliError(`${command} failed: timed out after ${HARNESS_TIMEOUT_S}s`);
+  let detail = result.stderr.trim() || result.stdout.trim();
+  for (const secret of secrets) detail = detail.split(secret).join("<redacted>");
+  throw new CliError(`${command} failed: ${detail || `exit code ${result.code}`}`);
+}
+
+/**
+ * Carry out a plan: apply the entry through the harness CLI or print it,
+ * then report. Nothing is written here; Python's messages go in `notes`.
+ */
 async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
-  const { input, notes } = plan;
+  const { input } = plan;
+  const where = pathLabel(plan.configPath);
+  const notes = input.dryRun ? ["Dry run: nothing is written, run or fetched."] : [];
+  notes.push(...input.notes);
 
-  if (plan.exists && !plan.force) {
-    if (!plan.dryRun) {
-      throw new CliError(
-        `${plan.configPath} already has an MCP server named '${plan.name}'.\n` +
-          "  Re-run with --force to replace it.",
-      );
-    }
-    notes.push(`${plan.configPath} already has '${plan.name}'; a real run needs --force`);
+  const stops = plan.found && plan.stops && !input.force;
+  if (stops) {
+    const stop = `a ${input.name} entry already exists in ${where}; re-run with --force to replace it`;
+    if (!input.dryRun) throw new CliError(`Nothing was written: ${stop}.`);
+    notes.push(`Setup would stop here: ${stop}.`);
   }
-
-  const cli = plan.cli.program === null ? null : plan.cli;
-  const file = cli === null ? null : deps.which(cli.program);
-  const display = cli === null ? null : shellCommand([cli.program, ...cli.argv]);
-  const manual = plan.cli.program === null ? plan.cli.reason : notFound(plan.cli.program);
-
-  if (plan.dryRun) {
-    printBlock(deps, `Would configure ${plan.configPath}:`, plan.block);
-    notes.unshift("dry run: nothing was written or run");
-    notes.push(file !== null ? `would run: ${display}` : `${manual}; a real run prints this block too`);
-    if (plan.envFile !== null) notes.push(`would set ${plan.envFile.name} in ${plan.envFile.path}`);
-    return report(deps, input, {
-      status: "dry_run",
-      wrote: [],
-      gitignoreAdded: [],
-      url: plan.url,
-      appliedWith: null,
-      notes,
-    });
-  }
+  notes.push(...plan.notes);
 
   let appliedWith: string | null = null;
-  if (cli !== null && file !== null && display !== null) {
-    // First, so a harness that refuses the entry leaves every file as it was.
-    await runHarnessCli(deps, file, cli.argv, display, input.apiKey);
-    appliedWith = display;
+  if (plan.cli.program !== null) {
+    const { program, file, argv } = plan.cli;
+    const display = shellCommand([program, ...argv]);
+    if (input.dryRun) {
+      notes.push(`${stops ? "With --force, would run" : "Would run"}: ${display}`);
+      printBlock(deps, `Would configure ${where}:`, plan.block);
+    } else {
+      await runHarnessCommand(deps, file, program, argv, input.secrets);
+      appliedWith = display;
+      notes.push(`Done: ${program} wrote ${input.name} to ${where}.`);
+    }
   } else {
-    const target = plan.blockTarget ?? plan.configPath;
-    printBlock(deps, `Add this to ${target}:`, plan.block);
-    notes.push(`${manual}; add the block printed on stderr to ${target}`);
-    if (plan.exists) notes.push(`replace the existing '${plan.name}' entry there with it`);
+    const replace = plan.found ? " in place of the existing one" : "";
+    const edits = `Setup does not edit ${where} itself (${plan.cli.reason}).`;
+    printBlock(deps, `${edits}\nAdd this ${input.name} entry to ${plan.blockTarget}${replace}:`, plan.block);
+    notes.push(`${edits} Add the ${input.name} entry printed on stderr to ${plan.blockTarget}${replace}.`);
   }
+  if (!input.dryRun) notes.push(...plan.after);
 
-  const wrote: string[] = [];
-  if (plan.envFile !== null) {
-    writeEnvFile(plan.envFile.path, plan.envFile.name, input.apiKey);
-    wrote.push(plan.envFile.path);
-  }
-  const kaguraPath = writeKaguraJson(input, plan.keyInKaguraJson);
-  wrote.push(kaguraPath);
-  if (!plan.keyInKaguraJson) {
-    notes.push(
-      `the key came from ${KEY_ENV_VAR}, where ${LABEL[input.harness]} reads it, so it was not ` +
-        `copied into ${kaguraPath}`,
-    );
-  }
-  const gitignoreAdded = protectSecrets(input.projectDir, [".kagura.json"]);
   return report(deps, input, {
-    status: "success",
-    wrote,
-    gitignoreAdded,
+    status: input.dryRun ? "dry_run" : "success",
+    wrote: [],
+    gitignoreAdded: [],
     url: plan.url,
     appliedWith,
     notes,
   });
 }
 
-/** Whether the Kagura plugin's Codex hooks have been turned on. */
-function codexHooksOn(codexHome: string): boolean {
+/** The prefix of the Kagura plugin's Codex data directories. */
+const CODEX_PLUGIN_DATA_PREFIX = "kagura-memory-";
+/** The table the plugin's hooks read when their config.json names none. */
+const CODEX_HOOKS_DEFAULT_SERVER = "kagura-memory";
+/** The hooks treat a larger config.json as unreadable. */
+const CODEX_HOOKS_CONFIG_CAP = 64 * 1024;
+
+/**
+ * Whether the Kagura plugin's Codex hooks read the `name` entry — Python's
+ * `codex_hooks_enabled`.
+ *
+ * Turning them on writes a `config.json` into the plugin's data directory,
+ * and its `mcp_server` names the table they take their credential from
+ * (`kagura-memory` when absent). A file the hooks cannot use — unreadable,
+ * over 64 KiB, not a JSON object — leaves them idle, here as in the hooks.
+ * Nothing read from it is echoed.
+ */
+function codexHooksEnabled(codexHome: string, name: string): boolean {
   const dataDir = path.join(codexHome, "plugins", "data");
-  let entries: string[];
+  let dirs: string[];
   try {
-    entries = fs.readdirSync(dataDir);
+    dirs = fs.readdirSync(dataDir);
   } catch {
     return false;
   }
-  return entries.some(
-    (entry) =>
-      entry.startsWith(`${SERVER_NAME}-`) && fs.existsSync(path.join(dataDir, entry, "config.json")),
-  );
-}
-
-async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
-  // The name first: a usage error, as click reports before it runs anything.
-  const name = parseName(args);
-  const input = resolveInput(deps, args, "codex");
-  const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile);
-  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-  const configPath = path.join(codexHome, "config.toml");
-
-  // Codex hands the server's instructions to the model, so guardrails
-  // take effect here. A value already in --mcp-url is kept as written.
-  let guardrails = input.guardrails;
-  if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
-    if (codexHooksOn(codexHome)) {
-      // The plugin's hooks read this same table and deliver the
-      // guardrails themselves; the server need not repeat them.
-      guardrails = "off";
-      notes.push("the Kagura plugin's Codex hooks are on, so guardrails defaults to off");
-    } else if (input.contextFlag) {
-      if (isUuid(input.contextId)) {
-        guardrails = parseUuid(input.contextId);
-        notes.push("guardrails defaults to the -c context; pass --guardrails off to turn them off");
-      } else {
-        notes.push(`-c ${quote(input.contextId)} is not a UUID, so it was not used for guardrails`);
-      }
+  return dirs.some((dir) => {
+    if (!dir.startsWith(CODEX_PLUGIN_DATA_PREFIX)) return false;
+    const file = path.join(dataDir, dir, "config.json");
+    let settings: unknown;
+    try {
+      if (fs.statSync(file).size > CODEX_HOOKS_CONFIG_CAP) return false;
+      // Python decodes the bytes itself, a UTF-8 BOM included.
+      settings = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, ""));
+    } catch {
+      return false;
     }
-  }
-  const url = mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile });
-
-  // The key cannot be stored for Codex: it reads the variable from the
-  // environment of the shell that starts it.
-  notes.push(
-    `Codex reads the key from its environment: export ${KEY_ENV_VAR} in the shell that ` +
-      "starts it, or in that shell's profile",
-  );
-
-  return applyPlan(deps, {
-    input,
-    name,
-    url,
-    configPath,
-    exists: tomlHasServer(readText(configPath), name),
-    force: args.flags.has("force"),
-    dryRun: args.flags.has("dry-run"),
-    block: codexTomlBlock(name, url),
-    // Naming an env var also makes Codex skip its OAuth probe. `add`
-    // overwrites an entry of the same name, so --force needs no other
-    // form; the existence check is what makes that overwrite opt-in.
-    cli: {
-      program: "codex",
-      argv: ["mcp", "add", name, "--url", url, "--bearer-token-env-var", KEY_ENV_VAR],
-    },
-    envFile: null,
-    // A key already in KAGURA_API_KEY stays only there: that is where the
-    // user chose to keep it, and this bin reads it from there too.
-    keyInKaguraJson: input.keyFlag || process.env[KEY_ENV_VAR] !== input.apiKey,
-    notes,
+    if (!isObject(settings)) return false;
+    const server = settings.mcp_server ?? CODEX_HOOKS_DEFAULT_SERVER;
+    return server === name;
   });
 }
 
 /**
- * The entry URL for a harness that does not pass the server's
- * instructions to the model: without `guardrails`, whether that came from
- * the flag or the URL, and a note saying so. `off` never gets here;
- * `resolveInput` refuses it.
+ * Python's closing notes on a Codex entry whose URL names a guardrails
+ * context. Its preview command is the Python CLI's: this port has no
+ * `guardrails digest` yet.
  */
-function urlWithoutGuardrails(input: SetupInput, notes: string[]): string {
-  const value = input.guardrails ?? queryParam(input.baseUrl, "guardrails");
+function codexDigestNotes(context: string, url: string, keyEnv: string): string[] {
+  // On the entry's own credential: its key variable, on its server.
+  const env = keyEnv === KEY_ENV_VAR ? [] : [`KAGURA_API_KEY="\${${keyEnv}}"`];
+  env.push(`KAGURA_MCP_URL=${shellQuote(url)}`);
+  const preview = [...env, shellCommand(["kagura", "guardrails", "digest", context, "--target", "instructions"])];
+  return [
+    `Codex should get the tool guardrail digest of context ${context} in the MCP instructions when ` +
+      "it connects. The server sends only its base text instead when the entry's credential cannot " +
+      "read that context, the context has no guardrails, or the deployment turns the digest off. " +
+      `Preview what it sends with the Python CLI: ${preview.join(" ")}`,
+    "Use a context whose editor list you control: every editor's guardrail summaries reach the model.",
+  ];
+}
+
+async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
+  const input = resolveHarnessInput(deps, args, "codex");
+  const { name, keyEnv } = input;
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const configPath = path.join(codexHome, "config.toml");
+  const found = tomlHasServer(readText(configPath), name);
+
+  // Codex reads the server's instructions, so guardrails take effect
+  // here. A value already in --mcp-url is kept as written.
+  const notes: string[] = [];
+  let guardrails = input.guardrails;
+  if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
+    if (codexHooksEnabled(codexHome, name)) {
+      // The plugin's hooks read this same table and deliver the
+      // guardrails themselves; the server need not repeat them.
+      guardrails = "off";
+      notes.push(
+        "The plugin's hooks deliver guardrails, so the URL gets ?guardrails=off (the hooks' own " +
+          "setup asks for it; --guardrails overrides).",
+      );
+    } else if (input.contextFlag) {
+      if (isUuid(input.contextId)) {
+        guardrails = parseUuid(input.contextId);
+      } else {
+        // Python lists the profile's contexts to resolve a name; this port
+        // makes no call to do so.
+        notes.push(
+          `Note: --context-id ${quote(input.contextId)} is not a UUID, so it was not used for ` +
+            "guardrails: this port looks up no context names.",
+        );
+      }
+    }
+  }
+  notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile));
+  const url = mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile });
+
+  const after = [
+    `Codex reads the API key from $${keyEnv} when it connects: set it in the environment that ` +
+      `starts Codex, e.g. \`export ${keyEnv}=<your-api-key>\` in your shell profile. ` +
+      "(Codex refuses an inline bearer_token on a URL entry.)",
+  ];
+  const lane = queryParam(url, "guardrails");
+  if (lane !== undefined && isUuid(lane)) after.push(...codexDigestNotes(parseUuid(lane), url, keyEnv));
+  after.push(
+    "Restart Codex (or start a new session) to load the entry.",
+    `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
+  );
+
+  const codex = deps.which("codex");
+  return applyPlan(deps, {
+    input,
+    url,
+    configPath,
+    found,
+    stops: true,
+    block: codexTomlBlock(name, url, keyEnv),
+    blockTarget: "it",
+    // Naming an env var also makes Codex skip its OAuth probe. `add`
+    // overwrites an entry of the same name, so --force needs no `codex mcp
+    // remove` first, as Python runs; the existence check is what makes
+    // that overwrite opt-in.
+    cli:
+      codex === null
+        ? { program: null, reason: notOnPath("codex") }
+        : {
+            program: "codex",
+            file: codex,
+            argv: ["mcp", "add", name, "--url", url, "--bearer-token-env-var", keyEnv],
+          },
+    notes,
+    after,
+  });
+}
+
+/**
+ * The entry URL for a harness that does not read the server's
+ * instructions, with Python's warnings: a `--guardrails` context and one
+ * in the URL are not written, and a `guardrails=off` in the URL is kept,
+ * though it takes away the one lane left. The flag's `off` never gets
+ * here: it is refused.
+ */
+function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
+  const title = LABEL[input.harness];
+  const reach = `Guardrails reach ${title} through get_context_info (on by default).`;
+  if (input.guardrails !== undefined) {
+    notes.push(
+      `Warning: ${title} does not read MCP instructions, so --guardrails has no effect there and is ` +
+        `not written. ${reach}`,
+    );
+  }
+  const value = queryParam(input.baseUrl, "guardrails");
   if (value === undefined) return input.baseUrl;
-  const label = LABEL[input.harness];
+  if (value.trim().toLowerCase() === "off") {
+    notes.push(
+      `Warning: ${input.urlFlag ? "--mcp-url" : "the MCP URL"} has ?guardrails=off, which removes the ` +
+        `guardrails block from get_context_info: ${title} then gets no guardrails from Kagura.`,
+    );
+    return input.baseUrl;
+  }
+  // Python keeps it; its own README says a context id is never written
+  // into their entry.
   notes.push(
-    `guardrails=${value} was not written: ${label} does not pass the server's ` +
-      `instructions to the model. On ${label}, guardrails arrive through ` +
-      "get_context_info(context_id) at session start",
+    `Warning: ${title} does not read MCP instructions, so the MCP URL's ?guardrails=${value} has no ` +
+      `effect there and is not written. ${reach}`,
   );
   return withoutQueryParam(input.baseUrl, "guardrails");
 }
 
-async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
-  const name = parseName(args);
-  const input = resolveInput(deps, args, "hermes");
-  const notes: string[] = [];
-  const url = urlWithoutGuardrails(input, notes);
+/** Python's `str.strip()` whitespace, which unlike `trim` leaves a BOM. */
+const PY_SPACE = "[\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]";
+const PY_STRIP = new RegExp(`^${PY_SPACE}+|${PY_SPACE}+$`, "g");
+/** The full case folds `toLowerCase` lacks that yield ASCII: ß, long s and the Latin ligatures. */
+const FOLDS: Record<string, string> = {
+  "\u00df": "ss",
+  "\u017f": "s",
+  "\ufb00": "ff",
+  "\ufb01": "fi",
+  "\ufb02": "fl",
+  "\ufb03": "ffi",
+  "\ufb04": "ffl",
+  "\ufb05": "st",
+  "\ufb06": "st",
+};
 
-  const hermesHome = process.env.HERMES_HOME || path.join(os.homedir(), ".hermes");
-  const configPath = path.join(hermesHome, "config.yaml");
-  const envVar = hermesEnvVar(name);
+/**
+ * Python's `str.casefold()`, as far as an ASCII-only check of the result
+ * can tell: every other fold that yields ASCII is `toLowerCase`'s too.
+ */
+function casefold(text: string): string {
+  return text.toLowerCase().replace(/[\u00df\u017f\ufb00-\ufb06]/g, (c) => FOLDS[c]!);
+}
+
+/**
+ * Where Hermes keeps `config.yaml` and `.env` for its active profile —
+ * Python's `hermes_home`: `$HERMES_HOME`, else the sticky profile
+ * `~/.hermes/active_profile` names (`~/.hermes/profiles/<name>`), else
+ * `~/.hermes`. An unreadable file names none, and neither does `default`.
+ */
+function hermesHome(): string {
+  const env = process.env.HERMES_HOME;
+  if (env) return env;
+  const root = path.join(os.homedir(), ".hermes");
+  let active = "";
+  try {
+    active = casefold(fs.readFileSync(path.join(root, "active_profile"), "utf-8").replace(PY_STRIP, ""));
+  } catch {
+    active = "";
+  }
+  if (active !== "default" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(active)) {
+    return path.join(root, "profiles", active);
+  }
+  return root;
+}
+
+async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
+  const input = resolveHarnessInput(deps, args, "hermes");
+  const { name, keyEnv } = input;
+  const home = hermesHome();
+  const configPath = path.join(home, "config.yaml");
+  const where = pathLabel(configPath);
   const text = readText(configPath);
+  const notes: string[] = [];
+  const url = urlForNoInstructions(input, notes);
 
   // With a top-level mcp_servers key already there, the whole block pasted
   // in as printed would be a second one, and YAML keeps only the last: the
@@ -1480,83 +1818,95 @@ async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const indent = yamlServersIndent(text);
   if (indent !== null) {
     notes.push(
-      `${configPath} already has a top-level mcp_servers: key, so only the ${name} entry is ` +
-        "printed: a second mcp_servers: key would replace the first, and the servers under it with it",
+      `${where} already has a top-level mcp_servers: key, so only the ${name} entry is printed: a ` +
+        "second mcp_servers: key would replace the first, and the servers under it with it",
     );
     if (yamlServersInline(text)) {
       notes.push(
-        `${configPath} writes its mcp_servers value inline (flow style or null); rewrite it as a ` +
-          `block mapping, one server per indented key, before adding the ${name} entry under it`,
+        `${where} writes its mcp_servers value inline (flow style or null); rewrite it as a block ` +
+          `mapping, one server per indented key, before adding the ${name} entry under it`,
       );
     }
   }
 
+  const hermes = deps.which("hermes");
   return applyPlan(deps, {
     input,
-    name,
     url,
     configPath,
-    exists: yamlHasServer(text, name),
-    force: args.flags.has("force"),
-    dryRun: args.flags.has("dry-run"),
-    block: hermesYamlBlock(name, url, envVar, indent ?? undefined),
-    blockTarget: indent === null ? undefined : `the mcp_servers: mapping in ${configPath}`,
+    found: yamlHasServer(text, name),
+    stops: hermes !== null,
+    block: hermesYamlBlock(name, url, keyEnv, indent ?? undefined),
+    blockTarget: indent === null ? "it" : "its mcp_servers: mapping",
+    // Never run: `hermes mcp add` prompts for the key and the tools to
+    // enable, and this port never hands a CLI the terminal. Python's -y.
     cli: {
       program: null,
-      reason:
-        "`hermes mcp add` always prompts (for authentication, the key and the tools to enable), " +
-        "so it is not run",
+      reason: hermes === null ? notOnPath("hermes") : "`hermes mcp add` is interactive and this port never prompts",
     },
-    // Hermes resolves ${VAR} in config.yaml from its environment and from
-    // this file.
-    envFile: { path: path.join(hermesHome, ".env"), name: envVar },
-    keyInKaguraJson: true,
     notes,
+    // Hermes resolves ${VAR} in config.yaml from its environment and from
+    // the .env beside it.
+    after: [
+      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(path.join(home, ".env"))} with an editor: the ` +
+        "entry reads it from there, and setup never sees the key.",
+      `Check it with: ${shellCommand(["hermes", "mcp", "test", name])}`,
+    ],
   });
 }
 
 async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
-  const name = parseName(args);
-  const input = resolveInput(deps, args, "openclaw");
-  const force = args.flags.has("force");
-  const notes: string[] = [];
-  const url = urlWithoutGuardrails(input, notes);
-
+  const input = resolveHarnessInput(deps, args, "openclaw");
+  const { name, keyEnv } = input;
+  // $OPENCLAW_STATE_DIR too, which Python's paths leave out.
   const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
   const configPath = process.env.OPENCLAW_CONFIG_PATH || path.join(stateDir, "openclaw.json");
+  const found = json5HasServer(readText(configPath), name);
+  const notes: string[] = [];
+  const url = urlForNoInstructions(input, notes);
 
-  // `add` refuses a name that exists, so --force goes through `set`.
-  // --no-probe: the docs do not say whether the probe reads the .env the
-  // key is written to, so a probe could fail an entry that works.
-  const argv = force
-    ? ["mcp", "set", name, JSON.stringify(openclawEntry(url))]
-    : [
-        "mcp",
-        "add",
-        name,
-        "--url",
-        url,
-        "--transport",
-        "streamable-http",
-        "--header",
-        `Authorization=Bearer \${${KEY_ENV_VAR}}`,
-        "--no-probe",
-      ];
-  notes.push(`check it with: openclaw mcp doctor ${name} --probe`);
+  // `add` refuses a name that exists, so replacing one goes through `set`,
+  // as in Python; so does any --force run, since the scan could miss an
+  // entry OpenClaw has, and `set` adds one too. --no-probe: the key is not
+  // in the .env yet.
+  const argv =
+    found || input.force
+      ? ["mcp", "set", name, JSON.stringify(openclawEntry(url, keyEnv))]
+      : [
+          "mcp",
+          "add",
+          name,
+          "--url",
+          url,
+          "--transport",
+          "streamable-http",
+          "--header",
+          `Authorization=Bearer \${${keyEnv}}`,
+          "--no-probe",
+        ];
 
+  const openclaw = deps.which("openclaw");
   return applyPlan(deps, {
     input,
-    name,
     url,
     configPath,
-    exists: json5HasServer(readText(configPath), name),
-    force,
-    dryRun: args.flags.has("dry-run"),
-    block: openclawBlock(name, url),
-    cli: { program: "openclaw", argv },
-    envFile: { path: path.join(stateDir, ".env"), name: KEY_ENV_VAR },
-    keyInKaguraJson: true,
+    found,
+    stops: openclaw !== null,
+    block: openclawBlock(name, url, keyEnv),
+    blockTarget: "it",
+    cli:
+      openclaw === null
+        ? { program: null, reason: notOnPath("openclaw") }
+        : { program: "openclaw", file: openclaw, argv },
     notes,
+    after: [
+      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(path.join(stateDir, ".env"))} with an editor: ` +
+        `the entry sends \${${keyEnv}} (mcp.servers headers take no SecretRef), and setup never sees ` +
+        "the key.",
+      "The Gateway hot-reloads the file. MCP tools appear in OpenClaw's coding and messaging tool " +
+        "profiles, not in minimal.",
+      `Check it with: ${shellCommand(["openclaw", "mcp", "doctor", name, "--probe"])}`,
+    ],
   });
 }
 
@@ -1587,47 +1937,103 @@ const claude: Command = {
 };
 
 const codex: Command = {
-  summary: "Set up Kagura Memory integration for OpenAI Codex.",
+  summary: "Set up Kagura Memory for OpenAI Codex (CLI and IDE extension).",
   description:
-    "  Runs `codex mcp add NAME --url URL --bearer-token-env-var KAGURA_API_KEY`,\n" +
-    "  or prints the table for $CODEX_HOME/config.toml (default\n" +
-    "  ~/.codex/config.toml) when codex is not on PATH. Codex reads the key\n" +
-    "  from KAGURA_API_KEY in the shell that starts it; a key found there is\n" +
-    "  not copied into .kagura.json, and a re-run reads it from there again.\n\n" +
-    "  --guardrails, when neither it nor the URL sets one, defaults to off\n" +
-    "  when the Kagura plugin's Codex hooks are on, and otherwise to the -c\n" +
-    "  context when that is a UUID.\n\n" +
+    "  Adds the kagura-memory MCP server with `codex mcp add NAME --url URL\n" +
+    "  --bearer-token-env-var KAGURA_API_KEY`, which writes ~/.codex/config.toml\n" +
+    "  ($CODEX_HOME); with --force it replaces an entry of that name, which\n" +
+    "  the add overwrites. Without codex on PATH, setup prints the\n" +
+    "  [mcp_servers] table to add instead. The entry names the variable Codex\n" +
+    "  reads the API key from when it connects (--api-key-env renames it):\n" +
+    "  setup never sees the key, and writes no file itself. Check it with:\n" +
+    "  codex mcp get kagura-memory.\n\n" +
+    "  Codex reads the server's MCP instructions, so --context-id (a UUID) or\n" +
+    "  --guardrails CONTEXT_ID puts that context's tool guardrail digest in\n" +
+    "  them. While the kagura-memory Codex plugin's guardrail hooks are on for\n" +
+    "  the entry, they deliver guardrails themselves, and the URL gets\n" +
+    "  ?guardrails=off instead. A guardrails value already in --mcp-url is\n" +
+    "  kept.\n\n" +
     GUARDRAILS_ADVICE,
-  spec: { flags: [...COMMON_FLAGS, GUARDRAILS, TOOL_PROFILE, ...HARNESS_FLAGS] },
+  spec: {
+    flags: [
+      HARNESS_PROFILE,
+      NAME,
+      CODEX_CONTEXT_ID,
+      CODEX_GUARDRAILS,
+      TOOL_PROFILE,
+      ...HARNESS_TAIL,
+      apiKeyEnv(
+        "The variable Codex reads the API key from (bearer_token_env_var; default KAGURA_API_KEY, " +
+          "which every kagura-memory command also ranks above OAuth profiles)",
+      ),
+      ...HARNESS_END,
+    ],
+  },
   run: (deps, args) => runCodex(deps as CliDeps, args),
 };
 
 const hermes: Command = {
-  summary: "Set up Kagura Memory integration for Hermes Agent.",
+  summary: "Set up Kagura Memory for Hermes Agent.",
   description:
-    "  Writes the key to $HERMES_HOME/.env (default ~/.hermes/.env) as\n" +
-    "  MCP_<NAME>_API_KEY (MCP_KAGURA_MEMORY_API_KEY by default), the name\n" +
-    "  `hermes mcp add` derives from --name, and prints the config.yaml block\n" +
-    "  that refers to it: the entry alone when config.yaml already has an\n" +
-    "  mcp_servers key. `hermes mcp add` always prompts, so it is not run.\n" +
-    "  Guardrails arrive through get_context_info at session start, so from\n" +
-    "  the --guardrails flag or the URL, guardrails=off is refused and a\n" +
-    "  context id is not written.",
-  spec: { flags: [...COMMON_FLAGS, GUARDRAILS_NOT_WRITTEN, ...HARNESS_FLAGS] },
+    "  Prints the mcp_servers block and the config.yaml to add it to\n" +
+    "  ($HERMES_HOME, or the active Hermes profile's:\n" +
+    "  ~/.hermes/profiles/<name> when ~/.hermes/active_profile names one,\n" +
+    "  else ~/.hermes), and changes nothing: `hermes mcp add` is interactive\n" +
+    "  and this port never prompts. When config.yaml already has an\n" +
+    "  mcp_servers key, the entry alone is printed, to go under it. The entry\n" +
+    "  reads the API key from MCP_<NAME>_API_KEY (MCP_KAGURA_MEMORY_API_KEY by\n" +
+    "  default), the variable `hermes mcp add` derives from --name, in the\n" +
+    "  .env beside config.yaml: add the key there yourself; setup never sees\n" +
+    "  it. Check it with: hermes mcp test kagura-memory.\n\n" +
+    "  Hermes does not read MCP instructions: guardrails reach it through\n" +
+    "  get_context_info (on by default). --guardrails off is refused, and a\n" +
+    "  context id, from the flag or the URL, is not written; a ?guardrails=off\n" +
+    "  already in the URL is kept, with a warning.",
+  spec: {
+    flags: [
+      HARNESS_PROFILE,
+      NAME,
+      UNUSED_CONTEXT_ID,
+      guardrailsNotWritten("Hermes"),
+      ...HARNESS_TAIL,
+      apiKeyEnv("Not accepted: Hermes names the variable MCP_<NAME>_API_KEY"),
+      ...HARNESS_END,
+    ],
+  },
   run: (deps, args) => runHermes(deps as CliDeps, args),
 };
 
 const openclaw: Command = {
-  summary: "Set up Kagura Memory integration for OpenClaw.",
+  summary: "Set up Kagura Memory for OpenClaw.",
   description:
-    "  Writes the key to $OPENCLAW_STATE_DIR/.env (default ~/.openclaw/.env)\n" +
-    "  as KAGURA_API_KEY and runs `openclaw mcp add ... --transport\n" +
-    "  streamable-http --no-probe` (with --force, `openclaw mcp set`), or\n" +
-    "  prints the block for $OPENCLAW_CONFIG_PATH (default openclaw.json in\n" +
-    "  that directory) when openclaw is not on PATH. As on Hermes, from\n" +
-    "  the --guardrails flag or the URL, guardrails=off is refused and a\n" +
-    "  context id is not written.",
-  spec: { flags: [...COMMON_FLAGS, GUARDRAILS_NOT_WRITTEN, ...HARNESS_FLAGS] },
+    "  Adds the kagura-memory MCP server with `openclaw mcp add NAME --url URL\n" +
+    "  --transport streamable-http --header 'Authorization=Bearer\n" +
+    "  ${KAGURA_API_KEY}' --no-probe`; --force replaces an entry with\n" +
+    "  `openclaw mcp set`. Both write $OPENCLAW_CONFIG_PATH (default\n" +
+    "  openclaw.json in the state directory, $OPENCLAW_STATE_DIR or\n" +
+    "  ~/.openclaw), which the Gateway hot-reloads. Without openclaw on PATH,\n" +
+    "  setup prints the mcp.servers block instead. OpenClaw fills in\n" +
+    "  ${KAGURA_API_KEY} (--api-key-env renames it) from the .env in its\n" +
+    "  state directory: add the key there yourself; setup never sees it.\n" +
+    "  Check it with: openclaw mcp doctor kagura-memory --probe.\n\n" +
+    "  OpenClaw does not read MCP instructions: guardrails reach it through\n" +
+    "  get_context_info (on by default). As on Hermes, --guardrails off is\n" +
+    "  refused, and a context id, from the flag or the URL, is not written; a\n" +
+    "  ?guardrails=off already in the URL is kept, with a warning.",
+  spec: {
+    flags: [
+      HARNESS_PROFILE,
+      NAME,
+      UNUSED_CONTEXT_ID,
+      guardrailsNotWritten("OpenClaw"),
+      ...HARNESS_TAIL,
+      apiKeyEnv(
+        "The variable the Authorization header references, kept in ~/.openclaw/.env " +
+          "($OPENCLAW_STATE_DIR/.env when set; default KAGURA_API_KEY)",
+      ),
+      ...HARNESS_END,
+    ],
+  },
   run: (deps, args) => runOpenclaw(deps as CliDeps, args),
 };
 

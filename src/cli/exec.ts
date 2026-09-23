@@ -23,7 +23,8 @@ export interface ExecOptions {
   cwd?: string;
   /**
    * How long the program may run before it is killed; EXEC_TIMEOUT_MS when
-   * unset. `setup claude` gives `claude` Python's 30 s.
+   * unset. `setup claude` gives `claude` Python's 30 s, and `setup codex`
+   * and `setup openclaw` give their CLIs Python's 120 s.
    */
   timeoutMs?: number;
 }
@@ -33,6 +34,8 @@ export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** Set, to true, when the program was killed for running past its timeout. */
+  timedOut?: true;
 }
 
 /**
@@ -105,13 +108,14 @@ export function execFile(
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;
-    const settle = (code: number, failure = ""): void => {
+    const settle = (code: number, failure = "", timedOut = false): void => {
       if (settled) return;
       settled = true;
       resolve({
         code,
         stdout: Buffer.concat(stdout).toString("utf-8"),
         stderr: `${Buffer.concat(stderr).toString("utf-8")}${failure}`,
+        ...(timedOut ? { timedOut: true as const } : {}),
       });
     };
 
@@ -136,9 +140,15 @@ export function execFile(
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (e) => settle(127, e.message));
     // 128+n for a signal, as in `secret exec`: "it died" stays
-    // distinguishable from "it exited 0".
+    // distinguishable from "it exited 0". Nothing here kills the child but
+    // spawn's own timeout, which marks it `killed`; a signal from anywhere
+    // else leaves that unset.
     child.on("close", (code, signal) =>
-      settle(code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0))),
+      settle(
+        code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0)),
+        "",
+        signal !== null && child.killed === true,
+      ),
     );
   });
 }
