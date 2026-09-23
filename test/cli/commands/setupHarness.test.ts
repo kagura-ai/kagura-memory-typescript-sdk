@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ExecResult } from "../../../src/cli/exec.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
-import type { KaguraConfig } from "../../../src/config.js";
+import { loadConfig, type KaguraConfig } from "../../../src/config.js";
 
 interface Harness {
   deps: CliDeps;
@@ -31,7 +31,12 @@ interface Programs {
   exec?: (file: string, argv: readonly string[]) => ExecResult;
 }
 
-function harness(programs: Programs = {}, config: KaguraConfig = {}): Harness {
+/**
+ * `config` stands in for what `loadConfig` returns; "disk" runs the real
+ * loader, which reads ./.kagura.json, then ~/.kagura.json, and only when
+ * neither exists the KAGURA_* variables.
+ */
+function harness(programs: Programs = {}, config: KaguraConfig | "disk" = {}): Harness {
   const out: string[] = [];
   const err: string[] = [];
   const runs: string[][] = [];
@@ -44,7 +49,7 @@ function harness(programs: Programs = {}, config: KaguraConfig = {}): Harness {
       runs.push([file, ...argv]);
       return programs.exec?.(file, argv) ?? { code: 0, stdout: "", stderr: "" };
     },
-    loadConfig: () => config,
+    loadConfig: () => (config === "disk" ? loadConfig() : config),
   } as unknown as CliDeps;
   return { deps, out, err, runs };
 }
@@ -56,6 +61,7 @@ const MCP_URL = "https://x.test/mcp";
 let sandbox: string;
 let home: string;
 const ORIGINAL_ENV = { ...process.env };
+const ORIGINAL_CWD = process.cwd();
 
 beforeEach(() => {
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-setup-"));
@@ -63,12 +69,15 @@ beforeEach(() => {
   fs.mkdirSync(home, { recursive: true });
   process.env.HOME = home;
   process.env.USERPROFILE = home;
-  for (const name of ["CODEX_HOME", "HERMES_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH"]) {
+  // KAGURA_API_KEY too: setup falls back to it for the key, so the
+  // developer's own must not stand in for a missing one.
+  for (const name of ["CODEX_HOME", "HERMES_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "KAGURA_API_KEY"]) {
     delete process.env[name];
   }
 });
 
 afterEach(() => {
+  process.chdir(ORIGINAL_CWD);
   // Restored in place: assigning a fresh object to process.env detaches it
   // from the real environment, and os.homedir() would go on reading the
   // first test's HOME for the rest of the file.
@@ -160,6 +169,84 @@ describe("setup codex", () => {
     expect(kagura).not.toContain("envonly_key_abcdef");
     expect(JSON.parse(kagura)).toEqual({ mcp_url: MCP_URL, context_id: CONTEXT });
     expect((report(h).notes as string[]).join("\n")).toMatch(/not copied into .*\.kagura\.json/);
+  });
+
+  describe("with the key in KAGURA_API_KEY and a .kagura.json without one", () => {
+    // The real loader returns a .kagura.json as it is, so the variable has
+    // to be read by setup itself — and setup codex writes exactly such a
+    // file when the key came from the variable.
+    const ENV_KEY = "envonly_key_abcdef";
+    const kaguraJson = () => path.join(sandbox, ".kagura.json");
+    const codexIn = (...extra: string[]) =>
+      ["setup", "codex", "--mcp-url", MCP_URL, "--project-dir", sandbox, ...extra];
+
+    beforeEach(() => {
+      process.env.KAGURA_API_KEY = ENV_KEY;
+      process.chdir(sandbox);
+    });
+
+    it("can be re-run: the first run's own .kagura.json does not hide the key", async () => {
+      const first = harness(codex, "disk");
+      expect(await runCli(codexIn("-c", CONTEXT), first.deps)).toBe(0);
+      expect(JSON.parse(fs.readFileSync(kaguraJson(), "utf-8"))).toEqual({ mcp_url: MCP_URL, context_id: CONTEXT });
+
+      const again = harness(codex, "disk");
+      expect(await runCli(codexIn("--guardrails", "off"), again.deps)).toBe(0);
+      expect(again.runs[0]![5]).toBe(`${MCP_URL}?guardrails=off`);
+      expect(fs.readFileSync(kaguraJson(), "utf-8")).not.toContain(ENV_KEY);
+    });
+
+    it("works on a first run whose .kagura.json holds only context_id", async () => {
+      fs.writeFileSync(kaguraJson(), JSON.stringify({ context_id: CONTEXT }));
+      const h = harness(codex, "disk");
+      expect(await runCli(codexIn(), h.deps)).toBe(0);
+      expect(h.runs).toHaveLength(1);
+      expect(fs.readFileSync(kaguraJson(), "utf-8")).not.toContain(ENV_KEY);
+    });
+
+    it("lets .kagura.json's own api_key win over the variable", async () => {
+      fs.writeFileSync(kaguraJson(), JSON.stringify({ api_key: "file_key_0123456789" }));
+      const h = harness(codex, "disk");
+      expect(await runCli(codexIn(), h.deps)).toBe(0);
+      // Not the variable's key, so it stays in the file as it was.
+      expect(JSON.parse(fs.readFileSync(kaguraJson(), "utf-8")).api_key).toBe("file_key_0123456789");
+    });
+  });
+
+  it("without a key anywhere, names every place one can come from, and not auth login", async () => {
+    // setup writes an API-key entry; an OAuth profile does not give it one.
+    const h = harness(codex);
+    expect(await runCli(["setup", "codex", "--project-dir", sandbox], h.deps)).toBe(1);
+    const err = h.err.join("\n");
+    expect(err).toContain("Error: no API key: pass --api-key, set api_key in .kagura.json, or export KAGURA_API_KEY.");
+    expect(err).not.toMatch(/auth login/);
+    expect(h.runs).toEqual([]);
+  });
+
+  it("warns that a ?tools= allowlist wins over --tool-profile", async () => {
+    // memory-cloud applies `tools` before it reads `profile`.
+    const h = harness(codex);
+    expect(
+      await runCli(setup("codex", "--mcp-url", `${MCP_URL}?tools=recall`, "--tool-profile", "core"), h.deps),
+    ).toBe(0);
+    expect(report(h).notes).toContain(
+      "Warning: the MCP URL has a ?tools= allowlist, which the server applies instead of --tool-profile core.",
+    );
+    expect(h.runs[0]![5]).toBe(`${MCP_URL}?tools=recall&profile=core`);
+
+    const plain = harness(codex);
+    await runCli(setup("codex", "--mcp-url", `${MCP_URL}?tools=recall`), plain.deps);
+    expect((report(plain).notes as string[]).join("\n")).not.toMatch(/allowlist/);
+  });
+
+  it("describes the --guardrails default with its conditions", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "codex", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n").replace(/\s+/g, " ");
+    expect(text).toContain(
+      "--guardrails, when neither it nor the URL sets one, defaults to off when the Kagura plugin's " +
+        "Codex hooks are on, and otherwise to the -c context when that is a UUID.",
+    );
   });
 
   it("--dry-run prints the two-key TOML table and runs and writes nothing", async () => {
@@ -377,6 +464,45 @@ describe("setup hermes", () => {
     expect(report(h)).toMatchObject({ harness: "hermes", applied_with: null });
   });
 
+  describe("a config.yaml that already has mcp_servers", () => {
+    // Pasted as printed, a second top-level mcp_servers key would replace
+    // the first — YAML keeps the last — and drop every other server.
+    const other = 'model: x\nmcp_servers:\n  other:\n    url: "https://o"\n';
+
+    it("prints the entry alone, to go under the existing key", async () => {
+      fs.mkdirSync(hermesDir(), { recursive: true });
+      fs.writeFileSync(configYaml(), other);
+      const h = harness({});
+      expect(await runCli(setup("hermes"), h.deps)).toBe(0);
+      expect(h.err).toContain(`Add this to the mcp_servers: mapping in ${configYaml()}:`);
+      expect(h.err).toContain(
+        [
+          "  kagura-memory:",
+          `    url: "${MCP_URL}"`,
+          "    headers:",
+          '      Authorization: "Bearer ${MCP_KAGURA_MEMORY_API_KEY}"',
+        ].join("\n"),
+      );
+      expect(h.err.join("\n")).not.toMatch(/^mcp_servers:/m);
+      const notes = (report(h).notes as string[]).join("\n");
+      expect(notes).toContain(`add the block printed on stderr to the mcp_servers: mapping in ${configYaml()}`);
+      expect(notes).toContain(
+        `${configYaml()} already has a top-level mcp_servers: key, so only the kagura-memory entry is ` +
+          "printed: a second mcp_servers: key would replace the first, and the servers under it with it",
+      );
+      // Still never written here.
+      expect(fs.readFileSync(configYaml(), "utf-8")).toBe(other);
+    });
+
+    it("indents the entry as the file indents its other servers", async () => {
+      fs.mkdirSync(hermesDir(), { recursive: true });
+      fs.writeFileSync(configYaml(), "mcp_servers:\n    other:\n        url: y\n");
+      const h = harness({});
+      await runCli(setup("hermes", "--dry-run"), h.deps);
+      expect(h.err.join("\n")).toContain(`    kagura-memory:\n      url: "${MCP_URL}"`);
+    });
+  });
+
   it("honours HERMES_HOME", async () => {
     process.env.HERMES_HOME = path.join(sandbox, "hermes-home");
     const h = harness({});
@@ -451,6 +577,13 @@ describe("setup hermes", () => {
   it("does not take --tool-profile", async () => {
     const h = harness({});
     expect(await runCli(setup("hermes", "--tool-profile", "core"), h.deps)).toBe(2);
+  });
+
+  it("says the variable follows --name", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "hermes", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n").replace(/\s+/g, " ");
+    expect(text).toContain("as MCP_<NAME>_API_KEY (MCP_KAGURA_MEMORY_API_KEY by default)");
   });
 
   it("describes --guardrails as what it does here, not as a URL parameter", async () => {
@@ -528,6 +661,15 @@ describe("setup openclaw", () => {
     await runCli(setup("openclaw"), h.deps);
     expect(fs.existsSync(path.join(sandbox, "state", ".env"))).toBe(true);
     expect(h.err.join("\n")).toContain(path.join(sandbox, "conf", "oc.json5"));
+  });
+
+  it("names the state and config overrides in its help", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "openclaw", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n").replace(/\s+/g, " ");
+    expect(text).toContain("$OPENCLAW_STATE_DIR/.env (default ~/.openclaw/.env)");
+    expect(text).toContain("$OPENCLAW_CONFIG_PATH");
+    expect(text).not.toContain("Writes the key to ~/.openclaw/.env");
   });
 
   it("replaces an existing KAGURA_API_KEY line", async () => {
@@ -614,6 +756,38 @@ describe("the harness .env files are not world-readable", () => {
     const h = harness({});
     await runCli(setup(name), h.deps);
     expect(fs.statSync(path.join(home, dir, ".env")).mode & 0o077).toBe(0);
+  });
+});
+
+describe("a flag-shaped --name", () => {
+  // The name is a bare positional in the codex and openclaw argv, where a
+  // harness CLI would read `--help` as its own option, print its help and
+  // exit 0 — a success report with nothing configured.
+  const everywhere: Programs = { onPath: { codex: "/usr/bin/codex", openclaw: "/usr/bin/openclaw" } };
+
+  it.each([
+    ["codex", "--help"],
+    ["codex", "-h"],
+    ["codex", "--no-probe"],
+    ["codex", "_x"],
+    ["openclaw", "--help"],
+    ["openclaw", "-x"],
+    ["hermes", "--help"],
+  ])("setup %s --name=%s exits 2 and runs nothing", async (harnessName, name) => {
+    const h = harness(everywhere);
+    expect(await runCli(setup(harnessName, `--name=${name}`), h.deps)).toBe(2);
+    expect(h.err.join("\n")).toContain(
+      `Error: Invalid value for '--name': '${name}' must start with a letter or digit and contain ` +
+        "only letters, digits, '-' and '_'.",
+    );
+    expect(h.runs).toEqual([]);
+    expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
+  });
+
+  it("still takes a name that only contains a dash", async () => {
+    const h = harness(everywhere);
+    expect(await runCli(setup("codex", "--name=kagura-work_2"), h.deps)).toBe(0);
+    expect(h.runs[0]!.slice(1, 4)).toEqual(["mcp", "add", "kagura-work_2"]);
   });
 });
 

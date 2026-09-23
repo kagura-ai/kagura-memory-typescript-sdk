@@ -21,7 +21,8 @@ import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { mcpOptions } from "../runClientCommand.js";
-import { findClaudeEntries } from "./setup.js";
+import { shellQuote } from "./harnessConfig.js";
+import { findClaudeEntries, realProjectPath, type ClaudeScope } from "./setup.js";
 
 type Status = "pass" | "warn" | "fail" | "info";
 
@@ -163,6 +164,20 @@ function mcpMode(entry: Record<string, unknown>): "stdio" | "static-token" | "ur
   return "absent";
 }
 
+/**
+ * How to replace a legacy `type: "url"` entry, by the scope it is in —
+ * Python's `_LEGACY_TYPE_FIX`. Setup writes project and user scope; a
+ * local one must go first, or the re-run's shadow check refuses to write
+ * under it.
+ */
+const LEGACY_TYPE_FIX: Record<ClaudeScope, string> = {
+  project: "re-run `kagura-memory setup claude`",
+  user: "re-run `kagura-memory setup claude --scope user`",
+  local:
+    "remove it (`claude mcp remove --scope local kagura-memory`), then re-run " +
+    "`kagura-memory setup claude`",
+};
+
 function checkMcp(deps: CommandDeps): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const config = safeConfig(deps);
@@ -234,12 +249,18 @@ function checkMcp(deps: CommandDeps): DoctorCheck[] {
     });
   }
   if (used.config.type === "url") {
+    let fix = LEGACY_TYPE_FIX[used.scope];
+    const mcpJsonDir = path.dirname(used.path);
+    if (used.scope === "project" && mcpJsonDir !== realProjectPath(cwd)) {
+      // A parent directory's .mcp.json: a re-run here would write a closer file.
+      fix = `re-run \`kagura-memory setup claude --project-dir ${shellQuote(mcpJsonDir)}\``;
+    }
     checks.push({
       section: "mcp",
       status: "warn",
       message:
-        'The kagura-memory entry has type "url", which Claude Code does not accept; ' +
-        're-run `kagura-memory setup claude` to rewrite it as "http"',
+        `The kagura-memory entry has type "url", which Claude Code does not accept; ` +
+        `${fix} to write it as "http"`,
       details,
     });
   }

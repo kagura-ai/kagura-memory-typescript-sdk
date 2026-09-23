@@ -15,6 +15,7 @@ import {
   withoutQuery,
   withoutQueryParam,
   yamlHasServer,
+  yamlServersIndent,
 } from "../../../src/cli/commands/harnessConfig.js";
 
 const UUID = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
@@ -200,6 +201,24 @@ describe("yamlHasServer", () => {
   });
 });
 
+describe("yamlServersIndent", () => {
+  it("is null without a top-level mcp_servers key", () => {
+    expect(yamlServersIndent("")).toBeNull();
+    expect(yamlServersIndent("model: x\nplugins:\n  mcp_servers:\n    a: 1")).toBeNull();
+  });
+
+  it("copies the indentation of the entries already under it", () => {
+    expect(yamlServersIndent('mcp_servers:\n  other:\n    url: "https://o"')).toBe("  ");
+    expect(yamlServersIndent("model: x\nmcp_servers:\n\n    # a note\n    other:\n      url: y")).toBe("    ");
+  });
+
+  it("uses two spaces when the key has no block entries to copy from", () => {
+    expect(yamlServersIndent("mcp_servers:\nmodel: x")).toBe("  ");
+    expect(yamlServersIndent("mcp_servers: {}")).toBe("  ");
+    expect(yamlServersIndent("mcp_servers:")).toBe("  ");
+  });
+});
+
 describe("json5HasServer", () => {
   it("reads plain JSON exactly", () => {
     expect(json5HasServer('{"mcp":{"servers":{"kagura-memory":{}}}}', "kagura-memory")).toBe(true);
@@ -238,6 +257,19 @@ describe("blocks", () => {
         '    url: "https://x.test/mcp"',
         "    headers:",
         '      Authorization: "Bearer ${MCP_KAGURA_MEMORY_API_KEY}"',
+      ].join("\n"),
+    );
+  });
+
+  it("hermes: the entry alone, at the given indent, for a file that has mcp_servers already", () => {
+    // Appended as a second top-level mcp_servers key, the full block would
+    // replace the servers already there: YAML keeps the last one.
+    expect(hermesYamlBlock("kagura-memory", "https://x.test/mcp", "MCP_KAGURA_MEMORY_API_KEY", "    ")).toBe(
+      [
+        "    kagura-memory:",
+        '      url: "https://x.test/mcp"',
+        "      headers:",
+        '        Authorization: "Bearer ${MCP_KAGURA_MEMORY_API_KEY}"',
       ].join("\n"),
     );
   });

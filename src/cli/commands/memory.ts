@@ -187,8 +187,8 @@ const recall: Command = {
         name: "trusted-only",
         type: "switch",
         help:
-          "Exclude external / connector-ingested memories (filters.trust_tier=trusted). " +
-          "Use it for reads fed back to an agent, like the SessionStart hook.",
+          "Exclude external / connector-ingested memories (filters.trust_tier=trusted; " +
+          "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook.",
       },
     ],
   },

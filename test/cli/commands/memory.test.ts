@@ -165,8 +165,8 @@ describe("kagura-memory recall", () => {
     expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
     const line = h.out.join("\n").split("\n").find((l) => l.trimStart().startsWith("--trusted-only"));
     expect(line).toContain(
-      "Exclude external / connector-ingested memories (filters.trust_tier=trusted). " +
-        "Use it for reads fed back to an agent, like the SessionStart hook.",
+      "Exclude external / connector-ingested memories (filters.trust_tier=trusted; " +
+        "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook.",
     );
   });
 

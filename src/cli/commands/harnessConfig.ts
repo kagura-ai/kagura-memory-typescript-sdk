@@ -223,6 +223,29 @@ export function yamlHasServer(text: string, name: string): boolean {
 }
 
 /**
+ * How Hermes's `config.yaml` text indents the entries under its top-level
+ * `mcp_servers` key: null when it has no such key, and two spaces when the
+ * key has no block entries to copy the indent from.
+ *
+ * A file with the key needs the entry alone, placed under it: a second
+ * top-level `mcp_servers:` key would replace the first (YAML keeps the
+ * last), and every server under it with it.
+ */
+export function yamlServersIndent(text: string): string | null {
+  let found = false;
+  for (const line of text.split(/\r?\n/)) {
+    // Blank and comment lines neither open nor close a block.
+    if (/^\s*(#|$)/.test(line)) continue;
+    if (!found) {
+      found = /^mcp_servers\s*:/.test(line);
+      continue;
+    }
+    return /^(\s+)\S/.exec(line)?.[1] ?? "  ";
+  }
+  return found ? "  " : null;
+}
+
+/**
  * Whether OpenClaw's `openclaw.json` text has `mcp.servers.<name>`.
  *
  * Plain JSON (which is valid JSON5) is read exactly. Anything else — real
@@ -272,16 +295,22 @@ export function hermesEnvVar(name: string): string {
   return `MCP_${suffix}_API_KEY`;
 }
 
-/** The `mcp_servers.<name>` block for Hermes's `config.yaml`. */
-export function hermesYamlBlock(name: string, url: string, envVar: string): string {
+/**
+ * The `mcp_servers.<name>` block for Hermes's `config.yaml`: the whole
+ * mapping, or with `entryIndent` (see `yamlServersIndent`) the `<name>`
+ * entry alone, indented to go under an `mcp_servers:` key already there.
+ */
+export function hermesYamlBlock(name: string, url: string, envVar: string, entryIndent?: string): string {
   // JSON string literals are valid YAML double-quoted scalars.
-  return [
-    "mcp_servers:",
-    `  ${name}:`,
-    `    url: ${JSON.stringify(url)}`,
-    "    headers:",
-    `      Authorization: ${JSON.stringify(`Bearer \${${envVar}}`)}`,
-  ].join("\n");
+  const entry = [
+    `${name}:`,
+    `  url: ${JSON.stringify(url)}`,
+    "  headers:",
+    `    Authorization: ${JSON.stringify(`Bearer \${${envVar}}`)}`,
+  ];
+  return entryIndent === undefined
+    ? ["mcp_servers:", ...entry.map((line) => `  ${line}`)].join("\n")
+    : entry.map((line) => `${entryIndent}${line}`).join("\n");
 }
 
 /**

@@ -75,9 +75,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`bearer_token_env_var`, since Codex rejects an inline `bearer_token` on
   an HTTP server and then fails to load the whole file), and a key found in
   that variable is not copied into `.kagura.json`. Hermes and OpenClaw read
-  it from their own `.env` (`MCP_KAGURA_MEMORY_API_KEY` in
-  `$HERMES_HOME/.env`, `KAGURA_API_KEY` in `~/.openclaw/.env`), which is
-  written 0600 with that one line replaced or appended.
+  it from their own `.env` (`MCP_KAGURA_MEMORY_API_KEY`, or
+  `MCP_<NAME>_API_KEY` under `--name`, in `$HERMES_HOME/.env`;
+  `KAGURA_API_KEY` in `$OPENCLAW_STATE_DIR/.env`, by default
+  `~/.openclaw/.env`), which is written 0600 with that one line replaced or
+  appended. Every `setup` subcommand takes the key from `--api-key`, then
+  from the `api_key` in `.kagura.json`, then from `KAGURA_API_KEY`, so a
+  re-run finds a key that the first run left in the variable.
 
   This package has no TOML, YAML or JSON5 parser and takes no runtime
   dependencies, so it never rewrites those configs. The entry goes in
@@ -87,10 +91,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one JSON document. On Windows, a CLI installed only as an npm `.cmd` shim
   counts as not found, because Node runs one only through a shell that
   would re-parse the arguments. Hermes always gets the printed block,
-  because `hermes mcp add` always prompts. An existing entry of the same
+  because `hermes mcp add` always prompts; when its `config.yaml` already
+  has an `mcp_servers:` key, the block is the `kagura-memory` entry alone,
+  indented to go under it, since a second top-level key would replace the
+  first and every server in it. OpenClaw's block names
+  `$OPENCLAW_CONFIG_PATH` when that is set. An existing entry of the same
   name stops the command with exit 1 unless `--force` is given; `--name`
   renames the entry, and `--dry-run` shows what would be configured without
-  writing or running anything. Hermes and OpenClaw do not pass the server's
+  writing or running anything. A name must start with a letter or digit,
+  and anything else exits 2 before a harness CLI runs: the name is a bare
+  argument to `codex` and `openclaw`, which would read `--name=--help` as
+  an option, print their help and exit 0 with nothing configured. Hermes
+  and OpenClaw do not pass the server's
   instructions to the model, so there `guardrails=off` is refused and a
   guardrails context id is dropped with a note, whether it comes from
   `--guardrails` or from the URL: `off` would also remove the
@@ -121,7 +133,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   UUID exits 2, since the server silently ignores it, and so does an empty
   `--tool-profile`. On Codex, when neither the flag nor the URL sets
   `guardrails`, it defaults to `off` if the Kagura plugin's Codex hooks are
-  on, and otherwise to the `-c` context when that is a UUID.
+  on, and otherwise to the `-c` context when that is a UUID. As in the
+  Python CLI, `--tool-profile` on a URL with a `?tools=` allowlist, which
+  the server applies instead, gets a warning in the notes, and a
+  `setup claude` run that leaves out a `guardrails` or `profile` value the
+  replaced entry had says so: "Note: the previous project-scope entry also
+  had --guardrails off, which this run left out; re-run with it to keep
+  it."
 
 - **`setup claude` notices the Kagura Memory plugin.** When
   `claude plugin list --json`, run in `--project-dir`, shows it enabled,
@@ -133,7 +151,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`recall --trusted-only`**
   ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45))
-  sends `filters.trust_tier = "trusted"`, so external and
+  sends `filters.trust_tier = "trusted"` (server v0.24.0+), so external and
   connector-ingested memories are left out of the results. The Python CLI
   added it for its SessionStart hook; this bin installs no hooks, but
   mirrors the flag and its help so the two CLIs take the same argv.
@@ -163,16 +181,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45)).
   It read only `./.mcp.json`, so a user- or local-scope entry read as
   missing and one scope hiding another went unreported. It now reads the
-  same three scopes as `setup claude` and reports the entry Claude Code
-  uses as `MCP Mode: <mode> (<scope> scope, <file>)`, with `scope` and
-  `source` in the check's `details`, plus a warning for each entry that one
-  hides, in the Python CLI's words. The other messages change too: an
+  same three scopes as `setup claude`, the same way (local scope under the
+  git repository root, project scope from the closest `.mcp.json` here or
+  in a parent directory, labelled by its path), and reports the entry
+  Claude Code uses as `MCP Mode: <mode> (<scope> scope, <file>)`, with
+  `scope` and `source` in the check's `details`, plus a warning for each
+  entry that one hides, in the Python CLI's words. The other messages
+  change too: an
   `info` "No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)"
   when no scope has one, and a `warn` "No usable kagura-memory entry found
   in …" for a `.mcp.json` without one, or for an entry that is neither the
   `kagura-mcp` stdio proxy nor an HTTP entry. A static-token entry passes,
   where Python's `doctor` points at `setup claude --profile`, whose proxy
   this package does not ship. A `.mcp.json` that is not JSON still fails.
+  The warning about a legacy `type: "url"` entry names the fix for its
+  scope, in the Python CLI's words: re-run `kagura-memory setup claude` for
+  project scope (with `--project-dir <dir>` for a parent directory's
+  `.mcp.json`), `--scope user` for user scope, and for local scope
+  `claude mcp remove --scope local kagura-memory` first.
+
+- **`setup`'s missing-key error names `KAGURA_API_KEY` and no longer
+  points at `auth login`**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45)).
+  An OAuth profile gives `setup` no key, so following that hint changed
+  nothing. The error now reads `no API key: pass --api-key, set api_key in
+  .kagura.json, or export KAGURA_API_KEY.`, and `setup claude` reads that
+  variable when `.kagura.json` has no `api_key`, where it used to stop.
 
 ### Fixed
 
@@ -183,8 +217,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Skipped — unknown MCP server type "url"`, and
   `claude mcp get kagura-memory` finds no such server, while the command
   reported success. The entry is now `type: "http"`. Re-run `setup claude`
-  to rewrite an existing one; `doctor` warns about a `url` entry and says
-  so.
+  to rewrite an existing one; `doctor` warns about a `url` entry and names
+  the command for its scope.
 
 - **`setup claude` could report success for an entry that never takes
   effect**
@@ -196,8 +230,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry. For the default `--scope project` that is a local-scope entry; for
   `--scope user` a project `.mcp.json` entry, such as the one earlier
   releases wrote, counts too. An entry the new one hides in a weaker scope
-  is noted instead. An `.mcp.json` it cannot parse now also stops the
-  command before `.kagura.json` is rewritten rather than after.
+  is noted instead. The scopes are read as Claude Code reads them: local
+  scope under the git repository root (a linked worktree's main working
+  tree), whichever subdirectory setup runs in, and project scope from the
+  closest `.mcp.json` that defines the entry, in the project or a parent
+  directory. A parent's entry stops `--scope user`, and a `--scope project`
+  write below it is noted as hiding it. The printed command starts with a
+  `cd` into the directory it acts on (the project, or the one holding the
+  `.mcp.json`) when that is not the current one. An `.mcp.json` it cannot
+  parse, or whose `mcpServers` is not an object, now also stops the
+  command before `.kagura.json` is rewritten rather than after; an array
+  there used to lose the entry while the command reported success.
 
 - **A rate-limited device sign-in says how long to wait**
   ([#44](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/44)).
