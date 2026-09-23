@@ -657,7 +657,8 @@ export interface IndexerStatusResponse {
  * Lifecycle state of a Sleep Maintenance run.
  *
  * `degraded` (server v0.43.0+) is a run that finished although some of its
- * judge-LLM calls failed; if they all fail the run is `failed`. A degraded
+ * judge-LLM calls failed, or (v0.46.0+) although a phase failed; if the
+ * judge calls all fail the run is `failed`. A degraded
  * run still made its changes, so it can be rolled back like a `completed`
  * one.
  */
@@ -685,8 +686,8 @@ export interface SleepReport {
   llm_calls_made: number;
   llm_tokens_used: number;
   /**
-   * Judge-LLM calls that raised, across all phases — the count behind a
-   * `degraded` or `failed` status (server v0.43.0+).
+   * Judge-LLM calls that raised, across all phases (server v0.43.0+). It
+   * can be 0 on a `degraded` run whose grade came from a failed phase.
    *
    * @default 0
    */
@@ -1257,9 +1258,9 @@ export interface AgentBootstrapComponent {
  * component reports `status="error"` under `components` while the rest
  * still return, with the top-level `degraded` flag set.
  *
- * A recall that fell back to keyword-only search is not a failure, so it
- * does not set the top-level flag: check `components.recall.degraded`
- * (and `degraded_reason`) as well.
+ * A recall that fell back to keyword-only search sets the top-level flag
+ * too (server v0.66.0+); `components.recall.degraded_reason` tells that
+ * apart from a failed component (`status="error"`).
  *
  * `context` reuses {@link ContextDetail} — the server emits the block
  * byte-compatible with `get_context_info` (`search_config` is not

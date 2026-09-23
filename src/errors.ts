@@ -306,10 +306,12 @@ export class KaguraPartialRollbackError extends KaguraError {
  * Not always, though. `updateSearchConfig` also answers
  * `permission_denied` for a context that does not exist or that the caller
  * cannot see, so there a missing context is this class, not
- * {@link KaguraNotFoundError}. Neither it nor the analysis tools (reached
- * through `callRawTool`) send `required_role`, so `requiredRole` is `null`
- * on those calls whatever the cause, and it cannot tell a missing context
- * from a role denial.
+ * {@link KaguraNotFoundError}. Only some tools send `required_role`:
+ * `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools
+ * and the analysis tools (reached through `callRawTool`) do not, so
+ * `requiredRole` is `null` on those calls whatever the cause, and on
+ * `updateSearchConfig` it cannot tell a missing context from a role
+ * denial.
  *
  * `requiredRole` is the server's own wording — a role such as `"editor"`
  * or a phrase such as `"owner or admin"` — so display it rather than

@@ -690,7 +690,7 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       error: "CONNECTOR-001",
       message: "Connector seat limit reached. Your plan allows 2 connector(s).",
       max_connectors: 2,
-      active_connectors: 2,
+      active_connectors: 3,
     };
     const err = await failure(server, (c) => c.callRawTool("setup_connector"));
 
@@ -698,7 +698,7 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     const quota = err as KaguraQuotaError;
     expect(quota.gate).toBeNull();
     // The legacy seat counts stand in for the canonical current / limit.
-    expect(quota.current).toBe(2);
+    expect(quota.current).toBe(3);
     expect(quota.limit).toBe(2);
   });
 
@@ -710,7 +710,7 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       error: "quota_exceeded",
       message: "Analysis daily quota exceeded: 3/3 runs today (addon bonus 0).",
       quota_type: "memory_analysis",
-      used_today: 3,
+      used_today: 4,
       limit_today: 3,
       addon_bonus: 0,
       remaining_today: 0,
@@ -720,8 +720,8 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     )) as KaguraQuotaError;
     expect(err).toBeInstanceOf(KaguraQuotaError);
     expect(err.quotaType).toBe("memory_analysis");
-    expect(err.usedToday).toBe(3);
-    expect(err.current).toBe(3);
+    expect(err.usedToday).toBe(4);
+    expect(err.current).toBe(4);
     expect(err.limit).toBe(3);
   });
 
@@ -734,15 +734,15 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       gate: "quota",
       quota_type: "connectors",
       current: 3,
-      limit: 3,
-      active_connectors: 99,
+      limit: 5,
+      active_connectors: 98,
       max_connectors: 99,
     };
     const err = (await failure(server, (c) =>
       c.callRawTool("setup_connector"),
     )) as KaguraQuotaError;
     expect(err.current).toBe(3);
-    expect(err.limit).toBe(3);
+    expect(err.limit).toBe(5);
   });
 
   it("reads ingest_events' retry_after_seconds as retryAfter", async () => {
@@ -1412,6 +1412,16 @@ describe("createContext quota pre-check", () => {
     await expect(client.createContext({ name: "new" })).rejects.toThrow(KaguraQuotaError);
     // The create_context tool must NOT have been called after the quota block.
     expect(server.requests.some((r) => (r.body?.params as { name?: string })?.name === "create_context")).toBe(false);
+  });
+
+  it("lets the server decide when list_contexts could not read the quota (limit 0)", async () => {
+    // list_contexts answers a failed quota lookup with limit 0 and
+    // can_create false; every plan allows at least one context.
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: false, count: 0, limit: 0 };
+    server.toolResults.create_context = { status: "success", id: "ctx-0" };
+    const client = makeClient(server);
+    await expect(client.createContext({ name: "new" })).resolves.toMatchObject({ id: "ctx-0" });
   });
 
   it("allows creation when can_create is absent (defaults to true)", async () => {

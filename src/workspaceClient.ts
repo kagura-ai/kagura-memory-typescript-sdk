@@ -431,7 +431,7 @@ export class WorkspaceClient extends KaguraRestClient {
       return gated;
     }
     return new KaguraQuotaError(
-      extractDetail(response.text) || "Quota exceeded. Try again later.",
+      sanitizeServerDetail(extractDetail(response.text)) ?? "Quota exceeded. Try again later.",
       responseRetryAfter(response.headers, response.text),
     );
   }

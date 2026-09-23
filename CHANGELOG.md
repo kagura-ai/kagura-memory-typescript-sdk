@@ -24,7 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `KaguraFeatureNotAvailableError` (new) | MCP `plan_required` / `feature_not_available`, REST 403 `FEAT-001` | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
   | `KaguraQuotaError` (extended) | MCP `quota_exceeded` / `CONNECTOR-001`, REST `QUOTA-001` / `QUOTA-002` / `CONNECTOR-001` | the above plus `quotaType`, `current`, `limit`, `usedToday`, `resetsAt` |
   | `KaguraPartialRollbackError` (new) | `rollbackSleepRun` reversing only part of a run | `reportId`, `summary` |
-  | `KaguraPermissionError` (new) | MCP `permission_denied`: usually a role too low, but on `updateSearchConfig` also a context that does not exist or that the caller cannot see | `requiredRole` (`null` on `updateSearchConfig` and the analysis tools, which never send it) |
+  | `KaguraPermissionError` (new) | MCP `permission_denied`: usually a role too low, but on `updateSearchConfig` also a context that does not exist or that the caller cannot see | `requiredRole` (only some tools send it: `null` on `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools) |
 
   All of them extend `KaguraError`, so existing `instanceof KaguraError`
   handling still catches them, and the MCP ones keep the exact message the
@@ -90,7 +90,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `limit`. It has no `gate` and no plan fields, because `list_contexts`
   does not send them, so it says less than the server's own context-cap
   refusal, which names the plan that lifts the cap. The server's refusal
-  arrives only when a concurrent create gets past the check.
+  arrives when a concurrent create gets past the check, and when
+  `list_contexts` reports `limit: 0` — its answer to a failed quota
+  lookup — in which case the pre-check now steps aside and lets
+  `create_context` decide, as the Python SDK does.
 
 - **`KaguraClient.loadGuardrails({ contextId, cap? })`**
   ([#41](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/41),
@@ -274,9 +277,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Docs that no longer matched the server**
   ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)):
 
-  - A soft-deleted memory is recoverable until the deployment's cleanup
-    window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30
-    days), not for a fixed 30 days. Server v0.66.0 made the window
+  - A soft-deleted memory is kept, but not restorable through the API,
+    until the deployment's cleanup window passes
+    (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), not for a
+    fixed 30 days. Server v0.66.0 made the window
     configurable. Fixed in `forget`, the README and
     `kagura-memory forget --help`.
   - `createContext`'s `embeddingModel` was called immutable. No API call
@@ -288,9 +292,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     filters (v0.54.0), and says when `tag_suggestions` comes back.
     `recall()` documents `degraded` and `degraded_reason` (v0.66.0). They
     mark a keyword-only fallback, where an empty result means the search was
-    impaired, not that nothing is stored. In `getAgentBootstrap` that flag
-    is on `components.recall`, and the envelope's own `degraded` stays
-    `false`, because the recall succeeded.
+    impaired, not that nothing is stored. Only a hybrid search (the
+    default) falls back; `searchMode: "semantic"` still fails. In
+    `getAgentBootstrap` a keyword-only recall sets both
+    `components.recall.degraded` and the envelope's `degraded`, and
+    `degraded_reason` tells it apart from a failed component.
   - The `Edge` doc named three edge types the server does not have
     (`semantic_similarity`, `declared_link`, `tag_cooccurrence`) and left
     out four it does. It now lists the server's eight. The test fixture

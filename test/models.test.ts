@@ -360,11 +360,11 @@ const auditVerify: AuditVerifyResponse = {
   erasure_pseudonymized: [7, 19],
 };
 
-// The recall component carries its own degraded flag; the envelope's
-// stays false because the recall succeeded.
+// A keyword-only recall flags its component and, since server v0.66.0,
+// the envelope too; degraded_reason tells it from a failed component.
 const bootstrap: AgentBootstrapResponse = {
   status: "success",
-  degraded: false,
+  degraded: true,
   agent: { agent_id: "agent_1", name: "ci-agent" },
   components: {
     recall: {
@@ -468,8 +468,8 @@ describe("models", () => {
     expect(auditVerify.erasure_pseudonymized).toEqual([7, 19]);
   });
 
-  it("a keyword-only bootstrap recall is flagged on the component", () => {
-    expect(bootstrap.degraded).toBe(false);
+  it("a keyword-only bootstrap recall is flagged on the component and the envelope", () => {
+    expect(bootstrap.degraded).toBe(true);
     expect(bootstrap.components?.recall?.degraded).toBe(true);
   });
 });

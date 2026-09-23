@@ -388,7 +388,7 @@ describe("status mapping", () => {
     server.body = JSON.stringify({
       error: "CONNECTOR-001",
       message: "Connector seat limit reached. Your plan allows 2 connector(s).",
-      details: { max_connectors: 2, active_connectors: 2 },
+      details: { max_connectors: 2, active_connectors: 3 },
     });
     const probe = makeProbe(server);
 
@@ -399,7 +399,7 @@ describe("status mapping", () => {
     expect(quota.gate).toBeNull();
     expect(quota.quotaType).toBeNull();
     // The legacy seat counts stand in for the canonical current / limit.
-    expect(quota.current).toBe(2);
+    expect(quota.current).toBe(3);
     expect(quota.limit).toBe(2);
   });
 
@@ -412,7 +412,7 @@ describe("status mapping", () => {
       details: {
         quota_type: "workspace_limit_reached",
         owned_count: 1,
-        cap: 1,
+        cap: 3,
         tier: "free",
         next_tier: "basic",
       },
@@ -424,7 +424,7 @@ describe("status mapping", () => {
     const quota = err as KaguraQuotaError;
     expect(quota.quotaType).toBe("workspace_limit_reached");
     expect(quota.current).toBe(1);
-    expect(quota.limit).toBe(1);
+    expect(quota.limit).toBe(3);
   });
 
   it("reads the analysis quota's pre-v0.75 used_today / limit_today as current / limit", async () => {
@@ -433,14 +433,14 @@ describe("status mapping", () => {
     server.body = JSON.stringify({
       error: "QUOTA-001",
       message: "Analysis daily quota exceeded: 3/3 runs today (addon bonus 0).",
-      details: { quota_type: "memory_analysis", used_today: 3, limit_today: 3 },
+      details: { quota_type: "memory_analysis", used_today: 4, limit_today: 3 },
     });
     const probe = makeProbe(server);
 
     const err = await caught(probe.requestPublic("POST", "/api/v1/analyses"));
     const quota = err as KaguraQuotaError;
     expect(quota).toBeInstanceOf(KaguraQuotaError);
-    expect(quota.current).toBe(3);
+    expect(quota.current).toBe(4);
     expect(quota.limit).toBe(3);
   });
 

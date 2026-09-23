@@ -937,8 +937,9 @@ export class KaguraClient {
   /**
    * Search memories. Returns the API response with a `results` list.
    *
-   * When the semantic half of the search is unavailable, server v0.66.0+
-   * falls back to keyword-only search and adds `degraded: true` and
+   * When the semantic half of a hybrid search (the default `searchMode`)
+   * is unavailable, server v0.66.0+ falls back to keyword-only search —
+   * `searchMode: "semantic"` still fails — and adds `degraded: true` and
    * `degraded_reason` (`"embedding_unavailable"` or
    * `"vector_search_unavailable"`) instead of failing. Both keys are absent
    * on a normal search. A degraded result has a different `confidence`
@@ -1437,8 +1438,9 @@ export class KaguraClient {
    * `{"status": "error", ...}` under `components` while the rest still
    * return, with the top-level `degraded` flag set. Identity and
    * authorization failures are total and throw instead. A keyword-only
-   * recall (see {@link recall}) is not a failure: it sets
-   * `components.recall.degraded`, not the top-level flag.
+   * recall (see {@link recall}) sets the top-level flag too (server
+   * v0.66.0+), along with `components.recall.degraded`; its
+   * `degraded_reason` tells an impaired recall from a failed component.
    *
    * The REST companion (`POST /api/v1/agents/{agent_id}/bootstrap`) is
    * available via `AgentsClient` for API-key-only callers such as
@@ -1628,9 +1630,11 @@ export class KaguraClient {
   }
 
   /**
-   * Soft-delete memories by specific memoryId or by search query. They
-   * stay recoverable until the deployment's cleanup window passes
-   * (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days).
+   * Soft-delete memories by specific memoryId or by search query. The
+   * rows are kept, but not restorable through the API, until the
+   * deployment's cleanup window passes
+   * (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days; Sleep
+   * retention can purge sooner, and `0` turns the sweep off).
    *
    * The silent skip is per target, for a caller who may write to the
    * workspace: a target that caller may not delete, or one already gone,
@@ -1671,7 +1675,9 @@ export class KaguraClient {
    * Create a new context in the current workspace.
    *
    * Checks the workspace's context limit first, with {@link listContexts},
-   * and throws without calling `create_context` when `can_create` is false.
+   * and throws without calling `create_context` when `can_create` is false
+   * — unless `limit` is 0, which is how the server reports that it could
+   * not read the quota; `create_context` then decides.
    * That error comes from the SDK, not the server: it carries
    * `quotaType: "contexts"` with `current` / `limit`, but `gate` and the
    * plan fields stay `null` because `list_contexts` does not send them. A
@@ -1692,7 +1698,10 @@ export class KaguraClient {
     // a present `null` as "can create".
     const contexts = await this.listContexts();
     const canCreate = "can_create" in contexts ? contexts.can_create : true;
-    if (!canCreate) {
+    // `limit: 0` with `can_create: false` is how list_contexts reports a
+    // failed quota lookup (every plan allows at least one context), so the
+    // server's own check decides then, as in the Python SDK.
+    if (!canCreate && contexts.limit !== 0) {
       // Coerce missing/null count/limit to "?" so schema drift never
       // produces "null/null" in the message; a real 0 is preserved.
       const count = contexts.count ?? null;

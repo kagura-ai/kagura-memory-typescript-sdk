@@ -261,7 +261,7 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`; REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
-| `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Neither it nor the analysis tools (through `callRawTool`) send a role, so `requiredRole` is `null` on those calls and cannot tell a missing context from a role denial | `requiredRole` |
+| `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
 | `KaguraError` | any other code | — |
 
 memory-cloud v0.75.0+ tags every plan and quota refusal with a `gate`
@@ -329,7 +329,7 @@ when `undefined`.
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. |
-| `forget` | Soft-delete by `memoryId` or by `query`, recoverable until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
+| `forget` | Soft-delete by `memoryId` or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, and time-window filters. Omit `contextId` for the caller's cross-context view. |
 
 ### Deterministic lanes
@@ -426,7 +426,8 @@ if (bootstrap.degraded) {
   // some component failed fail-soft; inspect bootstrap.components
 }
 if (bootstrap.components?.recall?.degraded) {
-  // the recall ran keyword-only; it succeeded, so the flag above stays false
+  // the recall ran keyword-only (degraded_reason says why); this also sets
+  // the top-level flag above, since server v0.66.0
 }
 ```
 
