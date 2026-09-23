@@ -8,6 +8,20 @@ export interface Recorded {
 }
 
 /**
+ * The server's reply to a request naming an MCP session it no longer holds
+ * — one dropped after an idle hour or by a restart (#39).
+ */
+export const SESSION_EXPIRED_BODY = {
+  jsonrpc: "2.0",
+  error: {
+    code: -32603,
+    message: "MCP session not found or expired. Please re-initialize your connection.",
+    data: { action: "Send a new 'initialize' request without Mcp-Session-Id header" },
+  },
+  id: null,
+};
+
+/**
  * Minimal fake MCP + REST server behind a fetch stub — the TS analogue of
  * the httpx MockTransport used by the Python test suite.
  */
@@ -20,6 +34,8 @@ export class FakeServer {
   /** When set, every request returns this raw response. */
   forcedResponse: Response | null = null;
   sessionId: string | null = "session-123";
+  /** Dropped session ids: a request naming one gets a 404 {@link SESSION_EXPIRED_BODY}. */
+  expiredSessions = new Set<string>();
 
   fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = String(input);
@@ -33,6 +49,11 @@ export class FakeServer {
 
     if (this.forcedResponse) {
       return this.forcedResponse.clone();
+    }
+
+    const session = headers["mcp-session-id"];
+    if (session !== undefined && this.expiredSessions.has(session)) {
+      return new Response(JSON.stringify(SESSION_EXPIRED_BODY), { status: 404 });
     }
 
     const rpcMethod = body?.method;
@@ -76,6 +97,11 @@ export class FakeServer {
     const calls = this.requests.filter((r) => r.body?.method === "tools/call");
     const params = calls[n]?.body?.params as { arguments: Record<string, unknown> };
     return params.arguments;
+  }
+
+  /** `[JSON-RPC method, mcp-session-id]` of every request, in order. */
+  calls(): Array<[unknown, string | undefined]> {
+    return this.requests.map((r) => [r.body?.method, r.headers["mcp-session-id"]]);
   }
 }
 

@@ -40,6 +40,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never the REST API. The MCP URL itself keeps its query, and URLs without
   one derive the same base as before.
 
+- **A long-lived `KaguraClient` recovers when the server drops its MCP
+  session**
+  ([#39](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/39)):
+  the server keeps `initialize`-based sessions in memory, drops them after
+  an idle hour and on every restart, and answers a request naming one with
+  HTTP 404. The client cached the session id until `close()`, so a server
+  process, bot or agent loop that sat idle for an hour or lived through a
+  deploy failed every MCP call from then on with a bare `HTTP 404` — which
+  gave no hint that a new client would fix it. A 404 on a request that
+  carried a session id now re-opens the session and retries the request
+  exactly once; the server rejects the request before dispatch, so the
+  retry is safe even for a write. If the retry 404s too, the
+  `KaguraConnectionError` says the session expired and the client
+  re-initialized once. A 404 on `initialize` itself is not retried, and
+  neither is a 404 `-32601` Method-not-found, which is not about the
+  session.
+
+- **Concurrent calls share one `initialize`.** Calls that found no session
+  at the same moment each sent their own handshake, so N parallel first
+  calls opened N sessions and kept whichever answered last. They now wait
+  on one in-flight `initialize` — on first use, and again when they all hit
+  the same expired session. A call whose 404 lands after another call has
+  already re-opened the session keeps that session instead of discarding
+  it. A failed handshake is not cached: every waiter gets the error and the
+  next call tries again.
+
+- **MCP 4xx errors carry the server's message.** The MCP transport answers
+  a request it rejects before dispatch with a JSON-RPC `error` body rather
+  than a `detail` envelope, and the error extractor did not read that
+  shape. So `HTTP 404` becomes `HTTP 404: MCP session not found or
+  expired. …`, and any other JSON-RPC 4xx shows its `error.message` too.
+
 ## [0.8.0] - 2026-08-01
 
 ### Added

@@ -11,7 +11,15 @@ import {
   KaguraNotFoundError,
   KaguraQuotaError,
 } from "./errors.js";
-import { baseUrlFromMcp, SDK_VERSION, throwForKaguraStatus, validateHttpsUrl } from "./http.js";
+import {
+  baseUrlFromMcp,
+  extractDetail,
+  mcpSessionExpired,
+  mcpSessionHeader,
+  SDK_VERSION,
+  throwForKaguraStatus,
+  validateHttpsUrl,
+} from "./http.js";
 import type {
   Agent,
   AgentBinding,
@@ -382,6 +390,8 @@ export class KaguraClient {
   private readonly auth: AuthProvider;
   private readonly fetchImpl: typeof globalThis.fetch;
   private sessionId: string | null = null;
+  /** The in-flight `initialize`, shared by every caller (see initializeSession). */
+  private sessionOpening: Promise<void> | null = null;
   private requestIdCounter = 1;
 
   constructor(options: KaguraClientOptions = {}) {
@@ -441,12 +451,27 @@ export class KaguraClient {
     }
   }
 
-  /** Initialize the MCP session if not already initialized. */
+  /**
+   * Initialize the MCP session if not already initialized.
+   *
+   * Single-flight: calls that find no session at the same time (on first
+   * use, or after all hitting one expired session) share one `initialize`
+   * instead of each opening, and orphaning, a session of their own.
+   */
   private async initializeSession(): Promise<void> {
     if (this.sessionId) {
       return;
     }
+    // Dropped once settled, so a failed handshake is retried by the next
+    // call rather than replayed to it.
+    this.sessionOpening ??= this.openSession().finally(() => {
+      this.sessionOpening = null;
+    });
+    await this.sessionOpening;
+  }
 
+  /** Run the `initialize` handshake and keep the session id it returns. */
+  private async openSession(): Promise<void> {
     const body = {
       jsonrpc: "2.0",
       id: this.nextRequestId(),
@@ -478,7 +503,15 @@ export class KaguraClient {
     }
   }
 
-  /** Make a JSON-RPC 2.0 request to the MCP server. */
+  /**
+   * Make a JSON-RPC 2.0 request to the MCP server.
+   *
+   * A request naming a session the server has dropped (idle hour, restart)
+   * gets a 404; without recovery a long-lived client would fail every call
+   * from then on (#39). The session is re-opened and the request retried
+   * exactly once. The server rejects it before dispatch, which makes that
+   * retry safe even for a non-idempotent `tools/call`.
+   */
   private async makeJsonRpcRequest(
     method: string,
     params: Record<string, unknown>,
@@ -492,11 +525,27 @@ export class KaguraClient {
       params,
     };
 
-    const headers: Record<string, string> = this.sessionId
-      ? { "mcp-session-id": this.sessionId }
-      : {};
-    const response = await this.post(this.mcpUrl, body, headers);
-    const text = await this.safeText(response);
+    const sessionId = this.sessionId;
+    let response = await this.post(this.mcpUrl, body, mcpSessionHeader(sessionId));
+    let text = await this.safeText(response);
+    if (mcpSessionExpired(response.status, text, sessionId)) {
+      // Forget the session only while it is still the stale one: a
+      // concurrent call may already have re-opened it, and that one stays.
+      if (this.sessionId === sessionId) {
+        this.sessionId = null;
+      }
+      await this.initializeSession();
+      const retrySessionId = this.sessionId;
+      response = await this.post(this.mcpUrl, body, mcpSessionHeader(retrySessionId));
+      text = await this.safeText(response);
+      if (mcpSessionExpired(response.status, text, retrySessionId)) {
+        const detail = extractDetail(text);
+        throw new KaguraConnectionError(
+          "MCP session expired; the client re-initialized once and the retry still got " +
+            (detail ? `HTTP 404: ${detail}` : "HTTP 404"),
+        );
+      }
+    }
     if (!response.ok) {
       throwForKaguraStatus(response.status, response.headers, text);
     }
