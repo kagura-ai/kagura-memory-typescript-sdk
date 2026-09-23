@@ -24,7 +24,7 @@ import {
   KaguraConnectionError,
   excMessage,
 } from "../errors.js";
-import { extractDetail, validateHttpsUrl } from "../http.js";
+import { extractDetail, retryAfterSeconds, validateHttpsUrl } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 
 // OAuth2 endpoint paths under {server}.
@@ -36,6 +36,10 @@ const PATH_REVOKE = "/api/v1/oauth/revoke";
 
 // RFC 8628 §3.5 — "slow_down" requires the client to add 5 seconds.
 const SLOW_DOWN_INCREMENT_SEC = 5;
+
+// memory-cloud's per-IP device-flow window (memory-cloud#1656, v0.76.0): the
+// wait to report when a 429 carries no usable Retry-After.
+const DEVICE_RATE_LIMIT_RETRY_AFTER_SEC = 60;
 
 /** The pre-registered public client ID seeded by memory-cloud #624. */
 export const DEFAULT_CLIENT_ID = "kagura-cli";
@@ -150,6 +154,32 @@ function safeJson(bodyText: string): Record<string, unknown> {
 }
 
 /**
+ * The server's reason from an error body: whatever `extractDetail` finds,
+ * else an RFC 6749 `error_description`. The Python SDK's `extract_detail`
+ * reads that last shape too; the OAuth endpoints answer with it.
+ */
+function oauthDetail(bodyText: string): string {
+  return extractDetail(bodyText) || stringOr(safeJson(bodyText).error_description, "");
+}
+
+/**
+ * Explain a 429 from `device/authorize`, with the wait from `Retry-After`.
+ *
+ * memory-cloud v0.76.0 limits `device/authorize` per client address and
+ * answers 429 with `Retry-After: 60` and an RFC 6749 `error_description`,
+ * which is kept. A missing or non-numeric `Retry-After` reads as that same
+ * 60 s window. The Python CLI's wording.
+ */
+function deviceRateLimitedMessage(headers: Headers, bodyText: string): string {
+  const retryAfter = retryAfterSeconds(headers) ?? DEVICE_RATE_LIMIT_RETRY_AFTER_SEC;
+  const message =
+    "Too many sign-in attempts from this address (HTTP 429). " +
+    `Retry after ${retryAfter} seconds.`;
+  const detail = oauthDetail(bodyText);
+  return detail ? `${message}\n  Server said: ${detail}` : message;
+}
+
+/**
  * Build a `TokenResponse` from a 200 `/oauth/token/` body.
  *
  * `expiresAt` is computed from `expires_in` at receipt time so laptop sleep
@@ -183,6 +213,11 @@ function tokenResponseFromBody(bodyText: string, status: number): TokenResponse 
  *
  * memory-cloud's device/authorize accepts JSON, unlike the /oauth/token/ +
  * /oauth/revoke endpoints which take application/x-www-form-urlencoded.
+ *
+ * @throws KaguraAuthError the server refused the request. A 429
+ *   (memory-cloud v0.76.0+ limits this endpoint per client address) says
+ *   how long to wait, from `Retry-After`.
+ * @throws KaguraConnectionError network failure.
  */
 export async function authorizeDevice(
   server: string,
@@ -209,8 +244,11 @@ export async function authorizeDevice(
     throw new KaguraConnectionError(`Could not reach ${url}: ${excMessage(e)}`, { cause: e });
   }
 
+  if (response.status === 429) {
+    throw new KaguraAuthError(deviceRateLimitedMessage(response.headers, text));
+  }
   if (!response.ok) {
-    const detail = extractDetail(text) || text;
+    const detail = oauthDetail(text) || text;
     throw new KaguraAuthError(
       `Device authorization failed (HTTP ${response.status}): ${detail}\n` +
         `  Verify the server URL and that '${clientId}' is registered.`,

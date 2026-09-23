@@ -134,6 +134,18 @@ describe("authorizeDevice", () => {
     );
   });
 
+  it("reports an RFC 6749 error_description rather than the raw body", async () => {
+    // The Python SDK's extract_detail reads error_description too.
+    const stub = sequenceFetch([
+      jsonResponse(400, { error: "invalid_client", error_description: "Unknown client." }),
+    ]);
+    const message = await authorizeDevice(SERVER, { fetch: stub }).catch(
+      (e: unknown) => (e as Error).message,
+    );
+    expect(message).toMatch(/^Device authorization failed \(HTTP 400\): Unknown client\.\n/);
+    expect(message).not.toContain("invalid_client\"");
+  });
+
   it("wraps a network error as KaguraConnectionError", async () => {
     await expect(authorizeDevice(SERVER, { fetch: failingFetch() })).rejects.toThrow(
       KaguraConnectionError,
@@ -158,6 +170,69 @@ describe("authorizeDevice", () => {
     ]);
     await expect(authorizeDevice(SERVER, { fetch: stub })).rejects.toThrow(
       /missing required fields/,
+    );
+  });
+});
+
+// memory-cloud v0.76.0 limits device/authorize per client address.
+const RATE_LIMIT_DESCRIPTION = "Too many device authorization requests. Please try again later.";
+const RATE_LIMIT_BODY = { error: "invalid_request", error_description: RATE_LIMIT_DESCRIPTION };
+
+/** What authorizeDevice throws against a server answering `response`. */
+async function authorizeAgainst(response: Response): Promise<Error> {
+  const calls: RecordedCall[] = [];
+  const caught = await authorizeDevice(SERVER, {
+    scope: "memory:read",
+    fetch: sequenceFetch([response], calls),
+  }).catch((e: unknown) => e);
+  expect(calls.map((c) => c.url)).toEqual([`${SERVER}/api/v1/oauth/device/authorize`]);
+  expect(caught).toBeInstanceOf(KaguraAuthError);
+  return caught as Error;
+}
+
+function rateLimited(headers: Record<string, string>, body: unknown = RATE_LIMIT_BODY): Response {
+  return new Response(typeof body === "string" ? body : JSON.stringify(body), {
+    status: 429,
+    headers,
+  });
+}
+
+describe("authorizeDevice: HTTP 429", () => {
+  it("says how long to wait, keeping the server's reason", async () => {
+    const { message } = await authorizeAgainst(
+      rateLimited({ "Retry-After": "60", "Cache-Control": "no-store" }),
+    );
+    // The Python CLI's wording.
+    expect(message).toBe(
+      "Too many sign-in attempts from this address (HTTP 429). Retry after 60 seconds.\n" +
+        `  Server said: ${RATE_LIMIT_DESCRIPTION}`,
+    );
+    // Not the generic failure, whose hint (check the client id) is wrong here.
+    expect(message).not.toMatch(/Device authorization failed|registered/);
+  });
+
+  it("uses the server's Retry-After", async () => {
+    const { message } = await authorizeAgainst(rateLimited({ "Retry-After": " 17 " }));
+    expect(message).toContain("Retry after 17 seconds.");
+  });
+
+  it.each([
+    ["absent", {}],
+    ["not a number", { "Retry-After": "soon" }],
+    ["negative", { "Retry-After": "-5" }],
+    ["an HTTP date", { "Retry-After": "Wed, 23 Sep 2026 12:00:00 GMT" }],
+  ])("waits the server's 60 s window when Retry-After is %s", async (_label, headers) => {
+    const { message } = await authorizeAgainst(rateLimited(headers));
+    expect(message).toContain("Retry after 60 seconds.");
+  });
+
+  it("stands alone when the body has no reason to quote", async () => {
+    // A proxy's 429 page.
+    const { message } = await authorizeAgainst(
+      rateLimited({ "Retry-After": "30" }, "<html>rate limited</html>"),
+    );
+    expect(message).toBe(
+      "Too many sign-in attempts from this address (HTTP 429). Retry after 30 seconds.",
     );
   });
 });

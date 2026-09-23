@@ -188,6 +188,13 @@ An empty profile name would create a nameless profile and an empty scope
 would go to the server verbatim. Every other option treats `--flag=` as
 Python does.
 
+**Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
+requests per client address. When the server refuses one with HTTP 429,
+`auth login` says so and how many seconds to wait (from the `Retry-After`
+header, 60 when it is missing), with the server's reason on the next line.
+`login()` and `authorizeDevice` throw the same message as a
+`KaguraAuthError`.
+
 #### Signing up with an invite
 
 On a deployment that admits new accounts only by beta invite, pass the

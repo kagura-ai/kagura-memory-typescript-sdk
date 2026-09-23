@@ -306,6 +306,31 @@ describe("cli: login", () => {
     expect(await runCli(["login"], h.deps)).toBe(1);
     expect(h.err.join("\n")).toMatch(/Run: kagura auth login/);
   });
+
+  it("says how long to wait when sign-in is rate-limited, writing nothing", async () => {
+    // memory-cloud v0.76.0 limits device/authorize per client address.
+    const urls: string[] = [];
+    const rateLimited = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          error: "invalid_request",
+          error_description: "Too many device authorization requests. Please try again later.",
+        }),
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    }) as typeof globalThis.fetch;
+    const h = harness({ login, fetch: rateLimited });
+
+    expect(await runCli(["login", "--server", "https://api.test/mcp", "--no-browser"], h.deps)).toBe(1);
+    const err = h.err.join("\n");
+    expect(err).toContain("Error: Too many sign-in attempts from this address (HTTP 429).");
+    expect(err).toContain("Retry after 60 seconds.");
+    expect(err).toContain("Too many device authorization requests. Please try again later.");
+    expect(err).not.toContain("Device authorization failed");
+    expect(urls).toEqual(["https://api.test/api/v1/oauth/device/authorize"]);
+    expect(fs.existsSync(credentialsPath)).toBe(false);
+  });
 });
 
 /** Matches the server's `^[A-Za-z0-9_-]{20,128}$`; 30 characters. */
