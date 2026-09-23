@@ -1,0 +1,281 @@
+/**
+ * Text helpers for `setup`: MCP URL query edits, the line-based `.env`
+ * files Hermes and OpenClaw read, the blocks printed for a user to paste,
+ * and read-only scans for an existing entry.
+ *
+ * None of this parses TOML, YAML or JSON5, and none of it rewrites those
+ * files. The package takes no runtime dependencies, so a harness config is
+ * changed only by the harness's own CLI, or by the user from a printed
+ * block. The scans look for the entry's key and nothing else, to decide
+ * whether `--force` is needed; they err toward "exists", because a false
+ * positive costs a `--force` while a false negative lets a harness CLI
+ * replace an entry nobody asked it to touch.
+ */
+
+import { CliError } from "../parse.js";
+
+/** The variable Codex and OpenClaw entries read the key from. */
+export const KEY_ENV_VAR = "KAGURA_API_KEY";
+
+interface SplitUrl {
+  base: string;
+  params: string[];
+  fragment: string;
+}
+
+/**
+ * Split a URL by hand rather than through `URL`: `searchParams` re-encodes
+ * every parameter on the way out (`tools=a,b` becomes `tools=a%2Cb`), and
+ * the other parameters are meant to be kept as written.
+ */
+function splitUrl(url: string): SplitUrl {
+  const hash = url.indexOf("#");
+  const fragment = hash === -1 ? "" : url.slice(hash);
+  const rest = hash === -1 ? url : url.slice(0, hash);
+  const q = rest.indexOf("?");
+  return {
+    base: q === -1 ? rest : rest.slice(0, q),
+    params: q === -1 ? [] : rest.slice(q + 1).split("&").filter((p) => p !== ""),
+    fragment,
+  };
+}
+
+function paramName(param: string): string {
+  const eq = param.indexOf("=");
+  return eq === -1 ? param : param.slice(0, eq);
+}
+
+/** The decoded value of `key` in the URL's query, or undefined. */
+export function queryParam(url: string, key: string): string | undefined {
+  const param = splitUrl(url).params.find((p) => paramName(p) === key);
+  if (param === undefined) return undefined;
+  const eq = param.indexOf("=");
+  if (eq === -1) return "";
+  const raw = param.slice(eq + 1).replace(/\+/g, " ");
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Set `key=value` in the URL's query.
+ *
+ * An existing value is replaced where it stands, and any repeat of the
+ * key dropped, so the server cannot read a stale one first. Every other
+ * parameter is kept as written; a URL that already has a query gets `&`.
+ */
+export function withQueryParam(url: string, key: string, value: string): string {
+  const { base, params, fragment } = splitUrl(url);
+  const pair = `${key}=${encodeURIComponent(value)}`;
+  const out: string[] = [];
+  let placed = false;
+  for (const param of params) {
+    if (paramName(param) !== key) out.push(param);
+    else if (!placed) {
+      out.push(pair);
+      placed = true;
+    }
+  }
+  if (!placed) out.push(pair);
+  return `${base}?${out.join("&")}${fragment}`;
+}
+
+/**
+ * The URL for the Claude plugin's `server_url` setting.
+ *
+ * The plugin's hooks call the server themselves, so the entry's tool
+ * profile and guardrails context mean nothing there. `guardrails=off` is
+ * the one parameter kept: it is what stops the server from also sending
+ * a digest of the memories the hooks already deliver.
+ */
+export function pluginServerUrl(url: string): string {
+  const { base } = splitUrl(url);
+  return queryParam(url, "guardrails")?.toLowerCase() === "off" ? `${base}?guardrails=off` : base;
+}
+
+/**
+ * Set `name=value` in the text of a `.env` file.
+ *
+ * The first existing line for `name` is replaced in place (keeping an
+ * `export` prefix) and any later ones are removed, so the new value is the
+ * only one whichever occurrence a loader honours. Other lines, comments
+ * and the file's line endings are left as they were.
+ *
+ * @throws CliError when the value holds a line break: written raw, it
+ *   would end the line and start a second, attacker-shaped one.
+ */
+export function upsertEnvLine(text: string, name: string, value: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw new CliError(`refusing to write ${name}: the value contains a line break`);
+  }
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const matcher = new RegExp(`^\\s*(export\\s+)?${name}\\s*=`);
+  const lines = text === "" ? [] : text.split(/\r?\n/);
+  // A final newline leaves one empty element; it is put back by the join.
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+
+  const out: string[] = [];
+  let placed = false;
+  for (const line of lines) {
+    const match = matcher.exec(line);
+    if (match === null) out.push(line);
+    else if (!placed) {
+      out.push(`${match[1] ?? ""}${name}=${value}`);
+      placed = true;
+    }
+  }
+  if (!placed) out.push(`${name}=${value}`);
+  return `${out.join(eol)}${eol}`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The name as a bare, double-quoted or single-quoted key. */
+function keyPattern(name: string): string {
+  const n = escapeRegExp(name);
+  return `(?:${n}|"${n}"|'${n}')`;
+}
+
+/**
+ * Whether Codex's `config.toml` text already defines `mcp_servers.<name>`.
+ *
+ * Covers the spellings TOML allows for it: a `[mcp_servers.<name>]` header
+ * or a sub-table of it, a root-level dotted key, a key inside
+ * `[mcp_servers]`, and an inline table.
+ */
+export function tomlHasServer(text: string, name: string): boolean {
+  const key = keyPattern(name);
+  const header = new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${key}\\s*[\\].]`);
+  const dotted = new RegExp(`^\\s*mcp_servers\\s*\\.\\s*${key}\\s*[.=]`);
+  const inline = new RegExp(`^\\s*mcp_servers\\s*=.*[{,]\\s*${key}\\s*=`);
+  const inTable = new RegExp(`^\\s*${key}\\s*[.=]`);
+  let table = "";
+  for (const line of text.split(/\r?\n/)) {
+    if (header.test(line)) return true;
+    const opened = /^\s*\[\[?([^\]]*)\]/.exec(line);
+    if (opened !== null) {
+      table = opened[1]!.replace(/\s+/g, "");
+      continue;
+    }
+    if (table === "" && (dotted.test(line) || inline.test(line))) return true;
+    if (table === "mcp_servers" && inTable.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether Hermes's `config.yaml` text has `<name>` under the top-level
+ * `mcp_servers` mapping, in block or flow style.
+ */
+export function yamlHasServer(text: string, name: string): boolean {
+  const key = keyPattern(name);
+  const child = new RegExp(`^\\s+${key}\\s*:`);
+  const flow = new RegExp(`[{,]\\s*${key}\\s*:`);
+  let inBlock = false;
+  for (const line of text.split(/\r?\n/)) {
+    // Blank and comment lines neither open nor close a block.
+    if (/^\s*(#|$)/.test(line)) continue;
+    const top = /^mcp_servers\s*:(.*)$/.exec(line);
+    if (top !== null) {
+      if (flow.test(top[1]!)) return true;
+      inBlock = true;
+      continue;
+    }
+    if (!/^\s/.test(line)) {
+      inBlock = false;
+      continue;
+    }
+    if (inBlock && child.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether OpenClaw's `openclaw.json` text has `mcp.servers.<name>`.
+ *
+ * Plain JSON (which is valid JSON5) is read exactly. Anything else — real
+ * JSON5, with comments and unquoted keys — is not parsed; any key of that
+ * name counts as the entry.
+ */
+export function json5HasServer(text: string, name: string): boolean {
+  if (!text.trim()) return false;
+  try {
+    const parsed = JSON.parse(text) as { mcp?: { servers?: unknown } } | null;
+    const servers = parsed?.mcp?.servers;
+    return typeof servers === "object" && servers !== null && Object.hasOwn(servers, name);
+  } catch {
+    return new RegExp(`(?:^|[\\s{,])${keyPattern(name)}\\s*:`, "m").test(text);
+  }
+}
+
+/**
+ * The `[mcp_servers.<name>]` table for Codex: exactly `url` and
+ * `bearer_token_env_var`.
+ *
+ * Not `bearer_token` — Codex rejects an inline token on an HTTP server and
+ * the whole file then fails to load — and not `http_headers`, which would
+ * put the key in the file. A JSON string literal is a valid TOML basic
+ * string, escapes included.
+ */
+export function codexTomlBlock(name: string, url: string): string {
+  return [
+    `[mcp_servers.${name}]`,
+    `url = ${JSON.stringify(url)}`,
+    `bearer_token_env_var = ${JSON.stringify(KEY_ENV_VAR)}`,
+  ].join("\n");
+}
+
+/**
+ * The variable Hermes reads an entry's key from — the name `hermes mcp add`
+ * derives from the server name, so the entry matches one Hermes would write.
+ */
+export function hermesEnvVar(name: string): string {
+  return `MCP_${name.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+}
+
+/** The `mcp_servers.<name>` block for Hermes's `config.yaml`. */
+export function hermesYamlBlock(name: string, url: string, envVar: string): string {
+  // JSON string literals are valid YAML double-quoted scalars.
+  return [
+    "mcp_servers:",
+    `  ${name}:`,
+    `    url: ${JSON.stringify(url)}`,
+    "    headers:",
+    `      Authorization: ${JSON.stringify(`Bearer \${${envVar}}`)}`,
+  ].join("\n");
+}
+
+/**
+ * The OpenClaw entry.
+ *
+ * `transport` is explicit because OpenClaw otherwise assumes `sse`. The
+ * header is a `${VAR}` reference: `mcp.servers.*.headers` does not take
+ * OpenClaw's secret references, and a literal key is what
+ * `openclaw mcp doctor` warns about.
+ */
+export function openclawEntry(url: string): Record<string, unknown> {
+  return {
+    url,
+    transport: "streamable-http",
+    headers: { Authorization: `Bearer \${${KEY_ENV_VAR}}` },
+  };
+}
+
+/** The entry nested at `mcp.servers.<name>`; JSON, which JSON5 accepts. */
+export function openclawBlock(name: string, url: string): string {
+  return JSON.stringify({ mcp: { servers: { [name]: openclawEntry(url) } } }, null, 2);
+}
+
+/** POSIX-quote one argument, leaving plain words bare. */
+export function shellQuote(arg: string): string {
+  return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/** An argv as a line a user could paste into a POSIX shell. */
+export function shellCommand(argv: readonly string[]): string {
+  return argv.map(shellQuote).join(" ");
+}

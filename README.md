@@ -108,12 +108,14 @@ npx kagura-memory --help
 | `files` | `upload` `list` `delete` `download-url` |
 | `resource` | `tokens {list,create,update,revoke}` `list` `setup` `schema` `stats` `indexer-status` `events` `ingest` `ingest-batch` `import` |
 | `secret` | `keygen` `list` `put` `get` `grant` `revoke` `rotate` `delete` `pubkeys` `approve` `audit-verify` `exec` |
-| other | `config show` `doctor` `setup claude` |
+| `setup` | `claude` `codex` `hermes` `openclaw` |
+| other | `config show` `doctor` |
 
 ```bash
 npx kagura-memory auth login --profile work --read-only
 npx kagura-memory recall "OAuth setup" -c dev -k 10
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
+npx kagura-memory setup codex --dry-run   # key from .kagura.json or KAGURA_API_KEY
 npx kagura-memory doctor
 ```
 
@@ -121,6 +123,28 @@ The context id comes from `-c/--context-id`, or from `context_id` in
 `.kagura.json`. Credentials live in `~/.kagura/credentials.json` and are
 shared with the Python CLI, so either tool can create a profile the other
 then uses.
+
+**Connecting a harness.** Each `setup` subcommand writes `.kagura.json`
+(0600, gitignored) and an MCP entry named `kagura-memory`: the URL plus a
+Bearer header. The key is never printed, and outside Claude Code it never
+goes into the harness's config file.
+
+| Subcommand | How the entry is applied | Where the key lives |
+|---|---|---|
+| `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json … --scope user` | in the entry |
+| `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `KAGURA_API_KEY`, exported in the shell that starts Codex |
+| `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` always prompts | `$HERMES_HOME/.env`, as `MCP_KAGURA_MEMORY_API_KEY` |
+| `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe` | `~/.openclaw/.env`, as `KAGURA_API_KEY` |
+
+This package has no TOML, YAML or JSON5 parser, so it never rewrites those
+files. When the harness's CLI is not on `PATH`, the block is printed on
+stderr with the file it belongs in, and stdout stays one JSON document.
+`--guardrails <context-id|off>` and `--tool-profile` set the URL's query
+parameters; `--dry-run` shows what would be configured and changes
+nothing. `setup claude` stops with the matching `claude mcp remove`
+command when a stronger Claude Code scope already defines the entry, and
+when the Kagura Memory plugin is enabled it lists the plugin settings to
+enter.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
@@ -136,10 +160,10 @@ promise. Use the Python CLI for those.
   from `KAGURA_AGE_IDENTITY` or `KAGURA_AGE_IDENTITY_FILE` and fails
   closed when neither is set. **A key custodied by the Python CLI is not
   readable here, and vice versa.**
-- `setup claude --profile` (the OAuth path) writes an `.mcp.json` that
-  launches Python's `kagura-mcp` stdio proxy, which this package does not
-  install; that flag reports the fact instead of writing a config that
-  would fail at launch. The `--api-key` path works here.
+- `setup … --profile` (the OAuth path) writes an entry that launches
+  Python's `kagura-mcp` stdio proxy, which this package does not install;
+  every `setup` subcommand reports the fact instead of writing a config
+  that would fail at launch. The `--api-key` path works here.
 - `config show` does not reproduce Python's key mask
   (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12 characters
   and print the whole secret twice.

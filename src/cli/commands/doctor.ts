@@ -173,6 +173,17 @@ function checkMcp(deps: CommandDeps): DoctorCheck[] {
         status: "warn",
         message: ".mcp.json has no 'kagura-memory' server; run: kagura-memory setup claude",
       });
+    } else if ((entry as { type?: unknown } | null)?.type === "url") {
+      // What `setup claude` wrote before it switched to `http`. Accepted
+      // here, but Claude Code skips it as an unknown server type, so the
+      // fix is worth saying.
+      checks.push({
+        section: "mcp",
+        status: "warn",
+        message:
+          '.mcp.json configures kagura-memory with type "url", which Claude Code does not recognise; ' +
+          "re-run: kagura-memory setup claude",
+      });
     } else {
       checks.push({ section: "mcp", status: "pass", message: ".mcp.json configures kagura-memory" });
     }
