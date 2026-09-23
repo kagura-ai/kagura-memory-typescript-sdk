@@ -13,8 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   emits the Python CLI's payload: one object per profile, in file order,
   with `profile`, `default`, `user_email`, `workspace_name`,
   `workspace_id`, `server`, `scope`, `expired`, `refreshable` and
-  `expires_at` (UTC, as Python's `isoformat()` writes it). No token is
-  ever included, and with no profile it prints `[]` and exits 0, as Python
+  `expires_at` (UTC, as Python's `isoformat()` writes it), with non-ASCII
+  escaped as `\uXXXX`, as Python's `json.dumps` default writes it (every
+  other command prints UTF-8, as Python does there). No token is ever
+  included, and with no profile it prints `[]` and exits 0, as Python
   does.
 
 - **`auth status` reports the Claude Code entry in use**
@@ -116,7 +118,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as well, rather than expanding `$KAGURA_API_KEY` into the command line
   when pasted. `--scope project` is unchanged: the key stays in
   `.mcp.json` (0600, gitignored), as in Python. `.kagura.json` keeps the
-  key at both scopes.
+  key at both scopes. **Upgrading:** a user-scope entry an earlier release
+  wrote still holds the key in `~/.claude.json` until you re-run
+  `kagura-memory setup claude --scope user` with `KAGURA_MCP_API_KEY`
+  exported, which replaces it; `doctor` now warns about such an entry.
 
 - **A failed user-scope replace never puts back an entry that holds a
   key** ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
@@ -140,10 +145,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **An unknown option is reported in click's words**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
-  `Error: No such option: --x`, on every command, where this CLI said
-  `Unknown option: --x`. It matches the `Error: No such command '…'.` an
-  unknown command already got. The exit code (2) and the help that follows
-  are unchanged.
+  `Error: No such option: --x`, where this CLI said `Unknown option: --x`.
+  That is the wording of click 8.3, which the Python CLI's lockfile pins;
+  click 8.4 and later, which a fresh `pip install kagura-memory` resolves,
+  write `Error: No such option '--x'.`. The option is named as click names
+  it, without any value written into the token: `--x` for `--x=value` and
+  `-x` for `-xVALUE`, where this CLI quoted the whole token, value
+  included. A switch given a value (`--json=true`) gets click's `Error:
+  Option '--json' does not take a value.`, and an option the root or a
+  group does not take (`kagura-memory --x`, `kagura-memory auth --x`) now
+  gets the same error line before the help, where it got the help alone.
+  The exit code (2) and the help that follows are unchanged. Click's `Did
+  you mean …?` suggestion is not reproduced.
+
+- **Short options combine as in click**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
+  `-k10` is `-k 10`, and `-yv` is `-y -v`, where this CLI refused both as
+  unknown options. In such a group the first letter that is no option is
+  reported by itself: `recall q -yx` is `Error: No such option: -x`.
 
 - **`auth logout` revokes the token on the server first**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
@@ -157,12 +176,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--profile`, where Python ignores `--profile` and removes every profile,
   stay as they were.
 
-- **Three exit codes follow the Python CLI**
+- **Four exit codes follow the Python CLI**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
   `auth login --read-only --scope …` exits 1 (was 2), since Python raises a
-  `ClickException` there, not a usage error; `auth list` with no profile
-  exits 1 with `Error: No profiles. Run: kagura-memory auth login` (was 0);
-  and `doctor` exits 1 (was 0) when the entry in use is a `kagura-mcp`
+  `ClickException` there, not a usage error; `auth list` and `auth status`
+  with no profile exit 1 with `Error: No profiles. Run: kagura-memory auth
+  login` (was 0, the message on stdout); and `doctor` exits 1 (was 0)
+  when the entry in use is a `kagura-mcp`
   stdio entry and `kagura-mcp` is not on `PATH`, the new check failing as
   Python's does. That includes an entry that names it by path or through
   a launcher, which `doctor` used to report with a warning (see Fixed).
@@ -175,7 +195,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plugin has one guardrail context for every project and authenticates
   only with a user API key. The help gives the server floors for
   `--guardrails` (memory-cloud v0.74.0+) and `--tool-profile` (v0.73.0+),
-  and the profile names the server knows, `full` and `core`.
+  and the profile names the server knows, `full` and `core`. `--guardrails`
+  is written `off|CONTEXT_ID`, as in Python and on the other `setup`
+  subcommands, and `--profile`'s help says the option is refused: it is
+  the Python CLI's `kagura-mcp` entry.
 
 - **`refreshAccessToken`'s non-OAuth failure quotes an
   `error_description`**
@@ -214,7 +237,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `.kagura.json` that cannot be loaded no longer stops these setups
   (exit 1): they go on with a note, as Python never reads it.
   The JSON report keeps its fields, and `wrote` and `gitignore_added` are
-  now empty. `setup claude` is unchanged.
+  now empty. `setup claude` still writes `.kagura.json`, with the key, and
+  its `.gitignore` line.
 
 - **The `--profile` refusal names the Python command for every harness**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
@@ -294,12 +318,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     read MCP instructions, so --guardrails has no effect there and is not
     written.`
   - A failing `codex` or `openclaw`: `` `codex mcp add` failed: <what it
-    printed> ``, or `exit code N`, or `timed out after 120s`. Any key it
-    echoes is still masked. Both now get Python's 120-second timeout,
-    where they got 60. A run that reaches it fails as timed out whatever
-    the CLI then exits with, where one that caught the signal and exited
-    0 was reported as done. Every harness CLI, `claude` included, is now
-    killed there with SIGKILL, as Python kills it, not SIGTERM.
+    printed> ``, or `exit code N`, or `timed out after 120s`. Every key
+    this process knows of is masked in what it printed: `--api-key`, a
+    configured `api_key`, `$KAGURA_API_KEY`, `$KAGURA_MCP_API_KEY` and the
+    `--api-key-env` variable, as in what a failing `claude` prints. Both
+    now get Python's 120-second timeout, where they got 60. A run that
+    reaches it fails as timed out whatever the CLI then exits with, where
+    one that caught the signal and exited 0 was reported as done. Every
+    harness CLI, `claude` included, is now killed there with SIGKILL, as
+    Python kills it, not SIGTERM, together with every process it started:
+    on POSIX it runs as the leader of its own process group, and the whole
+    group is killed. So a launcher such as the npm `codex`, whose native
+    binary inherits the output pipes, no longer keeps setup waiting past
+    the timeout, and nothing is left running. On Windows only the CLI
+    itself is killed, and setup returns at the timeout all the same.
   - Hermes is `Hermes Agent`, and paths under the home directory are
     written `~/…`, in messages. The JSON fields keep full paths.
   - `--help` has Python's summaries and option help. `--guardrails` is
@@ -307,6 +339,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     they do here.
 
 ### Fixed
+
+- **`setup claude` takes a missing key and URL from the project it sets
+  up** ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  Without `--api-key` or `--mcp-url`, it took them from the configuration
+  this bin's other commands load: the current directory's `.kagura.json`,
+  else `~/.kagura.json`. So `setup claude --project-dir ../other`, run
+  from one project, wrote this project's key and URL into the other's
+  `.kagura.json` and `.mcp.json`, and Claude Code there signed in as the
+  wrong identity or workspace. As in the Python CLI, they now come from
+  the `.kagura.json` in `--project-dir`, then from `KAGURA_API_KEY` (and
+  `KAGURA_MCP_URL`); never from another directory's file. The context id
+  falls back the same way.
+
+- **A malformed `.kagura.json` or `.mcp.json` is named, never quoted**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The errors passed on the `JSON.parse` message, which for an unexpected
+  token quotes the text around it, and so could print the first
+  characters of an API key: every command that loads the configuration,
+  the harness setups included, `setup claude` for either file, and
+  `doctor`. They now name the file and, where JSON.parse gives one, the
+  position as Python writes it: `Invalid JSON or encoding in .kagura.json
+  (expected UTF-8): line 2 column 43`, `refusing to rewrite …/.mcp.json:
+  it is not valid JSON`, `.mcp.json is not valid JSON (line 2 column 20)`.
+
+- **`doctor --json` printed `"[Circular]"` for a shared details object**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The checks about one Claude Code entry shared its `details`, and the
+  JSON printer took every object it met twice for a cycle, so the legacy
+  `type: "url"` warning had `"details": "[Circular]"`. Each check now has
+  its own, and the printer marks only an object that contains itself.
 
 - **`doctor` and `auth status` know a `kagura-mcp` entry by path or
   launcher**
@@ -339,7 +401,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
   The bin ports 17 of the Python CLI's 21 top-level commands, counting the
   `contexts` alias, not "17 of 19". `kagura process` was removed from the
-  Python SDK in v0.37.0 and is no longer listed as not ported. The Python
+  Python SDK in v0.37.0 and is no longer listed as not ported, and
+  `doctor` no longer says it lives in the Python package: its `llm` line
+  names `ingest` alone. The Python
   commands and options this bin lacks are now listed under **Not ported**:
   `auth create-key` / `list-keys` / `revoke-key`, `workspace member …` /
   `workspace invite …`, `guardrails load` / `digest`, `measure record` /
@@ -348,14 +412,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `setup openclaw` (`--url-form` and `--api-key-env` are ported now;
   see Added). The intro no longer says every flag name is the Python
   CLI's: the options only this bin has (`secret keygen --reveal`, `-c` on
-  `setup`, and `--tool-profile` on `setup codex`) are listed under **Only
-  in this bin**, beside the `--api-key` and `--project-dir` the harness
+  `setup`, `--tool-profile` on `setup codex`, and `--no-browser` on `auth
+  refresh`) are listed under **Only in this bin**, beside the `--api-key`
+  and `--project-dir` the harness
   subcommands now accept and ignore (see Changed). The divergence
   paragraph named one place where this CLI refuses what click accepts, an
   empty `--profile=` or `--scope=`; it now also names `--lock --unlock`,
   `--rerank --no-rerank`, `auth logout --all --profile`,
-  `--dismiss-supersede-candidate` beside an empty `--external-id=`, a
-  value that begins with a dash, and attached or grouped short options.
+  `--dismiss-supersede-candidate` beside an empty `--external-id=`, and a
+  value that begins with a dash.
   The invite section says that a server older than memory-cloud 0.70.0
   takes no invites.
 
@@ -367,7 +432,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   '--importance' / '-i': 'abc' is not a valid float.` even when
   `--memory-id` / `--external-id` (or, for `forget`, `--memory-id` /
   `--query`) is also missing or wrong. This CLI ran those checks first and
-  exited 1 with their message; it now converts the option first.
+  exited 1 with their message; it now converts the option first. A bad
+  `-k`, on `forget` or `recall`, is named `'-k'` as click names it, where
+  this CLI said `'--k' / '-k'`, naming a long form neither CLI has.
 
 - **`setup hermes` follows Hermes's active profile**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).

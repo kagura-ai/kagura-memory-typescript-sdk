@@ -58,7 +58,29 @@ describe("loadConfig", () => {
 
   it("throws for a non-object JSON body", () => {
     fs.writeFileSync(path.join(cwd, ".kagura.json"), "[1,2]");
-    expect(() => loadConfig({ cwd, home, env: {} })).toThrow(/Invalid JSON/);
+    expect(() => loadConfig({ cwd, home, env: {} })).toThrow(
+      "Invalid JSON or encoding in .kagura.json (expected UTF-8): expected a JSON object",
+    );
+  });
+
+  it.each([
+    // V8 quotes the text around an unexpected token, and the file holds the key.
+    // The position is Python's: `Expecting ',' delimiter: line 2 column 43 (char 44)`.
+    ['{"api_key": kagura_FILECANARY_dddd4444}', "Invalid JSON or encoding in .kagura.json (expected UTF-8)"],
+    [
+      '{\n  "api_key": "kagura_FILECANARY_dddd4444" "mcp_url": "x"}',
+      "Invalid JSON or encoding in .kagura.json (expected UTF-8): line 2 column 43",
+    ],
+  ])("names the file and never quotes it (%j)", (text, message) => {
+    fs.writeFileSync(path.join(cwd, ".kagura.json"), text);
+    expect(() => loadConfig({ cwd, home, env: {} })).toThrow(new Error(message));
+  });
+
+  it("says the same of ~/.kagura.json", () => {
+    fs.writeFileSync(path.join(home, ".kagura.json"), '{"api_key": kagura_FILECANARY_dddd4444}');
+    expect(() => loadConfig({ cwd, home, env: {} })).toThrow(
+      new Error("Invalid JSON or encoding in ~/.kagura.json (expected UTF-8)"),
+    );
   });
 
   it("preserves unknown keys from the file", () => {

@@ -170,8 +170,10 @@ describe("cli: usage and dispatch", () => {
 
   it("accepts the 'auth' prefix so it reads like the Python CLI", async () => {
     const h = harness();
-    expect(await runCli(["auth", "status"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toMatch(/No profiles/);
+    // Exit 1 with nothing stored, as Python's ClickException.
+    expect(await runCli(["auth", "status"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+    expect(h.out).toEqual([]);
   });
 
   it.each([
@@ -209,6 +211,51 @@ describe("cli: usage and dispatch", () => {
     const h = harness();
     expect(await runCli(["auth", "frobnicate"], h.deps)).toBe(2);
     expect(h.err.join("\n")).toMatch(/Error: No such command 'frobnicate'\./);
+  });
+
+  // Click 8.3's words (the version the Python CLI's lockfile pins), checked
+  // against it: the option's name, never a value written into the token.
+  it.each([
+    [["recall", "q", "--bogus=kg_secret_key"], "Error: No such option: --bogus"],
+    [["recall", "q", "-xkg_secret_key"], "Error: No such option: -x"],
+    [["auth", "status", "--bogus=kg_secret_key"], "Error: No such option: --bogus"],
+    [["auth", "status", "--profile", "p", "--json=kg_secret_key"], "Error: No such option: --json"],
+    [["auth", "list", "--json=kg_secret_key"], "Error: Option '--json' does not take a value."],
+  ])("reports %j by the option's name alone", async (argv, line) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(line);
+    expect([...h.out, ...h.err].join("\n")).not.toContain("kg_secret");
+  });
+
+  it.each([
+    [["--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory [OPTIONS]"],
+    [["--bogus=kg_secret_key"], "Error: No such option: --bogus", "Usage: kagura-memory [OPTIONS]"],
+    [["--version=1"], "Error: Option '--version' does not take a value.", "Usage: kagura-memory [OPTIONS]"],
+    [["auth", "--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory auth [OPTIONS]"],
+    [["auth", "-xkg_secret_key", "status"], "Error: No such option: -x", "Usage: kagura-memory auth [OPTIONS]"],
+    [["resource", "tokens", "--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory resource tokens [OPTIONS]"],
+  ])("reports an option the root or a group does not take (%j), then its help", async (argv, line, usage) => {
+    // Click's groups say so too; this printed the help alone before.
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(line);
+    expect(h.err[1]).toMatch(new RegExp(`^${usage.replace(/[[\]]/g, "\\$&")}`));
+    expect(h.out).toEqual([]);
+    expect(h.err.join("\n")).not.toContain("kg_secret");
+  });
+
+  it("still gives the help of the root or a group for --help or -h, and bare, exit 2 with no error", async () => {
+    for (const argv of [["--help"], ["-h"], ["auth", "--help"], ["auth", "-h"]]) {
+      const h = harness();
+      expect(await runCli(argv, h.deps)).toBe(0);
+      expect(h.err).toEqual([]);
+    }
+    for (const argv of [[], ["auth"]]) {
+      const h = harness();
+      expect(await runCli(argv, h.deps)).toBe(2);
+      expect(h.err[0]).toMatch(/^Usage: /);
+    }
   });
 
   it("reports the version", async () => {
@@ -933,6 +980,16 @@ describe("cli: each auth subcommand takes only the flags it reads", () => {
 });
 
 describe("cli: status", () => {
+  it.each([[[]], [["--profile", "work"]]])(
+    "exits 1 with no profiles, as Python's ClickException does (%j)",
+    async (extra) => {
+      const h = harness();
+      expect(await runCli(["auth", "status", ...extra], h.deps)).toBe(1);
+      expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+      expect(h.out).toEqual([]);
+    },
+  );
+
   it("reports refreshable: false for a profile with no refresh token", async () => {
     seed({ default: creds({ refreshToken: "" }) });
     const h = harness();
@@ -1062,8 +1119,8 @@ describe("cli: status", () => {
     it("says nothing of Claude Code without a profile to show", async () => {
       writeMcpJson(STDIO);
       const empty = harness();
-      expect(await runCli(["auth", "status"], empty.deps)).toBe(0);
-      expect(empty.out.join("\n")).not.toContain("Claude Code");
+      expect(await runCli(["auth", "status"], empty.deps)).toBe(1);
+      expect([...empty.out, ...empty.err].join("\n")).not.toContain("Claude Code");
 
       seed({ default: creds() });
       const unknown = harness();
@@ -1123,6 +1180,19 @@ describe("cli: list", () => {
     const h = harness();
     expect(await runCli(["auth", "list", "--json"], h.deps)).toBe(0);
     expect(h.out).toEqual(["[]"]);
+  });
+
+  it("--json escapes non-ASCII as Python's json.dumps does by default", async () => {
+    // Python prints this payload with json.dumps(..., indent=2), no
+    // ensure_ascii=False: byte for byte, "神楽 WS" is "\u795e\u697d WS".
+    seed({ work: creds({ workspaceName: "神楽 WS", userEmail: "ユーザー@example.com" }) }, "work");
+    const h = harness();
+    expect(await runCli(["auth", "list", "--json"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    expect(text).toContain('"workspace_name": "\\u795e\\u697d WS"');
+    expect(text).toContain('"user_email": "\\u30e6\\u30fc\\u30b6\\u30fc@example.com"');
+    expect(/[^\x00-\x7e]/.test(text)).toBe(false);
+    expect((JSON.parse(text) as { workspace_name: string }[])[0]!.workspace_name).toBe("神楽 WS");
   });
 });
 

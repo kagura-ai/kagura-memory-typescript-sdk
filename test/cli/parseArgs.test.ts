@@ -87,14 +87,78 @@ describe("parseArgs", () => {
     }
   });
 
-  it.each([["-p"], ["-x"], ["-abc"]])(
-    "reports an unregistered short flag %j rather than treating it as a positional",
-    (flag) => {
-      const parsed = parse(["login", flag, "work"]);
-      expect(parsed.unknown).toEqual([flag]);
-      expect(parsed.positionals).toEqual(["work"]);
-    },
-  );
+  it.each([
+    ["-p", "-p"],
+    ["-x", "-x"],
+    ["-abc", "-a"],
+  ])("reports an unregistered short flag %j rather than treating it as a positional", (flag, name) => {
+    const parsed = parse(["login", flag, "work"]);
+    expect(parsed.unknown).toEqual([name]);
+    expect(parsed.positionals).toEqual(["work"]);
+  });
+
+  describe("names an unknown option as click's error does, without any value in the token", () => {
+    // Measured against click 8.3.3: "No such option: --bogus" for
+    // `--bogus=kg_secret`, and "-x" for `-xVALUE`.
+    it.each([
+      [["--bogus=kg_secret_key"], "--bogus"],
+      [["--bogus="], "--bogus"],
+      [["-xkg_secret_key"], "-x"],
+      [["-vx"], "-x"],
+      [["-h=x"], "-h"],
+    ])("%j → %s", (argv, name) => {
+      const parsed = parse(["cmd", ...argv]);
+      expect(parsed.unknown).toEqual([name]);
+      expect(JSON.stringify(parsed)).not.toContain("kg_secret");
+    });
+
+    it("reports a switch given a value by its name, as click's 'does not take a value'", () => {
+      const parsed = parse(["cmd", "--json=true"]);
+      expect(parsed.noValue).toEqual(["--json"]);
+      expect(parsed.unknown).toEqual([]);
+      expect(parsed.flags.has("json")).toBe(false);
+    });
+  });
+
+  describe("combines short options as click does", () => {
+    const SHORT: ParseSpec = {
+      flags: [
+        { name: "yes", short: "y", type: "switch" },
+        { name: "verbose", short: "v", type: "count" },
+        { name: "k", short: "k", type: "value", shortOnly: true },
+      ],
+    };
+    const short = (argv: string[]) => parseArgs(["cmd", ...argv], SHORT);
+
+    it("reads a cluster of switches", () => {
+      const parsed = short(["-yvv"]);
+      expect(parsed.flags.has("yes")).toBe(true);
+      expect(parsed.counts.verbose).toBe(2);
+      expect(parsed.unknown).toEqual([]);
+    });
+
+    it.each([
+      [["-k5"], "5"],
+      [["-kabc"], "abc"],
+      [["-yk5"], "5"],
+      [["-yk", "5"], "5"],
+      [["-k=5"], "5"],
+    ])("reads a value option's value from the rest of the token or the next (%j)", (argv, value) => {
+      const parsed = short(argv);
+      expect(parsed.values.k).toBe(value);
+      expect(parsed.unknown).toEqual([]);
+      expect(parsed.positionals).toEqual([]);
+    });
+
+    it("reports a value option at the end of a cluster with nothing after it", () => {
+      expect(short(["-yk"]).missingValue).toEqual(["-k"]);
+    });
+
+    it("reports the first letter that is no option, as click does for -y=1", () => {
+      expect(short(["-y=1"]).unknown).toEqual(["-="]);
+      expect(short(["-yx"]).unknown).toEqual(["-x"]);
+    });
+  });
 
   it("still treats a bare '-' as a positional", () => {
     expect(parse(["use", "-"]).positionals).toEqual(["-"]);
@@ -206,13 +270,9 @@ describe("parseArgs", () => {
     expect(parse(["process", "--verbose", "--verbose"]).counts.verbose).toBe(2);
   });
 
-  it("does not treat a mixed cluster as a count", () => {
-    // `-vx` is not "verbose plus x"; this parser deliberately supports only
-    // same-letter repetition, so anything else must be reported rather than
-    // half-understood.
-    const parsed = parse(["process", "-vx"]);
-    expect(parsed.unknown).toEqual(["-vx"]);
-    expect(parsed.counts.verbose).toBe(0);
+  it("reports the unknown letter of a mixed cluster", () => {
+    // `-vx` is "verbose, then no such option -x", as click reads it.
+    expect(parse(["process", "-vx"]).unknown).toEqual(["-x"]);
   });
 
   // --- -h ----------------------------------------------------------------
@@ -222,7 +282,7 @@ describe("parseArgs", () => {
     // any token whose body was "h", inline value and all.
     const parsed = parse(["cmd", "-h=x"]);
     expect(parsed.flags.has("help")).toBe(false);
-    expect(parsed.unknown).toEqual(["-h=x"]);
+    expect(parsed.unknown).toEqual(["-h"]);
   });
 
   it("lets a command that registers -h keep it", () => {

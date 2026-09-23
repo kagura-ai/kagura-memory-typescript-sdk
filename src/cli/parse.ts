@@ -34,8 +34,12 @@ export class CliError extends Error {
   }
 }
 
-/** `'--importance' / '-i'`, the way click names an option in its errors. */
+/**
+ * `'--importance' / '-i'`, the way click names an option in its errors;
+ * `'-k'` for a short-only one, which has no long form to name.
+ */
 export function flagLabel(flag: FlagSpec): string {
+  if (flag.short !== undefined && flag.shortOnly === true) return `'-${flag.short}'`;
   return flag.short === undefined ? `'--${flag.name}'` : `'--${flag.name}' / '-${flag.short}'`;
 }
 

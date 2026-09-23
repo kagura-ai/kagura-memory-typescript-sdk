@@ -62,7 +62,7 @@ import { SECRET_GROUP } from "./commands/secret.js";
 import { SETUP_GROUP, classifyMcpEntry, findClaudeEntries } from "./commands/setup.js";
 import type { ExecOptions, ExecResult } from "./exec.js";
 import { checkInviteSupport, type InviteSupport } from "./invite.js";
-import { formatJson } from "./output.js";
+import { formatJsonAscii } from "./output.js";
 import { CliError, CliUsageError } from "./parse.js";
 import { parseArgs, type FlagSpec, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
@@ -96,9 +96,8 @@ const INVITE: FlagSpec = {
 
 /**
  * `--invite` where it is not read: declared, so its value — a sign-up
- * credential — is consumed rather than reported, and quoted, as an
- * unknown option, and hidden from `--help`; {@link refuseInvite} then
- * refuses it.
+ * credential — is consumed rather than read as options when it begins
+ * with `-`, and hidden from `--help`; {@link refuseInvite} then refuses it.
  */
 const INVITE_REFUSED: FlagSpec = { ...INVITE, hidden: true };
 
@@ -513,8 +512,9 @@ function cmdStatus(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
   const cf = loadCredentialsFile(deps.credentialsPath);
   const names = Object.keys(cf.profiles);
   if (names.length === 0) {
-    deps.write("No profiles. Run: kagura-memory auth login");
-    return 0;
+    // Exit 1, as Python's ClickException ("No credentials found for
+    // profile …") and `auth list`.
+    throw new CliError("No profiles. Run: kagura-memory auth login");
   }
 
   const only = args.values.profile;
@@ -669,7 +669,8 @@ function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
   if (args.flags.has("json")) {
     // Python's `_profiles_as_json`: file order, no token, and `[]` (exit 0)
     // when there is no profile. `expired` is the access token's state;
-    // `refreshable` says whether the profile is still usable.
+    // `refreshable` says whether the profile is still usable. Printed with
+    // json.dumps's default, as Python prints it: non-ASCII escaped.
     const payload = Object.entries(cf.profiles).map(([name, creds]) => ({
       profile: name,
       default: name === cf.defaultProfile,
@@ -682,7 +683,7 @@ function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
       refreshable: Boolean(creds.refreshToken),
       expires_at: pythonIsoUtc(creds.expiresAt),
     }));
-    deps.write(formatJson(payload));
+    deps.write(formatJsonAscii(payload));
     return 0;
   }
   const names = Object.keys(cf.profiles).sort();
@@ -735,10 +736,11 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
  *
  * Every other flag a subcommand does not read is an unknown option. This
  * one is declared, hidden, on each of them ({@link INVITE_REFUSED}) so its
- * value, a sign-up credential, is consumed rather than quoted back in the
- * unknown-option error — `--invite=<token>`, or a token that begins with
- * `-`, would otherwise be. Ignored, it would read as though the invite had
- * been used, plausibly so on `refresh`, which can re-run the device flow.
+ * value, a sign-up credential, is consumed: a token that begins with `-`
+ * would otherwise be read as short options, a letter at a time, and its
+ * first letter that is no option named in the error. Ignored, it would
+ * read as though the invite had been used, plausibly so on `refresh`,
+ * which can re-run the device flow.
  * The message names the flag, never its value. Click, whose subcommands do
  * not declare it, says "No such option: --invite" with the same exit 2;
  * this wording also says where the flag belongs.
@@ -840,6 +842,35 @@ interface Resolved {
 }
 
 /**
+ * Click's errors for options a command or group does not take, in the
+ * words of click 8.3, which the Python CLI's lockfile pins: `No such
+ * option: --x`, naming the option without any value written into the
+ * token, and `Option '--json' does not take a value.` Click 8.4 and later
+ * word the first `No such option '--x'.`. Click also suggests a close
+ * match (`Did you mean --json?`), which this bin does not.
+ */
+function reportBadOptions(deps: CliDeps, parsed: Pick<ParsedArgs, "unknown" | "noValue">): void {
+  for (const name of parsed.unknown) deps.writeError(`Error: No such option: ${name}`);
+  for (const name of parsed.noValue) deps.writeError(`Error: Option '${name}' does not take a value.`);
+}
+
+/** The options the root takes, beside `--help`; `--version` is answered before a command is looked up. */
+const ROOT_SPEC: ParseSpec = { flags: [{ name: "version", type: "switch" }] };
+/** A group takes no option but `--help`. */
+const GROUP_SPEC: ParseSpec = { flags: [] };
+
+/**
+ * An option given to the root or a group, where a command name was due:
+ * `--help` / `-h` asks for the help (exit 0); anything else is click's
+ * error, then the help (exit 2).
+ */
+function groupOption(deps: CliDeps, token: string, spec: ParseSpec, help: string): { help: string; code: number } {
+  if (token === "--help" || token === "-h") return { help, code: 0 };
+  reportBadOptions(deps, parseArgs([token], spec));
+  return { help, code: 2 };
+}
+
+/**
  * Find the command argv names, without a spec.
  *
  * Resolution has to happen before parsing — the parser needs the command's
@@ -848,11 +879,9 @@ interface Resolved {
  */
 function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code: number } {
   const head = argv[0];
-  if (head === undefined || head.startsWith("-")) {
-    // No command: `--help` is a request, a bare invocation is a mistake.
-    const wantsHelp = head === "--help" || head === "-h";
-    return { help: renderRootHelp(), code: wantsHelp ? 0 : 2 };
-  }
+  // No command: a bare invocation is a mistake.
+  if (head === undefined) return { help: renderRootHelp(), code: 2 };
+  if (head.startsWith("-")) return groupOption(deps, head, ROOT_SPEC, renderRootHelp());
   if (head === "help") {
     return { help: renderRootHelp(), code: 0 };
   }
@@ -873,12 +902,9 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
   while (isGroup(entry)) {
     const groupPath = `kagura-memory ${path.join(" ")}`;
     const next = argv[index];
-    if (next === undefined || next.startsWith("-")) {
-      const wantsHelp = next === "--help" || next === "-h";
-      return {
-        help: renderGroupHelp(groupPath, entry.summary, entry.commands),
-        code: wantsHelp ? 0 : 2,
-      };
+    if (next === undefined) return { help: renderGroupHelp(groupPath, entry.summary, entry.commands), code: 2 };
+    if (next.startsWith("-")) {
+      return groupOption(deps, next, GROUP_SPEC, renderGroupHelp(groupPath, entry.summary, entry.commands));
     }
     const child: Command | CommandGroup | undefined = entry.commands[next];
     if (child === undefined) {
@@ -944,11 +970,8 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     })
     .map((flag) => `--${flag.name}`);
 
-  if (parsed.unknown.length > 0 || parsed.missingValue.length > 0 || empty.length > 0) {
-    for (const flag of parsed.unknown) {
-      // Click's wording, as for an unknown command.
-      deps.writeError(`Error: No such option: ${flag}`);
-    }
+  if (parsed.unknown.length > 0 || parsed.noValue.length > 0 || parsed.missingValue.length > 0 || empty.length > 0) {
+    reportBadOptions(deps, parsed);
     for (const flag of parsed.missingValue) {
       deps.writeError(`Option ${flag} needs a value.`);
     }

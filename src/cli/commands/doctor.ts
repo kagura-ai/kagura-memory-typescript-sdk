@@ -16,7 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { defaultCredentialsPath, loadCredentialsFile, isExpired } from "../../auth/credentials.js";
-import type { KaguraConfig } from "../../config.js";
+import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -27,6 +27,7 @@ import {
   classifyMcpEntry,
   claudeJsonLabel,
   findClaudeEntries,
+  holdsCredential,
   realProjectPath,
   unsetHeaderVars,
   type ClaudeScope,
@@ -160,6 +161,20 @@ const LEGACY_TYPE_FIX: Record<ClaudeScope, string> = {
     "`kagura-memory setup claude`",
 };
 
+/**
+ * How to replace an entry outside project scope that holds the key, by
+ * the scope it is in: setup writes a user-scope one that sends
+ * ${KAGURA_MCP_API_KEY}, and writes no local-scope one.
+ */
+const CREDENTIAL_FIX: Record<Exclude<ClaudeScope, "project">, string> = {
+  user:
+    "re-run `kagura-memory setup claude --scope user` with KAGURA_MCP_API_KEY exported to replace it " +
+    "with one that sends ${KAGURA_MCP_API_KEY}",
+  local:
+    "remove it (`claude mcp remove --scope local kagura-memory`), then re-run " +
+    "`kagura-memory setup claude`",
+};
+
 function checkMcp(deps: CliDeps): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const config = safeConfig(deps);
@@ -185,16 +200,30 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
   const mcpJson = path.join(cwd, ".mcp.json");
   const hasMcpJson = fs.existsSync(mcpJson);
   if (hasMcpJson) {
+    let text: string | null = null;
     try {
-      JSON.parse(fs.readFileSync(mcpJson, "utf-8"));
+      text = fs.readFileSync(mcpJson, "utf-8");
     } catch (e) {
-      // Python reads such a file as empty; Claude Code cannot load it either,
-      // which is worth more than a missing entry.
       checks.push({
         section: "mcp",
         status: "fail",
-        message: `.mcp.json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+        message: `.mcp.json cannot be read: ${e instanceof Error ? e.message : String(e)}`,
       });
+    }
+    if (text !== null) {
+      try {
+        JSON.parse(text);
+      } catch (e) {
+        // Python reads such a file as empty; Claude Code cannot load it
+        // either, which is worth more than a missing entry. Where, never
+        // what: the file can hold the key (see jsonErrorWhere).
+        const where = jsonErrorWhere(e, text);
+        checks.push({
+          section: "mcp",
+          status: "fail",
+          message: `.mcp.json is not valid JSON${where ? ` (${where})` : ""}`,
+        });
+      }
     }
   }
 
@@ -214,24 +243,40 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
     );
     return checks;
   }
-  const details = { scope: used.scope, source: used.source };
+  // A fresh copy for each check: one object shared by two of them is not
+  // a cycle, but it is still one object.
+  const details = () => ({ scope: used.scope, source: used.source });
   const mode = classifyMcpEntry(used.config);
   if (mode === "absent") {
     checks.push({
       section: "mcp",
       status: "warn",
       message: `No usable kagura-memory entry found in ${used.source} (${used.scope} scope)`,
-      details,
+      details: details(),
     });
   } else {
     // Python warns about a static-token entry and points at `setup claude
     // --profile`, whose stdio proxy this package does not ship; here that
-    // entry is the one `setup claude` writes, so it passes.
+    // entry is the one `setup claude` writes at project scope, so it
+    // passes. One elsewhere that holds the key gets the warning below.
     checks.push({
       section: "mcp",
       status: "pass",
       message: `MCP Mode: ${mode} (${used.scope} scope, ${used.source})`,
-      details,
+      details: details(),
+    });
+  }
+  if (used.scope !== "project" && holdsCredential(used.config)) {
+    // The key is stored in ~/.claude.json — as `setup claude --scope user`
+    // wrote it before 0.11.0 — where the entry could send
+    // ${KAGURA_MCP_API_KEY} instead.
+    checks.push({
+      section: "mcp",
+      status: "warn",
+      message:
+        `The kagura-memory entry (${used.scope} scope, ${used.source}) holds an API key in that file; ` +
+        CREDENTIAL_FIX[used.scope],
+      details: details(),
     });
   }
   if (used.config.type === "url") {
@@ -247,7 +292,7 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
       message:
         `The kagura-memory entry has type "url", which Claude Code does not accept; ` +
         `${fix} to write it as "http"`,
-      details,
+      details: details(),
     });
   }
   for (const name of unsetHeaderVars(used.config)) {
@@ -259,7 +304,7 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
       message:
         `The kagura-memory entry sends \${${name}} in a header, but ${name} is not set here: ` +
         "set it in the environment that starts Claude Code, or the server rejects the request",
-      details: { ...details, env: name },
+      details: { ...details(), env: name },
     });
   }
   for (const hidden of entries.slice(1)) {
@@ -401,7 +446,7 @@ export const DOCTOR: Command = {
       {
         section: "llm",
         status: "info",
-        message: "this SDK ships no LLM layer; `process` and `ingest` live in the Python package",
+        message: "this SDK ships no LLM layer; `ingest` lives in the Python package",
       },
       ...(await checkServer(deps)),
     ];

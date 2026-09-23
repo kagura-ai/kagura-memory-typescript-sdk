@@ -93,8 +93,13 @@ Four ways to authenticate, in resolution order:
 `kagura-memory` mirrors the Python CLI's `kagura` command: its subcommands
 and flags take the Python CLI's names, and it prints the same JSON on
 stdout and exits with the same codes (2 for a usage error, 1 for a runtime
-failure). The commands and options not ported yet, the few options only
-this bin has, and the deliberate differences are listed below.
+failure). An option a command, a group or the root does not take is
+refused in the words of click 8.3, the version the Python CLI's lockfile
+pins: `Error: No such option: --x`, naming the option without any value
+given in it (click 8.4 and later write `No such option '--x'.`, and may
+add a `Did you mean …?` this bin does not). The commands and options not
+ported yet, the few options only this bin has, and the deliberate
+differences are listed below.
 
 ```bash
 npx kagura-memory --help
@@ -132,9 +137,14 @@ named `kagura-memory`: the URL plus a Bearer header. The key is never
 printed, and no harness CLI gets it on its command line.
 
 `setup claude` also writes `.kagura.json` (0600, gitignored). Its key
-comes from `--api-key`, else the `api_key` in `.kagura.json`, else
-`KAGURA_API_KEY`. `.kagura.json` gets the URL as given; the parameters
-that `--guardrails` and `--tool-profile` set go on the entry's URL only.
+comes from `--api-key`, else the `api_key` in the project's own
+`.kagura.json` (the one in `--project-dir`), else `KAGURA_API_KEY`; the
+URL likewise from `--mcp-url`, else that file's `mcp_url`, else
+`KAGURA_MCP_URL`. It never takes them from `~/.kagura.json`, nor, with
+`--project-dir`, from the current directory's `.kagura.json`: those are
+another project's credentials. `.kagura.json` gets the URL as given; the
+parameters that `--guardrails` and `--tool-profile` set go on the entry's
+URL only.
 
 `setup codex`, `setup hermes` and `setup openclaw` never see, write, print
 or pass the key, as in the Python CLI. The entry names the environment
@@ -196,7 +206,10 @@ separate variable from `KAGURA_API_KEY`, which the SDK ranks above
 `.kagura.json` and OAuth profiles for every command. The entry is the one
 the Python CLI writes, so a run of either CLI finds the other's entry up
 to date. `--scope project` still writes the key into `.mcp.json`, so keep
-that file out of version control (setup adds it to `.gitignore`).
+that file out of version control (setup adds it to `.gitignore`). A
+user-scope entry this CLI wrote before 0.11.0 still holds the key in
+`~/.claude.json`: re-run `setup claude --scope user` with
+`KAGURA_MCP_API_KEY` exported to replace it (`doctor` warns about one).
 
 `--guardrails <context-id|off>` (memory-cloud v0.74.0+) sets the URL's
 `guardrails` parameter on `setup claude` and `setup codex`. On `setup
@@ -256,7 +269,9 @@ flags (`--[no-]session-hook`, `--[no-]sync-hook`, `--[no-]commands`) and
 still runs, and change nothing. `doctor` reports the entry Claude Code
 uses in the current directory, with its scope and file, and warns about
 each entry that one hides. It also warns when a header of that entry
-sends a `${VAR}` that is unset in the current environment, and for a
+sends a `${VAR}` that is unset in the current environment, or when that
+entry is in user or local scope and holds the key itself, in
+`~/.claude.json`, saying how to replace it; and for a
 `kagura-mcp` stdio entry (the Python CLI's `--profile` form) checks that
 `kagura-mcp` is on `PATH`. For a `type: "url"` entry, which earlier
 releases wrote and Claude Code skips, it names the fix for the entry's
@@ -284,7 +299,11 @@ only, and takes their flags as inert (see above).
 key (see key custody below) and refuses to print it to a terminal without
 `--reveal`. `-c` is short for `--context-id` on every `setup` subcommand.
 `setup codex` also takes `--tool-profile`, which the Python CLI has only on
-`setup claude`. `setup codex`, `setup hermes` and `setup openclaw` still
+`setup claude`. `auth refresh --no-browser`: a refresh that widens
+`--scope` re-runs the device flow here too, and this skips opening the
+browser, as on `auth login`; Python's `auth refresh` takes only
+`--profile` and `--scope`. `setup codex`, `setup hermes` and
+`setup openclaw` still
 accept `--api-key` and `--project-dir`, which they took before 0.11.0, so
 older scripts still run. Neither does anything now, and a note says so.
 `--api-key` beside `--profile` is still the usage error (exit 2) it was,
@@ -360,8 +379,6 @@ would accept.
   `--name-contains -auth` is a missing value here, where click takes
   `-auth`. Write `--name-contains=-auth`. `auth login --invite` is the
   exception, since an invite token may begin with a dash.
-- A short option's value is not attached, and short options are not
-  grouped: `-k10` is an unknown option here, where click reads `-k 10`.
 
 **Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
 requests per client address. When the server refuses one with HTTP 429,
@@ -372,14 +389,16 @@ server's reason, when it gives one, on the next line.
 `KaguraAuthError`.
 
 **`auth` subcommands.** Each takes only the options it reads, as in the
-Python CLI: any other is refused with click's `Error: No such option: …`
+Python CLI: any other is refused with click's `Error: No such option: --x`
 (exit 2), and `--help` lists only its own. `auth status` ends with the
 `kagura-memory` entry Claude Code uses in the current directory and each
 entry it hides, in the Python CLI's words (nothing when no scope defines
 one). `auth list --json` emits Python's fields per profile (`profile`,
 `default`, `user_email`, `workspace_name`, `workspace_id`, `server`,
 `scope`, `expired`, `refreshable`, `expires_at`), never a token, and `[]`
-when there is none; `auth list` without profiles exits 1. `auth logout`
+when there is none, with non-ASCII escaped as `\uXXXX`, as Python's
+`json.dumps` default writes it. `auth list` and `auth status` without
+profiles exit 1. `auth logout`
 revokes the access
 token on the server before it deletes the profile, best effort: the
 profile is deleted even when that fails, with Python's warning (with

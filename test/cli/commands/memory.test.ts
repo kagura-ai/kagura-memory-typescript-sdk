@@ -244,10 +244,12 @@ describe("kagura-memory recall", () => {
     expect(h.err.join("\n")).toContain("Missing argument 'QUERY'.");
   });
 
-  it("exits 2 for a non-integer -k", async () => {
-    const { code, h } = await wire(["recall", "q", "-k", "abc"]);
-    expect(code).toBe(2);
-    expect(h.err.join("\n")).toContain("'abc' is not a valid integer.");
+  it("exits 2 for a non-integer -k, naming it as click does: -k alone, with no long form", async () => {
+    for (const argv of [["recall", "q", "-k", "abc"], ["recall", "q", "-kabc"]]) {
+      const { code, h } = await wire(argv);
+      expect(code).toBe(2);
+      expect(h.err[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
+    }
   });
 
   it("exits 1 when no context resolves, with the Python message", async () => {
@@ -311,7 +313,7 @@ describe("kagura-memory forget", () => {
     // click coerces `type=int` before the body's ClickException can run.
     const { code, h } = await wire(["forget", "-k", "abc"]);
     expect(code).toBe(2);
-    expect(h.err.join("\n")).toContain("'abc' is not a valid integer.");
+    expect(h.err[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
     expect(h.err.join("\n")).not.toContain("Either --memory-id or --query is required");
     expect(h.server.requests).toHaveLength(0);
   });

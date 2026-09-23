@@ -23,9 +23,10 @@ export interface ExecOptions {
   cwd?: string;
   /**
    * How long the program may run before it is killed, with SIGKILL as
-   * Python's `subprocess.run(timeout=…)` kills it; EXEC_TIMEOUT_MS when
-   * unset. `setup claude` gives `claude` Python's 30 s, and `setup codex`
-   * and `setup openclaw` give their CLIs Python's 120 s.
+   * Python's `subprocess.run(timeout=…)` kills it, and every process it
+   * started with it; EXEC_TIMEOUT_MS when unset. `setup claude` gives
+   * `claude` Python's 30 s, and `setup codex` and `setup openclaw` give
+   * their CLIs Python's 120 s.
    */
   timeoutMs?: number;
 }
@@ -37,7 +38,8 @@ export interface ExecResult {
   stderr: string;
   /**
    * Set, to true, when the program was killed for running past its
-   * timeout, whatever code it then reported: that run failed.
+   * timeout: that run failed, whatever it would have reported. `code` is
+   * then 128+SIGKILL, and the output is what it printed until then.
    */
   timedOut?: true;
 }
@@ -46,10 +48,12 @@ export interface ExecResult {
  * Extensions tried on Windows, in order.
  *
  * `.cmd` and `.bat` are left out on purpose: Node refuses to spawn them
- * without a shell, and a shell would re-parse the argv — which for
- * `claude mcp add-json` carries the API key inside JSON full of quotes. A
- * harness installed only as a `.cmd` shim is treated as absent, and
- * `setup` prints the block for the user to apply instead.
+ * without a shell, and a shell would re-parse the argv — the JSON full of
+ * quotes that `claude mcp add-json` and `openclaw mcp set` take — and
+ * expand the `${KAGURA_MCP_API_KEY}` / `${KAGURA_API_KEY}` reference in it,
+ * which the harness must receive as written. A harness installed only as a
+ * `.cmd` shim is treated as absent, and `setup` prints the block for the
+ * user to apply instead.
  */
 const WINDOWS_EXTENSIONS = [".exe", ".com"];
 
@@ -96,25 +100,69 @@ export function which(
   return null;
 }
 
+/** `process.kill`'s shape; injected so a test never signals a real process. */
+type KillLike = (pid: number, signal: NodeJS.Signals) => unknown;
+
+/** Signals that end this process while a child runs, so they end the child's group too. */
+const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+
 /**
  * Run a program to completion and capture its output.
  *
  * Never rejects: a program that cannot start resolves to code 127, the
  * shell's "command not found", so a caller has one failure path to handle.
+ *
+ * The timeout bounds the whole run. On POSIX the program leads its own
+ * process group, and the timeout sends SIGKILL to that group, so a
+ * launcher-style CLI — the npm `codex`, which spawns the native binary with
+ * our pipes as its stdio — dies together with what it started. The run is
+ * settled there and then, its pipes destroyed, rather than on 'close',
+ * which a process holding the pipes that the kill missed would put off
+ * indefinitely. Windows has no process groups here: only the program itself
+ * is killed, and the run is settled all the same.
  */
 export function execFile(
   file: string,
   argv: readonly string[],
   options: ExecOptions = {},
   spawnImpl: SpawnLike = spawn,
+  killImpl: KillLike = process.kill,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    // Its own process group, so one kill reaches everything it starts.
+    const group = platform !== "win32";
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
+    let child: ReturnType<SpawnLike> | undefined;
+
+    const killAll = (): void => {
+      if (child === undefined) return;
+      try {
+        if (group && child.pid !== undefined) killImpl(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    };
+    // A detached group no longer gets the terminal's Ctrl-C, so a signal
+    // that ends this process ends the group first, then this process as
+    // it would have without the handler.
+    const onSignal = (signal: NodeJS.Signals): void => {
+      killAll();
+      unlisten();
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    };
+    const unlisten = (): void => {
+      if (group) for (const signal of FORWARDED_SIGNALS) process.removeListener(signal, onSignal);
+    };
     const settle = (code: number, failure = "", timedOut = false): void => {
       if (settled) return;
       settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      unlisten();
       resolve({
         code,
         stdout: Buffer.concat(stdout).toString("utf-8"),
@@ -123,7 +171,6 @@ export function execFile(
       });
     };
 
-    let child;
     try {
       // No shell, so argv reaches the program verbatim and nothing in it —
       // a URL's `&`, the JSON `claude mcp add-json` takes — is re-parsed.
@@ -134,29 +181,30 @@ export function execFile(
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         windowsHide: true,
-        timeout: options.timeoutMs ?? EXEC_TIMEOUT_MS,
-        // Not SIGTERM, which a CLI can catch and then exit as it likes, or
-        // ignore and so hang `setup` past the timeout.
-        killSignal: "SIGKILL",
+        detached: group,
       });
     } catch (e) {
       settle(127, e instanceof Error ? e.message : String(e));
       return;
     }
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.on("error", (e) => settle(127, e.message));
+    const running = child;
+    running.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    running.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    running.on("error", (e) => settle(127, e.message));
     // 128+n for a signal, as in `secret exec`: "it died" stays
-    // distinguishable from "it exited 0". Nothing here kills the child but
-    // spawn's own timeout, which marks it `killed`; a signal from anywhere
-    // else leaves that unset. So `killed` alone says it timed out, whatever
-    // code or signal the close reports.
-    child.on("close", (code, signal) =>
-      settle(
-        code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0)),
-        "",
-        child.killed === true,
-      ),
+    // distinguishable from "it exited 0".
+    running.on("close", (code, signal) =>
+      settle(code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0))),
     );
+    if (group) for (const signal of FORWARDED_SIGNALS) process.on(signal, onSignal);
+    timer = setTimeout(() => {
+      // Not SIGTERM, which a CLI can catch and then exit as it likes, or
+      // ignore and so hang `setup` past the timeout. Whatever it would have
+      // reported, the run failed: it timed out.
+      killAll();
+      running.stdout?.destroy();
+      running.stderr?.destroy();
+      settle(128 + constants.signals.SIGKILL, "", true);
+    }, options.timeoutMs ?? EXEC_TIMEOUT_MS);
   });
 }

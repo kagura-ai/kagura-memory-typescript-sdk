@@ -36,7 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
-import type { KaguraConfig } from "../../config.js";
+import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { validateHttpsUrl } from "../../http.js";
 import { isUuid, parseUuid } from "../../uuid.js";
 import { rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
@@ -76,7 +76,15 @@ const SERVER_NAME = "kagura-memory";
 const API_KEY: FlagSpec = { name: "api-key", type: "value", help: "Kagura API key (skip prompt)" };
 const MCP_URL: FlagSpec = { name: "mcp-url", type: "value", metavar: "URL", help: "MCP URL" };
 const CONTEXT_ID: FlagSpec = { name: "context-id", short: "c", type: "value", help: "Context ID" };
-const PROFILE: FlagSpec = { name: "profile", type: "value", help: "OAuth profile name" };
+// Python's OAuth setup, which writes the kagura-mcp entry: refused here,
+// and the help says so, as the harness subcommands' does.
+const PROFILE: FlagSpec = {
+  name: "profile",
+  type: "value",
+  help:
+    "OAuth profile (from `kagura auth login`) for the Python CLI's kagura-mcp entry, which this " +
+    "port cannot write: refused",
+};
 const PROJECT_DIR: FlagSpec = {
   name: "project-dir",
   type: "value",
@@ -97,7 +105,7 @@ const NON_INTERACTIVE: FlagSpec = {
 const GUARDRAILS: FlagSpec = {
   name: "guardrails",
   type: "value",
-  metavar: "CONTEXT_ID|off",
+  metavar: "off|CONTEXT_ID",
   help: "Set the URL's guardrails parameter (server v0.74.0+): a context id, or off",
 };
 // Python's floor and names (memory-cloud's PROFILES); worded to hold for
@@ -159,12 +167,7 @@ const DRY_RUN: FlagSpec = {
   type: "switch",
   help: "Show the command or block and the entry; change nothing",
 };
-const HARNESS_PROFILE: FlagSpec = {
-  ...PROFILE,
-  help:
-    "OAuth profile (from `kagura auth login`) for the Python CLI's kagura-mcp entry, which this " +
-    "port cannot write: refused, and ignored with --url-form",
-};
+const HARNESS_PROFILE: FlagSpec = { ...PROFILE, help: `${PROFILE.help}, and ignored with --url-form` };
 const URL_FORM: FlagSpec = {
   name: "url-form",
   type: "switch",
@@ -303,19 +306,20 @@ function readJsonSafe(target: string): Record<string, unknown> {
     throw new CliError(`cannot read ${target}: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!text.trim()) return {};
+  // Overwriting a file we could not understand would discard whatever the
+  // operator had configured there. The reason never quotes the file, which
+  // holds the key (see jsonErrorWhere).
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error("expected a JSON object");
-    }
-    return parsed as Record<string, unknown>;
+    parsed = JSON.parse(text);
   } catch (e) {
-    // Overwriting a file we could not understand would discard whatever
-    // the operator had configured there.
-    throw new CliError(
-      `refusing to rewrite ${target}: it is not a JSON object (${e instanceof Error ? e.message : String(e)})`,
-    );
+    const where = jsonErrorWhere(e, text);
+    throw new CliError(`refusing to rewrite ${target}: it is not valid JSON${where ? ` (${where})` : ""}`);
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new CliError(`refusing to rewrite ${target}: it is not a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /**
@@ -486,6 +490,8 @@ interface SetupInput {
    * so one this cannot parse stops the command with nothing changed.
    */
   kagura: Record<string, unknown>;
+  /** Every key this process knows of, cut out of whatever `claude` prints. */
+  secrets: string[];
 }
 
 /**
@@ -501,7 +507,7 @@ function refuseProfileWithKey(args: ParsedArgs): void {
 }
 
 /** What `setup claude` resolves before touching anything. */
-function resolveInput(deps: CommandDeps, args: ParsedArgs): SetupInput {
+function resolveInput(args: ParsedArgs): SetupInput {
   rejectExtraArgs(args);
   // First, as click runs Python's option callbacks while it parses.
   const guardrails = parseGuardrails(args.values.guardrails);
@@ -517,25 +523,29 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs): SetupInput {
     throw new CliUsageError(`Invalid value for '--project-dir': ${projectDir} does not exist.`);
   }
 
-  // Fall back to whatever is already configured, so re-running with no
-  // flags refreshes the files rather than blanking them.
-  const { config } = resolveConfig(deps, undefined, false);
-  // Then to KAGURA_API_KEY: the loader reads it only when no .kagura.json
-  // exists, and setup codex before 0.11.0 wrote one without the key when
-  // the key came from that variable.
-  const configKey = typeof config.api_key === "string" ? config.api_key : "";
-  const resolvedKey = apiKey ?? (configKey || process.env[KEY_ENV_VAR] || "");
-  const baseUrl =
-    args.values["mcp-url"] ??
-    (typeof config.mcp_url === "string" && config.mcp_url ? config.mcp_url : DEFAULT_MCP_URL);
+  // Fall back to what the project already has, so re-running with no flags
+  // refreshes its files rather than blanking them: its own .kagura.json,
+  // as Python reads `project / ".kagura.json"`. Never the one this bin's
+  // loader would find (the current directory's, then ~/.kagura.json):
+  // with --project-dir that is another project's, and its key would be
+  // written into this one and sent by its Claude Code. Read before
+  // anything is written or run, so one that cannot be parsed stops the
+  // command with nothing changed.
+  const kagura = readJsonSafe(path.join(projectDir, ".kagura.json"));
+  const own = (key: string): string => (typeof kagura[key] === "string" ? (kagura[key] as string) : "");
+  // Then the environment, as the loader reads it when no file exists:
+  // KAGURA_API_KEY, since setup codex before 0.11.0 wrote a .kagura.json
+  // without the key when the key came from that variable.
+  const resolvedKey = apiKey ?? (own("api_key") || process.env[KEY_ENV_VAR] || "");
+  const baseUrl = args.values["mcp-url"] ?? (own("mcp_url") || process.env.KAGURA_MCP_URL || DEFAULT_MCP_URL);
   const contextFlag = Boolean(args.values["context-id"]);
-  const contextId = args.values["context-id"] || config.context_id || "";
+  const contextId = args.values["context-id"] || own("context_id") || process.env.KAGURA_CONTEXT_ID || "";
 
   if (!resolvedKey) {
     // No word of `auth login`: setup writes an API-key entry, and an OAuth
     // profile does not give it one.
     throw new CliError(
-      `no API key: pass --api-key, set api_key in .kagura.json, or export ${KEY_ENV_VAR}.`,
+      `no API key: pass --api-key, set api_key in the project's .kagura.json, or export ${KEY_ENV_VAR}.`,
     );
   }
   return {
@@ -547,7 +557,8 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs): SetupInput {
     contextFlag,
     guardrails,
     toolProfile,
-    kagura: readJsonSafe(path.join(projectDir, ".kagura.json")),
+    kagura,
+    secrets: knownKeys(apiKey, own("api_key")),
   };
 }
 
@@ -616,23 +627,42 @@ function printBlock(deps: CommandDeps, heading: string, block: string): void {
 }
 
 /**
- * Run a harness CLI, failing with its own message.
- *
- * No argv here carries the key, but a CLI may echo back whatever it read,
- * its environment or config included, so the key is still cut out of
- * whatever is shown.
+ * Every API key this process knows of, for {@link redactKeys}: the ones
+ * given (`--api-key`, a configured `api_key`, the variable `--api-key-env`
+ * names), then `$KAGURA_API_KEY` and `$KAGURA_MCP_API_KEY` — the variables
+ * the entries reference and a harness CLI inherits. Non-empty, each once,
+ * longest first, so a key that contains another is cut whole.
  */
+export function knownKeys(...given: unknown[]): string[] {
+  const keys = [...given, process.env[KEY_ENV_VAR], process.env[CLAUDE_KEY_ENV_VAR]].filter(
+    (k): k is string => typeof k === "string" && k !== "",
+  );
+  return [...new Set(keys)].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * `text` with every one of `keys` ({@link knownKeys}) cut out. No argv this
+ * command runs carries a key, but a harness CLI may echo whatever it read,
+ * its environment or config included, and its output is shown on failure.
+ */
+export function redactKeys(text: string, keys: readonly string[]): string {
+  let out = text;
+  for (const key of keys) out = out.split(key).join("<redacted>");
+  return out;
+}
+
+/** Run a harness CLI, failing with its own message, every known key cut out. */
 async function runHarnessCli(
   deps: CliDeps,
   file: string,
   argv: string[],
   display: string,
-  apiKey: string,
+  secrets: readonly string[],
   options?: ExecOptions,
 ): Promise<void> {
   const result = await deps.execFile(file, argv, options);
   if (result.code === 0) return;
-  const detail = (result.stderr.trim() || result.stdout.trim()).split(apiKey).join("<redacted>");
+  const detail = redactKeys(result.stderr.trim() || result.stdout.trim(), secrets);
   throw new CliError(`\`${display}\` failed (exit ${result.code})${detail ? `:\n  ${detail}` : ""}`);
 }
 
@@ -1180,7 +1210,7 @@ async function writeUserEntry(
   replaces: Record<string, unknown> | null,
 ): Promise<void> {
   const run = (argv: string[], display: string) =>
-    runHarnessCli(deps, claude, argv, display, input.apiKey, CLAUDE_EXEC);
+    runHarnessCli(deps, claude, argv, display, input.secrets, CLAUDE_EXEC);
   // Python's _add_user_entry: the entry goes on claude's command line,
   // which every local user can read in the process list while it runs, so
   // one that holds a credential is never passed — the new entry never
@@ -1214,7 +1244,7 @@ async function writeUserEntry(
 }
 
 async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
-  const input = resolveInput(deps, args);
+  const input = resolveInput(args);
   const scope = parseChoice(SCOPE, args.values.scope ?? "project", CLAUDE_TARGET_SCOPES);
   const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile);
   const asked = ASKS_FOR_HOOKS.filter((name) => args.flags.has(name)).map((name) => `--${name}`);
@@ -1391,7 +1421,7 @@ interface HarnessInput {
   toolProfile: string | undefined;
   /** The variable the entry reads the key from. */
   keyEnv: string;
-  /** Every key this process knows of, cut out of whatever a harness CLI prints. */
+  /** Every key this process knows of ({@link knownKeys}), cut out of whatever a harness CLI prints. */
   secrets: string[];
   force: boolean;
   dryRun: boolean;
@@ -1456,9 +1486,9 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
 
   // For the URL and context fallbacks alone: no key is taken from it.
   // Python never reads it, so with --mcp-url one that cannot be loaded
-  // stops nothing; the context fallback only fills in the report. The
-  // loader's reason is left out: a JSON.parse message quotes the file,
-  // and so can quote a key in it.
+  // stops nothing; the context fallback only fills in the report. Without
+  // --mcp-url the loader's error stops the run: it names the file and
+  // never quotes it, which can hold a key.
   const notes: string[] = [];
   let config: KaguraConfig = {};
   try {
@@ -1505,9 +1535,6 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
     );
   }
 
-  const secrets = [apiKey, config.api_key, process.env[keyEnv], process.env[KEY_ENV_VAR]].filter(
-    (s): s is string => typeof s === "string" && s !== "",
-  );
   return {
     harness,
     name,
@@ -1519,8 +1546,7 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
     guardrails,
     toolProfile,
     keyEnv,
-    // Longest first, so a key that contains another is cut whole.
-    secrets: [...new Set(secrets)].sort((a, b) => b.length - a.length),
+    secrets: knownKeys(apiKey, config.api_key, process.env[keyEnv]),
     force: args.flags.has("force"),
     dryRun: args.flags.has("dry-run"),
     notes,
@@ -1556,11 +1582,9 @@ interface HarnessPlan {
 
 /**
  * Run `codex` or `openclaw` with Python's timeout, failing in Python's
- * words: `` `codex mcp add` failed: `` and what it printed, its exit code
- * when it printed nothing, or the timeout.
- *
- * No argv carries a key, but a CLI may echo whatever it read, its
- * environment included, so every key this process knows of is cut out.
+ * words: `` `codex mcp add` failed: `` and what it printed, every known key
+ * cut out ({@link redactKeys}), its exit code when it printed nothing, or
+ * the timeout.
  */
 async function runHarnessCommand(
   deps: CliDeps,
@@ -1575,8 +1599,7 @@ async function runHarnessCommand(
   // Python, whatever code it reported.
   if (result.timedOut) throw new CliError(`${command} failed: timed out after ${HARNESS_TIMEOUT_S}s`);
   if (result.code === 0) return;
-  let detail = result.stderr.trim() || result.stdout.trim();
-  for (const secret of secrets) detail = detail.split(secret).join("<redacted>");
+  const detail = redactKeys(result.stderr.trim() || result.stdout.trim(), secrets);
   throw new CliError(`${command} failed: ${detail || `exit code ${result.code}`}`);
 }
 

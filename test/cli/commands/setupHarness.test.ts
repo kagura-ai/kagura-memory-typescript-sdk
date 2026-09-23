@@ -274,6 +274,15 @@ describe("setup codex", () => {
       expect(h.err.join("\n")).toContain("Error: Invalid JSON or encoding in .kagura.json");
       expect(h.runs).toEqual([]);
     });
+
+    it.each(["codex", "hermes", "openclaw"])("stops setup %s without --mcp-url, and quotes none of it", async (name) => {
+      process.chdir(sandbox);
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), BROKEN);
+      const h = harness({ onPath: { [name]: `/usr/bin/${name}` } }, "disk");
+      expect(await runCli(["setup", name, "--dry-run"], h.deps)).toBe(1);
+      expect(h.err).toEqual(["Error: Invalid JSON or encoding in .kagura.json (expected UTF-8)"]);
+      expect(h.err.join("\n")).not.toContain("kagura_");
+    });
   });
 
   it("falls back to the configured mcp_url, then the default", async () => {
@@ -1211,6 +1220,53 @@ describe("no key reaches output, argv or a file", () => {
       }
     }
     expect(filesUnder(sandbox)).toEqual([]);
+  });
+});
+
+describe("a failing harness CLI's output", () => {
+  // No argv carries a key, but a CLI may print its environment or config;
+  // every key this process knows of is cut out of what is shown.
+  const KEYS = {
+    flag: "kagura_FLAG_aaaa1111",
+    config: "kagura_CONFIG_bbbb2222",
+    env: "kagura_ENV_cccc3333",
+    mcpEnv: "kagura_MCPENV_dddd4444",
+    other: "kagura_OTHERVAR_eeee5555",
+  };
+
+  it.each([
+    ["codex", "--api-key", KEYS.flag],
+    ["codex", "the configured api_key", KEYS.config],
+    ["codex", "$KAGURA_API_KEY", KEYS.env],
+    ["codex", "$KAGURA_MCP_API_KEY", KEYS.mcpEnv],
+    ["codex", "the --api-key-env variable", KEYS.other],
+    ["openclaw", "--api-key", KEYS.flag],
+    ["openclaw", "the configured api_key", KEYS.config],
+    ["openclaw", "$KAGURA_API_KEY", KEYS.env],
+    ["openclaw", "$KAGURA_MCP_API_KEY", KEYS.mcpEnv],
+    ["openclaw", "the --api-key-env variable", KEYS.other],
+  ])("setup %s masks %s", async (name, _source, key) => {
+    process.env.KAGURA_API_KEY = KEYS.env;
+    process.env.KAGURA_MCP_API_KEY = KEYS.mcpEnv;
+    process.env.OTHERVAR = KEYS.other;
+    const h = harness(
+      { onPath: { [name]: `/usr/bin/${name}` }, exec: () => ({ code: 4, stdout: "", stderr: `env: ${key}` }) },
+      { api_key: KEYS.config },
+    );
+    expect(await runCli(setup(name, "--api-key", KEYS.flag, "--api-key-env", "OTHERVAR"), h.deps)).toBe(1);
+    expect(h.err.join("\n")).toContain("failed: env: <redacted>");
+    expect(h.err.join("\n")).not.toContain(key);
+  });
+
+  it("cuts a longer key whole when it contains a shorter one", async () => {
+    process.env.KAGURA_API_KEY = "kagura_short";
+    process.env.KAGURA_MCP_API_KEY = "kagura_short_and_longer";
+    const h = harness({
+      onPath: { codex: "/usr/bin/codex" },
+      exec: () => ({ code: 1, stdout: "", stderr: "kagura_short_and_longer kagura_short" }),
+    });
+    expect(await runCli(setup("codex"), h.deps)).toBe(1);
+    expect(h.err).toContain("Error: `codex mcp add` failed: <redacted> <redacted>");
   });
 });
 
