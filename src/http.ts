@@ -47,16 +47,30 @@ function formatValidationErrors(errors: unknown[]): string {
   return parts.join("; ");
 }
 
+/** The `error` object of a JSON-RPC error body, else `null`. */
+function jsonRpcError(body: unknown): Record<string, unknown> | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return null;
+  }
+  const error = (body as Record<string, unknown>).error;
+  return typeof error === "object" && error !== null && !Array.isArray(error)
+    ? (error as Record<string, unknown>)
+    : null;
+}
+
 /**
  * Return a useful server-supplied error string from a response body.
  *
- * Handles four response shapes:
+ * Handles five response shapes:
  * - `{"detail": "string"}` — returned as-is (FastAPI HTTPException default).
  * - `{"detail": [{"loc": [...], "msg": "...", ...}, ...]}` — FastAPI's
  *   validation-error format; each entry becomes `"<loc.path>: <msg>"`.
  * - `{"error": "<CODE>", "message": "string", "details": {...}}` — the
  *   memory-cloud canonical envelope; returns `message`, appending
  *   `details.errors` validation entries when present.
+ * - `{"jsonrpc": "2.0", "error": {"code": int, "message": "string"}}` — the
+ *   MCP transport's 4xx for a request it rejects before dispatch; returns
+ *   `error.message`, e.g. the expired-session 404's re-initialize hint.
  * - Anything else — returns an empty string so callers can fall back.
  */
 export function extractDetail(bodyText: string): string {
@@ -91,7 +105,46 @@ export function extractDetail(bodyText: string): string {
     }
     return message;
   }
+  const rpcMessage = jsonRpcError(rec)?.message;
+  if (typeof rpcMessage === "string" && rpcMessage) {
+    return rpcMessage;
+  }
   return "";
+}
+
+/** Headers naming the MCP session `sessionId` — none before a session exists. */
+export function mcpSessionHeader(sessionId: string | null): Record<string, string> {
+  return sessionId ? { "mcp-session-id": sessionId } : {};
+}
+
+const JSONRPC_METHOD_NOT_FOUND = -32601;
+
+/**
+ * Whether a response says the MCP session a request carried is gone (#39).
+ *
+ * MCP Streamable HTTP answers a request naming a session the server no
+ * longer holds with `404`, and the client must then send a new
+ * `initialize`. The server keeps legacy (`initialize`-handshake) sessions
+ * in process memory and drops them after an idle hour and on every restart.
+ * The one `404` that is not about the session is the stateless 2026-07-28
+ * `-32601` Method-not-found reply: that path ignores the session id, so
+ * re-initializing would only open an orphan session.
+ */
+export function mcpSessionExpired(
+  status: number,
+  bodyText: string,
+  sessionId: string | null,
+): boolean {
+  if (!sessionId || status !== 404) {
+    return false;
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return true;
+  }
+  return jsonRpcError(body)?.code !== JSONRPC_METHOD_NOT_FOUND;
 }
 
 /**
