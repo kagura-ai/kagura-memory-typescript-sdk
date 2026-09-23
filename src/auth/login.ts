@@ -68,7 +68,8 @@ export interface LoginOptions {
   /**
    * Called once with the device-authorization response before polling
    * starts — display `userCode` and `verificationUri` (or open
-   * `verificationUriComplete`) here.
+   * `verificationUriComplete`) here. For a new user holding a beta invite,
+   * `buildInviteLink` turns this response into one sign-up-and-approve link.
    *
    * Awaited, and a throw aborts the login before any polling or disk
    * write, so a host app that cannot show the code fails fast.
@@ -78,6 +79,26 @@ export interface LoginOptions {
   fetch?: typeof globalThis.fetch;
   /** Injectable sleep in milliseconds, used between polls. */
   sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * The MCP URL `login()` authenticates against, validated.
+ *
+ * Exported so the CLI's `--invite` feature check reaches the server the
+ * device flow uses.
+ */
+export function resolveLoginMcpUrl(
+  mcpUrl: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  // Explicit arg > KAGURA_MCP_URL > public default, matching the Python
+  // CLI. Without the env step a self-hosted user with KAGURA_MCP_URL set
+  // would be silently logged in to the public cloud instead.
+  const resolved = mcpUrl?.trim() || env.KAGURA_MCP_URL?.trim() || DEFAULT_MCP_URL;
+  // The device flow carries a bearer token back over this connection, so
+  // the destination is validated before any request goes out.
+  validateHttpsUrl(resolved, "MCP URL");
+  return resolved;
 }
 
 /**
@@ -96,14 +117,7 @@ export interface LoginOptions {
  * `refreshToken` if the caller needs to react.
  */
 export async function login(options: LoginOptions = {}): Promise<OAuthCredentials> {
-  const env = options.env ?? process.env;
-  // Explicit arg > KAGURA_MCP_URL > public default, matching the Python
-  // CLI. Without the env step a self-hosted user with KAGURA_MCP_URL set
-  // would be silently logged in to the public cloud instead.
-  const mcpUrl = options.mcpUrl?.trim() || env.KAGURA_MCP_URL?.trim() || DEFAULT_MCP_URL;
-  // The device flow carries a bearer token back over this connection, so
-  // the destination is validated before any request goes out.
-  validateHttpsUrl(mcpUrl, "MCP URL");
+  const mcpUrl = resolveLoginMcpUrl(options.mcpUrl, options.env ?? process.env);
   const server = baseUrlFromMcp(mcpUrl);
   const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
   const profile = options.profile ?? "default";

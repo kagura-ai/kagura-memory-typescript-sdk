@@ -24,7 +24,7 @@ import {
   KaguraConnectionError,
   excMessage,
 } from "../errors.js";
-import { extractDetail } from "../http.js";
+import { extractDetail, retryAfterSeconds, validateHttpsUrl } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 
 // OAuth2 endpoint paths under {server}.
@@ -36,6 +36,10 @@ const PATH_REVOKE = "/api/v1/oauth/revoke";
 
 // RFC 8628 §3.5 — "slow_down" requires the client to add 5 seconds.
 const SLOW_DOWN_INCREMENT_SEC = 5;
+
+// memory-cloud's per-IP device-flow window (memory-cloud#1656, v0.76.0): the
+// wait to report when a 429 carries no usable Retry-After.
+const DEVICE_RATE_LIMIT_RETRY_AFTER_SEC = 60;
 
 /** The pre-registered public client ID seeded by memory-cloud #624. */
 export const DEFAULT_CLIENT_ID = "kagura-cli";
@@ -150,6 +154,32 @@ function safeJson(bodyText: string): Record<string, unknown> {
 }
 
 /**
+ * The server's reason from an error body: whatever `extractDetail` finds,
+ * else an RFC 6749 `error_description`. The Python SDK's `extract_detail`
+ * reads that last shape too; the OAuth endpoints answer with it.
+ */
+function oauthDetail(bodyText: string): string {
+  return extractDetail(bodyText) || stringOr(safeJson(bodyText).error_description, "");
+}
+
+/**
+ * Explain a 429 from `device/authorize`, with the wait from `Retry-After`.
+ *
+ * memory-cloud v0.76.0 limits `device/authorize` per client address and
+ * answers 429 with `Retry-After: 60` and an RFC 6749 `error_description`,
+ * which is kept. A missing or non-numeric `Retry-After` reads as that same
+ * 60 s window. The Python CLI's wording.
+ */
+function deviceRateLimitedMessage(headers: Headers, bodyText: string): string {
+  const retryAfter = retryAfterSeconds(headers) ?? DEVICE_RATE_LIMIT_RETRY_AFTER_SEC;
+  const message =
+    "Too many sign-in attempts from this address (HTTP 429). " +
+    `Retry after ${retryAfter} seconds.`;
+  const detail = oauthDetail(bodyText);
+  return detail ? `${message}\n  Server said: ${detail}` : message;
+}
+
+/**
  * Build a `TokenResponse` from a 200 `/oauth/token/` body.
  *
  * `expiresAt` is computed from `expires_in` at receipt time so laptop sleep
@@ -183,6 +213,11 @@ function tokenResponseFromBody(bodyText: string, status: number): TokenResponse 
  *
  * memory-cloud's device/authorize accepts JSON, unlike the /oauth/token/ +
  * /oauth/revoke endpoints which take application/x-www-form-urlencoded.
+ *
+ * @throws KaguraAuthError the server refused the request. A 429
+ *   (memory-cloud v0.76.0+ limits this endpoint per client address) says
+ *   how long to wait, from `Retry-After`.
+ * @throws KaguraConnectionError network failure.
  */
 export async function authorizeDevice(
   server: string,
@@ -209,8 +244,11 @@ export async function authorizeDevice(
     throw new KaguraConnectionError(`Could not reach ${url}: ${excMessage(e)}`, { cause: e });
   }
 
+  if (response.status === 429) {
+    throw new KaguraAuthError(deviceRateLimitedMessage(response.headers, text));
+  }
   if (!response.ok) {
-    const detail = extractDetail(text) || text;
+    const detail = oauthDetail(text) || text;
     throw new KaguraAuthError(
       `Device authorization failed (HTTP ${response.status}): ${detail}\n` +
         `  Verify the server URL and that '${clientId}' is registered.`,
@@ -465,5 +503,235 @@ export async function revokeToken(
     return response.status === 200 || response.status === 204;
   } catch {
     return false;
+  }
+}
+
+// memory-cloud's beta-invite token shape (its beta_invite_service). Checked
+// client-side so a mistyped invite fails before any request, not at sign-up.
+const INVITE_TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
+const INVITE_TOKEN_RULE = "20-128 characters from A-Z, a-z, 0-9, '_' and '-'";
+
+/** An invite reduced to what the `/join` hand-off needs. */
+export interface ParsedInvite {
+  token: string;
+  /** Origin of a pasted `/join/<token>` link; `null` for a bare token. */
+  origin: string | null;
+  /**
+   * The pasted link without its query or fragment; `null` for a bare
+   * token. Step one of the two-step prompt when `/join` cannot be placed
+   * on the frontend.
+   */
+  link: string | null;
+}
+
+/** Throw, without quoting `token`, unless it has the invite-token shape. */
+function checkInviteToken(token: string): void {
+  if (!INVITE_TOKEN_RE.test(token)) {
+    throw new KaguraAuthError(`an invite token must be ${INVITE_TOKEN_RULE}`);
+  }
+}
+
+/** The pieces of a `scheme://netloc/path?query#fragment` URL, unnormalised. */
+interface UrlParts {
+  /** Lower-cased. */
+  scheme: string;
+  netloc: string;
+  path: string;
+  query: string;
+}
+
+/**
+ * `url` split as the Python SDK's `urlsplit` splits it; `null` when it has
+ * no `scheme://` authority.
+ *
+ * Not `new URL`: WHATWG parsing repairs what it reads — a backslash becomes
+ * a slash, `https:host` gains its `//`, a control character is
+ * percent-encoded — so an invite link or `return_to` the Python CLI refuses
+ * would pass here. Like `urlsplit`, tab, CR and LF are dropped and leading
+ * controls and spaces stripped.
+ */
+function splitUrl(url: string): UrlParts | null {
+  const text = url.replace(/[\t\r\n]/g, "").replace(/^[\x00-\x20]+/, "");
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?/.exec(text);
+  if (m === null) {
+    return null;
+  }
+  return { scheme: m[1]!.toLowerCase(), netloc: m[2]!, path: m[3]!, query: m[4] ?? "" };
+}
+
+/**
+ * `scheme://host[:port]` of an http(s) URL, as a browser forms it: lower-cased,
+ * with the scheme's default port dropped. `null` otherwise.
+ *
+ * A backslash in the authority is refused rather than read the way a
+ * browser would (as the start of the path), since the Python CLI does not
+ * read it that way either.
+ */
+function urlOrigin(parts: UrlParts | null): string | null {
+  if (
+    parts === null ||
+    (parts.scheme !== "http" && parts.scheme !== "https") ||
+    parts.netloc === "" ||
+    parts.netloc.includes("\\")
+  ) {
+    return null;
+  }
+  try {
+    return new URL(`${parts.scheme}://${parts.netloc}`).origin;
+  } catch {
+    // An empty host, or a port that is not a number or out of range.
+    return null;
+  }
+}
+
+/**
+ * Whether memory-cloud's `/join` keeps `path` as its `return_to`.
+ *
+ * Mirrors the relative-path branch of the frontend's `safeReturnTo`
+ * (memory-cloud v0.76.0): exactly one leading `/`, no backslash and no C0
+ * control character. `/join` drops any other value silently and sends the
+ * invitee to the dashboard, so the CLI prints the two steps instead.
+ */
+function joinKeepsReturnTo(path: string): boolean {
+  return path.startsWith("/") && !path.startsWith("//") && !/[\\\x00-\x1f]/.test(path);
+}
+
+/**
+ * Read an invite given as a bare token or as a link whose path ends in
+ * `/join/<token>`. The link may sit under a base path and end in a slash;
+ * any query or fragment is ignored. It must spell out `://`, and must pass
+ * the `--server` HTTPS rule, since it carries the token. The Python SDK's
+ * `parse_invite`, reason for reason.
+ *
+ * @throws KaguraAuthError the value is neither. The message says why
+ *   without quoting the value: the token is a sign-up credential. It is
+ *   worded to follow the CLI's "Invalid value for '--invite': ".
+ */
+export function parseInvite(value: string): ParsedInvite {
+  const text = value.trim();
+  if (!text.includes("://")) {
+    if (text.includes("/")) {
+      throw new KaguraAuthError("an invite link must be a full https://<host>/join/<token> URL");
+    }
+    checkInviteToken(text);
+    return { token: text, origin: null, link: null };
+  }
+
+  const parts = splitUrl(text);
+  const origin = urlOrigin(parts);
+  if (parts === null || origin === null) {
+    throw new KaguraAuthError("an invite link must be an https://<host>/join/<token> URL");
+  }
+  try {
+    validateHttpsUrl(origin, "An invite link");
+  } catch (e) {
+    throw new KaguraAuthError(excMessage(e), { cause: e });
+  }
+  const path = parts.path.replace(/\/+$/, "");
+  const segments = path.split("/");
+  if (segments.length < 3 || segments[segments.length - 2] !== "join") {
+    throw new KaguraAuthError("an invite link must end in /join/<token>");
+  }
+  const token = segments[segments.length - 1]!;
+  checkInviteToken(token);
+  return { token, origin, link: `${origin}${path}` };
+}
+
+/**
+ * The frontend's base URL: `verificationUri` minus its final `/device`.
+ *
+ * memory-cloud builds `verificationUri` as `{frontend_url}/device`, and it
+ * is the only frontend location the CLI learns — `--server` is the API,
+ * which can live on another origin. `null` when the URI does not end in a
+ * `/device` segment or fails the `--server` HTTPS rule: `/join` cannot
+ * then be placed safely.
+ */
+export function inviteBaseUrl(verificationUri: string): string | null {
+  const parts = splitUrl(verificationUri);
+  const origin = urlOrigin(parts);
+  const path = parts?.path.replace(/\/+$/, "") ?? "";
+  if (origin === null || !path.endsWith("/device")) {
+    return null;
+  }
+  const base = `${origin}${path.slice(0, -"/device".length)}`;
+  try {
+    validateHttpsUrl(base);
+  } catch {
+    return null;
+  }
+  return base;
+}
+
+/**
+ * The one link that signs a new account up with an invite and lands it on
+ * the approval page with the code filled in:
+ * `<base>/join/<token>?return_to=<path and query of verificationUriComplete>`.
+ *
+ * The Python SDK's `build_invite_link`, argument for argument. Pure, and
+ * meant for `login()`'s `onUserCode` — the first point where both the
+ * invite and the user code are known. `base` is {@link inviteBaseUrl}: the
+ * frontend serves `/join` beside `/device`, under whatever base path it
+ * has. `return_to` is the relative path the server validates as
+ * same-origin, percent-encoded whole. `authorizeDevice` fills a missing
+ * `verification_uri_complete` with the bare `verificationUri`, which lands
+ * on an empty code form; the CLI passes `verificationUri` plus
+ * `?user_code=` in that case.
+ *
+ * Needs memory-cloud v0.76.0 or later, whose `/join` honours `return_to`
+ * (memory-cloud#1655). An older one signs the user up and stops on its
+ * dashboard, where `verificationUriComplete` still approves the pending
+ * code — so show that too.
+ *
+ * @param token a bare invite token; a pasted link reduced to its token.
+ * @returns the link, or `null` when `/join` cannot be placed or would drop
+ *   `return_to`: `verificationUri` does not end in `/device` or is plain
+ *   HTTP off localhost, `verificationUriComplete` is on another origin, or
+ *   its path and query are not a `return_to` memory-cloud keeps.
+ * @throws KaguraAuthError the token is malformed (the message never
+ *   quotes it).
+ */
+export function buildInviteLink(
+  verificationUri: string,
+  verificationUriComplete: string,
+  token: string,
+): string | null {
+  checkInviteToken(token);
+  const base = inviteBaseUrl(verificationUri);
+  const complete = splitUrl(verificationUriComplete);
+  if (
+    base === null ||
+    complete === null ||
+    urlOrigin(complete) !== urlOrigin(splitUrl(verificationUri))
+  ) {
+    return null;
+  }
+  const returnTo = complete.query ? `${complete.path}?${complete.query}` : complete.path;
+  if (!joinKeepsReturnTo(returnTo)) {
+    return null;
+  }
+  return `${base}/join/${token}?return_to=${encodeURIComponent(returnTo)}`;
+}
+
+/**
+ * Refuse a pasted invite link whose origin is not the frontend's.
+ *
+ * The frontend's origin is `verificationUri`'s — `--server` is the API,
+ * which can differ. A link is never rewritten onto another host, so a
+ * mismatch means the login is going to the wrong server. A bare token
+ * carries no origin and always passes.
+ *
+ * @throws KaguraAuthError the origins differ. The message names both,
+ *   never the token.
+ */
+export function checkInviteOrigin(invite: ParsedInvite, verificationUri: string): void {
+  if (invite.origin === null) {
+    return;
+  }
+  const frontend = urlOrigin(splitUrl(verificationUri));
+  if (invite.origin !== frontend) {
+    throw new KaguraAuthError(
+      `This invite is for a different server (${invite.origin}) than the one ` +
+        `you are logging in to (${frontend ?? verificationUri}).`,
+    );
   }
 }

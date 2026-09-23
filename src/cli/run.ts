@@ -16,6 +16,7 @@ import {
   DEFAULT_SCOPE,
   READ_ONLY_SCOPE,
   login,
+  resolveLoginMcpUrl,
   type LoginOptions,
 } from "../auth/login.js";
 import { refresh, type RefreshOptions } from "../auth/refresh.js";
@@ -27,8 +28,16 @@ import {
   setDefaultProfile,
   type OAuthCredentials,
 } from "../auth/credentials.js";
-import type { DeviceAuthorizationResponse } from "../auth/deviceFlow.js";
-import { excMessage } from "../errors.js";
+import {
+  buildInviteLink,
+  checkInviteOrigin,
+  inviteBaseUrl,
+  parseInvite,
+  type DeviceAuthorizationResponse,
+  type ParsedInvite,
+} from "../auth/deviceFlow.js";
+import { KaguraAuthError, excMessage } from "../errors.js";
+import { baseUrlFromMcp } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 import {
   isGroup,
@@ -50,6 +59,8 @@ import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
 import { SETUP_GROUP } from "./commands/setup.js";
+import type { ExecOptions, ExecResult } from "./exec.js";
+import { checkInviteSupport, type InviteSupport } from "./invite.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
@@ -60,6 +71,8 @@ import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
  * unambiguous — no two `auth` subcommands give the same flag different
  * meanings — and because `cmdLogin`/`cmdLogout` already reject the
  * combinations that are individually valid but mutually exclusive.
+ * `--invite` is the exception that gets refused rather than ignored where
+ * it is not read; see {@link refuseInvite}.
  */
 const AUTH_SPEC: ParseSpec = {
   flags: [
@@ -68,6 +81,14 @@ const AUTH_SPEC: ParseSpec = {
     { name: "scope", type: "value", rejectEmpty: true, help: 'Space-separated scopes, e.g. "memory:read memory:write"' },
     { name: "read-only", type: "switch", help: "Request memory:read only" },
     { name: "no-browser", type: "switch", help: "Print the code and URL without opening a browser" },
+    {
+      name: "invite",
+      type: "value",
+      metavar: "LINK_OR_TOKEN",
+      // A token may begin with "-"; see FlagSpec.dashValue.
+      dashValue: true,
+      help: "login: sign up with a beta invite (/join/<token> link or bare token)",
+    },
     { name: "all", type: "switch", help: "logout: remove every stored profile" },
     { name: "yes", type: "switch", help: "logout: skip the confirmation prompt" },
   ],
@@ -76,10 +97,22 @@ const AUTH_SPEC: ParseSpec = {
 export interface CliDeps extends CommandDeps {
   /** Best-effort browser launch; returns false when it could not open. */
   openBrowser: (url: string) => Promise<boolean>;
+  /**
+   * Find a program on PATH; null when it is not there.
+   *
+   * `setup` uses this and {@link CliDeps.execFile} to apply an entry with
+   * the harness's own CLI. Both are injected so its tests never read the
+   * real PATH or start a process.
+   */
+  which: (name: string) => string | null;
+  /** Run a program with no shell and no stdin; never rejects. */
+  execFile: (file: string, argv: readonly string[], options?: ExecOptions) => Promise<ExecResult>;
   login: typeof login;
   refresh: typeof refresh;
   /** Overrides for tests; production passes nothing. */
   credentialsPath?: string;
+  /** Overrides for tests; production passes nothing (global fetch). */
+  fetch?: typeof globalThis.fetch;
 }
 
 const ROOT_SUMMARY = "Kagura Memory Cloud CLI - AI-driven memory management.";
@@ -97,25 +130,179 @@ Default scope is "${DEFAULT_SCOPE}"; --read-only requests "${READ_ONLY_SCOPE}".
 Narrowing a scope on refresh is silent; widening needs consent, so it
 re-runs the device flow.`;
 
-/** Print the code and URL, then optionally try to open a browser. */
-function devicePrompt(deps: CliDeps, openBrowserFlag: boolean) {
-  return async (auth: DeviceAuthorizationResponse): Promise<void> => {
-    const url = auth.verificationUriComplete || auth.verificationUri;
-    // Unconditionally, and before any launch attempt: if the browser opens
-    // silently or fails, the operator can still copy the code by eye.
-    deps.write("");
-    deps.write(`  First copy your one-time code: ${auth.userCode}`);
-    deps.write("  Then approve at:");
-    deps.write(`    ${url}`);
-    deps.write("");
+/** `--invite`, parsed; how the server takes it is asked once the code is issued. */
+interface InviteHandoff {
+  /** The token appears only inside a printed `/join` link, never bare. */
+  invite: ParsedInvite;
+  /** The API base the device flow runs against, where `/system/info` is asked. */
+  server: string;
+}
 
-    if (!openBrowserFlag) {
-      deps.write("  (--no-browser: not opening a browser; still polling here.)");
+/**
+ * The approval URL with the code in it, for the one link's `return_to`.
+ *
+ * RFC 8628 makes `verification_uri_complete` optional, and
+ * `authorizeDevice` fills a missing one with the bare `verificationUri`.
+ * Built on that, the link would land on an empty code form, so the code is
+ * put back: `verificationUri`'s path plus `?user_code=`, the shape
+ * memory-cloud itself builds. The Python CLI passes the bare URI on; this
+ * is deliberately one step better.
+ */
+function approvalWithCode(auth: DeviceAuthorizationResponse): string {
+  if (auth.verificationUriComplete && auth.verificationUriComplete !== auth.verificationUri) {
+    return auth.verificationUriComplete;
+  }
+  try {
+    const url = new URL(auth.verificationUri);
+    url.search = new URLSearchParams({ user_code: auth.userCode }).toString();
+    url.hash = "";
+    return url.toString();
+  } catch {
+    // Not a URL: buildInviteLink returns null for it, and the prompt
+    // falls back to two steps.
+    return auth.verificationUri;
+  }
+}
+
+/**
+ * Open `url` unless `--no-browser`; say so when that, or the opener, fails.
+ * `what` names the link above to open by hand. The Python CLI's lines.
+ */
+async function openBrowserOrExplain(
+  deps: CliDeps,
+  url: string,
+  openBrowserFlag: boolean,
+  what = "the URL",
+): Promise<void> {
+  if (!openBrowserFlag) {
+    deps.write("  (--no-browser: not opening a browser; polling will continue here.)");
+    return;
+  }
+  if (!(await deps.openBrowser(url))) {
+    deps.write(
+      `  Could not auto-open the browser. Open ${what} above manually. ` +
+        "Polling will continue here.",
+    );
+  }
+}
+
+/**
+ * Print the code and URL first, then optionally try to open a browser.
+ *
+ * Unconditionally, and before any launch attempt: if the browser opens
+ * silently or fails, the operator can still copy the code by eye.
+ */
+async function printDevicePrompt(
+  deps: CliDeps,
+  auth: DeviceAuthorizationResponse,
+  openBrowserFlag: boolean,
+): Promise<void> {
+  const approveUrl = auth.verificationUriComplete || auth.verificationUri;
+  deps.write("");
+  deps.write(`! First copy your one-time code: ${auth.userCode}`);
+  deps.write("  Open this URL in your browser to approve:");
+  deps.write(`    ${approveUrl}`);
+  deps.write("");
+  await openBrowserOrExplain(deps, approveUrl, openBrowserFlag);
+}
+
+/**
+ * The `--invite` prompt: the code first, then the link or links in order.
+ *
+ * The Python CLI's (kagura-memory-python-sdk#259). `hand_off` prints the
+ * one link when `/join` can be placed beside `/device` and would keep
+ * `return_to`, then the approval URL for a user already signed in;
+ * otherwise two steps, the `/join` link and then the approval URL.
+ * `disabled` prints a note and the ordinary prompt. The browser opens the
+ * invite link, never the approval URL ahead of it.
+ */
+async function printInvitePrompt(
+  deps: CliDeps,
+  auth: DeviceAuthorizationResponse,
+  invite: ParsedInvite,
+  support: InviteSupport,
+  openBrowserFlag: boolean,
+): Promise<void> {
+  if (support === "disabled") {
+    deps.write("");
+    deps.write("  Note: this server does not accept invites, so --invite has no effect.");
+    await printDevicePrompt(deps, auth, openBrowserFlag);
+    return;
+  }
+
+  const approveUrl = auth.verificationUriComplete || auth.verificationUri;
+  const link =
+    support === "hand_off"
+      ? buildInviteLink(auth.verificationUri, approvalWithCode(auth), invite.token)
+      : null;
+
+  deps.write("");
+  deps.write(`! First copy your one-time code: ${auth.userCode}`);
+  if (link !== null) {
+    deps.write("  Open this link to accept your invite and sign in:");
+    deps.write(`    ${link}`);
+    deps.write("  After sign-up you land on the approval page with the code filled in.");
+    // An already-signed-in user, or a /join that still ends on the
+    // dashboard, leaves the code pending; this approves it directly.
+    deps.write("  If you land on the dashboard instead, approve here:");
+    deps.write(`    ${approveUrl}`);
+    deps.write("");
+    await openBrowserOrExplain(deps, link, openBrowserFlag, "the invite link");
+    return;
+  }
+
+  // return_to would be ignored or dropped, so step 1 is /join alone,
+  // placed beside /device. Where it cannot be, step 1 is the link the user
+  // gave (never a guessed host), and for a bare token no link at all.
+  const base = inviteBaseUrl(auth.verificationUri);
+  const joinLink = base !== null ? `${base}/join/${invite.token}` : invite.link;
+  const minutes = Math.max(1, Math.round(auth.expiresIn / 60));
+  // Worded to hold on every server, including one with the hand-off whose
+  // /join could not be placed, or whose /system/info could not be read.
+  deps.write("  Accept your invite before you approve the code, in this order:");
+  deps.write(
+    joinLink !== null
+      ? `    1. Open your invite link and sign up:   ${joinLink}`
+      : "    1. Open the invite link you were sent and sign up.",
+  );
+  deps.write(`    2. Then open this URL and approve:       ${approveUrl}`);
+  deps.write(`  Polling continues here until the code expires (in ${minutes} min).`);
+  deps.write("");
+  // Nothing to open for a bare token: approval first would send a
+  // signed-out user to a login that drops the invite.
+  if (joinLink !== null) {
+    await openBrowserOrExplain(deps, joinLink, openBrowserFlag, "step 1");
+  }
+}
+
+/**
+ * `onUserCode` for the device flow: the prompt, and with `--invite`, the
+ * checks that choose it.
+ *
+ * login() awaits this callback, so a throw here stops it before it polls
+ * or writes a profile. The Python CLI's order: the invite's origin against
+ * the device response first, so a link for another server aborts without
+ * asking that server anything more; then `/system/info`.
+ */
+function devicePrompt(deps: CliDeps, openBrowserFlag: boolean, handoff?: InviteHandoff) {
+  return async (auth: DeviceAuthorizationResponse): Promise<void> => {
+    if (handoff === undefined) {
+      await printDevicePrompt(deps, auth, openBrowserFlag);
       return;
     }
-    if (!(await deps.openBrowser(url))) {
-      deps.write("  (Could not open a browser — use the URL above.)");
+    try {
+      checkInviteOrigin(handoff.invite, auth.verificationUri);
+    } catch (e) {
+      // "<its MCP URL>" where Python says "<its API URL>": this CLI's
+      // --server takes the MCP URL and derives the API from it.
+      throw new KaguraAuthError(
+        `${excMessage(e)}\n  Log in to the invite's server instead: ` +
+          "kagura-memory auth login --server <its MCP URL> --invite <link>",
+        { cause: e },
+      );
     }
+    const support = await checkInviteSupport(handoff.server, deps.fetch);
+    await printInvitePrompt(deps, auth, handoff.invite, support, openBrowserFlag);
   };
 }
 
@@ -149,6 +336,18 @@ function describeProfile(name: string, creds: OAuthCredentials, isDefault: boole
 }
 
 async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
+  // First, and before any request, as click validates an option while it
+  // parses. The reason never quotes the value: an invite is a sign-up
+  // credential, and stderr ends up in CI logs.
+  let invite: ParsedInvite | undefined;
+  if (args.values.invite !== undefined) {
+    try {
+      invite = parseInvite(args.values.invite);
+    } catch (e) {
+      throw new CliUsageError(`Invalid value for '--invite': ${excMessage(e)}`);
+    }
+  }
+
   const readOnly = args.flags.has("read-only");
   const scope = args.values.scope;
   if (readOnly && scope !== undefined) {
@@ -156,14 +355,22 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
     return 2;
   }
 
+  // The server is asked how it takes the invite only once the device code
+  // is issued (devicePrompt), as in the Python CLI.
+  const handoff: InviteHandoff | undefined =
+    invite === undefined
+      ? undefined
+      : { invite, server: baseUrlFromMcp(resolveLoginMcpUrl(args.values.server)) };
+
   const options: LoginOptions = {
-    onUserCode: devicePrompt(deps, !args.flags.has("no-browser")),
+    onUserCode: devicePrompt(deps, !args.flags.has("no-browser"), handoff),
   };
   if (args.values.profile !== undefined) options.profile = args.values.profile;
   if (args.values.server !== undefined) options.mcpUrl = args.values.server;
   if (readOnly) options.scope = READ_ONLY_SCOPE;
   else if (scope !== undefined) options.scope = scope;
   if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
+  if (deps.fetch !== undefined) options.fetch = deps.fetch;
 
   const creds = await deps.login(options);
   deps.write(
@@ -324,45 +531,72 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   return 0;
 }
 
+/**
+ * Refuse `--invite` on an `auth` subcommand that does not read it.
+ *
+ * AUTH_SPEC is pooled, so every subcommand parses the flag; only `login`
+ * uses it. Ignored elsewhere, it would read as though the invite had been
+ * used — plausibly so on `refresh`, which can re-run the device flow — and
+ * a flag that looks like it changes behaviour but does not is worse than
+ * one that is rejected (the argument `setup claude` makes too). The
+ * message names the flag, never its value. Click, whose subcommands do
+ * not declare it, says "No such option: --invite" with the same exit 2;
+ * this wording also says where the flag belongs.
+ */
+function refuseInvite(run: Command["run"]): Command["run"] {
+  return async (deps, args) => {
+    if (args.values.invite !== undefined) {
+      deps.writeError("--invite applies only to 'auth login'.");
+      return 2;
+    }
+    return run(deps, args);
+  };
+}
+
 /** The `auth` subcommands, as registry entries. */
 const AUTH_GROUP: CommandGroup = {
   summary: "OAuth2 device-flow authentication for Kagura Memory.",
   commands: {
     login: {
       summary: "Authenticate via OAuth2 device flow.",
+      description:
+        "  --invite signs a new account up with a beta invite and approves this\n" +
+        "  login from one link, on a server that supports it. An older server\n" +
+        "  gets two steps instead, and one that takes no invites a notice. The\n" +
+        "  invite is never saved, and is printed only inside a link.",
       spec: AUTH_SPEC,
       run: (deps, args) => cmdLogin(deps as CliDeps, args),
     },
     refresh: {
       summary: "Rotate access_token (optionally requesting a new scope).",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdRefresh(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdRefresh(deps as CliDeps, args)),
     },
     status: {
       summary: "Show the current profile, server, scope, expiry, and workspace.",
       spec: AUTH_SPEC,
-      run: async (deps, args) => cmdStatus(deps as CliDeps, args),
+      run: refuseInvite(async (deps, args) => cmdStatus(deps as CliDeps, args)),
     },
     use: {
       summary: "Set the default profile used when none is selected.",
       args: "PROFILE",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdUse(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdUse(deps as CliDeps, args)),
     },
     logout: {
       summary: "Delete a stored profile (or all of them).",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdLogout(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdLogout(deps as CliDeps, args)),
     },
     list: {
       summary: "List every stored profile; the default is marked with `*`.",
       spec: AUTH_SPEC,
-      run: async (deps) => cmdList(deps as CliDeps),
+      run: refuseInvite(async (deps) => cmdList(deps as CliDeps)),
     },
     token: {
       summary: "Emit the raw access_token to stdout (for CI / scripts).",
       spec: AUTH_SPEC,
-      run: (deps, args) => cmdToken(deps as CliDeps, args),
+      run: refuseInvite((deps, args) => cmdToken(deps as CliDeps, args)),
     },
   },
 };

@@ -162,6 +162,22 @@ describe("parseArgs", () => {
     expect(parsed.missingValue).toEqual(["--scope"]);
   });
 
+  it("takes a dash-prefixed token as the value of a dashValue flag", () => {
+    // An invite token is base64url, so about one in 64 begins with "-".
+    // Under the default rule it would be reported as an unknown option —
+    // and that error quotes it.
+    const spec: ParseSpec = { flags: [{ name: "invite", type: "value", dashValue: true }] };
+    const parsed = parseArgs(["login", "--invite", "-AbCdEfGhIjKlMnOpQrSt"], spec);
+    expect(parsed.values.invite).toBe("-AbCdEfGhIjKlMnOpQrSt");
+    expect(parsed.unknown).toEqual([]);
+    expect(parsed.missingValue).toEqual([]);
+  });
+
+  it("still reports a dashValue flag at the end of argv as missing its value", () => {
+    const spec: ParseSpec = { flags: [{ name: "invite", type: "value", dashValue: true }] };
+    expect(parseArgs(["login", "--invite"], spec).missingValue).toEqual(["--invite"]);
+  });
+
   it("still reports a bare negative number that no option is waiting for", () => {
     // The numeric exception applies only where a value is expected. On its
     // own, `-5` is what click calls "No such option" — reporting it beats

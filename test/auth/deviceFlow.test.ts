@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CLIENT_ID,
   authorizeDevice,
+  buildInviteLink,
+  checkInviteOrigin,
+  inviteBaseUrl,
+  parseInvite,
   pollForToken,
   refreshAccessToken,
   revokeToken,
@@ -130,6 +134,18 @@ describe("authorizeDevice", () => {
     );
   });
 
+  it("reports an RFC 6749 error_description rather than the raw body", async () => {
+    // The Python SDK's extract_detail reads error_description too.
+    const stub = sequenceFetch([
+      jsonResponse(400, { error: "invalid_client", error_description: "Unknown client." }),
+    ]);
+    const message = await authorizeDevice(SERVER, { fetch: stub }).catch(
+      (e: unknown) => (e as Error).message,
+    );
+    expect(message).toMatch(/^Device authorization failed \(HTTP 400\): Unknown client\.\n/);
+    expect(message).not.toContain("invalid_client\"");
+  });
+
   it("wraps a network error as KaguraConnectionError", async () => {
     await expect(authorizeDevice(SERVER, { fetch: failingFetch() })).rejects.toThrow(
       KaguraConnectionError,
@@ -154,6 +170,69 @@ describe("authorizeDevice", () => {
     ]);
     await expect(authorizeDevice(SERVER, { fetch: stub })).rejects.toThrow(
       /missing required fields/,
+    );
+  });
+});
+
+// memory-cloud v0.76.0 limits device/authorize per client address.
+const RATE_LIMIT_DESCRIPTION = "Too many device authorization requests. Please try again later.";
+const RATE_LIMIT_BODY = { error: "invalid_request", error_description: RATE_LIMIT_DESCRIPTION };
+
+/** What authorizeDevice throws against a server answering `response`. */
+async function authorizeAgainst(response: Response): Promise<Error> {
+  const calls: RecordedCall[] = [];
+  const caught = await authorizeDevice(SERVER, {
+    scope: "memory:read",
+    fetch: sequenceFetch([response], calls),
+  }).catch((e: unknown) => e);
+  expect(calls.map((c) => c.url)).toEqual([`${SERVER}/api/v1/oauth/device/authorize`]);
+  expect(caught).toBeInstanceOf(KaguraAuthError);
+  return caught as Error;
+}
+
+function rateLimited(headers: Record<string, string>, body: unknown = RATE_LIMIT_BODY): Response {
+  return new Response(typeof body === "string" ? body : JSON.stringify(body), {
+    status: 429,
+    headers,
+  });
+}
+
+describe("authorizeDevice: HTTP 429", () => {
+  it("says how long to wait, keeping the server's reason", async () => {
+    const { message } = await authorizeAgainst(
+      rateLimited({ "Retry-After": "60", "Cache-Control": "no-store" }),
+    );
+    // The Python CLI's wording.
+    expect(message).toBe(
+      "Too many sign-in attempts from this address (HTTP 429). Retry after 60 seconds.\n" +
+        `  Server said: ${RATE_LIMIT_DESCRIPTION}`,
+    );
+    // Not the generic failure, whose hint (check the client id) is wrong here.
+    expect(message).not.toMatch(/Device authorization failed|registered/);
+  });
+
+  it("uses the server's Retry-After", async () => {
+    const { message } = await authorizeAgainst(rateLimited({ "Retry-After": " 17 " }));
+    expect(message).toContain("Retry after 17 seconds.");
+  });
+
+  it.each([
+    ["absent", {}],
+    ["not a number", { "Retry-After": "soon" }],
+    ["negative", { "Retry-After": "-5" }],
+    ["an HTTP date", { "Retry-After": "Wed, 23 Sep 2026 12:00:00 GMT" }],
+  ])("waits the server's 60 s window when Retry-After is %s", async (_label, headers) => {
+    const { message } = await authorizeAgainst(rateLimited(headers));
+    expect(message).toContain("Retry after 60 seconds.");
+  });
+
+  it("stands alone when the body has no reason to quote", async () => {
+    // A proxy's 429 page.
+    const { message } = await authorizeAgainst(
+      rateLimited({ "Retry-After": "30" }, "<html>rate limited</html>"),
+    );
+    expect(message).toBe(
+      "Too many sign-in attempts from this address (HTTP 429). Retry after 30 seconds.",
     );
   });
 });
@@ -444,5 +523,281 @@ describe("revokeToken", () => {
 
   it("returns false on network failure (never throws)", async () => {
     expect(await revokeToken(SERVER, { token: "atok", fetch: failingFetch() })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Invite hand-off (#44)
+// ---------------------------------------------------------------------------
+
+/** Matches the server's `^[A-Za-z0-9_-]{20,128}$`; 30 characters. */
+const INVITE = "inv_ABCDEFGHIJKLMNOPQRSTUV-123";
+
+/**
+ * A device response whose frontend (`app.test`) is not the API host, as on
+ * a deployment that serves them apart: the link must follow the frontend.
+ */
+const VERIFY = "https://app.test/device";
+const COMPLETE = "https://app.test/device?user_code=WDJB-MJHT";
+
+const LINK = `https://app.test/join/${INVITE}?return_to=%2Fdevice%3Fuser_code%3DWDJB-MJHT`;
+
+/** What a function threw, so a test can inspect the error it chose. */
+function thrown(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  return undefined;
+}
+
+describe("parseInvite", () => {
+  it("accepts a bare token", () => {
+    expect(parseInvite(INVITE)).toEqual({ token: INVITE, origin: null, link: null });
+  });
+
+  it("accepts a /join/<token> link, ignoring any query or fragment", () => {
+    expect(parseInvite(`https://app.test/join/${INVITE}?utm=mail#top`)).toEqual({
+      token: INVITE,
+      origin: "https://app.test",
+      link: `https://app.test/join/${INVITE}`,
+    });
+  });
+
+  it("accepts a link under a base path, keeping the path in the link", () => {
+    expect(parseInvite(`https://app.test/kagura/app/join/${INVITE}`)).toEqual({
+      token: INVITE,
+      origin: "https://app.test",
+      link: `https://app.test/kagura/app/join/${INVITE}`,
+    });
+  });
+
+  it("accepts a trailing slash, as a frontend with trailingSlash produces", () => {
+    expect(parseInvite(`https://app.test/join/${INVITE}/`)).toEqual({
+      token: INVITE,
+      origin: "https://app.test",
+      link: `https://app.test/join/${INVITE}`,
+    });
+  });
+
+  it.each([
+    ["a fragment alone", `https://app.test/join/${INVITE}#frag`, "https://app.test"],
+    ["an upper-case scheme and host", `HTTPS://App.Test/join/${INVITE}`, "https://app.test"],
+    ["the scheme's default port", `https://app.test:443/join/${INVITE}`, "https://app.test"],
+    ["another scheme's default port", `https://app.test:80/join/${INVITE}`, "https://app.test:80"],
+    // Plain HTTP on localhost, as --server allows.
+    ["localhost", `http://localhost:3000/join/${INVITE}`, "http://localhost:3000"],
+    ["localhost on port 80", `http://localhost:80/join/${INVITE}`, "http://localhost"],
+    ["an IPv6 loopback", `http://[::1]:3000/join/${INVITE}`, "http://[::1]:3000"],
+  ])("reads the origin as a browser does, from %s", (_label, value, origin) => {
+    expect(parseInvite(value)).toMatchObject({ token: INVITE, origin });
+  });
+
+  it("tolerates the whitespace a paste drags along", () => {
+    expect(parseInvite(`  ${INVITE}\n`).token).toBe(INVITE);
+  });
+
+  // The Python CLI's reasons, which click prints after "Invalid value for
+  // '--invite': ".
+  const TOKEN_RULE = "an invite token must be 20-128 characters from A-Z, a-z, 0-9, '_' and '-'";
+  const FULL_URL = "an invite link must be a full https://<host>/join/<token> URL";
+  const WEB_URL = "an invite link must be an https://<host>/join/<token> URL";
+  const JOIN_LAST = "an invite link must end in /join/<token>";
+
+  it.each([
+    ["too short", "a".repeat(19), TOKEN_RULE],
+    ["too long", "a".repeat(129), TOKEN_RULE],
+    ["outside the alphabet", `${INVITE}!`, TOKEN_RULE],
+    ["a dot", "inv_ABCDEFGHIJKLMNOP.QRSTUV-123", TOKEN_RULE],
+    ["empty", "", TOKEN_RULE],
+    ["a token with a newline inside", `inv_ABCDEFGHIJ\nKLMNOPQRSTUV-123`, TOKEN_RULE],
+    ["a link with no /join/ segment", `https://app.test/invite/${INVITE}`, JOIN_LAST],
+    ["a link with a segment after the token", `https://app.test/join/${INVITE}/extra`, JOIN_LAST],
+    ["a link ending in /join", "https://app.test/join", JOIN_LAST],
+    ["a link with the token alone", `https://app.test/${INVITE}`, JOIN_LAST],
+    ["a link whose token is malformed", "https://app.test/join/short", TOKEN_RULE],
+    ["a link on a non-web scheme", `ftp://app.test/join/${INVITE}`, WEB_URL],
+    ["a link with no host", `https:///join/${INVITE}`, WEB_URL],
+    ["a link with a port out of range", `https://app.test:99999/join/${INVITE}`, WEB_URL],
+    ["a host without a scheme", `app.test/join/${INVITE}`, FULL_URL],
+    // A browser would read these as https://app.test/join/<token>; the
+    // Python CLI wants the "://" written out, and so does this one.
+    ["a link with one slash after the scheme", `https:/app.test/join/${INVITE}`, FULL_URL],
+    ["a link with no slash after the scheme", `https:app.test/join/${INVITE}`, FULL_URL],
+    ["a link written with backslashes", `https:\\\\app.test\\join\\${INVITE}`, TOKEN_RULE],
+    ["a host followed by backslashes", `https://app.test\\join\\${INVITE}`, WEB_URL],
+  ])("refuses %s, saying why without quoting it", (_label, value, reason) => {
+    const caught = thrown(() => parseInvite(value));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    const message = (caught as Error).message;
+    expect(message).toBe(reason);
+    expect(message).not.toContain(INVITE);
+  });
+
+  it("refuses a plain-HTTP link off localhost with the --server rule", () => {
+    // The link carries a sign-up credential. The message names the origin,
+    // never the token.
+    const caught = thrown(() => parseInvite(`http://app.test/join/${INVITE}`));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    expect((caught as Error).message).toBe(
+      "An invite link must use HTTPS for security (got: http://app.test). " +
+        "HTTP is only allowed for localhost development.",
+    );
+  });
+});
+
+describe("inviteBaseUrl", () => {
+  it.each([
+    ["the frontend root", VERIFY, "https://app.test"],
+    [
+      "a frontend under a base path",
+      "https://app.test/kagura/app/device",
+      "https://app.test/kagura/app",
+    ],
+    ["a trailing slash", "https://app.test/device/", "https://app.test"],
+    ["plain HTTP on localhost", "http://localhost:3000/device", "http://localhost:3000"],
+  ])("strips the final /device from %s", (_label, uri, base) => {
+    expect(inviteBaseUrl(uri)).toBe(base);
+  });
+
+  it.each([
+    ["a URI that does not end in /device", "https://app.test/activate"],
+    ["a segment that only ends in 'device'", "https://app.test/mydevice"],
+    ["plain HTTP off localhost", "http://app.test/device"],
+    ["a non-web scheme", "ftp://app.test/device"],
+    ["something that is not a URL", "device"],
+    ["a scheme with no authority", "javascript:alert(1)/device"],
+  ])("returns null for %s", (_label, uri) => {
+    expect(inviteBaseUrl(uri)).toBeNull();
+  });
+});
+
+describe("buildInviteLink", () => {
+  it("builds <base>/join/<token>?return_to=<device path and query>", () => {
+    expect(buildInviteLink(VERIFY, COMPLETE, INVITE)).toBe(LINK);
+  });
+
+  it("places /join beside /device on a frontend under a base path", () => {
+    expect(
+      buildInviteLink(
+        "https://app.test/kagura/app/device",
+        "https://app.test/kagura/app/device?user_code=WDJB-MJHT",
+        INVITE,
+      ),
+    ).toBe(
+      `https://app.test/kagura/app/join/${INVITE}` +
+        "?return_to=%2Fkagura%2Fapp%2Fdevice%3Fuser_code%3DWDJB-MJHT",
+    );
+  });
+
+  it("round-trips return_to to exactly the path and query of the complete form", () => {
+    const link = new URL(buildInviteLink(VERIFY, COMPLETE, INVITE)!);
+    expect(link.searchParams.get("return_to")).toBe("/device?user_code=WDJB-MJHT");
+  });
+
+  it("uses the bare path when the complete form carries no query", () => {
+    expect(buildInviteLink(VERIFY, VERIFY, INVITE)).toBe(
+      `https://app.test/join/${INVITE}?return_to=%2Fdevice`,
+    );
+  });
+
+  it("keeps every query parameter of the complete form in return_to", () => {
+    const complete = "https://app.test/device?user_code=WDJB-MJHT&lang=ja";
+    const link = new URL(buildInviteLink(VERIFY, complete, INVITE)!);
+    expect(link.searchParams.get("return_to")).toBe("/device?user_code=WDJB-MJHT&lang=ja");
+  });
+
+  it("treats a spelled-out default port as the same origin", () => {
+    expect(buildInviteLink("https://app.test:443/device", COMPLETE, INVITE)).toBe(LINK);
+  });
+
+  it("builds on a plain-HTTP frontend on localhost", () => {
+    expect(
+      buildInviteLink(
+        "http://localhost:3000/device",
+        "http://localhost:3000/device?user_code=WDJB-MJHT",
+        INVITE,
+      ),
+    ).toBe(`http://localhost:3000/join/${INVITE}?return_to=%2Fdevice%3Fuser_code%3DWDJB-MJHT`);
+  });
+
+  it.each([
+    [
+      "verificationUri does not end in /device",
+      "https://app.test/activate",
+      "https://app.test/activate?user_code=X",
+    ],
+    // The link carries the token: never over plaintext to a remote host.
+    [
+      "verificationUri is plain HTTP off localhost",
+      "http://app.test/device",
+      "http://app.test/device?user_code=X",
+    ],
+    [
+      "verificationUri has a segment after /device",
+      "https://app.test/device/extra",
+      "https://app.test/device/extra?user_code=X",
+    ],
+    ["verificationUri has no authority", "javascript:alert(1)/device", "javascript:alert(1)/device"],
+    ["the complete form is on another origin", VERIFY, "https://other.test/device?user_code=X"],
+    ["the complete form is empty", VERIFY, ""],
+    // Values memory-cloud's /join drops as return_to (its safeReturnTo),
+    // which would strand the new user on the dashboard: a `//` path (a
+    // FRONTEND_URL with a trailing slash), a backslash, a C0 control.
+    ["return_to would start with //", "https://app.test//device", "https://app.test//device?user_code=X"],
+    ["return_to would hold a backslash", VERIFY, "https://app.test/de\\vice?user_code=X"],
+    ["return_to would hold a control character", VERIFY, "https://app.test/device?user_code=W\x01X"],
+  ])("returns null when %s", (_label, uri, complete) => {
+    expect(buildInviteLink(uri, complete, INVITE)).toBeNull();
+  });
+
+  it("refuses a malformed token without quoting it", () => {
+    const bad = "not-a-real-invite-but-close!";
+    const caught = thrown(() => buildInviteLink(VERIFY, COMPLETE, bad));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    expect((caught as Error).message).not.toContain(bad);
+  });
+
+  it("takes a token, not a link", () => {
+    // A link is reduced to its token by parseInvite; handed here whole, it
+    // would be interpolated into the path.
+    const link = `https://app.test/join/${INVITE}`;
+    const caught = thrown(() => buildInviteLink(VERIFY, COMPLETE, link));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    expect((caught as Error).message).not.toContain(INVITE);
+  });
+});
+
+describe("checkInviteOrigin", () => {
+  it.each([
+    ["a bare token", INVITE],
+    ["a link on the frontend's origin", `https://app.test/join/${INVITE}`],
+    ["a link under a base path on that origin", `https://app.test/kagura/join/${INVITE}`],
+    ["a link spelling out the default port", `https://app.test:443/join/${INVITE}`],
+  ])("passes %s", (_label, value) => {
+    expect(() => checkInviteOrigin(parseInvite(value), VERIFY)).not.toThrow();
+  });
+
+  it.each([
+    ["another host", `https://other.test/join/${INVITE}`, VERIFY, "https://app.test"],
+    ["another port", `https://app.test:8443/join/${INVITE}`, VERIFY, "https://app.test"],
+    [
+      "another scheme",
+      `http://localhost/join/${INVITE}`,
+      "https://localhost/device",
+      "https://localhost",
+    ],
+    // No origin to name: the URI is named as given.
+    ["a URI that is not a URL", `https://app.test/join/${INVITE}`, "not a url", "not a url"],
+  ])("refuses a link on %s, naming both origins but never the token", (_label, value, uri, named) => {
+    const invite = parseInvite(value);
+    const caught = thrown(() => checkInviteOrigin(invite, uri));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    const msg = (caught as Error).message;
+    expect(msg).toMatch(/different server/);
+    expect(msg).toContain(`(${invite.origin!})`);
+    expect(msg).toContain(`(${named})`);
+    expect(msg).not.toContain(INVITE);
   });
 });

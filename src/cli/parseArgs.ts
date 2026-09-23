@@ -68,6 +68,18 @@ export interface FlagSpec {
    * "the two CLIs take the same flags" stop being literally true.
    */
   shortOnly?: boolean;
+  /**
+   * Take the next token as the value even when it begins with a dash.
+   *
+   * For `--invite`: an invite token is base64url, so about one in 64
+   * starts with `-`. Under the default rule `--invite -Ab…` reads as a
+   * missing value followed by an unknown option, and the unknown-option
+   * error quotes the token — a sign-up credential. Click consumes whatever
+   * follows a value option anyway; this restores that for the one flag
+   * whose values need it, and the flag's own validation catches a flag
+   * that was swallowed by mistake.
+   */
+  dashValue?: boolean;
 }
 
 export interface ParseSpec {
@@ -189,7 +201,10 @@ export function parseArgs(
     // it consumes whatever follows, so `--reranker -x` sets the value to
     // "-x" — but that turns a typo into a silent wrong value, so the
     // stricter rule stays.)
-    if (next === undefined || (next.startsWith("-") && next.length > 1 && !PY_FLOAT.test(next))) {
+    if (
+      next === undefined ||
+      (flag.dashValue !== true && next.startsWith("-") && next.length > 1 && !PY_FLOAT.test(next))
+    ) {
       return -1;
     }
     store(flag, next);

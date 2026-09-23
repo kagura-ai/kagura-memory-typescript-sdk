@@ -56,7 +56,10 @@ export interface ServerFeatures {
   managed_llm?: boolean;
   /** Referral endpoints are enabled (server v0.63.0+). */
   referrals?: boolean;
-  /** Beta invites are enabled (server v0.70.0+). */
+  /**
+   * New accounts are admitted by beta invite (server v0.70.0+);
+   * `auth login --invite` reads it.
+   */
   beta_invites?: boolean;
   /**
    * Reranking is switched on and its default provider can run (server

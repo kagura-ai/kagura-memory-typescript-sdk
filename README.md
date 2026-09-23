@@ -108,12 +108,14 @@ npx kagura-memory --help
 | `files` | `upload` `list` `delete` `download-url` |
 | `resource` | `tokens {list,create,update,revoke}` `list` `setup` `schema` `stats` `indexer-status` `events` `ingest` `ingest-batch` `import` |
 | `secret` | `keygen` `list` `put` `get` `grant` `revoke` `rotate` `delete` `pubkeys` `approve` `audit-verify` `exec` |
-| other | `config show` `doctor` `setup claude` |
+| `setup` | `claude` `codex` `hermes` `openclaw` |
+| other | `config show` `doctor` |
 
 ```bash
 npx kagura-memory auth login --profile work --read-only
 npx kagura-memory recall "OAuth setup" -c dev -k 10
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
+npx kagura-memory setup codex --dry-run   # key from .kagura.json or KAGURA_API_KEY
 npx kagura-memory doctor
 ```
 
@@ -121,6 +123,72 @@ The context id comes from `-c/--context-id`, or from `context_id` in
 `.kagura.json`. Credentials live in `~/.kagura/credentials.json` and are
 shared with the Python CLI, so either tool can create a profile the other
 then uses.
+
+**Connecting a harness.** Each `setup` subcommand writes `.kagura.json`
+(0600, gitignored) and an MCP entry named `kagura-memory`: the URL plus a
+Bearer header. The key comes from `--api-key`, else the `api_key` in
+`.kagura.json`, else `KAGURA_API_KEY`. `.kagura.json` gets the URL as
+given; the parameters that `--guardrails` and `--tool-profile` set go on
+the entry's URL only. The key is never printed, and outside
+Claude Code it never goes into the harness's config file. `setup codex`
+also leaves a key it found in `KAGURA_API_KEY` out of `.kagura.json`.
+
+| Subcommand | How the entry is applied | Where the key lives |
+|---|---|---|
+| `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json --scope user …` | in the entry |
+| `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `KAGURA_API_KEY`, exported in the shell that starts Codex |
+| `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` always prompts | `$HERMES_HOME/.env`, as `MCP_KAGURA_MEMORY_API_KEY` (`MCP_<NAME>_API_KEY` with `--name`) |
+| `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe` | `$OPENCLAW_STATE_DIR/.env` (default `~/.openclaw/.env`), as `KAGURA_API_KEY` |
+
+This package has no TOML, YAML or JSON5 parser, so it never rewrites those
+files. When the harness's CLI is not on `PATH`, the block is printed on
+stderr with the file it belongs in (`$CODEX_HOME/config.toml`,
+`$HERMES_HOME/config.yaml`, or `$OPENCLAW_CONFIG_PATH`, by default
+`openclaw.json` in the OpenClaw state directory), and stdout stays one
+JSON document. When Hermes's `config.yaml` already has an `mcp_servers:`
+key, only the `kagura-memory` entry is printed, to go under it: a second
+top-level `mcp_servers:` would replace the first, and every server in it.
+On Windows, a CLI installed only as an npm `.cmd` shim counts as not
+found: Node runs one only through a shell, which would re-parse the
+arguments.
+
+`--guardrails <context-id|off>` sets the URL's `guardrails` parameter on
+`setup claude` and `setup codex`. Hermes and OpenClaw do not pass the
+server's instructions to the model, so there `off` is refused and a
+context id is dropped, whether it comes from the flag or from the URL.
+`--tool-profile` (claude, codex) sets `profile` and refuses an empty name;
+the server applies a `?tools=` allowlist already on the URL instead, so
+that case gets a warning. Both go at the end of the query, `guardrails`
+first, replacing any value already there, as the Python CLI writes them.
+A `setup claude` run that leaves out a `guardrails` or `profile` value
+the entry it replaces had says so in a note. `--name`, `--force` and
+`--dry-run` (codex, hermes, openclaw) name the entry, replace an existing
+one, and show what would be configured without changing anything. A name
+starts with a letter or digit: it is a bare argument to `codex` and
+`openclaw`, which would read `--help` as an option.
+
+Claude Code uses the `kagura-memory` entry from the strongest scope
+(local > project > user). It keys local scope by the git repository root
+(a linked worktree's main working tree), and takes project scope from the
+closest `.mcp.json` that defines the entry, in the directory it runs in or
+any parent; `setup claude` and `doctor` read them the same way.
+`setup claude` writes nothing when a stronger scope already defines one,
+and prints the `claude mcp remove --scope …` command for it, after a `cd`
+into the directory that command must run in when that is not the current
+one. An entry the new one hides, in a weaker scope or in a parent's
+`.mcp.json`, is noted.
+With `--scope user`, an identical user-scope entry is left as it is and a
+different one is replaced: `claude mcp remove` runs before `claude mcp
+add-json`, and if the add then fails, the old entry is put back (if that
+fails too, the error prints the command to add the new one by hand).
+Without `claude` on `PATH`, `--scope user` prints the commands to run and
+writes nothing, unless the user-scope entry is already identical. When
+`claude plugin list --json` shows the Kagura Memory plugin enabled, the
+notes list the plugin settings to enter. `doctor` reports the entry
+Claude Code uses in the current directory, with its scope and file, and
+warns about each entry that one hides. For a `type: "url"` entry, which
+earlier releases wrote and Claude Code skips, it names the fix for the
+entry's scope.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
@@ -136,10 +204,10 @@ promise. Use the Python CLI for those.
   from `KAGURA_AGE_IDENTITY` or `KAGURA_AGE_IDENTITY_FILE` and fails
   closed when neither is set. **A key custodied by the Python CLI is not
   readable here, and vice versa.**
-- `setup claude --profile` (the OAuth path) writes an `.mcp.json` that
-  launches Python's `kagura-mcp` stdio proxy, which this package does not
-  install; that flag reports the fact instead of writing a config that
-  would fail at launch. The `--api-key` path works here.
+- `setup … --profile` (the OAuth path) writes an entry that launches
+  Python's `kagura-mcp` stdio proxy, which this package does not install;
+  every `setup` subcommand reports the fact instead of writing a config
+  that would fail at launch. The `--api-key` path works here.
 - `config show` does not reproduce Python's key mask
   (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12 characters
   and print the whole secret twice.
@@ -149,6 +217,71 @@ One divergence runs the other way, and it is small: `--profile=` and
 An empty profile name would create a nameless profile and an empty scope
 would go to the server verbatim. Every other option treats `--flag=` as
 Python does.
+
+**Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
+requests per client address. When the server refuses one with HTTP 429,
+`auth login` says so and how many seconds to wait (from the `Retry-After`
+header, 60 when it is missing or not a number of seconds), with the
+server's reason, when it gives one, on the next line.
+`login()` and `authorizeDevice` throw the same message as a
+`KaguraAuthError`.
+
+#### Signing up with an invite
+
+On a deployment that admits new accounts only by beta invite, pass the
+invite to `auth login`, either as the bare token or as the
+`https://…/join/<token>` link it arrived in:
+
+```bash
+npx kagura-memory auth login --invite <link-or-token>
+```
+
+Without it, a new user who starts from `auth login` is refused at sign-up:
+the approval page sends a signed-out visitor to the login page, which does
+not carry an invite. With it, once the device code is issued, the CLI asks
+the server how to present the invite (`GET /api/v1/system/info`, which
+takes no credentials, allowed 5 seconds):
+
+- **The server supports the hand-off** (memory-cloud 0.76.0 or later,
+  `v0.76.0` and build suffixes included): one link,
+  `<frontend>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>`, that
+  signs up with the invite and lands on the approval page with the code
+  filled in. The browser opens that link. Below it, "If you land on the
+  dashboard instead, approve here:" and the approval URL cover a user who
+  is already signed in.
+- **An older or unrecognised version, or the check failed**: two steps, in
+  order. The plain `/join/<token>` link, which the browser opens, then the
+  approval URL, and how long the code stays valid.
+- **The server does not take invites** (a `features` object without
+  `beta_invites: true`): a one-line note, then the ordinary prompt. A body
+  with no `features` object says nothing about invites, so the version
+  decides.
+
+`<frontend>` is the device response's approval URL with its final
+`/device` removed, so a frontend under a base path gets its `/join` beside
+its `/device`. When that URL does not end in `/device`, the CLI does not
+guess where `/join` lives: it takes the two steps, with your own link as
+step 1, or tells you to open the invite you were sent when you gave a bare
+token. It takes the two steps too when memory-cloud's `/join` would drop
+the `return_to` (a path starting with `//`, as a frontend URL configured
+with a trailing slash produces, or one holding a backslash or a control
+character), which would otherwise leave the new user on the dashboard.
+
+The invite is checked before any request. A malformed one exits 2 with
+`Error: Invalid value for '--invite': <reason>`, the Python CLI's reason,
+which never quotes the value. A pasted link must be written out in full,
+`https://<host>/…/join/<token>` (a browser would repair `https:/host/…`;
+the CLI does not), and must be HTTPS, as `--server` must (plain HTTP only
+on localhost). A `/join` link is never built on a plain-HTTP frontend: the
+token would travel in the clear. A link for a different server than the one
+being logged into aborts before the server is asked about invites and
+before the device code is polled, so no profile is written; the error
+suggests logging in with `--server` instead. The token is never saved, in
+`credentials.json` or anywhere else, and never appears in an error message:
+it is printed only inside a link. Every other `auth` subcommand rejects
+`--invite` with exit 2 rather than ignoring it. `--no-browser` works as it
+does without an invite, and when the browser cannot be opened the CLI says
+which link above to open by hand.
 
 #### Logging in from TypeScript
 
@@ -201,6 +334,34 @@ primitives are exported too: `authorizeDevice`, `pollForToken`,
 `refreshAccessToken`, `revokeToken`, plus the credentials store
 (`loadCredentialsFile`, `updateProfile`, `setDefaultProfile`,
 `deleteProfile`, …).
+
+For a new user holding a beta invite, `buildInviteLink` builds the same
+sign-up-and-approve link the CLI's `--invite` prints. It takes the Python
+SDK's `build_invite_link` arguments in the same order: the two approval
+URLs from the device response, then the invite token. `onUserCode` is the
+first point where both are known, so call it there. It is a pure function
+and does not check the server version; that check is the CLI's own.
+
+```ts
+import { buildInviteLink, login } from "kagura-memory";
+
+const token = "<token>"; // the last path segment of https://…/join/<token>
+
+await login({
+  onUserCode: ({ verificationUri, verificationUriComplete }) => {
+    // null when /join cannot be placed: the approval URL does not end in
+    // /device, is plain HTTP off localhost, or is not a return_to that
+    // memory-cloud's /join keeps.
+    const link = buildInviteLink(verificationUri, verificationUriComplete, token);
+    if (link !== null) console.log(`Sign up and approve: ${link}`);
+    // A signed-in user, or a server older than memory-cloud 0.76.0, ends
+    // up on the dashboard instead; the pending code is approved here.
+    console.log(`Or approve at: ${verificationUriComplete}`);
+  },
+});
+```
+
+A malformed token throws `KaguraAuthError`, whose message never quotes it.
 
 #### Refreshing
 
