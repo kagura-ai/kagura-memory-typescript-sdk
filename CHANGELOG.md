@@ -40,8 +40,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never the REST API. The MCP URL itself keeps its query, and URLs without
   one derive the same base as before.
 
-- **A long-lived `KaguraClient` recovers when the server drops its MCP
-
 - **A long-lived `KaguraClient` recovers when a server drops its MCP
   session**
   ([#39](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/39)):
@@ -79,7 +77,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expired. …`, and any other JSON-RPC 4xx shows its `error.message` too.
 
 - **`getMemoryStats()` no longer fails with HTTP 400 when called with its
-  defaults** (#46). It sent `sort_by=use_count`, a field memory-cloud
+  defaults**
+  ([#46](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/46)):
+  it sent `sort_by=use_count`, a field memory-cloud
   v0.34.0 (#1046) dropped; the server rejects any sort field outside
   `access_count`, `reference_count`, `importance`, `created_at` and
   `last_used_at`. The default is now `access_count`, the server's own, and
