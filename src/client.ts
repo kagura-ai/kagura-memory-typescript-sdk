@@ -9,11 +9,17 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraPartialRollbackError,
+  KaguraPermissionError,
+  // Referenced only from JSDoc {@link} on the plan-gated options.
+  KaguraPlanError,
   KaguraQuotaError,
 } from "./errors.js";
 import {
   baseUrlFromMcp,
   extractDetail,
+  gateError,
+  MCP_GATE_CODES,
   mcpSessionExpired,
   mcpSessionHeader,
   SDK_VERSION,
@@ -36,6 +42,7 @@ import type {
   MemoryStatsResponse,
   RecallNearbyResponse,
   RollbackResult,
+  RollbackSummary,
   ServerInfo,
   SleepReport,
   SleepReportDetail,
@@ -216,7 +223,12 @@ export interface CreateContextOptions {
   usageGuide?: string;
   /** Resource identifier for external data ingestion. */
   resourceId?: string;
-  /** Privacy flag (default: true). */
+  /**
+   * Privacy flag (default: true). A shared (`false`) context needs the
+   * `shared_contexts` feature; from server v0.75.0 a plan without it
+   * throws {@link KaguraPlanError} (older servers: a generic
+   * `validation_error`).
+   */
   isPrivate?: boolean;
   /** Embedding model (immutable after creation); see listEmbeddingModels(). */
   embeddingModel?: string;
@@ -229,7 +241,11 @@ export interface UpdateContextOptions {
   summary?: string;
   usageGuide?: string;
   resourceId?: string;
-  /** Public visibility (required for resource tokens). */
+  /**
+   * Public visibility (required for resource tokens). Making a context
+   * public is plan-gated on the `public_contexts` feature (server
+   * v0.68.0+): `true` on a plan without it throws {@link KaguraPlanError}.
+   */
   isPublic?: boolean;
   /** Locked contexts cannot be deleted. */
   isLocked?: boolean;
@@ -699,7 +715,9 @@ export class KaguraClient {
    * recognizes get a specific class. A code from a tool with no wrapper
    * (`secret_not_found`, say) lands on the generic {@link KaguraError}, so
    * match on the message or add the code to `raiseForMcpError` when you
-   * confirm it against the server.
+   * confirm it against the server. Plan and quota refusals are the
+   * exception: a v0.75.0+ server tags them with a `gate`, so they get
+   * {@link KaguraPlanError} / {@link KaguraQuotaError} from any tool.
    *
    * Use `getToolDefinitions()` to discover what the connected server offers.
    *
@@ -718,6 +736,12 @@ export class KaguraClient {
    * The server's MCP tools return `{"status": "error", "error": <code>,
    * "message": <str>, ...}` for domain errors the JSON-RPC transport
    * cannot represent. HTTP-level errors are handled by the request layer.
+   *
+   * Classes are keyed on the code and the envelope's own fields, never on
+   * the message, whose wording the server has changed before. Plan and
+   * quota refusals go by the envelope's `gate` first (server v0.75.0+),
+   * then by the code; their message stays the generic one, so matching on
+   * it keeps working.
    */
   private static raiseForMcpError(result: ToolResult, operation: string): void {
     if (result.status !== "error") {
@@ -734,7 +758,28 @@ export class KaguraClient {
     ) {
       throw new KaguraNotFoundError(`${operation}: ${message}`);
     }
-    throw new KaguraError(`${operation} failed (${code}): ${message}`);
+    const failure = `${operation} failed (${code}): ${message}`;
+    const gated = gateError(result, code, MCP_GATE_CODES, failure);
+    if (gated !== null) {
+      throw gated;
+    }
+    if (code === "partial_rollback") {
+      const summary = result.rollback_summary;
+      throw new KaguraPartialRollbackError(
+        failure,
+        typeof result.report_id === "string" ? result.report_id : null,
+        typeof summary === "object" && summary !== null && !Array.isArray(summary)
+          ? (summary as RollbackSummary)
+          : {},
+      );
+    }
+    if (code === "permission_denied") {
+      throw new KaguraPermissionError(
+        failure,
+        typeof result.required_role === "string" ? result.required_role : null,
+      );
+    }
+    throw new KaguraError(failure);
   }
 
   /** Store a memory. Returns the API response with `memory_id`. */
@@ -1417,7 +1462,10 @@ export class KaguraClient {
   /**
    * Create a new context in the current workspace.
    *
-   * @throws KaguraQuotaError when the workspace context limit is reached.
+   * @throws KaguraQuotaError when the workspace context limit is reached
+   *   (`quotaType: "contexts"`, with `current` / `limit`).
+   * @throws KaguraPlanError for a shared context (`isPrivate: false`) on a
+   *   plan without `shared_contexts` (server v0.75.0+).
    */
   async createContext(options: CreateContextOptions): Promise<ToolResult> {
     // Pre-check quota. Match the Python falsy check `not
@@ -1433,10 +1481,19 @@ export class KaguraClient {
       // produces "null/null" in the message; a real 0 is preserved.
       const count = contexts.count ?? null;
       const limit = contexts.limit ?? null;
+      // Same quotaType/current/limit the server's own refusal carries, so a
+      // caller reads one shape whichever side caught the cap. No `gate`:
+      // this is the SDK's inference, not the server's gate block.
       throw new KaguraQuotaError(
         `Context limit reached (${count === null ? "?" : String(count)}/` +
           `${limit === null ? "?" : String(limit)}). ` +
           "Delete unused contexts or upgrade your plan.",
+        null,
+        {
+          quotaType: "contexts",
+          current: typeof count === "number" ? count : null,
+          limit: typeof limit === "number" ? limit : null,
+        },
       );
     }
 
@@ -1501,6 +1558,13 @@ export class KaguraClient {
    * Atomically create Context + Resource entity + ingestion token in a
    * single server-side transaction. The returned `token` is plaintext and
    * shown once.
+   *
+   * Plan-gated on the `resources` feature (server v0.68.0+): a plan
+   * without it is refused with nothing created.
+   *
+   * @throws KaguraPlanError when the plan lacks `resources`;
+   *   `requiredPlanDisplay` names the plan that has it.
+   * @throws KaguraQuotaError at the workspace's context or token cap.
    */
   async setupResource(options: SetupResourceOptions): Promise<ToolResult> {
     const args: Record<string, unknown> = {
@@ -1874,6 +1938,18 @@ export class KaguraClient {
    * Reverse the effects of a completed Sleep Maintenance run. The server
    * processes actions in reverse order with per-step commits — a partial
    * failure means SOME actions may have been reversed before the error.
+   *
+   * A partial rollback throws {@link KaguraPartialRollbackError} rather
+   * than returning, and its `summary` is the {@link RollbackSummary} a
+   * clean run would have returned: the counts say what was reversed, and
+   * `summary.errors` names each action that was not (a merge a later write
+   * changed is counted in `merges_unreversible` and listed there too). The
+   * reversed steps stay committed and the report is marked `failed`, so
+   * read `err.summary` before deciding whether to retry.
+   *
+   * @throws KaguraPartialRollbackError when some actions could not be
+   *   reversed.
+   * @throws KaguraNotFoundError when the report or context does not exist.
    */
   async rollbackSleepRun(options: {
     contextId: string;

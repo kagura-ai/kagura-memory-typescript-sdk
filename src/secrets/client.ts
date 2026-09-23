@@ -50,9 +50,14 @@ export class SecretClient extends KaguraRestClient {
    * The server answers 403, not 404, for a secret the caller may not read,
    * so that the response does not reveal whether the secret exists. That
    * means a 403 here has three possible causes and the message has to name
-   * all of them rather than guess.
+   * all of them rather than guess. A plan or quota refusal is none of the
+   * three, so it gets its typed error instead.
    */
   protected override error403(response: RestResponse, _context: RequestContext): KaguraError {
+    const gated = this.gateRefusal(response);
+    if (gated !== null) {
+      return gated;
+    }
     const detail = extractDetail(response.text);
     const base =
       "Access denied (HTTP 403): you may not have a grant on this secret, " +
@@ -66,7 +71,9 @@ export class SecretClient extends KaguraRestClient {
    * Deliberate divergence from the base class, preserved from the Python
    * port: the secret surface has always rendered 429 through the generic
    * branch, and changing it would silently reclassify errors for existing
-   * callers on a file both SDKs share.
+   * callers on a file both SDKs share. That holds for a 429 carrying a
+   * quota gate too (the daily REST quota covers this surface): the
+   * divergence is about the status, and the gate does not override it.
    */
   protected override error429(response: RestResponse): KaguraError {
     return this.genericError(response);

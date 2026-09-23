@@ -116,3 +116,18 @@ describe("public surface: secret store (#28)", () => {
     expect(sdk.KaguraKeyCustodyError.prototype instanceof sdk.KaguraSecretError).toBe(true);
   });
 });
+
+describe("public surface: typed gate errors (#40)", () => {
+  it.each([
+    "KaguraPlanError",
+    "KaguraPartialRollbackError",
+    "KaguraPermissionError",
+    "KaguraQuotaError",
+  ])("exports %s as a KaguraError", (name) => {
+    const cls = (sdk as unknown as Record<string, { prototype: unknown }>)[name];
+    expect(typeof cls).toBe("function");
+    // Existing `catch (e) { if (e instanceof KaguraError) ... }` code must
+    // keep catching every one of them.
+    expect(cls!.prototype instanceof sdk.KaguraError).toBe(true);
+  });
+});

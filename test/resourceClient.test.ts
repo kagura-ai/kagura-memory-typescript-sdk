@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { KaguraNotFoundError, KaguraQuotaError } from "../src/errors.js";
+import { KaguraNotFoundError, KaguraPlanError, KaguraQuotaError } from "../src/errors.js";
 import { ResourceClient } from "../src/resourceClient.js";
 
 interface Recorded {
@@ -240,6 +240,49 @@ describe("error mapping", () => {
     const error = await client.createToken({ resourceId: "r" }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(KaguraQuotaError);
     expect((error as KaguraQuotaError).retryAfter).toBe(42);
+  });
+});
+
+describe("gate refusals on createToken (#40)", () => {
+  it("maps 403 FEAT-001 to KaguraPlanError", async () => {
+    const server = new FakeRest();
+    server.routes["/api/v1/resource-tokens"] = {
+      status: 403,
+      body: {
+        error: "FEAT-001",
+        message: "Feature 'resources' not available on L plan.",
+        details: {
+          gate: "plan",
+          feature: "resources",
+          required_plan: "promax",
+          required_plan_display: "XL",
+          current_plan: "pro",
+        },
+      },
+    };
+    const client = makeClient(server);
+
+    const error = await client.createToken({ resourceId: "r" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect((error as KaguraPlanError).requiredPlan).toBe("promax");
+  });
+
+  it("maps the active-token cap (403 QUOTA-001) to KaguraQuotaError", async () => {
+    const server = new FakeRest();
+    server.routes["/api/v1/resource-tokens"] = {
+      status: 403,
+      body: {
+        error: "QUOTA-001",
+        message: "Token limit reached. Your L plan allows 3 active tokens.",
+        details: { gate: "quota", quota_type: "resource_tokens", current: 3, limit: 3 },
+      },
+    };
+    const client = makeClient(server);
+
+    const error = await client.createToken({ resourceId: "r" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraQuotaError);
+    expect((error as KaguraQuotaError).quotaType).toBe("resource_tokens");
+    expect((error as KaguraQuotaError).limit).toBe(3);
   });
 });
 

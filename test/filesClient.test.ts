@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { KaguraConnectionError, KaguraIntegrityError } from "../src/errors.js";
+import {
+  KaguraConnectionError,
+  KaguraIntegrityError,
+  KaguraPlanError,
+  KaguraQuotaError,
+} from "../src/errors.js";
 import { FilesClient } from "../src/filesClient.js";
 
 interface Recorded {
@@ -302,5 +307,49 @@ describe("403 workspace hint (#115)", () => {
     expect(error).toBeInstanceOf(KaguraConnectionError);
     // authSource is null for a bare apiKey constructor → generic 403 shape.
     expect((error as Error).message).toContain("HTTP 403");
+  });
+
+  it("maps a FEAT-001 plan refusal to KaguraPlanError, not the workspace hint (#40)", async () => {
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = {
+      status: 403,
+      body: {
+        error: "FEAT-001",
+        message: "Feature 'file_storage' not available on S plan.",
+        details: { gate: "plan", feature: "file_storage", required_plan: "basic" },
+      },
+    };
+    const client = new FilesClient({
+      apiKey: "kagura_test",
+      baseUrl: "https://x.test",
+      fetch: server.fetch,
+      authSource: "env",
+      workspaceIdHint: WS,
+    });
+    const error = await client
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect((error as KaguraPlanError).feature).toBe("file_storage");
+    expect((error as Error).message).not.toContain("workspace not accessible");
+  });
+
+  it("maps the storage cap (429 QUOTA-001) to a KaguraQuotaError payload (#40)", async () => {
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = {
+      status: 429,
+      body: {
+        error: "QUOTA-001",
+        message: "Storage limit reached.",
+        details: { gate: "quota", quota_type: "storage_bytes", current: 1024, limit: 1024 },
+      },
+    };
+    const client = makeClient(server);
+    const error = await client
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraQuotaError);
+    expect((error as KaguraQuotaError).quotaType).toBe("storage_bytes");
+    expect((error as KaguraQuotaError).limit).toBe(1024);
   });
 });

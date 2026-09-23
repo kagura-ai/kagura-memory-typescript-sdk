@@ -42,11 +42,19 @@ export {
   KaguraIntegrityError,
   KaguraLLMError,
   KaguraNotFoundError,
+  KaguraPartialRollbackError,
+  KaguraPermissionError,
+  KaguraPlanError,
   KaguraQuotaError,
   KaguraRateLimitError,
   KaguraCryptoError,
   KaguraKeyCustodyError,
   KaguraSecretError,
+} from "./errors.js";
+export type {
+  KaguraErrorOptions,
+  KaguraGateOptions,
+  KaguraQuotaErrorOptions,
 } from "./errors.js";
 
 export { SDK_VERSION } from "./version.js";

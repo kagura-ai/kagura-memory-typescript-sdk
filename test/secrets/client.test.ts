@@ -14,6 +14,7 @@ import {
   KaguraAuthError,
   KaguraConnectionError,
   KaguraNotFoundError,
+  KaguraPlanError,
   KaguraQuotaError,
   KaguraSecretError,
 } from "../../src/errors.js";
@@ -329,6 +330,24 @@ describe("error mapping", () => {
     await expect(makeClient(rest).listSecrets()).rejects.toThrow(/Access denied \(HTTP 403\)/);
   });
 
+  it("maps a 403 gate refusal to its typed error before the grant message (#40)", async () => {
+    const rest = new FakeRest();
+    rest.status = 403;
+    rest.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Feature 'secrets' not available on S plan.",
+      details: { gate: "plan", feature: "secrets", required_plan: "basic" },
+    });
+    const error = await makeClient(rest)
+      .listSecrets()
+      .catch((e: unknown) => e);
+
+    // A plan refusal is none of the three grant causes, so it must not be
+    // dressed up as one.
+    expect(error).toBeInstanceOf(KaguraPlanError);
+    expect((error as Error).message).not.toMatch(/may not have a grant/);
+  });
+
   it("maps 429 through the generic branch, not KaguraQuotaError", async () => {
     const rest = new FakeRest();
     rest.status = 429;
@@ -342,6 +361,26 @@ describe("error mapping", () => {
     expect(error).not.toBeInstanceOf(KaguraQuotaError);
     expect(error).toBeInstanceOf(KaguraConnectionError);
     expect((error as Error).message).toBe("HTTP 429: slow down");
+  });
+
+  it("keeps 429 generic even when it carries a quota gate (#40)", async () => {
+    // The daily REST quota covers this surface too. It is still a 429, and
+    // the divergence above is about the status, so the gate does not
+    // override it: reclassifying it would break the same callers.
+    const rest = new FakeRest();
+    rest.status = 429;
+    rest.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Daily REST quota exceeded: 1001/1000. Resets at midnight UTC.",
+      details: { gate: "quota", quota_type: "api_rest_daily" },
+    });
+    const error = await makeClient(rest)
+      .listSecrets()
+      .catch((e: unknown) => e);
+
+    expect(error).not.toBeInstanceOf(KaguraQuotaError);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toMatch(/^HTTP 429: Daily REST quota exceeded/);
   });
 
   it("keeps the inherited 401 and 404 mappings", async () => {

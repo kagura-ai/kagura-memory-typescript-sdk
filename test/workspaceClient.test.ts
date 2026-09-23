@@ -18,6 +18,7 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraPlanError,
   KaguraQuotaError,
 } from "../src/errors.js";
 import {
@@ -504,6 +505,63 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     expect((err as KaguraConnectionError).message).toContain("Pro plan");
   });
 
+  it("maps the v0.75 team-invitations FEAT-001 to KaguraPlanError", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message:
+        "Feature 'team_invitations' not available on M plan. " +
+        "Upgrade to L plan to access this feature.",
+      details: {
+        gate: "plan",
+        feature: "team_invitations",
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    const plan = err as KaguraPlanError;
+    expect(plan.feature).toBe("team_invitations");
+    expect(plan.requiredPlanDisplay).toBe("L");
+    // A plan refusal is not an ownership problem: no owner-key hint.
+    expect(plan.message).not.toContain("OWNER's API key");
+  });
+
+  it("maps a pre-v0.75 FEAT-001 (public-bound member key) to KaguraPlanError", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Public-bound keys require the XL plan.",
+      details: { feature: "resources" },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.mintMemberKey(WS, "google_2", "ci", 30));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).feature).toBe("resources");
+  });
+
+  it("maps a 403 QUOTA-001 to KaguraQuotaError, not an ownership error", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Token limit reached.",
+      details: { gate: "quota", quota_type: "resource_tokens", current: 3, limit: 3 },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.listMembers(WS));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).quotaType).toBe("resource_tokens");
+  });
+
   it("scrubs a 403 detail carrying credential markers, falling back to the hint", async () => {
     // A hostile/buggy 403 echoing credentials must not be printed verbatim.
     const server = new FakeRest();
@@ -576,6 +634,37 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     expect(err).toBeInstanceOf(KaguraQuotaError);
     expect((err as KaguraQuotaError).message).toContain("Member limit reached");
     expect((err as KaguraQuotaError).retryAfter).toBe(30);
+  });
+
+  it("maps the v0.75 member seat cap (429 QUOTA-001) to a KaguraQuotaError payload", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Member limit reached (5 seats). Current members: 4, Pending invitations: 1.",
+      details: {
+        gate: "quota",
+        quota_type: "members",
+        current: 5,
+        limit: 5,
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.message).toContain("Member limit reached");
+    expect(quota.gate).toBe("quota");
+    expect(quota.quotaType).toBe("members");
+    expect(quota.current).toBe(5);
+    expect(quota.limit).toBe(5);
+    expect(quota.requiredPlanDisplay).toBe("L");
+    // A seat cap does not reset on a timer.
+    expect(quota.retryAfter).toBeNull();
   });
 
   it("names the failing field from a 422 validation envelope", async () => {

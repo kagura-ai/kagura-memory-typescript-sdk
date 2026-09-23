@@ -572,18 +572,37 @@ export interface SleepReportDetail extends SleepReport {
   action_count: number;
 }
 
-/** Per-category counts of actions reversed by `rollback_sleep_run`. */
+/**
+ * Per-category counts of actions reversed by `rollback_sleep_run`.
+ *
+ * A clean rollback returns it in {@link RollbackResult}; a partial one
+ * carries it on {@link KaguraPartialRollbackError.summary}.
+ */
 export interface RollbackSummary {
   /** @default 0 */
   edges_deleted?: number;
   /** @default 0 */
   merges_reversed?: number;
+  /**
+   * Merges left in place because a later write changed or removed the
+   * edge (server v0.61.0+). Each is also listed in `errors`, so a
+   * rollback is complete only when this is 0.
+   */
+  merges_unreversible?: number;
   /** @default 0 */
   importance_restored?: number;
   /** @default 0 */
   promotions_reversed?: number;
+  /**
+   * Actions left standing by design — the memory was pinned, forgotten,
+   * or removed since the run. Not errors.
+   */
+  importance_kept?: number;
+  /** See `importance_kept`. */
+  promotions_kept?: number;
   /** @default 0 */
   archives_restored?: number;
+  /** One entry per action that could not be reversed. */
   errors?: string[];
 }
 

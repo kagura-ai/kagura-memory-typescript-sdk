@@ -10,7 +10,10 @@
  * - {@link KaguraAuthError}: Authentication failed (401)
  * - {@link KaguraNotFoundError}: Resource not found (404)
  * - {@link KaguraConnectionError}: Connection or HTTP error
- * - {@link KaguraQuotaError}: Quota exceeded (429)
+ * - {@link KaguraPlanError}: The plan lacks the `resources` feature
+ *   (403 `FEAT-001`, e.g. from `createToken`)
+ * - {@link KaguraQuotaError}: Quota exceeded (429), or the active-token
+ *   cap reached (403 `QUOTA-001`, `quotaType: "resource_tokens"`)
  */
 
 import type { ResolvedAuth } from "./auth/types.js";
@@ -159,8 +162,8 @@ function serializeEvent(event: ResourceEventInput): Record<string, unknown> {
  *
  * Extends {@link KaguraRestClient} with the resource-token wire contract;
  * the base's default error hooks already implement this client's mapping
- * (429 → {@link KaguraQuotaError} with `retryAfter`), so no hooks are
- * overridden here.
+ * (429 → {@link KaguraQuotaError} with `retryAfter`; a 403 plan or
+ * token-cap refusal → its typed error), so no hooks are overridden here.
  */
 export class ResourceClient extends KaguraRestClient {
   /**
@@ -204,6 +207,9 @@ export class ResourceClient extends KaguraRestClient {
    * Create a new resource token.
    *
    * @returns Created token including plaintext token (shown only once).
+   * @throws KaguraPlanError when the plan lacks the `resources` feature.
+   * @throws KaguraQuotaError at the plan's active-token cap — a 403, not a
+   *   429; `limit` is the cap. Revoke a token or upgrade.
    */
   async createToken(options: CreateTokenOptions): Promise<ResourceTokenCreateResponse> {
     const body: Record<string, unknown> = { resource_id: options.resourceId };
@@ -287,6 +293,9 @@ export class ResourceClient extends KaguraRestClient {
    *   {@link SETUP_OAUTH_NOT_SUPPORTED_MSG}).
    * @throws KaguraAuthError if the Authorization header is missing or
    *   malformed in the static path.
+   * @throws KaguraPlanError when the plan lacks the `resources` feature,
+   *   and KaguraQuotaError at the context or token cap — see
+   *   `KaguraClient.setupResource`.
    *
    * Note: Idempotency for repeated calls with the same `resourceId` is
    * not guaranteed; server-side behavior may evolve. Avoid retrying

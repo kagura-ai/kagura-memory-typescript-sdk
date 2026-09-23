@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KaguraClient, MIN_SERVER_VERSION } from "../src/client.js";
 import {
@@ -6,6 +6,9 @@ import {
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraPartialRollbackError,
+  KaguraPermissionError,
+  KaguraPlanError,
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
@@ -468,6 +471,306 @@ describe("domain error translation (#180 semantics)", () => {
   });
 });
 
+describe("typed plan / quota / rollback / permission errors (#40)", () => {
+  async function failure(
+    server: FakeServer,
+    call: (c: KaguraClient) => Promise<unknown>,
+  ): Promise<unknown> {
+    return call(makeClient(server)).then(
+      () => {
+        throw new Error("expected the call to reject");
+      },
+      (e: unknown) => e,
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("maps a v0.75 quota_exceeded envelope by its gate, with the payload", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-23T23:00:00Z"));
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Daily memory limit reached (100/day).",
+      gate: "quota",
+      quota_type: "memories_per_day",
+      current: 100,
+      limit: 100,
+      used_today: 100,
+      requested: 1,
+      required_plan: "basic",
+      required_plan_display: "M",
+      current_plan: "free",
+      resets_at: "2026-09-24T00:00:00+00:00",
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    // Same text the generic mapping produced, so message matching still works.
+    expect(quota.message).toBe(
+      "remember failed (quota_exceeded): Daily memory limit reached (100/day).",
+    );
+    expect(quota.gate).toBe("quota");
+    expect(quota.quotaType).toBe("memories_per_day");
+    expect(quota.current).toBe(100);
+    expect(quota.limit).toBe(100);
+    expect(quota.usedToday).toBe(100);
+    expect(quota.requiredPlan).toBe("basic");
+    expect(quota.requiredPlanDisplay).toBe("M");
+    expect(quota.currentPlan).toBe("free");
+    expect(quota.resetsAt).toBe("2026-09-24T00:00:00+00:00");
+    expect(quota.retryAfter).toBe(3600);
+  });
+
+  it("maps a pre-v0.75 quota_exceeded envelope by its code", async () => {
+    // v0.68-v0.74: no gate, no canonical `current` — only the legacy counts.
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Memory limit reached.",
+      quota_type: "memory_limit",
+      limit: 1000,
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.gate).toBeNull();
+    expect(quota.quotaType).toBe("memory_limit");
+    expect(quota.limit).toBe(1000);
+    expect(quota.current).toBeNull();
+    expect(quota.retryAfter).toBeNull();
+  });
+
+  it("reads used_today as current when an older server sends no current", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Daily memory limit reached.",
+      quota_type: "memories_per_day",
+      limit: 100,
+      used_today: 100,
+    };
+    const err = (await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    )) as KaguraQuotaError;
+    expect(err.usedToday).toBe(100);
+    expect(err.current).toBe(100);
+  });
+
+  it("maps a v0.75 plan_required envelope by its gate, with the payload", async () => {
+    const server = new FakeServer();
+    server.toolResults.setup_resource = {
+      status: "error",
+      error: "plan_required",
+      message:
+        "Feature 'resources' not available on L plan. Upgrade to XL plan to access this feature.",
+      gate: "plan",
+      feature: "resources",
+      required_plan: "promax",
+      required_plan_display: "XL",
+      current_plan: "pro",
+    };
+    const err = await failure(server, (c) => c.setupResource({ resourceId: "r" }));
+
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    const plan = err as KaguraPlanError;
+    expect(plan.message).toMatch(/^setup_resource failed \(plan_required\): Feature 'resources'/);
+    expect(plan.gate).toBe("plan");
+    expect(plan.feature).toBe("resources");
+    expect(plan.requiredPlan).toBe("promax");
+    expect(plan.requiredPlanDisplay).toBe("XL");
+    expect(plan.currentPlan).toBe("pro");
+  });
+
+  it("maps a pre-v0.75 plan_required envelope by its code", async () => {
+    // v0.68-v0.74 sent only `required_plan` beside the code.
+    const server = new FakeServer();
+    server.toolResults.update_context = {
+      status: "error",
+      error: "plan_required",
+      message: "Public contexts require the L plan.",
+      required_plan: "pro",
+    };
+    const err = await failure(server, (c) => c.updateContext({ contextId: "c", isPublic: true }));
+
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    const plan = err as KaguraPlanError;
+    expect(plan.gate).toBeNull();
+    expect(plan.requiredPlan).toBe("pro");
+    expect(plan.feature).toBeNull();
+    expect(plan.requiredPlanDisplay).toBeNull();
+  });
+
+  it("maps create_context's v0.75 shared-context refusal to KaguraPlanError", async () => {
+    // Before v0.75 this was a validation_error; it is a plan gate now.
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: true, contexts: [] };
+    server.toolResults.create_context = {
+      status: "error",
+      error: "plan_required",
+      message: "Feature 'shared_contexts' not available on S plan.",
+      gate: "plan",
+      feature: "shared_contexts",
+      required_plan: "basic",
+      required_plan_display: "M",
+      current_plan: "free",
+    };
+    const err = await failure(server, (c) => c.createContext({ name: "team", isPrivate: false }));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).feature).toBe("shared_contexts");
+  });
+
+  it("chooses the class from the gate, not the code", async () => {
+    // An analysis tool's feature_not_available is the MCP twin of FEAT-001;
+    // a cap whose code the SDK does not know is still a quota when the gate
+    // says so.
+    const server = new FakeServer();
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "feature_not_available",
+      message: "Analyses are not enabled for this workspace.",
+      gate: "allowlist",
+      feature: "memory_analysis",
+    };
+    server.toolResults.setup_connector = {
+      status: "error",
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached.",
+      gate: "quota",
+      quota_type: "connectors",
+      current: 2,
+      limit: 2,
+    };
+    const client = makeClient(server);
+
+    const plan = await client.callRawTool("analyze_context").catch((e: unknown) => e);
+    expect(plan).toBeInstanceOf(KaguraPlanError);
+    // allowlist: no tier lifts it, so there is no plan to offer.
+    expect((plan as KaguraPlanError).gate).toBe("allowlist");
+    expect((plan as KaguraPlanError).requiredPlan).toBeNull();
+
+    const quota = await client.callRawTool("setup_connector").catch((e: unknown) => e);
+    expect(quota).toBeInstanceOf(KaguraQuotaError);
+    expect((quota as KaguraQuotaError).quotaType).toBe("connectors");
+  });
+
+  it("ignores wrong-typed gate fields instead of trusting the shape", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "limit",
+      gate: "quota",
+      quota_type: 42,
+      limit: "100",
+      current: null,
+      resets_at: 0,
+    };
+    const err = (await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    )) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.quotaType).toBeNull();
+    expect(err.limit).toBeNull();
+    expect(err.current).toBeNull();
+    expect(err.resetsAt).toBeNull();
+  });
+
+  it("maps partial_rollback to KaguraPartialRollbackError carrying the summary", async () => {
+    const server = new FakeServer();
+    const summary = {
+      edges_deleted: 3,
+      merges_reversed: 1,
+      merges_unreversible: 1,
+      importance_restored: 0,
+      promotions_reversed: 0,
+      importance_kept: 0,
+      promotions_kept: 0,
+      archives_restored: 2,
+      errors: ["Action 9 (merge): edge was changed by a later write"],
+    };
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "partial_rollback",
+      message:
+        "Rollback completed with 1 error(s). " +
+        "Report marked as 'failed' — inspect errors and retry if needed.",
+      report_id: "r1",
+      rollback_summary: summary,
+    };
+    const err = await failure(server, (c) =>
+      c.rollbackSleepRun({ contextId: "c", reportId: "r1" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraPartialRollbackError);
+    const partial = err as KaguraPartialRollbackError;
+    expect(partial.message).toMatch(/^rollback_sleep_run failed \(partial_rollback\): /);
+    expect(partial.reportId).toBe("r1");
+    expect(partial.summary).toEqual(summary);
+  });
+
+  it("gives partial_rollback an empty summary when the server omits it", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "partial_rollback",
+      message: "partial",
+    };
+    const err = (await failure(server, (c) =>
+      c.rollbackSleepRun({ contextId: "c", reportId: "r1" }),
+    )) as KaguraPartialRollbackError;
+    expect(err).toBeInstanceOf(KaguraPartialRollbackError);
+    expect(err.reportId).toBeNull();
+    expect(err.summary).toEqual({});
+  });
+
+  it("maps permission_denied to KaguraPermissionError carrying requiredRole", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "permission_denied",
+      message: "Cannot remember: tool guardrails require context editor or above.",
+      required_role: "editor",
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x", details: { tool_trigger: {} } }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraPermissionError).requiredRole).toBe("editor");
+    expect((err as KaguraPermissionError).message).toBe(
+      "remember failed (permission_denied): " +
+        "Cannot remember: tool guardrails require context editor or above.",
+    );
+  });
+
+  it("leaves other codes on the generic KaguraError", async () => {
+    const server = new FakeServer();
+    server.toolResults.update_context = {
+      status: "error",
+      error: "cannot_make_private",
+      message: "Cannot make private: context has a resource_id.",
+    };
+    const err = await failure(server, (c) => c.updateContext({ contextId: "c", isPublic: false }));
+    expect(err).toBeInstanceOf(KaguraError);
+    expect(err).not.toBeInstanceOf(KaguraPlanError);
+    expect(err).not.toBeInstanceOf(KaguraQuotaError);
+    expect(err).not.toBeInstanceOf(KaguraPermissionError);
+  });
+});
+
 describe("remember", () => {
   it("sends defaults and omits unset optionals", async () => {
     const server = new FakeServer();
@@ -741,6 +1044,21 @@ describe("createContext quota pre-check", () => {
     await expect(client.createContext({ name: "new" })).rejects.toThrow(
       /Context limit reached \(5\/5\)/,
     );
+  });
+
+  it("carries the counts as the server's own context-cap refusal would (#40)", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: false, count: 5, limit: 5 };
+    const client = makeClient(server);
+    const err = (await client
+      .createContext({ name: "new" })
+      .catch((e: unknown) => e)) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.quotaType).toBe("contexts");
+    expect(err.current).toBe(5);
+    expect(err.limit).toBe(5);
+    // The pre-check is the SDK's inference, not a server gate block.
+    expect(err.gate).toBeNull();
   });
 
   it("renders ? for missing or null count/limit (#183)", async () => {

@@ -246,9 +246,42 @@ try {
 ```
 
 Server-side domain errors (`{"status": "error", ...}`) are translated into
-exceptions — `KaguraNotFoundError` for missing contexts/memories/reports/
-agents/bindings, `KaguraError` otherwise — so you never need to inspect
-`result.status`.
+exceptions, so you never need to inspect `result.status`. The class is
+keyed on the error code and the envelope's fields, never on the message:
+
+| Class | Raised for | Carries |
+|-------|------------|---------|
+| `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings | — |
+| `KaguraPlanError` | MCP `plan_required`; REST 403 `FEAT-001` — the plan lacks a feature | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+| `KaguraQuotaError` | MCP `quota_exceeded`; REST `QUOTA-001` (the resource-token cap is a **403**) and other 429s | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
+| `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
+| `KaguraPermissionError` | MCP `permission_denied` — the caller's role is too low | `requiredRole` |
+| `KaguraError` | any other code | — |
+
+memory-cloud v0.75.0+ tags every plan and quota refusal with a `gate`
+(`plan`, `quota`, `allowlist` or `deployment`), and the SDK chooses the
+class from it first, falling back to the code for older servers. The
+payload fields are `null` whenever the server did not send them. Show
+`requiredPlanDisplay` (`"XL"`) to a user and decide with `requiredPlan`;
+both are `null` when no plan lifts the refusal, which is what an
+`allowlist` or `deployment` gate means. `retryAfter` is derived from
+`resetsAt` on a time-windowed quota such as `memories_per_day`, and is
+`null` on a fixed cap that waiting will not lift.
+
+```ts
+import { KaguraPlanError, KaguraQuotaError } from "kagura-memory";
+
+try {
+  await client.setupResource({ resourceId: "crm" });
+} catch (e) {
+  if (e instanceof KaguraPlanError) {
+    // requiredPlanDisplay is null when no plan lifts it (allowlist / deployment).
+    console.log(e.requiredPlanDisplay ? `upgrade to ${e.requiredPlanDisplay}` : e.message);
+  } else if (e instanceof KaguraQuotaError) {
+    console.log(`${e.quotaType}: ${e.current}/${e.limit}`);
+  }
+}
+```
 
 ## `KaguraClient` method reference
 
@@ -298,13 +331,13 @@ the counterpart to `recall`'s probabilistic search.
 | Method | What it does |
 |--------|--------------|
 | `listContexts` | All contexts, with the workspace's `can_create` quota flag. |
-| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached. `embeddingModel` is immutable afterwards. |
+| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraPlanError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` is immutable afterwards. |
 | `getContextInfo` | Metadata plus, by default, a memory-count breakdown. |
-| `updateContext` | Change display name, summary, usage guide, visibility, lock. |
+| `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraPlanError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
 | `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01) and reranking; the `useRerank` set here is what a `recall` that omits it follows. Owner/editor only. |
-| `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. |
+| `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. Plan-gated: throws `KaguraPlanError` on a plan without resources. |
 
 ### Agent run-state
 
@@ -320,7 +353,7 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 |--------|--------------|
 | `getSleepHistory` | Recent runs, newest first. |
 | `getSleepReport` | One run in detail, including the per-action audit log. |
-| `rollbackSleepRun` | Reverse a completed run. The server commits per step, so a partial rollback is possible — read the returned summary. |
+| `rollbackSleepRun` | Reverse a completed run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. Read `err.summary` — the same counts a clean run returns, with `err.summary.errors` naming each action that was not reversed — before deciding to retry. |
 
 ### Workspace and server
 

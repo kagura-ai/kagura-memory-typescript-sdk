@@ -3,8 +3,12 @@
 import {
   KaguraAuthError,
   KaguraConnectionError,
+  KaguraError,
+  KaguraPlanError,
+  KaguraQuotaError,
   KaguraRateLimitError,
 } from "./errors.js";
+import type { KaguraQuotaErrorOptions } from "./errors.js";
 
 export { SDK_VERSION } from "./version.js";
 
@@ -186,6 +190,123 @@ export function retryAfterSeconds(headers: Headers): number | null {
   }
   const trimmed = raw.trim();
   return /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : null;
+}
+
+/** Error codes of the plan and quota refusals, per surface. */
+export interface GateCodes {
+  plan: readonly string[];
+  quota: readonly string[];
+}
+
+/**
+ * MCP envelope codes. `feature_not_available` is the analysis tools'
+ * twin of `plan_required`, as REST `FEAT-001` is of both.
+ */
+export const MCP_GATE_CODES: GateCodes = {
+  plan: ["plan_required", "feature_not_available"],
+  quota: ["quota_exceeded"],
+};
+
+/**
+ * REST canonical-envelope codes. Beside `QUOTA-001`, the quota family has
+ * `QUOTA-002` (embedding spend) and `CONNECTOR-001` (connector seats).
+ */
+export const REST_GATE_CODES: GateCodes = {
+  plan: ["FEAT-001"],
+  quota: ["QUOTA-001", "QUOTA-002", "CONNECTOR-001"],
+};
+
+function stringField(block: Record<string, unknown>, key: string): string | null {
+  const value = block[key];
+  return typeof value === "string" ? value : null;
+}
+
+function numberField(block: Record<string, unknown>, key: string): number | null {
+  const value = block[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Build the typed error for a plan or quota refusal, or `null` if it is
+ * neither.
+ *
+ * `block` holds the gate fields: the MCP envelope itself, or a REST
+ * body's `details`. Its `gate` (memory-cloud v0.75.0+) picks the class
+ * whenever it is one the SDK knows, because the code alone can mislead: the
+ * resource-token cap is a quota that answers 403, and the connector seat
+ * cap keeps a code of its own. `allowlist` and `deployment` are the other
+ * two reasons a feature is unavailable, so they stay a
+ * {@link KaguraPlanError} — the class an older server's bare `FEAT-001`
+ * already gets. With no gate, `code` decides against the surface's
+ * `codes`.
+ *
+ * Wire keys are snake_case; a missing or wrong-typed one reads as `null`
+ * rather than trusting the shape.
+ */
+export function gateError(
+  block: Record<string, unknown>,
+  code: string | null,
+  codes: GateCodes,
+  message: string,
+  retryAfter: number | null = null,
+): KaguraError | null {
+  const gate = stringField(block, "gate");
+  let kind: "plan" | "quota" | null = null;
+  if (gate === "quota") {
+    kind = "quota";
+  } else if (gate === "plan" || gate === "allowlist" || gate === "deployment") {
+    kind = "plan";
+  } else if (code !== null && codes.quota.includes(code)) {
+    kind = "quota";
+  } else if (code !== null && codes.plan.includes(code)) {
+    kind = "plan";
+  }
+  if (kind === null) {
+    return null;
+  }
+  const options: KaguraQuotaErrorOptions = {
+    gate,
+    feature: stringField(block, "feature"),
+    requiredPlan: stringField(block, "required_plan"),
+    requiredPlanDisplay: stringField(block, "required_plan_display"),
+    currentPlan: stringField(block, "current_plan"),
+  };
+  if (kind === "plan") {
+    return new KaguraPlanError(message, options);
+  }
+  options.quotaType = stringField(block, "quota_type");
+  options.current = numberField(block, "current");
+  options.limit = numberField(block, "limit");
+  options.usedToday = numberField(block, "used_today");
+  options.resetsAt = stringField(block, "resets_at");
+  return new KaguraQuotaError(message, retryAfter, options);
+}
+
+/**
+ * Split a canonical `{"error", "message", "details"}` REST body into its
+ * code and details block; `null` for any other body.
+ */
+export function parseErrorEnvelope(
+  bodyText: string,
+): { code: string | null; details: Record<string, unknown> } | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return null;
+  }
+  const rec = body as Record<string, unknown>;
+  const details = rec.details;
+  return {
+    code: typeof rec.error === "string" ? rec.error : null,
+    details:
+      typeof details === "object" && details !== null && !Array.isArray(details)
+        ? (details as Record<string, unknown>)
+        : {},
+  };
 }
 
 /**

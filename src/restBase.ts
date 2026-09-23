@@ -34,7 +34,11 @@ import {
 import {
   baseUrlFromMcp,
   extractDetail,
+  gateError,
+  parseErrorEnvelope,
+  REST_GATE_CODES,
   retryAfterSeconds,
+  sanitizeServerDetail,
   SDK_VERSION,
   validateHttpsUrl,
 } from "./http.js";
@@ -130,9 +134,12 @@ function jsonTypeName(value: unknown): string {
  * default hooks implement the majority behavior:
  *
  * - 401 → {@link KaguraAuthError} with an OAuth-aware recovery hint
- * - 403 → the generic `HTTP 403: <detail>` mapping
+ * - 403 → {@link KaguraPlanError} / {@link KaguraQuotaError} for a plan
+ *   or quota refusal (see {@link gateRefusal}), else the generic
+ *   `HTTP 403: <detail>` mapping
  * - 404 → {@link KaguraNotFoundError} (server detail or "Not found")
- * - 429 → {@link KaguraQuotaError} with a tolerant `Retry-After`
+ * - 429 → {@link KaguraQuotaError} with a tolerant `Retry-After`, carrying
+ *   the refusal's gate payload when the body has one
  * - other statuses → {@link KaguraConnectionError}
  * - transport errors → {@link KaguraConnectionError}
  */
@@ -394,17 +401,52 @@ export class KaguraRestClient {
   }
 
   /**
-   * 403 → generic mapping by default; clients with a richer story
-   * (workspace hints, secret existence-hiding) override this.
+   * 403 → a plan or quota refusal's typed error, else the generic
+   * mapping; clients with a richer story (workspace hints, secret
+   * existence-hiding) override this, asking {@link gateRefusal} first.
    */
   protected error403(response: RestResponse, context: RequestContext): KaguraError {
-    return this.genericError(response);
+    return this.gateRefusal(response) ?? this.genericError(response);
   }
 
-  /** 429 → quota error with a tolerant `Retry-After` parse. */
+  /**
+   * 429 → quota error with a tolerant `Retry-After` parse. A typed
+   * refusal (the member seat cap, a daily quota) keeps the server's
+   * message and adds its gate payload; a bare 429 keeps the fixed text.
+   */
   protected error429(response: RestResponse): KaguraError {
-    return new KaguraQuotaError(
-      "Quota exceeded. Try again later.",
+    return (
+      this.gateRefusal(response) ??
+      new KaguraQuotaError("Quota exceeded. Try again later.", retryAfterSeconds(response.headers))
+    );
+  }
+
+  /**
+   * A plan or quota refusal → its typed error; `null` for any other body.
+   *
+   * memory-cloud v0.75.0 annotates every such refusal with `details.gate`,
+   * and the class follows the gate rather than the status: the
+   * resource-token cap is a quota that answers 403. An older server sends
+   * no gate, so the `FEAT-001` / `QUOTA-001` code decides. A body that is
+   * neither (a role denial, a pre-v0.75 `HTTP-403` plan message) gets
+   * `null`, and the hook maps it as it always did.
+   *
+   * Every 403 hook, the subclass overrides included, asks this first, so
+   * a plan refusal never reads as a credential problem; so does every 429
+   * hook but SecretClient's, which keeps 429 generic by design. The
+   * message is the server's own: it names the feature or cap and the plan
+   * that lifts it.
+   */
+  protected gateRefusal(response: RestResponse): KaguraError | null {
+    const envelope = parseErrorEnvelope(response.text);
+    if (envelope === null) {
+      return null;
+    }
+    return gateError(
+      envelope.details,
+      envelope.code,
+      REST_GATE_CODES,
+      sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
       retryAfterSeconds(response.headers),
     );
   }

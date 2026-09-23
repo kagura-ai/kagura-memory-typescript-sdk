@@ -11,7 +11,8 @@
  * Construction, credential resolution, lifecycle, and the base error
  * mapping live in {@link KaguraRestClient} (#229); this module keeps only
  * the workspace-specific wire contract: the owner-key 403 hint and the
- * detail-carrying 429 quota mapping.
+ * detail-carrying 429 quota mapping. Plan and quota refusals take the
+ * base's typed mapping before either.
  */
 
 import { SOURCE_LABEL } from "./auth/types.js";
@@ -116,7 +117,11 @@ export interface ListInvitationsOptions {
  *   Also returned for a workspace-scoped key used against a different
  *   workspace (uniform 404, memory-cloud #963) — a 404 here does NOT
  *   prove the resource is absent.
- * - `KaguraQuotaError` — member quota or rate limit exceeded (429)
+ * - `KaguraPlanError` — the plan lacks the feature (403 `FEAT-001`):
+ *   team invitations, or a public-bound member key
+ * - `KaguraQuotaError` — member seat cap or rate limit exceeded (429);
+ *   from server v0.75.0 the seat cap carries `quotaType: "members"` and
+ *   its counts
  */
 export class WorkspaceClient extends KaguraRestClient {
   // -------------------------------------------------------------------
@@ -378,7 +383,9 @@ export class WorkspaceClient extends KaguraRestClient {
    * rejection, deployment kill-switch, plan gate, self-role-change,
    * key/workspace mismatch) — those pass through untouched. Only the
    * deliberately uniform denial gets the owner-key hint, because that is
-   * the one a non-owner static key actually hits.
+   * the one a non-owner static key actually hits. A `FEAT-001` plan gate
+   * never gets here (it becomes a {@link KaguraPlanError}); a pre-v0.75
+   * `HTTP-403` one does, and passes through as text.
    */
   private format403(serverDetail: string): string {
     const safeDetail = sanitizeServerDetail(serverDetail);
@@ -403,16 +410,26 @@ export class WorkspaceClient extends KaguraRestClient {
   // ---- KaguraRestClient hooks -----------------------------------------
 
   protected override error403(response: RestResponse, _context: RequestContext): KaguraError {
-    return new KaguraConnectionError(this.format403(extractDetail(response.text)));
+    // A plan or quota refusal is not an ownership problem: type it before
+    // the owner-key hint can be attached.
+    return (
+      this.gateRefusal(response) ??
+      new KaguraConnectionError(this.format403(extractDetail(response.text)))
+    );
   }
 
   protected override error429(response: RestResponse): KaguraError {
     // Invite-create quota exhaustion ("Member limit reached ...") and
     // generic rate limiting both surface as 429 — keep the server
-    // message, it names the cause and the fix.
-    return new KaguraQuotaError(
-      extractDetail(response.text) || "Quota exceeded. Try again later.",
-      retryAfterSeconds(response.headers),
+    // message, it names the cause and the fix. From v0.75.0 the seat cap
+    // is a typed `QUOTA-001` (`quota_type: "members"`) and carries its
+    // counts too.
+    return (
+      this.gateRefusal(response) ??
+      new KaguraQuotaError(
+        extractDetail(response.text) || "Quota exceeded. Try again later.",
+        retryAfterSeconds(response.headers),
+      )
     );
   }
 }

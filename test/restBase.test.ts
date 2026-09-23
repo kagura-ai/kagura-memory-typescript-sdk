@@ -2,13 +2,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   KaguraAuthError,
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
+  KaguraPlanError,
   KaguraQuotaError,
 } from "../src/errors.js";
 import { SDK_VERSION } from "../src/http.js";
@@ -263,6 +264,175 @@ describe("status mapping", () => {
     const err = await caught(probe.requestPublic("GET", "/api/v1/things"));
     expect(err).toBeInstanceOf(KaguraAuthError);
     expect((err as KaguraAuthError).message).toBe("no access (HTTP 403)");
+  });
+
+  it("maps a v0.75 403 FEAT-001 to KaguraPlanError by its gate", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message:
+        "Feature 'resources' not available on L plan. Upgrade to XL plan to access this feature.",
+      details: {
+        gate: "plan",
+        feature: "resources",
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "pro",
+      },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/resource-tokens"));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    const plan = err as KaguraPlanError;
+    expect(plan.message).toBe(
+      "Feature 'resources' not available on L plan. Upgrade to XL plan to access this feature.",
+    );
+    expect(plan.gate).toBe("plan");
+    expect(plan.feature).toBe("resources");
+    expect(plan.requiredPlan).toBe("promax");
+    expect(plan.requiredPlanDisplay).toBe("XL");
+    expect(plan.currentPlan).toBe("pro");
+  });
+
+  it("maps a pre-v0.75 403 FEAT-001 to KaguraPlanError by its code", async () => {
+    // v0.68-v0.74 sent only details.feature beside the code.
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Resources require the XL plan.",
+      details: { feature: "resources" },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/resource-tokens"));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).gate).toBeNull();
+    expect((err as KaguraPlanError).feature).toBe("resources");
+    expect((err as KaguraPlanError).requiredPlan).toBeNull();
+  });
+
+  it("maps a 403 QUOTA-001 to KaguraQuotaError — a 403 is not always a plan refusal", async () => {
+    // The resource-token cap keeps its 403 in v0.75 but is a quota.
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Token limit reached. Your L plan allows 3 active tokens.",
+      details: {
+        gate: "quota",
+        quota_type: "resource_tokens",
+        current: 3,
+        limit: 3,
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "pro",
+        feature: "resources",
+        resets_at: null,
+      },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/resource-tokens"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err).not.toBeInstanceOf(KaguraPlanError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.message).toBe("Token limit reached. Your L plan allows 3 active tokens.");
+    expect(quota.gate).toBe("quota");
+    expect(quota.quotaType).toBe("resource_tokens");
+    expect(quota.current).toBe(3);
+    expect(quota.limit).toBe(3);
+    expect(quota.requiredPlanDisplay).toBe("XL");
+    expect(quota.feature).toBe("resources");
+    expect(quota.retryAfter).toBeNull();
+  });
+
+  it("chooses the class from the gate before the code", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached.",
+      details: { gate: "quota", quota_type: "connectors", current: 2, limit: 2 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).quotaType).toBe("connectors");
+  });
+
+  it("keeps a FEAT-001 behind an allowlist or deployment switch a KaguraPlanError", async () => {
+    // Pre-v0.75 servers send these as bare FEAT-001, so the class must not
+    // change with the server version; `gate` says no upgrade will help.
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Managed embeddings are disabled on this deployment.",
+      details: { gate: "deployment", feature: "managed_embeddings", required_plan: null },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraPlanError);
+    expect((err as KaguraPlanError).gate).toBe("deployment");
+    expect((err as KaguraPlanError).requiredPlan).toBeNull();
+  });
+
+  it("leaves a 403 that is no gate refusal on the generic mapping", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "AUTH-101",
+      message: "Insufficient permissions",
+      details: {},
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("GET", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraConnectionError);
+    expect((err as KaguraConnectionError).message).toBe("HTTP 403: Insufficient permissions");
+  });
+
+  it("carries the gate payload on a 429 QUOTA-001", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-23T23:59:00Z"));
+    try {
+      const server = new FakeRest();
+      server.status = 429;
+      server.body = JSON.stringify({
+        error: "QUOTA-001",
+        message: "Daily analysis quota reached.",
+        details: {
+          gate: "quota",
+          quota_type: "memory_analysis",
+          current: 5,
+          limit: 5,
+          used_today: 5,
+          resets_at: "2026-09-24T00:00:00Z",
+        },
+      });
+      const probe = makeProbe(server);
+
+      const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+      expect(err).toBeInstanceOf(KaguraQuotaError);
+      const quota = err as KaguraQuotaError;
+      expect(quota.message).toBe("Daily analysis quota reached.");
+      expect(quota.quotaType).toBe("memory_analysis");
+      expect(quota.usedToday).toBe(5);
+      // No Retry-After header, so the wait comes from resets_at.
+      expect(quota.retryAfter).toBe(60);
+
+      // A Retry-After header, when sent, wins over resets_at.
+      server.responseHeaders = { "Retry-After": "5" };
+      const withHeader = await caught(probe.requestPublic("POST", "/api/v1/things"));
+      expect((withHeader as KaguraQuotaError).retryAfter).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("maps 404 to KaguraNotFoundError with the server detail", async () => {
