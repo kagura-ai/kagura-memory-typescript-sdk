@@ -6,6 +6,227 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`auth list --json`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55))
+  emits the Python CLI's payload: one object per profile, in file order,
+  with `profile`, `default`, `user_email`, `workspace_name`,
+  `workspace_id`, `server`, `scope`, `expired`, `refreshable` and
+  `expires_at` (UTC, as Python's `isoformat()` writes it). No token is
+  ever included, and with no profile it prints `[]` and exits 0, as Python
+  does.
+
+- **`auth status` reports the Claude Code entry in use**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  After the profile blocks it prints the `kagura-memory` entry Claude Code
+  uses in the current directory, from the strongest of local, project and
+  user scope, and each entry that one hides, in the Python CLI's words:
+  refresh-aware for the `kagura-mcp` stdio proxy, legacy static token (with
+  the Python CLI's `setup claude --profile` as the way to migrate), or url
+  form. It prints nothing when no scope defines one or the one in use is
+  no form it knows.
+
+- **`doctor` warns about an unset header variable, and checks
+  `kagura-mcp` on `PATH`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  For each `${VAR}` without a default that a header of the entry in use
+  sends and that is unset or empty here, `doctor` warns, in Python's
+  words, that Claude Code would send it as literal text. This is the one
+  way the new user-scope entry fails. For a `kagura-mcp` stdio entry, which
+  the Python CLI's `--profile` setup writes, it passes or fails on whether
+  `kagura-mcp` is on `PATH`.
+
+- **`setup claude` accepts the Python CLI's hook, command and
+  context-selection flags**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
+  `--session-hook`, `--no-session-hook`, `--sync-hook`, `--no-sync-hook`,
+  `--commands`, `--no-commands` and `--no-auto-context`. This port installs
+  no hooks or slash commands and never picks a context, so they change
+  nothing, as their help says; a script written for `kagura setup claude`
+  no longer fails on an unknown option. A flag that asks for a hook or
+  command gets a note saying it did nothing.
+
+- **`recall --rerank` / `--no-rerank`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  Without either flag no `use_rerank` is sent, so the server (memory-cloud
+  v0.69.0+) follows the context's search config. `--rerank` sends
+  `use_rerank: true`, which applies only where the context allows
+  reranking, and `--no-rerank` sends an explicit `false`, which always
+  skips it. The help and examples
+  are the Python CLI's. Giving both is a usage error (exit 2), as it
+  already is on `context search-config`, where click takes the last one.
+
+- **`context list --name-contains / --summary / --details / --stats`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
+  with the Python CLI's help, map to `listContexts`'s `nameContains`,
+  `includeSummary`, `includeDetails` and `includeStats`. The first three
+  need memory-cloud v0.73.0+; `--stats` works on any server. An empty
+  `--name-contains=` lists everything, as in Python. The `contexts` alias
+  takes none of these options, as in Python, and its help now says to use
+  `context list` for them.
+
+- **`update-memory --dismiss-supersede-candidate`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55))
+  rejects the memory's `supersede_candidate` suggestion (server v0.65.0+;
+  older servers drop the flag silently). It needs `--memory-id`: with
+  `--external-id` it exits 1 before anything is sent, with the Python
+  CLI's message, `--dismiss-supersede-candidate requires --memory-id (not
+  --external-id)`. An empty `--external-id=` is refused the same way, as
+  `updateMemory` refuses it; the Python CLI lets that one through and
+  sends the empty value.
+
+### Changed
+
+- **`setup claude --scope user` keeps the API key off `claude`'s command
+  line and out of `~/.claude.json`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The entry passed to `claude mcp add-json` carried the key, where any
+  local user could read it in the process list while the command ran, and
+  Claude Code then stored it in `~/.claude.json`. The entry now sends
+  `Authorization: Bearer ${KAGURA_MCP_API_KEY}`, which `add-json` stores as
+  written and Claude Code expands from its own environment each time it
+  connects: the entry the Python CLI writes (python-sdk#258), so a run of
+  either CLI finds the other's entry up to date, where before this CLI
+  replaced Python's with a baked key. Export `KAGURA_MCP_API_KEY` where
+  Claude Code starts. It is deliberately not `KAGURA_API_KEY`, which the
+  SDK ranks above `.kagura.json` and every OAuth profile. Setup's notes
+  say where the key now comes from and whether this shell has the
+  variable, never printing it, and `applied_with` shows the command as it
+  ran. Without `claude` on `PATH`, the printed command names the variable
+  as well, rather than expanding `$KAGURA_API_KEY` into the command line
+  when pasted. `--scope project` is unchanged: the key stays in
+  `.mcp.json` (0600, gitignored), as in Python. `.kagura.json` keeps the
+  key at both scopes.
+
+- **A failed user-scope replace never puts back an entry that holds a
+  key** ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  When `add-json` failed after the old entry was removed, the old entry
+  went back through `claude`'s argv, and an entry with a baked key took
+  that key with it. As in Python, such an entry is not put back. When it
+  is not, or putting back an entry without a key fails too, setup prints
+  the command that re-adds it, a baked key masked as `<your-api-key>`, and
+  the error keeps the first failure and says why the old entry could not
+  be restored.
+
+- **Each `auth` subcommand takes only the options it reads**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The subcommands shared one option set, so `auth status --yes` or
+  `auth list --server …` parsed and then did nothing. Each now declares its
+  own, as the Python CLI does, so any other option is an unknown option
+  (exit 2) and `--help` lists only the subcommand's own. `refresh` keeps
+  `--no-browser` for the device flow a widening scope re-runs. `--invite`
+  outside `login` is still refused with its own message, its value never
+  quoted. The help texts are Python's where the behaviour is the same.
+
+- **An unknown option is reported in click's words**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
+  `Error: No such option: --x`, on every command, where this CLI said
+  `Unknown option: --x`. It matches the `Error: No such command '…'.` an
+  unknown command already got. The exit code (2) and the help that follows
+  are unchanged.
+
+- **`auth logout` revokes the token on the server first**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
+  as the Python CLI does. `POST /api/v1/oauth/revoke` is best effort,
+  bounded at 30 seconds: the profile is deleted whatever the server says,
+  and a failure prints Python's warning (with `--all`, every profile is
+  revoked and a failure is silent, as in Python). A note follows when
+  `KAGURA_API_KEY` is still set, and `-y` is now short for `--yes`. The
+  confirmation prompt, the exit 0 for a logout that names no profile when
+  nothing is stored, and the usage error (exit 2) for `--all` with
+  `--profile`, where Python ignores `--profile` and removes every profile,
+  stay as they were.
+
+- **Three exit codes follow the Python CLI**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
+  `auth login --read-only --scope …` exits 1 (was 2), since Python raises a
+  `ClickException` there, not a usage error; `auth list` with no profile
+  exits 1 with `Error: No profiles. Run: kagura-memory auth login` (was 0);
+  and `doctor` exits 1 (was 0) when the entry in use is a `kagura-mcp`
+  stdio entry and `kagura-mcp` is not on `PATH`, the new check failing as
+  Python's does. That includes an entry that names it by path or through
+  a launcher, which `doctor` used to report with a warning (see Fixed).
+
+- **`setup claude` messages follow Python's**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  A fresh user-scope add notes `Added kagura-memory at user scope (…)`,
+  and a replacement `Replaced the existing user-scope kagura-memory entry
+  (…)`. With the Kagura Memory plugin enabled, the notes add that the
+  plugin has one guardrail context for every project and authenticates
+  only with a user API key. The help gives the server floors for
+  `--guardrails` (memory-cloud v0.74.0+) and `--tool-profile` (v0.73.0+),
+  and the profile names the server knows, `full` and `core`.
+
+- **`refreshAccessToken`'s non-OAuth failure quotes an
+  `error_description`**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  A refresh answered with an `error_description` but no `error` code used to
+  end `Body: <the raw JSON>`; it now ends `Body: <the description>`, as the
+  Python SDK's does. A body with an `error` code reads as before.
+
+### Fixed
+
+- **`doctor` and `auth status` know a `kagura-mcp` entry by path or
+  launcher**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  `doctor` took an entry for the stdio proxy only when its command was
+  exactly `kagura-mcp`, so `/venv/bin/kagura-mcp`, `kagura-mcp.exe` and
+  `uvx --from kagura-memory kagura-mcp`, which work in Claude Code, were
+  reported as no usable entry. One classifier, Python's, now serves
+  `setup claude`, `doctor` and `auth status`.
+
+- **Messages name the `.claude.json` actually read**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  With `$CLAUDE_CONFIG_DIR` set, `setup claude` and `doctor` read
+  `$CLAUDE_CONFIG_DIR/.claude.json` but still called it `~/.claude.json`.
+  They now name it as Python does: under `~` when it is in the home
+  directory, by its full path otherwise.
+
+- **A workspace-URL 400/403 from the MCP transport says why**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  memory-cloud answers a `/mcp/w/<workspace>` URL whose workspace id is
+  malformed, or that the credential does not belong to, with an OAuth-style
+  body, `{"error": "<code>", "error_description": "..."}`, and the shared
+  error extractor did not read that shape, so `KaguraClient` threw a bare
+  `HTTP 403`. It now reads `error_description` last, after the other five
+  shapes, as the Python SDK's `extract_detail` does: `HTTP 403: You are
+  not a member of this workspace.` `authorizeDevice` had its own copy of
+  that rule and now uses the shared one, with the same messages.
+
+- **README claims that no longer held**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  The bin ports 17 of the Python CLI's 21 top-level commands, counting the
+  `contexts` alias, not "17 of 19". `kagura process` was removed from the
+  Python SDK in v0.37.0 and is no longer listed as not ported. The Python
+  commands and options this bin lacks are now listed under **Not ported**:
+  `auth create-key` / `list-keys` / `revoke-key`, `workspace member …` /
+  `workspace invite …`, `guardrails load` / `digest`, `measure record` /
+  `series`, `-v/--verbose` / `--progress` on `files upload` and
+  `resource import`, and `--url-form` / `--api-key-env` / `--agents-md` on
+  `setup codex`, `setup hermes` and `setup openclaw`. The intro no longer
+  says every flag name is the Python CLI's: the options only this bin has
+  (`secret keygen --reveal`, `-c` on `setup`, and `--api-key` /
+  `--project-dir` / `--tool-profile` on the three harness subcommands)
+  are listed under **Only in this bin**. The divergence paragraph named
+  one place where this CLI refuses what click accepts, an empty
+  `--profile=` or `--scope=`; it now also names `--lock --unlock`,
+  `--rerank --no-rerank`, `auth logout --all --profile`,
+  `--dismiss-supersede-candidate` beside an empty `--external-id=`, a
+  value that begins with a dash, and attached or grouped short options.
+  The invite section says that a server older than memory-cloud 0.70.0
+  takes no invites.
+
+- **A bad `-i` on `update-memory`, or `-k` on `forget`, is a usage error
+  whatever else is wrong**
+  ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)).
+  click converts a `type=float` or `type=int` option before the command's
+  own checks run, so the Python CLI exits 2 with `Invalid value for
+  '--importance' / '-i': 'abc' is not a valid float.` even when
+  `--memory-id` / `--external-id` (or, for `forget`, `--memory-id` /
+  `--query`) is also missing or wrong. This CLI ran those checks first and
+  exited 1 with their message; it now converts the option first.
+
 ## [0.10.1] - 2026-09-23
 
 ### Fixed
