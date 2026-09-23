@@ -32,6 +32,12 @@ beforeEach(() => {
   // local-scope key is the sandbox too.
   fs.mkdirSync(path.join(dir, ".git"));
   process.env.CLAUDE_CONFIG_DIR = dir;
+  // An isolated HOME, which does not contain the sandbox: messages name a
+  // file under HOME as `~/…`, and the sandbox's own paths must print in
+  // full wherever TMPDIR is, ~/tmp included.
+  process.env.HOME = path.join(dir, "home");
+  process.env.USERPROFILE = process.env.HOME;
+  fs.mkdirSync(process.env.HOME);
   process.chdir(dir);
   // `auth logout` notes it when set.
   delete process.env.KAGURA_API_KEY;
@@ -184,7 +190,7 @@ describe("cli: usage and dispatch", () => {
   it("reports --json as unknown rather than silently ignoring it", async () => {
     const h = harness();
     expect(await runCli(["login", "--json"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: --json/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: --json/);
   });
 
   it("rejects an unknown command and an unknown flag", async () => {
@@ -195,7 +201,8 @@ describe("cli: usage and dispatch", () => {
 
     const b = harness();
     expect(await runCli(["login", "--porfile", "x"], b.deps)).toBe(2);
-    expect(b.err.join("\n")).toMatch(/Unknown option: --porfile/);
+    // Click's too.
+    expect(b.err[0]).toBe("Error: No such option: --porfile");
   });
 
   it("rejects an unknown subcommand of a real group", async () => {
@@ -216,7 +223,7 @@ describe("cli: usage and dispatch", () => {
     // its own spec instead of sharing one global set.
     const h = harness();
     expect(await runCli(["recall", "q", "--read-only"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: --read-only/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: --read-only/);
   });
 });
 
@@ -895,7 +902,7 @@ describe("cli: each auth subcommand takes only the flags it reads", () => {
     const h = harness();
     const argv = ["auth", name, ...(name === "use" ? ["default"] : []), flag, ...(VALUE_FLAGS.has(flag) ? ["x"] : [])];
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Unknown option: ${flag}`);
+    expect(h.err[0]).toBe(`Error: No such option: ${flag}`);
     expect(h.out).toEqual([]);
     expect(h.loginCalls).toEqual([]);
     expect(h.refreshCalls).toEqual([]);
@@ -973,7 +980,7 @@ describe("cli: status", () => {
     function writeUserEntry(entry: unknown): void {
       fs.writeFileSync(path.join(dir, ".claude.json"), JSON.stringify({ mcpServers: { "kagura-memory": entry } }));
     }
-    /** The label of $CLAUDE_CONFIG_DIR/.claude.json: the sandbox is not under HOME. */
+    /** The label of $CLAUDE_CONFIG_DIR/.claude.json: the sandbox is not under HOME (see beforeEach). */
     const userLabel = () => path.join(dir, ".claude.json");
 
     /** What `status` prints after the profile blocks. */
@@ -1173,11 +1180,14 @@ describe("cli: logout", () => {
     expect(fs.existsSync(credentialsPath)).toBe(false);
   });
 
-  it("rejects --all together with --profile", async () => {
-    seed({ default: creds() });
+  it.each([[[]], [["--yes"]]])("rejects --all together with --profile (%j)", async (extra) => {
+    // Python ignores --profile and removes every profile; naming one says
+    // the rest should stay, so this refuses rather than guess.
+    seed({ default: creds(), work: creds() });
     const h = harness();
-    expect(await runCli(["logout", "--all", "--profile", "default"], h.deps)).toBe(2);
-    expect(fs.existsSync(credentialsPath)).toBe(true);
+    expect(await runCli(["logout", "--all", "--profile", "default", ...extra], h.deps)).toBe(2);
+    expect(h.err).toEqual(["--all and --profile are mutually exclusive; pick one."]);
+    expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default", "work"]);
   });
 
   it("is a successful no-op when there is nothing stored", async () => {
@@ -1244,6 +1254,35 @@ describe("cli: logout", () => {
       expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
       expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
       expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+    });
+
+    it("gives up on the server after 30 s, Python's timeout, and still removes the profile", async () => {
+      // A server that never answers: only the request's signal ends it.
+      // The timer is stood in for by a signal that has already fired, so
+      // the test does not wait; without the bound there is no signal at all.
+      const fired = AbortSignal.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(fired);
+      let signal: AbortSignal | null | undefined;
+      const hang = (async (_input: unknown, init?: RequestInit) => {
+        signal = init?.signal;
+        if (!signal) throw new Error("the revocation is unbounded");
+        const bound = signal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (bound.aborted) reject(bound.reason);
+          else bound.addEventListener("abort", () => reject(bound.reason));
+        });
+      }) as typeof globalThis.fetch;
+      try {
+        seed({ default: creds() });
+        const h = harness({ fetch: hang });
+        expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+        expect(timeout).toHaveBeenCalledWith(30_000);
+        expect(signal).toBe(fired);
+        expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
+        expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+      } finally {
+        timeout.mockRestore();
+      }
     });
 
     it("revokes every profile with --all, and says nothing of a failure, as Python does", async () => {

@@ -178,7 +178,7 @@ describe("kagura-memory recall", () => {
   it("rejects --k, which Python does not declare", async () => {
     const { code, h } = await wire(["recall", "q", "--k", "3"]);
     expect(code).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Unknown option: --k/);
+    expect(h.err.join("\n")).toMatch(/Error: No such option: --k/);
   });
 
   it("exits 2 when the query positional is missing", async () => {

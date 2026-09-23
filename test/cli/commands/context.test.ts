@@ -109,7 +109,7 @@ describe("kagura-memory context update", () => {
   it("takes the context id positionally, not from --context-id", async () => {
     const { code, h } = await wire(["context", "update", "--context-id", "ctx-1", "-d", "x"]);
     expect(code).toBe(2);
-    expect(h.err.join("\n")).toContain("Unknown option: --context-id");
+    expect(h.err.join("\n")).toContain("Error: No such option: --context-id");
   });
 });
 

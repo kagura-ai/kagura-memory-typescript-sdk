@@ -130,8 +130,9 @@ Bearer header. The key comes from `--api-key`, else the `api_key` in
 `.kagura.json`, else `KAGURA_API_KEY`. `.kagura.json` gets the URL as
 given; the parameters that `--guardrails` and `--tool-profile` set go on
 the entry's URL only. The key is never printed, and no harness CLI gets
-it on its command line; of the harness configs, only a project
-`.mcp.json` holds it.
+it on its command line. Of the files that hold the MCP entry, only a
+project `.mcp.json` holds the key as well; Hermes and OpenClaw read it
+from their own `.env`, as the table shows.
 `setup codex` also leaves a key it found in `KAGURA_API_KEY` out of
 `.kagura.json`.
 
@@ -226,7 +227,11 @@ scope.
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
 neither exists in this package and both would cost the zero-dependency
-promise. Use the Python CLI for those.
+promise. Use the Python CLI for those. The Claude Code extras of
+`kagura setup claude` are not ported either: its SessionStart and
+PostToolUse hooks and its `/kagura-recall` and `/kagura-remember`
+commands. `setup claude` here writes `.kagura.json` and the MCP entry
+only, and takes their flags as inert (see above).
 
 **Three deliberate divergences.**
 
@@ -260,22 +265,25 @@ server's reason, when it gives one, on the next line.
 `KaguraAuthError`.
 
 **`auth` subcommands.** Each takes only the options it reads, as in the
-Python CLI: any other is an unknown option (exit 2), and `--help` lists
-only its own. `auth status` ends with the `kagura-memory` entry Claude
-Code uses in the current directory and each entry it hides, in the Python
-CLI's words (nothing when no scope defines one). `auth list --json` emits
-Python's fields per profile (`profile`, `default`, `user_email`,
-`workspace_name`, `workspace_id`, `server`, `scope`, `expired`,
-`refreshable`, `expires_at`), never a token, and `[]` when there is none;
-`auth list` without profiles exits 1. `auth logout` revokes the access
+Python CLI: any other is refused with click's `Error: No such option: …`
+(exit 2), and `--help` lists only its own. `auth status` ends with the
+`kagura-memory` entry Claude Code uses in the current directory and each
+entry it hides, in the Python CLI's words (nothing when no scope defines
+one). `auth list --json` emits Python's fields per profile (`profile`,
+`default`, `user_email`, `workspace_name`, `workspace_id`, `server`,
+`scope`, `expired`, `refreshable`, `expires_at`), never a token, and `[]`
+when there is none; `auth list` without profiles exits 1. `auth logout`
+revokes the access
 token on the server before it deletes the profile, best effort: the
 profile is deleted even when that fails, with Python's warning (with
 `--all`, silently, as in Python). It notes when `KAGURA_API_KEY` is still
 set. Unlike the Python CLI, it asks before removing anything unless
-`--yes` (`-y`) is given, rather than refusing `--all` without it, and a
+`--yes` (`-y`) is given, rather than refusing `--all` without it; a
 logout that names no profile succeeds when nothing is stored, so
-`logout --yes` stays idempotent in setup scripts. `auth login` with both
-`--read-only` and `--scope` exits 1, as Python does.
+`logout --yes` stays idempotent in setup scripts; and `--all` with
+`--profile` is a usage error (exit 2), where Python ignores `--profile`
+and removes every profile. `auth login` with both `--read-only` and
+`--scope` exits 1, as Python does.
 
 #### Signing up with an invite
 

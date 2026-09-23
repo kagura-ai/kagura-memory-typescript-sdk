@@ -582,14 +582,17 @@ function noteApiKeyEnv(deps: CliDeps): void {
  * `kagura auth logout` — revoke on the server, best effort, then delete
  * the profile.
  *
- * Two deliberate differences from Python remain: this asks before it
+ * Three deliberate differences from Python remain: this asks before it
  * removes anything (`--yes`/`-y` skips it) where Python refuses `--all`
- * without `--yes`, and an untargeted logout with nothing stored succeeds
- * (see below) where Python exits 1.
+ * without `--yes`; an untargeted logout with nothing stored succeeds (see
+ * below) where Python exits 1; and `--all` with `--profile` is a usage
+ * error where Python ignores `--profile` and removes every profile.
  */
 async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
   const all = args.flags.has("all");
   const target = args.values.profile;
+  // Naming one profile says the rest should stay; removing them all
+  // anyway, as Python does, cannot be undone.
   if (all && target !== undefined) {
     deps.writeError("--all and --profile are mutually exclusive; pick one.");
     return 2;
@@ -788,7 +791,7 @@ const AUTH_GROUP: CommandGroup = {
       description:
         "  The server-side revoke is best effort: the profile is deleted even when\n" +
         "  it fails. Asks first unless --yes; with nothing stored, a logout that\n" +
-        "  names no profile succeeds.",
+        "  names no profile succeeds. --all does not take --profile.",
       spec: LOGOUT_SPEC,
       run: refuseInvite((deps, args) => cmdLogout(deps as CliDeps, args)),
     },
@@ -943,7 +946,8 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
   if (parsed.unknown.length > 0 || parsed.missingValue.length > 0 || empty.length > 0) {
     for (const flag of parsed.unknown) {
-      deps.writeError(`Unknown option: ${flag}`);
+      // Click's wording, as for an unknown command.
+      deps.writeError(`Error: No such option: ${flag}`);
     }
     for (const flag of parsed.missingValue) {
       deps.writeError(`Option ${flag} needs a value.`);
