@@ -1478,9 +1478,11 @@ export class KaguraClient {
    * Soft-delete memories (30-day retention) by specific memoryId or by
    * search query.
    *
-   * Tool guardrails the caller may not delete (below context editor, or on
-   * an agent credential) are skipped silently, not refused — check
-   * `deleted_count`, which can be 0 even for an explicit `memoryId`.
+   * A target the caller may not delete, or one already gone, is skipped
+   * silently, not refused. Since server v0.74.0 that includes every tool
+   * guardrail when the caller is below context editor or on an agent
+   * credential. Check `deleted_count`, which can be 0 even for an explicit
+   * `memoryId`.
    *
    * @throws Error if neither memoryId nor query is provided.
    */

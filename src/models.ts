@@ -1193,8 +1193,9 @@ export interface AuditVerifyResponse {
  * enforces) when a matching tool call happens.
  *
  * `tool` is a regex full-matched against the tool name; `match`, when
- * present, is searched in the call's subject (command, path, JSON args).
- * The server validates both on write against a safe-regex subset shared by
+ * present, is searched in the call's subject: the command, file path or
+ * JSON args for `on: "pre"`, the tool's error or result text for
+ * `on: "result"`. The server validates both on write against a safe-regex subset shared by
  * Python and JavaScript and never runs them — matching is the hook's job.
  * `"block"` is only accepted with `on: "pre"` and a specific `match`.
  *
