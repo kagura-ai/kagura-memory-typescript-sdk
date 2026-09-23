@@ -142,12 +142,17 @@ describe("parseArgs", () => {
       [["-kabc"], "abc"],
       [["-yk5"], "5"],
       [["-yk", "5"], "5"],
-      [["-k=5"], "5"],
     ])("reads a value option's value from the rest of the token or the next (%j)", (argv, value) => {
       const parsed = short(argv);
       expect(parsed.values.k).toBe(value);
       expect(parsed.unknown).toEqual([]);
       expect(parsed.positionals).toEqual([]);
+    });
+
+    it("reads -k=5 as 5, a documented divergence (click reads '=5')", () => {
+      const parsed = short(["-k=5"]);
+      expect(parsed.values.k).toBe("5");
+      expect(parsed.unknown).toEqual([]);
     });
 
     it("reports a value option at the end of a cluster with nothing after it", () => {

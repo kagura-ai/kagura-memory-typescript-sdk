@@ -302,7 +302,8 @@ key (see key custody below) and refuses to print it to a terminal without
 `setup claude`. `auth refresh --no-browser`: a refresh that widens
 `--scope` re-runs the device flow here too, and this skips opening the
 browser, as on `auth login`; Python's `auth refresh` takes only
-`--profile` and `--scope`. `setup codex`, `setup hermes` and
+`--profile` and `--scope`. `-h` is short for `--help` everywhere, where
+the Python CLI takes only `--help`. `setup codex`, `setup hermes` and
 `setup openclaw` still
 accept `--api-key` and `--project-dir`, which they took before 0.11.0, so
 older scripts still run. Neither does anything now, and a note says so.
@@ -374,6 +375,8 @@ would accept.
   `--external-id`, before anything is sent. The Python CLI refuses only a
   non-empty one, and sends an empty `--external-id=` to the server; this
   CLI refuses that too, as `updateMemory` does.
+- `-k=5` (a short option, `=`, a value) reads `5`, where click reads `=5`
+  as the value and then refuses it.
 - An option that takes a value does not take a following argument that
   begins with a dash and is not a number (a lone `-` is still a value):
   `--name-contains -auth` is a missing value here, where click takes

@@ -848,10 +848,18 @@ interface Resolved {
  * token, and `Option '--json' does not take a value.` Click 8.4 and later
  * word the first `No such option '--x'.`. Click also suggests a close
  * match (`Did you mean --json?`), which this bin does not.
+ *
+ * Only one is reported, as click stops at the first error. Naming every
+ * unknown would also name the `-Z` of a pasted `--invite -Z…` token.
  */
 function reportBadOptions(deps: CliDeps, parsed: Pick<ParsedArgs, "unknown" | "noValue">): void {
-  for (const name of parsed.unknown) deps.writeError(`Error: No such option: ${name}`);
-  for (const name of parsed.noValue) deps.writeError(`Error: Option '${name}' does not take a value.`);
+  const [unknown] = parsed.unknown;
+  if (unknown !== undefined) {
+    deps.writeError(`Error: No such option: ${unknown}`);
+    return;
+  }
+  const [noValue] = parsed.noValue;
+  if (noValue !== undefined) deps.writeError(`Error: Option '${noValue}' does not take a value.`);
 }
 
 /** The options the root takes, beside `--help`; `--version` is answered before a command is looked up. */

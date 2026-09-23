@@ -160,9 +160,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Short options combine as in click**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)):
-  `-k10` is `-k 10`, and `-yv` is `-y -v`, where this CLI refused both as
-  unknown options. In such a group the first letter that is no option is
-  reported by itself: `recall q -yx` is `Error: No such option: -x`.
+  `-k10` is `-k 10`, and switches can share one dash, where this CLI
+  refused both as unknown options. In such a group the first letter that
+  is no option is reported by itself: `context delete ID -yx` is
+  `Error: No such option: -x`. Only the first bad option is reported, as
+  click stops at the first error. One case still differs: `-k=5` reads
+  `5` here, where click reads `=5`.
 
 - **`auth logout` revokes the token on the server first**
   ([#55](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/55)),
@@ -330,7 +333,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     on POSIX it runs as the leader of its own process group, and the whole
     group is killed. So a launcher such as the npm `codex`, whose native
     binary inherits the output pipes, no longer keeps setup waiting past
-    the timeout, and nothing is left running. On Windows only the CLI
+    the timeout, and nothing it started is left running unless a process
+    detached itself on purpose. On Windows only the CLI
     itself is killed, and setup returns at the timeout all the same.
   - Hermes is `Hermes Agent`, and paths under the home directory are
     written `~/…`, in messages. The JSON fields keep full paths.

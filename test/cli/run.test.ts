@@ -228,6 +228,15 @@ describe("cli: usage and dispatch", () => {
     expect([...h.out, ...h.err].join("\n")).not.toContain("kg_secret");
   });
 
+  it("reports only the first bad option, as click stops at the first error", async () => {
+    // Every later unknown would otherwise be named too: the `-Z` of a
+    // pasted `--invite -Zkg_secret…` token, one character of it.
+    const h = harness();
+    expect(await runCli(["recall", "q", "--invite", "-Zkg_secret_key", "--bogus"], h.deps)).toBe(2);
+    expect(h.err.filter((l) => l.startsWith("Error:"))).toEqual(["Error: No such option: --invite"]);
+    expect([...h.out, ...h.err].join("\n")).not.toContain("-Z");
+  });
+
   it.each([
     [["--bogus"], "Error: No such option: --bogus", "Usage: kagura-memory [OPTIONS]"],
     [["--bogus=kg_secret_key"], "Error: No such option: --bogus", "Usage: kagura-memory [OPTIONS]"],

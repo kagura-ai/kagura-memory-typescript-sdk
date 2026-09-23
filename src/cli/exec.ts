@@ -49,9 +49,9 @@ export interface ExecResult {
  *
  * `.cmd` and `.bat` are left out on purpose: Node refuses to spawn them
  * without a shell, and a shell would re-parse the argv — the JSON full of
- * quotes that `claude mcp add-json` and `openclaw mcp set` take — and
- * expand the `${KAGURA_MCP_API_KEY}` / `${KAGURA_API_KEY}` reference in it,
- * which the harness must receive as written. A harness installed only as a
+ * quotes that `claude mcp add-json` and `openclaw mcp set` take, and its
+ * `${KAGURA_MCP_API_KEY}` / `${KAGURA_API_KEY}` reference, which the
+ * harness must receive exactly as written. A harness installed only as a
  * `.cmd` shim is treated as absent, and `setup` prints the block for the
  * user to apply instead.
  */
