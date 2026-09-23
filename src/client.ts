@@ -511,11 +511,14 @@ export class KaguraClient {
   /**
    * Make a JSON-RPC 2.0 request to the MCP server.
    *
-   * A request naming a session the server has dropped (idle hour, restart)
-   * gets a 404; without recovery a long-lived client would fail every call
-   * from then on (#39). The session is re-opened and the request retried
-   * exactly once. The server rejects it before dispatch, which makes that
-   * retry safe even for a non-idempotent `tools/call`.
+   * MCP Streamable HTTP answers a request naming a session the server has
+   * dropped (idle hour, restart) with a 404 and requires a new `initialize`;
+   * without recovery a long-lived client would fail every call from then on
+   * (#39). The session is re-opened and the request retried exactly once.
+   * The server rejects it before dispatch, which makes that retry safe even
+   * for a non-idempotent `tools/call`. (As deployed, server v0.75.0
+   * re-adopts an unknown session id instead, so against it this never
+   * fires.)
    */
   private async makeJsonRpcRequest(
     method: string,

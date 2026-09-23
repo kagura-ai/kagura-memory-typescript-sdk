@@ -126,6 +126,10 @@ const JSONRPC_METHOD_NOT_FOUND = -32601;
  * longer holds with `404`, and the client must then send a new
  * `initialize`. The server keeps legacy (`initialize`-handshake) sessions
  * in process memory and drops them after an idle hour and on every restart.
+ * (As deployed, v0.75.0 re-adopts an unknown session id instead of
+ * answering `404`, so against it this never fires; it is reached against a
+ * server that enforces the spec.)
+ *
  * The one `404` that is not about the session is the stateless 2026-07-28
  * `-32601` Method-not-found reply: that path ignores the session id, so
  * re-initializing would only open an orphan session.
