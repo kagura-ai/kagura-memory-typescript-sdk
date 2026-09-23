@@ -28,8 +28,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **An MCP URL with a query broke every REST call**
   ([#38](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/38)):
-  server v0.73 reads `?profile=`, `?tools=` and `?guardrails=` off the MCP
-  URL, but a query sitting directly on `/mcp`
+  server v0.73 reads `?profile=` and `?tools=` off the MCP URL (v0.74 adds
+  `?guardrails=`), but a query sitting directly on `/mcp`
   (`https://memory.kagura-ai.com/mcp?profile=core`) was not taken as the end
   of that segment, so the whole URL became the REST base and
   `getServerInfo()` requested `…/mcp?profile=core/api/v1/system/info`. MCP

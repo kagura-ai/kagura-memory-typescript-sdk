@@ -33,8 +33,8 @@ describe("baseUrlFromMcp", () => {
     expect(baseUrlFromMcp("https://x.test/mcpx/foo")).toBe("https://x.test/mcpx/foo");
   });
 
-  // Server v0.73+ reads `?profile=` / `?tools=` / `?guardrails=` off the
-  // MCP URL, so a query can sit directly on `/mcp`. It must not leak into
+  // Server v0.73+ reads `?profile=` / `?tools=` (v0.74+ `?guardrails=`) off
+  // the MCP URL, so a query can sit directly on `/mcp`. It must not leak into
   // the REST base as `/mcp?profile=core/api/v1/...`.
   it.each([
     "https://x.test/mcp?profile=core",

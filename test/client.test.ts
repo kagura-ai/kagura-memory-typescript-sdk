@@ -587,7 +587,11 @@ describe("REST endpoints", () => {
     await client.getServerInfo();
     expect(server.requests[0]!.url).toBe("https://x.test/api/v1/system/info");
     // MCP calls still carry the query: the server reads the profile there.
-    expect(client.mcpUrl).toBe("https://x.test/mcp?profile=core");
+    await client.listContexts();
+    expect(server.requests).toHaveLength(3); // REST + MCP init + tool call
+    for (const request of server.requests.slice(1)) {
+      expect(request.url).toBe("https://x.test/mcp?profile=core");
+    }
   });
 
   it("checkServerVersion returns info and never throws on old servers", async () => {
