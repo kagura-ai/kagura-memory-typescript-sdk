@@ -277,6 +277,23 @@ describe("recall", () => {
     });
   });
 
+  it("sends useRerank: false rather than dropping it (#37)", async () => {
+    // Since server v0.69.0 an omitted use_rerank follows the context's
+    // search config, so dropping false would let a rerank-enabled context
+    // rerank anyway. Only undefined may leave the key off the wire.
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.recall({ contextId: "c", query: "q", useRerank: false });
+    await client.recall({ contextIds: ["a", "b"], query: "q", useRerank: false });
+    await client.recall({ contextId: "c", query: "q", useRerank: undefined });
+    await client.recall({ contextId: "c", query: "q" });
+
+    expect(server.toolCallArgs(0).use_rerank).toBe(false);
+    expect(server.toolCallArgs(1).use_rerank).toBe(false);
+    expect(server.toolCallArgs(2)).not.toHaveProperty("use_rerank");
+    expect(server.toolCallArgs(3)).not.toHaveProperty("use_rerank");
+  });
+
   it("reads back what supersedes shadowed, and only when asked (#25)", async () => {
     const server = new FakeServer();
     const superseded = {

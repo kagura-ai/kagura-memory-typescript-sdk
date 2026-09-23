@@ -135,7 +135,14 @@ export interface RecallOptions {
   query: string;
   /** Number of results (default 5). */
   k?: number;
-  /** Enable AI reranking for higher quality results. */
+  /**
+   * AI reranking, tri-state since server v0.69.0. Omit it to follow the
+   * context's search config (set via {@link KaguraClient.updateSearchConfig});
+   * `true` requests reranking, which applies only when the context enables
+   * it and the workspace plan and deployment allow it; `false` skips it for
+   * this call. With `contextIds`, the first listed context's config decides.
+   * Servers before v0.69.0 rerank only on `true`.
+   */
   useRerank?: boolean;
   /**
    * Optional filters: `type`, `tags`, `tags_match` ("any"/"all"),
@@ -340,6 +347,7 @@ export interface UpdateSearchConfigOptions {
   bm25Weight?: number;
   /** Candidate fetch multiplier (1-10). */
   fetchFactor?: number;
+  /** Enable AI reranking; a `recall` that omits `useRerank` follows it (server v0.69.0+). */
   useRerank?: boolean;
   /** "voyage", "cohere", or "ollama". */
   rerankerProvider?: string;
@@ -725,8 +733,10 @@ export class KaguraClient {
     } else {
       args.context_id = contextId;
     }
-    if (options.useRerank) {
-      args.use_rerank = true;
+    // Send an explicit false: since server v0.69.0 an omitted use_rerank
+    // follows the context config, so dropping false would still rerank.
+    if (options.useRerank !== undefined) {
+      args.use_rerank = options.useRerank;
     }
     if (options.filters && Object.keys(options.filters).length > 0) {
       args.filters = options.filters;

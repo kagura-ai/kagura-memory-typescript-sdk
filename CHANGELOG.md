@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`recall({ useRerank: false })` now turns reranking off instead of being
+  dropped**
+  ([#37](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/37)):
+  since memory-cloud v0.69.0 `use_rerank` has three states: omitted follows
+  the context's search config, `false` forces reranking off, and `true` asks
+  for it but still needs the context to allow it. The SDK only ever sent
+  `true`, so a `false` never reached the wire, and on a context whose search
+  config enables reranking the server reranked anyway — the opposite of what
+  the caller asked for, paid for in reranker latency and quota, with results
+  in a different order than the caller expected.
+
+  `use_rerank` is now sent whenever `useRerank` is not `undefined`, `false`
+  included. Leaving it `undefined` still omits it, which is what "follow the
+  context default" means. With `contextIds`, the first listed context's
+  search config is the one that decides. Against a server older than
+  v0.69.0 nothing changes: there an omitted value already meant `false`.
+  The Python SDK gets the same fix for `use_rerank=False` (python-sdk#251).
+
 ## [0.8.0] - 2026-08-01
 
 ### Added
