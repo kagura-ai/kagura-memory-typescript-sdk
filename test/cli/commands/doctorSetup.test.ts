@@ -78,6 +78,10 @@ const ORIGINAL_CWD = process.cwd();
 
 beforeEach(() => {
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-cli-"));
+  // Claude Code keys local scope by the enclosing git root, so a sandbox
+  // under a TMPDIR inside some work tree would inherit that root. Make the
+  // sandbox its own root so every test starts from the same place.
+  fs.mkdirSync(path.join(sandbox, ".git"));
   // An isolated HOME so no real credentials profile is read or written.
   process.env.HOME = path.join(sandbox, "home");
   process.env.USERPROFILE = process.env.HOME;
@@ -308,7 +312,7 @@ describe("kagura-memory doctor", () => {
     it("finds the local-scope entry Claude Code keys by the git root, from a subdirectory", async () => {
       // Claude Code files local scope under the repository root, whichever
       // subdirectory it runs in; a subdirectory's own key is never used.
-      fs.mkdirSync(path.join(sandbox, ".git"));
+      fs.mkdirSync(path.join(sandbox, ".git"), { recursive: true });
       const sub = path.join(sandbox, "pkg", "sub");
       fs.mkdirSync(sub, { recursive: true });
       writeClaudeJson({
@@ -862,7 +866,7 @@ describe("setup claude scopes", () => {
     // `claude mcp remove --scope local|project` acts on the directory it
     // runs in, so pasted as it is, it would miss this project's entry.
     const project = path.join(sandbox, "my project");
-    fs.mkdirSync(project);
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true }); // its own root
     seedClaudeJson({ projects: { [fs.realpathSync(project)]: { mcpServers: { "kagura-memory": {} } } } });
     fs.writeFileSync(
       path.join(project, ".mcp.json"),
@@ -890,7 +894,7 @@ describe("setup claude scopes", () => {
       seedClaudeJson({ projects: { [fs.realpathSync(dir)]: { mcpServers: { "kagura-memory": { type: "http" } } } } });
 
     it("is found at the git root from a subdirectory", async () => {
-      fs.mkdirSync(path.join(sandbox, ".git"));
+      fs.mkdirSync(path.join(sandbox, ".git"), { recursive: true });
       const sub = path.join(sandbox, "pkg", "sub");
       fs.mkdirSync(sub, { recursive: true });
       localEntryAt(sandbox);
@@ -903,7 +907,7 @@ describe("setup claude scopes", () => {
 
     it("ignores a subdirectory's own key inside a repository", async () => {
       // Claude Code never files an entry there, so it hides nothing.
-      fs.mkdirSync(path.join(sandbox, ".git"));
+      fs.mkdirSync(path.join(sandbox, ".git"), { recursive: true });
       const sub = path.join(sandbox, "pkg");
       fs.mkdirSync(sub);
       localEntryAt(sub);
@@ -1071,7 +1075,7 @@ describe("setup claude scopes", () => {
     // name the project through a symlink.
     const real = path.join(sandbox, "real");
     const link = path.join(sandbox, "link");
-    fs.mkdirSync(real);
+    fs.mkdirSync(path.join(real, ".git"), { recursive: true }); // its own root
     fs.symlinkSync(real, link);
     seedClaudeJson({ projects: { [fs.realpathSync(real)]: { mcpServers: { "kagura-memory": {} } } } });
     const h = harness({});

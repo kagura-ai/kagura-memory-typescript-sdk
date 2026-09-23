@@ -54,6 +54,7 @@ import {
   withoutQueryParam,
   yamlHasServer,
   yamlServersIndent,
+  yamlServersInline,
 } from "./harnessConfig.js";
 
 /**
@@ -1275,6 +1276,12 @@ async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
       `${configPath} already has a top-level mcp_servers: key, so only the ${name} entry is ` +
         "printed: a second mcp_servers: key would replace the first, and the servers under it with it",
     );
+    if (yamlServersInline(text)) {
+      notes.push(
+        `${configPath} writes its mcp_servers value inline (flow style or null); rewrite it as a ` +
+          `block mapping, one server per indented key, before adding the ${name} entry under it`,
+      );
+    }
   }
 
   return applyPlan(deps, {

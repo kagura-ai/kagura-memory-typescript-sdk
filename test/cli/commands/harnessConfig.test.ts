@@ -16,6 +16,7 @@ import {
   withoutQueryParam,
   yamlHasServer,
   yamlServersIndent,
+  yamlServersInline,
 } from "../../../src/cli/commands/harnessConfig.js";
 
 const UUID = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
@@ -182,6 +183,13 @@ describe("tomlHasServer", () => {
   });
 });
 
+describe("yamlHasServer behind a BOM or a quoted key", () => {
+  it("still finds the entry", () => {
+    expect(yamlHasServer("\uFEFFmcp_servers:\n  kagura-memory:\n    url: x", "kagura-memory")).toBe(true);
+    expect(yamlHasServer('"mcp_servers":\n  kagura-memory:\n    url: x', "kagura-memory")).toBe(true);
+  });
+});
+
 describe("yamlHasServer", () => {
   it.each([
     "mcp_servers:\n  kagura-memory:\n    url: x",
@@ -212,10 +220,32 @@ describe("yamlServersIndent", () => {
     expect(yamlServersIndent("model: x\nmcp_servers:\n\n    # a note\n    other:\n      url: y")).toBe("    ");
   });
 
+  it("finds the key behind a BOM or in quotes", () => {
+    expect(yamlServersIndent('\uFEFFmcp_servers:\n  other:\n    url: y')).toBe("  ");
+    expect(yamlServersIndent('"mcp_servers":\n    other: {}')).toBe("    ");
+    expect(yamlServersIndent("'mcp_servers':")).toBe("  ");
+  });
+
   it("uses two spaces when the key has no block entries to copy from", () => {
     expect(yamlServersIndent("mcp_servers:\nmodel: x")).toBe("  ");
     expect(yamlServersIndent("mcp_servers: {}")).toBe("  ");
     expect(yamlServersIndent("mcp_servers:")).toBe("  ");
+  });
+});
+
+describe("yamlServersInline", () => {
+  it("is true when the key's value is written inline, flow style or null", () => {
+    expect(yamlServersInline("mcp_servers: {}")).toBe(true);
+    expect(yamlServersInline("mcp_servers: {other: {url: x}}")).toBe(true);
+    expect(yamlServersInline("mcp_servers: null")).toBe(true);
+    expect(yamlServersInline('"mcp_servers": ~')).toBe(true);
+  });
+
+  it("is false for a block mapping, a bare key, or no key", () => {
+    expect(yamlServersInline("mcp_servers:\n  other:\n    url: y")).toBe(false);
+    expect(yamlServersInline("mcp_servers:   # servers below")).toBe(false);
+    expect(yamlServersInline("mcp_servers:")).toBe(false);
+    expect(yamlServersInline("model: x")).toBe(false);
   });
 });
 

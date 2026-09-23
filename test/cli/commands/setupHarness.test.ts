@@ -469,6 +469,18 @@ describe("setup hermes", () => {
     // the first — YAML keeps the last — and drop every other server.
     const other = 'model: x\nmcp_servers:\n  other:\n    url: "https://o"\n';
 
+    it("says to rewrite an inline mcp_servers value as a block first", async () => {
+      fs.mkdirSync(hermesDir(), { recursive: true });
+      fs.writeFileSync(configYaml(), "\uFEFFmcp_servers: {other: {url: x}}\n");
+      const h = harness({});
+      expect(await runCli(setup("hermes"), h.deps)).toBe(0);
+      expect(h.err.join("\n")).not.toMatch(/^mcp_servers:/m);
+      const notes = (report(h).notes as string[]).join("\n");
+      expect(notes).toContain(
+        `${configYaml()} writes its mcp_servers value inline (flow style or null); rewrite it as a block mapping`,
+      );
+    });
+
     it("prints the entry alone, to go under the existing key", async () => {
       fs.mkdirSync(hermesDir(), { recursive: true });
       fs.writeFileSync(configYaml(), other);

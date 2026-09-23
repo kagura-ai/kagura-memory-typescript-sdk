@@ -199,6 +199,13 @@ export function tomlHasServer(text: string, name: string): boolean {
  * Whether Hermes's `config.yaml` text has `<name>` under the top-level
  * `mcp_servers` mapping, in block or flow style.
  */
+/**
+ * The top-level `mcp_servers:` key line, and what follows its colon. A BOM
+ * before it and a quoted key are both valid YAML, and missing either would
+ * print a second top-level key that silently replaces the first.
+ */
+const YAML_SERVERS_KEY = /^\uFEFF?(["']?)mcp_servers\1\s*:(.*)$/;
+
 export function yamlHasServer(text: string, name: string): boolean {
   const key = keyPattern(name);
   const child = new RegExp(`^\\s+${key}\\s*:`);
@@ -207,9 +214,9 @@ export function yamlHasServer(text: string, name: string): boolean {
   for (const line of text.split(/\r?\n/)) {
     // Blank and comment lines neither open nor close a block.
     if (/^\s*(#|$)/.test(line)) continue;
-    const top = /^mcp_servers\s*:(.*)$/.exec(line);
+    const top = YAML_SERVERS_KEY.exec(line);
     if (top !== null) {
-      if (flow.test(top[1]!)) return true;
+      if (flow.test(top[2]!)) return true;
       inBlock = true;
       continue;
     }
@@ -237,12 +244,28 @@ export function yamlServersIndent(text: string): string | null {
     // Blank and comment lines neither open nor close a block.
     if (/^\s*(#|$)/.test(line)) continue;
     if (!found) {
-      found = /^mcp_servers\s*:/.test(line);
+      found = YAML_SERVERS_KEY.test(line);
       continue;
     }
     return /^(\s+)\S/.exec(line)?.[1] ?? "  ";
   }
   return found ? "  " : null;
+}
+
+/**
+ * Whether Hermes's top-level `mcp_servers` value is written inline — flow
+ * style (`{…}`) or a scalar such as `null` — rather than as a block
+ * mapping. An entry printed for placing under the key cannot go there
+ * until the value is rewritten as a block.
+ */
+export function yamlServersInline(text: string): boolean {
+  for (const line of text.split(/\r?\n/)) {
+    const top = YAML_SERVERS_KEY.exec(line);
+    if (top !== null) {
+      return !/^\s*(#|$)/.test(top[2]!);
+    }
+  }
+  return false;
 }
 
 /**
