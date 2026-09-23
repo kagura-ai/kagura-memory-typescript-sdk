@@ -322,12 +322,27 @@ function parseSince(raw: string | undefined): Date | undefined {
 // setup + ingest
 // ---------------------------------------------------------------------
 
+/**
+ * Printed to stderr when `resource setup` is given `--summary`. The flag is
+ * still accepted so existing scripts keep working, but the server's
+ * `setup_resource` has no summary and never had one, so it is not sent
+ * (#47).
+ */
+export const SETUP_SUMMARY_IGNORED_NOTE =
+  "Note: --summary is ignored, since the server's setup_resource has no summary. " +
+  "Set it after setup with `kagura-memory context update <context_id> --summary ...`.";
+
 const setup: Command = {
   summary: "One-shot resource setup: create context + token.",
   spec: {
     flags: [
-      { ...RESOURCE_ID, help: "Resource identifier" },
-      { name: "summary", short: "s", type: "value", help: "Context summary" },
+      { ...RESOURCE_ID, help: "Resource identifier (also the context name)" },
+      {
+        name: "summary",
+        short: "s",
+        type: "value",
+        help: "Deprecated and ignored by the server; use `context update` after setup",
+      },
       { ...DESCRIPTION, help: "Token description" },
       { ...QUOTA, help: "Events/hour (1-10000)", defaultLabel: "1000" },
     ],
@@ -335,7 +350,6 @@ const setup: Command = {
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const resourceId = requiredValue(args, RESOURCE_ID);
-    const summary = args.values.summary;
     const description = args.values.description;
     const raw = args.values.quota;
     // Unlike `tokens create`, this one IS range-checked locally in Python.
@@ -344,10 +358,12 @@ const setup: Command = {
         ? 1000
         : parseRanged(QUOTA, raw, { min: 1, max: 10000, rangeLabel: "1<=x<=10000", integer: true });
     const { config } = resolveConfig(deps, undefined, false);
+    if (args.values.summary !== undefined) {
+      deps.writeError(SETUP_SUMMARY_IGNORED_NOTE);
+    }
     return runAndPrint(deps, () =>
       deps.makeResourceClient().setupResource({
         resourceId,
-        ...(summary !== undefined ? { summary } : {}),
         ...(description !== undefined ? { description } : {}),
         quotaEventsPerHour,
       }),

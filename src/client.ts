@@ -50,6 +50,7 @@ import type {
   ServerInfo,
   SleepReport,
   SleepReportDetail,
+  TagInfo,
   // Referenced only from JSDoc {@link} on the details options.
   ToolTrigger,
   UsageInfo,
@@ -297,7 +298,13 @@ export interface CreateContextOptions {
   summary?: string;
   /** LLM-oriented memory usage guidelines. */
   usageGuide?: string;
-  /** Resource identifier for external data ingestion. */
+  /**
+   * @deprecated The server's `create_context` does not read `resource_id`
+   * (memory-cloud through v0.76.0), so this was silently dropped; it is no
+   * longer sent (#47). Set it afterwards with
+   * `updateContext({ contextId, resourceId })` (owner only), or use
+   * {@link KaguraClient.setupResource} for a resource context.
+   */
   resourceId?: string;
   /**
    * Privacy flag (default: true). A shared (`false`) context needs the
@@ -333,8 +340,19 @@ export interface UpdateContextOptions {
 
 export interface SetupResourceOptions {
   resourceId: string;
-  /** Context name (defaults to resourceId server-side). */
+  /**
+   * Context name (defaults to `resourceId`). The server requires one; a
+   * resource id always passes its context-name rule, up to the 100-character
+   * name limit.
+   */
   name?: string;
+  /**
+   * @deprecated The server's `setup_resource` has no summary (memory-cloud
+   * through v0.76.0), so this was silently dropped; it is no longer sent
+   * (#47). Set it afterwards with
+   * `updateContext({ contextId, summary })` on the returned `context_id`
+   * (owner only).
+   */
   summary?: string;
   /** Token description. */
   description?: string;
@@ -358,8 +376,19 @@ export interface ListTagsOptions {
    * these values from the returned tags.
    *
    * Combine with `prefix` for server-side faceted browsing — one call per
-   * drill-down level, no local index. An empty array is a no-op filter and
-   * is not sent.
+   * drill-down level, no local index.
+   *
+   * Values are trimmed and blank ones dropped, as the server does; at most
+   * 50 remain, each at most 200 characters, or the call throws before any
+   * request. An empty result is a no-op filter and is not sent.
+   *
+   * A non-empty drill-down is sent to the REST route
+   * `GET /api/v1/contexts/{id}/tags`, which has had it since server
+   * v0.17.2: the MCP `list_tags` tool has no `with_tags` (through v0.76.0)
+   * and silently returned the unfiltered vocabulary (#47). The response has
+   * the same shape either way. The REST route sends no `context_name`, so
+   * the client looks it up once per context with a one-tag `list_tags`
+   * call and keeps it; a plain `listTags` call fills the same cache.
    */
   withTags?: string[];
 }
@@ -519,6 +548,12 @@ export class KaguraClient {
   /** Bumped by close(), so a handshake it interrupted cannot re-adopt its session. */
   private sessionEpoch = 0;
   private requestIdCounter = 1;
+  /**
+   * Context id (lower case) → name, for the `listTags` drill-down, whose
+   * REST route sends no name (#47). Safe to keep: the server has no way to
+   * rename a context (`update_context` cannot change `name`).
+   */
+  private readonly contextNames = new Map<string, string>();
 
   constructor(options: KaguraClientOptions = {}) {
     const resolved = resolveAuth({
@@ -713,13 +748,32 @@ export class KaguraClient {
       : {};
   }
 
-  /** GET a REST endpoint and parse the JSON body. */
-  private async restGet<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+  /**
+   * GET a REST endpoint and parse the JSON body.
+   *
+   * An array param is sent as one repeated key per item (`?k=a&k=b`), which
+   * is how FastAPI reads a `list[str]` query; joined, `a,b` is one value.
+   *
+   * Without `operation`, every non-2xx goes through the standard status
+   * mapping (a 404 is a {@link KaguraConnectionError}). With it, a 404 and a
+   * 422 get the classes and messages the MCP path gives that tool's
+   * `*_not_found` and `invalid_argument` errors, so a method that moved
+   * from MCP to REST throws what it always threw.
+   */
+  private async restGet<T>(
+    path: string,
+    params?: Record<string, unknown>,
+    operation?: string,
+  ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
     if (params) {
       const query = new URLSearchParams();
       for (const [key, value] of Object.entries(params)) {
-        if (value !== undefined && value !== null) {
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            query.append(key, String(item));
+          }
+        } else if (value !== undefined && value !== null) {
           query.set(key, String(value));
         }
       }
@@ -745,6 +799,15 @@ export class KaguraClient {
 
     const text = await this.safeText(response);
     if (!response.ok) {
+      if (operation !== undefined) {
+        const detail = extractDetail(text);
+        if (response.status === 404) {
+          throw new KaguraNotFoundError(`${operation}: ${detail || "Not found"}`);
+        }
+        if (response.status === 422) {
+          throw new KaguraError(`${operation} failed (invalid_argument): ${detail || "HTTP 422"}`);
+        }
+      }
       throwForKaguraStatus(response.status, response.headers, text);
     }
     try {
@@ -1495,6 +1558,13 @@ export class KaguraClient {
    *
    * Call before remember() to reuse existing tag spellings, or before
    * recall() with tag filters. Requires memory-cloud server v0.15.4+.
+   * A `withTags` drill-down is sent to the REST tags route rather than MCP
+   * (see {@link ListTagsOptions.withTags}); the result has the same shape.
+   *
+   * @throws Error if `limit`, `minCount`, `prefix` or `withTags` is out of
+   *   range, before any request.
+   * @throws KaguraNotFoundError if the context does not exist or the caller
+   *   cannot see it.
    */
   async listTags(options: ListTagsOptions): Promise<ListTagsResponse> {
     const limit = options.limit ?? 50;
@@ -1509,23 +1579,129 @@ export class KaguraClient {
     if (prefix.length > 200) {
       throw new Error(`prefix must be at most 200 characters, got ${prefix.length}`);
     }
+    // Normalized as the server normalizes it, so the limits below judge the
+    // list the server would. An empty drill-down matches everything
+    // (`tags @> '{}'`), so it is the same as none.
+    const withTags = (options.withTags ?? []).map((t) => t.trim()).filter((t) => t !== "");
+    if (withTags.length > 50) {
+      throw new Error(`withTags accepts at most 50 tags, got ${withTags.length}`);
+    }
+    // In code points, as the server's len() counts, not UTF-16 units.
+    const tooLong = withTags.map((t) => [...t].length).find((n) => n > 200);
+    if (tooLong !== undefined) {
+      throw new Error(`each withTags value must be at most 200 characters, got ${tooLong}`);
+    }
+    const sort = options.sort ?? "count";
+
+    if (withTags.length > 0) {
+      // MCP list_tags has no with_tags through server v0.76.0 and silently
+      // returns the whole vocabulary instead (#47).
+      return this.listTagsViaRest(options.contextId, {
+        limit,
+        min_count: minCount,
+        sort,
+        prefix: prefix || undefined,
+        with_tags: withTags,
+      });
+    }
 
     const args: Record<string, unknown> = {
       context_id: options.contextId,
       limit,
       min_count: minCount,
-      sort: options.sort ?? "count",
+      sort,
     };
     if (prefix) {
       args.prefix = prefix;
     }
-    // An empty drill-down matches everything (`tags @> '{}'`), so it is
-    // equivalent to omitting the key — drop it like an empty prefix.
-    if (options.withTags !== undefined && options.withTags.length > 0) {
-      args.with_tags = options.withTags;
-    }
     const result = await this.callToolChecked("list_tags", args);
+    this.rememberContextName(result);
     return result as unknown as ListTagsResponse;
+  }
+
+  /**
+   * The `listTags` drill-down over `GET /api/v1/contexts/{id}/tags`,
+   * reshaped to exactly what MCP `list_tags` returns: the route adds a
+   * `sample_summary` (always null) but sends no `status` or `context_name`.
+   */
+  private async listTagsViaRest(
+    contextId: string,
+    params: Record<string, unknown>,
+  ): Promise<ListTagsResponse> {
+    // Encoded, so a caller's id cannot add segments to the request path.
+    const body = await this.restGet<unknown>(
+      `/api/v1/contexts/${encodeURIComponent(contextId)}/tags`,
+      params,
+      "list_tags",
+    );
+    const record =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : {};
+    const rawTags = record.tags;
+    if (
+      typeof record.context_id !== "string" ||
+      !Array.isArray(rawTags) ||
+      typeof record.total !== "number"
+    ) {
+      throw new KaguraConnectionError(
+        "Unexpected list_tags response: missing 'context_id', 'tags' or 'total'.",
+      );
+    }
+    const tags: TagInfo[] = rawTags.map((item: unknown) => {
+      const tag = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
+      if (typeof tag.tag !== "string" || typeof tag.count !== "number") {
+        throw new KaguraConnectionError(
+          "Unexpected list_tags response: a tag without 'tag' or 'count'.",
+        );
+      }
+      return {
+        tag: tag.tag,
+        count: tag.count,
+        last_used_at: typeof tag.last_used_at === "string" ? tag.last_used_at : null,
+      };
+    });
+    // Only after the REST call, so its error is the one a caller sees.
+    const contextName = await this.contextNameFor(record.context_id);
+    const result: ToolResult = {
+      status: "success",
+      context_id: record.context_id,
+      context_name: contextName,
+      tags,
+      total: record.total,
+    };
+    return result as unknown as ListTagsResponse;
+  }
+
+  /**
+   * A context's name, from the cache or from one `list_tags` call.
+   *
+   * `list_tags`, not `get_context_info`: it checks access exactly as the
+   * REST tags route does, where `get_context_info` also applies an API
+   * key's workspace scope and agent bindings and so can refuse a context
+   * the route serves. It is also exempt from the MCP daily limit, and with
+   * `limit: 1` it carries one tag.
+   */
+  private async contextNameFor(contextId: string): Promise<string> {
+    const key = contextId.toLowerCase();
+    const cached = this.contextNames.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const result = await this.callToolChecked("list_tags", { context_id: contextId, limit: 1 });
+    const name = result.context_name;
+    if (typeof name !== "string") {
+      throw new KaguraConnectionError("Unexpected list_tags response: missing 'context_name'.");
+    }
+    this.contextNames.set(key, name);
+    return name;
+  }
+
+  /** Keep the context name an MCP `list_tags` result carries. */
+  private rememberContextName(result: ToolResult): void {
+    if (typeof result.context_id === "string" && typeof result.context_name === "string") {
+      this.contextNames.set(result.context_id.toLowerCase(), result.context_name);
+    }
   }
 
   /**
@@ -1739,9 +1915,8 @@ export class KaguraClient {
     if (options.usageGuide !== undefined) {
       args.usage_guide = options.usageGuide;
     }
-    if (options.resourceId !== undefined) {
-      args.resource_id = options.resourceId;
-    }
+    // `resourceId` is deliberately not sent: create_context does not read
+    // it (#47). See CreateContextOptions.resourceId.
     if (options.embeddingModel !== undefined) {
       args.embedding_model = options.embeddingModel;
     }
@@ -1788,21 +1963,21 @@ export class KaguraClient {
    * Plan-gated on the `resources` feature (server v0.68.0+): a plan
    * without it is refused with nothing created.
    *
+   * The context is named `name`, or `resourceId` when `name` is omitted:
+   * the server requires a name and refuses the call without one.
+   *
    * @throws KaguraFeatureNotAvailableError when the plan lacks `resources`;
    *   `requiredPlanDisplay` names the plan that has it.
    * @throws KaguraQuotaError at the workspace's context or token cap.
    */
   async setupResource(options: SetupResourceOptions): Promise<ToolResult> {
+    // `summary` is deliberately not sent: setup_resource has none (#47).
+    // See SetupResourceOptions.summary.
     const args: Record<string, unknown> = {
       resource_id: options.resourceId,
+      name: options.name ?? options.resourceId,
       quota_events_per_hour: options.quotaEventsPerHour ?? 1000,
     };
-    if (options.name !== undefined) {
-      args.name = options.name;
-    }
-    if (options.summary !== undefined) {
-      args.summary = options.summary;
-    }
     if (options.description !== undefined) {
       args.description = options.description;
     }

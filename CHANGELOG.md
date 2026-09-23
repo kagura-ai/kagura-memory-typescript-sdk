@@ -6,6 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`listTags({ withTags })` now filters**
+  ([#47](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/47)).
+  The drill-down went to the MCP `list_tags` tool, which has no
+  `with_tags` through memory-cloud v0.76.0 and drops arguments it does not
+  know. Every drill-down therefore came back as the whole, unfiltered
+  vocabulary, with no error. A non-empty `withTags` now calls
+  `GET /api/v1/contexts/{id}/tags`, which has had the filter since server
+  v0.17.2, with one `with_tags` key per tag. The result has the MCP path's
+  shape: `status`, `context_id`, `context_name`, `tags` of `tag`, `count`
+  and `last_used_at`, and `total`. The REST route sends no
+  `context_name`, so the client looks it up once per context with a
+  one-tag `list_tags` call (the same access check as the route, and exempt
+  from the MCP daily limit) and keeps it. A plain `listTags` call fills
+  the same cache, so the usual browse-then-drill-down flow costs one
+  request per drill-down.
+  `withTags` values are trimmed and blank ones dropped, as the server does.
+  More than 50 tags, or one over 200 characters, now throws before any
+  request. A missing or hidden context throws `KaguraNotFoundError`, and a
+  value the server refuses throws `KaguraError`, as on the MCP path. A
+  plain `listTags` call is unchanged.
+
+- **`setupResource` and `kagura-memory resource setup` work without a
+  context name** ([#47](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/47)).
+  The server's `setup_resource` requires `name`, but the SDK sent one only
+  when given. The docs said the name defaulted to the resource id on the
+  server, which was never true. So `setupResource({ resourceId })`,
+  `ResourceClient.setupResource` without `contextName`, and every
+  `resource setup` run (which has no name flag) were refused with
+  `missing_fields`. The name now defaults to `resourceId` on the client.
+
+### Deprecated
+
+- **`createContext`'s `resourceId`, and `summary` on `setupResource` and
+  `ResourceClient.setupResource`**
+  ([#47](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/47)).
+  The server reads neither (`create_context` has no `resource_id` and
+  `setup_resource` has no `summary`, through memory-cloud v0.76.0), so both
+  were silently dropped. They are no longer sent. The options stay, so
+  existing code still compiles. Set them afterwards with
+  `updateContext({ contextId, resourceId })` or
+  `updateContext({ contextId, summary })`, which is owner-only. `resource
+  setup --summary` is still accepted, but it prints a note saying it is
+  ignored and names `kagura-memory context update` instead.
+
 ## [0.10.0] - 2026-09-23
 
 ### Added
