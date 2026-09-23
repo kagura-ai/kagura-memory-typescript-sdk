@@ -654,6 +654,22 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     expect((err as KaguraQuotaError).retryAfter).toBe(30);
   });
 
+  it("reads a 429's details.retry_after when no Retry-After header came", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "RATE-001",
+      message: "Too many requests. Please try again later.",
+      details: { retry_after: 60 },
+    });
+    const client = makeClient(server);
+
+    const err = await caught(client.createInvitation(WS, "a@b.com", { role: "admin" }));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).message).toBe("Too many requests. Please try again later.");
+    expect((err as KaguraQuotaError).retryAfter).toBe(60);
+  });
+
   it("keeps a 429 a KaguraQuotaError even when its body reads as a plan refusal (#40)", async () => {
     const server = new FakeRest();
     server.status = 429;

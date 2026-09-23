@@ -695,7 +695,74 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     const err = await failure(server, (c) => c.callRawTool("setup_connector"));
 
     expect(err).toBeInstanceOf(KaguraQuotaError);
-    expect((err as KaguraQuotaError).gate).toBeNull();
+    const quota = err as KaguraQuotaError;
+    expect(quota.gate).toBeNull();
+    // The legacy seat counts stand in for the canonical current / limit.
+    expect(quota.current).toBe(2);
+    expect(quota.limit).toBe(2);
+  });
+
+  it("reads the analysis quota's pre-v0.75 limit_today as limit", async () => {
+    // v0.74 analysis_gates: used_today / limit_today, no current / limit.
+    const server = new FakeServer();
+    server.toolResults.analyze_context = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Analysis daily quota exceeded: 3/3 runs today (addon bonus 0).",
+      quota_type: "memory_analysis",
+      used_today: 3,
+      limit_today: 3,
+      addon_bonus: 0,
+      remaining_today: 0,
+    };
+    const err = (await failure(server, (c) =>
+      c.callRawTool("analyze_context"),
+    )) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.quotaType).toBe("memory_analysis");
+    expect(err.usedToday).toBe(3);
+    expect(err.current).toBe(3);
+    expect(err.limit).toBe(3);
+  });
+
+  it("prefers the canonical current / limit over the legacy names v0.75 keeps beside them", async () => {
+    const server = new FakeServer();
+    server.toolResults.setup_connector = {
+      status: "error",
+      error: "CONNECTOR-001",
+      message: "Connector seat limit reached.",
+      gate: "quota",
+      quota_type: "connectors",
+      current: 3,
+      limit: 3,
+      active_connectors: 99,
+      max_connectors: 99,
+    };
+    const err = (await failure(server, (c) =>
+      c.callRawTool("setup_connector"),
+    )) as KaguraQuotaError;
+    expect(err.current).toBe(3);
+    expect(err.limit).toBe(3);
+  });
+
+  it("reads ingest_events' retry_after_seconds as retryAfter", async () => {
+    // The resource events-per-hour quota: no gate, no resets_at, only a
+    // top-level retry hint.
+    const server = new FakeServer();
+    server.toolResults.ingest_events = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Event quota exceeded: 10/10 events per hour",
+      retry_after_seconds: 3600,
+    };
+    const err = (await failure(server, (c) =>
+      c.callRawTool("ingest_events"),
+    )) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.retryAfter).toBe(3600);
+    expect(err.message).toBe(
+      "ingest_events failed (quota_exceeded): Event quota exceeded: 10/10 events per hour",
+    );
   });
 
   it("keeps a transport 429 a KaguraRateLimitError, with the daily quota's payload", async () => {
@@ -722,6 +789,24 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     expect(limited.gate).toBe("quota");
     expect(limited.quotaType).toBe("api_mcp_daily");
     expect(limited.retryAfter).toBe(86400);
+  });
+
+  it("falls back to the body's retry_after on a transport 429 with no Retry-After", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({
+        error: "RATE-001",
+        message: "Rate limit exceeded: 61/60 requests per minute",
+        details: { retry_after: 60, limit: 60, remaining: 0 },
+      }),
+      { status: 429 },
+    );
+    const err = (await failure(server, (c) => c.listContexts())) as KaguraRateLimitError;
+
+    expect(err).toBeInstanceOf(KaguraRateLimitError);
+    expect(err.retryAfter).toBe(60);
+    // A per-minute limit is no typed quota, so its `limit` is not read.
+    expect(err.limit).toBeNull();
   });
 
   it("ignores wrong-typed gate fields instead of trusting the shape", async () => {
@@ -812,6 +897,40 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       "remember failed (permission_denied): " +
         "Cannot remember: tool guardrails require context editor or above.",
     );
+  });
+
+  it("refuses a workspace viewer's forget outright rather than skipping its target", async () => {
+    // handle_forget checks the workspace role before it looks at any target.
+    const server = new FakeServer();
+    server.toolResults.forget = {
+      status: "error",
+      error: "permission_denied",
+      message: "Viewers have read-only access. Cannot delete memories.",
+      your_role: "viewer",
+      required_role: "member",
+    };
+    const err = await failure(server, (c) => c.forget({ contextId: "c", memoryId: "m1" }));
+
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraPermissionError).requiredRole).toBe("member");
+  });
+
+  it("maps updateSearchConfig's missing context to KaguraPermissionError, not KaguraNotFoundError", async () => {
+    // update_search_config answers every access failure, a missing context
+    // included, with permission_denied and no required_role.
+    const server = new FakeServer();
+    server.toolResults.update_search_config = {
+      status: "error",
+      error: "permission_denied",
+      message: "Context not found",
+    };
+    const err = await failure(server, (c) =>
+      c.updateSearchConfig({ contextId: "00000000-0000-0000-0000-000000000000" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect(err).not.toBeInstanceOf(KaguraNotFoundError);
+    expect((err as KaguraPermissionError).requiredRole).toBeNull();
   });
 
   it("leaves other codes on the generic KaguraError", async () => {
@@ -1222,7 +1341,7 @@ describe("createContext quota pre-check", () => {
     );
   });
 
-  it("carries the counts as the server's own context-cap refusal would (#40)", async () => {
+  it("carries the counts but no gate or plan fields, which list_contexts does not send (#40)", async () => {
     const server = new FakeServer();
     server.toolResults.list_contexts = { can_create: false, count: 5, limit: 5 };
     const client = makeClient(server);
@@ -1233,8 +1352,48 @@ describe("createContext quota pre-check", () => {
     expect(err.quotaType).toBe("contexts");
     expect(err.current).toBe(5);
     expect(err.limit).toBe(5);
-    // The pre-check is the SDK's inference, not a server gate block.
+    // The pre-check is the SDK's inference, not a server gate block, so the
+    // plan is unknown here, which the docs must not read as "no plan lifts it".
     expect(err.gate).toBeNull();
+    expect(err.requiredPlan).toBeNull();
+    expect(err.requiredPlanDisplay).toBeNull();
+    expect(err.currentPlan).toBeNull();
+    const called = server.requests.some(
+      (r) => (r.body?.params as { name?: string })?.name === "create_context",
+    );
+    expect(called).toBe(false);
+  });
+
+  it("carries the server's gate block when create_context itself refuses past the pre-check", async () => {
+    // A concurrent create can win the race between the two calls; the
+    // server's own refusal then names the plan that lifts the cap.
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: true, count: 0, limit: 1 };
+    server.toolResults.create_context = {
+      status: "error",
+      error: "quota_exceeded",
+      message:
+        "Context limit reached. Your S plan allows 1 context(s) per workspace. " +
+        "Upgrade to M plan for more contexts.",
+      help: "Delete unused contexts or upgrade your plan.",
+      gate: "quota",
+      quota_type: "contexts",
+      current: 1,
+      limit: 1,
+      required_plan: "basic",
+      required_plan_display: "M",
+      current_plan: "free",
+    };
+    const client = makeClient(server);
+    const err = (await client
+      .createContext({ name: "new" })
+      .catch((e: unknown) => e)) as KaguraQuotaError;
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect(err.gate).toBe("quota");
+    expect(err.quotaType).toBe("contexts");
+    expect(err.requiredPlan).toBe("basic");
+    expect(err.requiredPlanDisplay).toBe("M");
+    expect(err.currentPlan).toBe("free");
   });
 
   it("renders ? for missing or null count/limit (#183)", async () => {

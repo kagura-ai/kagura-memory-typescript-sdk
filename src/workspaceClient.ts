@@ -17,7 +17,7 @@
 
 import { SOURCE_LABEL } from "./auth/types.js";
 import { KaguraConnectionError, KaguraError, KaguraQuotaError } from "./errors.js";
-import { extractDetail, retryAfterSeconds, sanitizeServerDetail } from "./http.js";
+import { extractDetail, responseRetryAfter, sanitizeServerDetail } from "./http.js";
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "./models.js";
 import { KaguraRestClient } from "./restBase.js";
 import type { RequestContext, RestResponse } from "./restBase.js";
@@ -432,7 +432,7 @@ export class WorkspaceClient extends KaguraRestClient {
     }
     return new KaguraQuotaError(
       extractDetail(response.text) || "Quota exceeded. Try again later.",
-      retryAfterSeconds(response.headers),
+      responseRetryAfter(response.headers, response.text),
     );
   }
 }

@@ -34,7 +34,14 @@ export interface KaguraGateOptions extends KaguraErrorOptions {
   currentPlan?: string | null;
 }
 
-/** {@link KaguraGateOptions} plus the counts a quota refusal carries. */
+/**
+ * {@link KaguraGateOptions} plus the counts a quota refusal carries.
+ *
+ * `current` and `limit` are the canonical names memory-cloud v0.75.0
+ * added. When the SDK builds these from an older server's refusal, it
+ * reads each cap's legacy names instead: `used_today` / `limit_today`,
+ * `owned_count` / `cap`, `active_connectors` / `max_connectors`.
+ */
 export interface KaguraQuotaErrorOptions extends KaguraGateOptions {
   /** Which cap, e.g. `"memories_per_day"`, `"resource_tokens"`, `"members"`. */
   quotaType?: string | null;
@@ -172,22 +179,35 @@ export class KaguraContextError extends KaguraError {}
  *
  * The gate fields are `null` unless the server sent them. `gate` is
  * `"quota"` on every typed cap, whether or not a higher tier raises it:
- * an upgrade helps only when `requiredPlan` is non-null. An untyped
- * limit, such as the 1 MB memory-size guard, arrives with no gate.
- * `retryAfter` is the `Retry-After` header when there was one, else it is
- * derived from `resetsAt` on a time-windowed quota such as
- * `memories_per_day`; a fixed cap has neither, because waiting will not
- * lift it.
+ * with a `gate`, an upgrade helps only when `requiredPlan` is non-null.
+ * With no `gate` — a server older than v0.75.0, or the SDK's own
+ * context-limit pre-check, which knows only `quotaType`, `current` and
+ * `limit` — a `null` `requiredPlan` means the plan is unknown, not that no
+ * plan lifts the cap. An untyped limit, such as the 1 MB memory-size
+ * guard, arrives with no gate either.
+ *
+ * `retryAfter` is the `Retry-After` header when there was one, else the
+ * retry hint the body carried (REST `details.retry_after`, MCP
+ * `retry_after_seconds`; the resource events-per-hour quota sends only
+ * that), else it is derived from `resetsAt` on a time-windowed quota such
+ * as `memories_per_day`. A fixed cap has none of them, because waiting
+ * will not lift it.
  */
 export class KaguraQuotaError extends KaguraError {
   readonly retryAfter: number | null;
   readonly gate: string | null;
   readonly quotaType: string | null;
   /**
-   * Count already used. Falls back to `usedToday` for servers older than
-   * v0.75.0, which sent only the legacy name.
+   * Count already used. A server older than v0.75.0 sent no `current`, so
+   * the SDK reads the refusal's legacy count instead: `used_today`,
+   * `owned_count` or `active_connectors`. An error built by hand falls back
+   * to `usedToday`.
    */
   readonly current: number | null;
+  /**
+   * The cap that was hit. When the refusal has no `limit`, the SDK reads
+   * its legacy name instead: `limit_today`, `cap` or `max_connectors`.
+   */
   readonly limit: number | null;
   readonly usedToday: number | null;
   readonly resetsAt: string | null;
@@ -226,10 +246,11 @@ export class KaguraQuotaError extends KaguraError {
  * `ResourceClient.createToken` or a public-bound
  * `WorkspaceClient.mintMemberKey`.
  *
- * Show `requiredPlanDisplay`; decide with `requiredPlan`. Both are `null`
- * when no tier lifts the refusal, and a v0.75.0+ server says why in
- * `gate`: `"allowlist"` or `"deployment"` mean an upgrade will not help.
-
+ * Show `requiredPlanDisplay`; decide with `requiredPlan`. With a `gate`
+ * (server v0.75.0+), both are `null` when no tier lifts the refusal, and
+ * `gate` says why: `"allowlist"` or `"deployment"` mean an upgrade will
+ * not help. An older server sends no `gate` and not always the plan, so
+ * there a `null` `requiredPlan` means the plan is unknown.
  *
  * Named after the server's MCP `feature_not_available` code and the Python
  * SDK's class of the same name: not every refusal here is about the plan.
@@ -258,6 +279,9 @@ export class KaguraFeatureNotAvailableError extends KaguraError {
  * the report is marked `failed`. `summary` is the same
  * {@link RollbackSummary} a clean rollback returns: its counts say what
  * was undone, and `summary.errors` names each action that was not.
+ *
+ * The server will not roll back a `failed` report again, so there is no
+ * retry; the actions in `summary.errors` need handling some other way.
  */
 export class KaguraPartialRollbackError extends KaguraError {
   readonly reportId: string | null;
@@ -276,7 +300,16 @@ export class KaguraPartialRollbackError extends KaguraError {
 }
 
 /**
- * The caller's role does not allow the operation (MCP `permission_denied`).
+ * The server refused the call with MCP `permission_denied`: usually because
+ * the caller's role does not allow the operation.
+ *
+ * Not always, though. `updateSearchConfig` also answers
+ * `permission_denied` for a context that does not exist or that the caller
+ * cannot see, so there a missing context is this class, not
+ * {@link KaguraNotFoundError}. Neither it nor the analysis tools (reached
+ * through `callRawTool`) send `required_role`, so `requiredRole` is `null`
+ * on those calls whatever the cause, and it cannot tell a missing context
+ * from a role denial.
  *
  * `requiredRole` is the server's own wording — a role such as `"editor"`
  * or a phrase such as `"owner or admin"` — so display it rather than

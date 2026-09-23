@@ -257,24 +257,36 @@ keyed on the error code and the envelope's fields, never on the message:
 
 | Class | Raised for | Carries |
 |-------|------------|---------|
-| `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings | — |
+| `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
 | `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`; REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
-| `KaguraPermissionError` | MCP `permission_denied` — the caller's role is too low | `requiredRole` |
+| `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Neither it nor the analysis tools (through `callRawTool`) send a role, so `requiredRole` is `null` on those calls and cannot tell a missing context from a role denial | `requiredRole` |
 | `KaguraError` | any other code | — |
 
 memory-cloud v0.75.0+ tags every plan and quota refusal with a `gate`
 (`plan`, `quota`, `allowlist` or `deployment`), and the SDK chooses the
 class from it first, falling back to the code for older servers. The
-payload fields are `null` whenever the server did not send them. Show
-`requiredPlanDisplay` (`"XL"`) to a user and decide with `requiredPlan`;
-both are `null` when no plan lifts the refusal, which is what an
-`allowlist` or `deployment` gate means. A `quota` gate is set on every
-typed cap, including one no tier raises, so an upgrade helps only when
-`requiredPlan` is non-null. `retryAfter` is derived from `resetsAt` on a
-time-windowed quota such as `memories_per_day`, and is `null` on a fixed
-cap that waiting will not lift.
+payload fields are `null` whenever the server did not send them. Against a
+server older than v0.75.0, `current` and `limit` are read from the legacy
+names the refusal carries instead (`used_today` / `limit_today`,
+`owned_count` / `cap`, `active_connectors` / `max_connectors`).
+
+Show `requiredPlanDisplay` (`"XL"`) to a user and decide with
+`requiredPlan`, as long as `gate` is set. With a `gate`, both are `null`
+when no plan lifts the refusal, which is what an `allowlist` or
+`deployment` gate means, and a `quota` gate is set on every typed cap,
+including one no tier raises, so an upgrade helps only when `requiredPlan`
+is non-null. With no `gate`, a `null` `requiredPlan` means the plan is
+unknown, not that no plan lifts it. That covers an older server, and
+`createContext`'s own context-limit check, which reads `listContexts()`
+and so fills in only `quotaType`, `current` and `limit`.
+
+`retryAfter` is the `Retry-After` header, else the retry hint in the body
+(REST `details.retry_after`, MCP `retry_after_seconds`, which is all the
+resource events-per-hour quota sends), else it is derived from `resetsAt`
+on a time-windowed quota such as `memories_per_day`. It is `null` on a
+fixed cap that waiting will not lift.
 
 An HTTP 429 keeps the class it always had on two surfaces.
 `KaguraClient`'s own transport raises `KaguraRateLimitError` for the
@@ -290,7 +302,7 @@ try {
   await client.setupResource({ resourceId: "crm" });
 } catch (e) {
   if (e instanceof KaguraFeatureNotAvailableError) {
-    // requiredPlanDisplay is null when no plan lifts it (allowlist / deployment).
+    // null when no plan lifts it (allowlist / deployment gate) or, with no gate, unknown.
     console.log(e.requiredPlanDisplay ? `upgrade to ${e.requiredPlanDisplay}` : e.message);
   } else if (e instanceof KaguraQuotaError) {
     console.log(`${e.quotaType}: ${e.current}/${e.limit}`);
@@ -317,7 +329,7 @@ when `undefined`.
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. |
-| `forget` | Soft-delete by `memoryId` or by `query`, recoverable until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). A target the caller may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. |
+| `forget` | Soft-delete by `memoryId` or by `query`, recoverable until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, and time-window filters. Omit `contextId` for the caller's cross-context view. |
 
 ### Deterministic lanes
@@ -348,12 +360,12 @@ the counterpart to `recall`'s probabilistic search.
 | Method | What it does |
 |--------|--------------|
 | `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. |
-| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). |
+| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached: the SDK checks `listContexts()` first, so that error carries `quotaType`, `current` and `limit` but no `gate` or plan fields (`requiredPlan` `null` means unknown). Also throws `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). |
 | `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed. |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraFeatureNotAvailableError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
-| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only. Returns the whole updated `config`, the only place the reinforce and routing fields come back. |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only; a context that does not exist, or that the caller cannot see, also throws `KaguraPermissionError`. Returns the whole updated `config`, the only place the reinforce and routing fields come back. |
 | `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. Plan-gated: throws `KaguraFeatureNotAvailableError` on a plan without resources. |
 
 ### Agent run-state
@@ -370,7 +382,7 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 |--------|--------------|
 | `getSleepHistory` | Recent runs, newest first. |
 | `getSleepReport` | One run in detail, including the per-action audit log. |
-| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. Read `err.summary` — the same counts a clean run returns, with `err.summary.errors` naming each action that was not reversed — before deciding to retry. |
+| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. |
 
 ### Workspace and server
 

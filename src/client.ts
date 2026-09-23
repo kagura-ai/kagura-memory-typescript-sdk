@@ -17,6 +17,7 @@ import {
 } from "./errors.js";
 import {
   baseUrlFromMcp,
+  bodyRetryAfter,
   extractDetail,
   gateError,
   MCP_GATE_CODES,
@@ -145,7 +146,10 @@ export interface RememberOptions {
    * validated on write, and only a context editor or above on a user
    * credential (not an agent one) may set it — otherwise the call throws
    * {@link KaguraError}. The same gate covers changing or deleting a
-   * guardrail later; {@link forget} skips one silently rather than throwing.
+   * guardrail later. {@link forget} skips one silently rather than throwing
+   * when the caller may otherwise write to the workspace; a workspace
+   * viewer may not delete anything, and its `forget` throws
+   * {@link KaguraPermissionError} instead.
    */
   details?: Record<string, unknown>;
   /** Open-ended context metadata JSON. */
@@ -838,7 +842,8 @@ export class KaguraClient {
    * the message, whose wording the server has changed before. Plan and
    * quota refusals go by the envelope's `gate` first (server v0.75.0+),
    * then by the code; their message stays the generic one, so matching on
-   * it keeps working.
+   * it keeps working. A quota's `retry_after_seconds` (the resource
+   * events-per-hour quota on `ingest_events`) becomes its `retryAfter`.
    */
   private static raiseForMcpError(result: ToolResult, operation: string): void {
     if (result.status !== "error") {
@@ -856,7 +861,13 @@ export class KaguraClient {
       throw new KaguraNotFoundError(`${operation}: ${message}`);
     }
     const failure = `${operation} failed (${code}): ${message}`;
-    const gated = gateError(result, code, MCP_GATE_CODES, failure);
+    const gated = gateError(
+      result,
+      code,
+      MCP_GATE_CODES,
+      failure,
+      bodyRetryAfter(result, "retry_after_seconds"),
+    );
     if (gated !== null) {
       throw gated;
     }
@@ -1621,12 +1632,18 @@ export class KaguraClient {
    * stay recoverable until the deployment's cleanup window passes
    * (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days).
    *
-   * A target the caller may not delete, or one already gone, is skipped
-   * silently, not refused. Since server v0.74.0 that includes every tool
-   * guardrail when the caller is below context editor or on an agent
-   * credential. Check `deleted_count`, which can be 0 even for an explicit
-   * `memoryId`.
+   * The silent skip is per target, for a caller who may write to the
+   * workspace: a target that caller may not delete, or one already gone,
+   * is skipped rather than refused. Since server v0.74.0 that includes
+   * every tool guardrail when the caller is below context editor or on an
+   * agent credential. Check `deleted_count`, which can be 0 even for an
+   * explicit `memoryId`.
    *
+   * A caller who may not write to the workspace at all is refused before
+   * any target is looked at, so nothing is skipped silently for it.
+   *
+   * @throws KaguraPermissionError for a workspace viewer, which has
+   *   read-only access (`requiredRole: "member"`).
    * @throws Error if neither memoryId nor query is provided.
    */
   async forget(options: {
@@ -1653,8 +1670,16 @@ export class KaguraClient {
   /**
    * Create a new context in the current workspace.
    *
-   * @throws KaguraQuotaError when the workspace context limit is reached
-   *   (`quotaType: "contexts"`, with `current` / `limit`).
+   * Checks the workspace's context limit first, with {@link listContexts},
+   * and throws without calling `create_context` when `can_create` is false.
+   * That error comes from the SDK, not the server: it carries
+   * `quotaType: "contexts"` with `current` / `limit`, but `gate` and the
+   * plan fields stay `null` because `list_contexts` does not send them. A
+   * `null` `requiredPlan` there means the plan is unknown, not that no plan
+   * lifts the cap. The server's own refusal, which names the plan that
+   * lifts it, only arrives when a concurrent create gets past the check.
+   *
+   * @throws KaguraQuotaError when the workspace context limit is reached.
    * @throws KaguraFeatureNotAvailableError for a shared context (`isPrivate: false`) on a
    *   plan without `shared_contexts` (server v0.75.0+).
    */
@@ -1672,9 +1697,10 @@ export class KaguraClient {
       // produces "null/null" in the message; a real 0 is preserved.
       const count = contexts.count ?? null;
       const limit = contexts.limit ?? null;
-      // Same quotaType/current/limit the server's own refusal carries, so a
-      // caller reads one shape whichever side caught the cap. No `gate`:
-      // this is the SDK's inference, not the server's gate block.
+      // The quotaType/current/limit the server's own refusal would carry.
+      // Its gate and plan fields are not in list_contexts, so they stay
+      // null: this is the SDK's inference, not the server's gate block.
+      // The Python SDK keeps the same pre-check, with no plan fields either.
       throw new KaguraQuotaError(
         `Context limit reached (${count === null ? "?" : String(count)}/` +
           `${limit === null ? "?" : String(limit)}). ` +
@@ -1942,6 +1968,12 @@ export class KaguraClient {
    * The result echoes the whole configuration after the update under
    * `config`. That is the only place the reinforce and routing fields
    * come back: {@link getContextInfo}'s `search_config` leaves them out.
+   *
+   * @throws KaguraPermissionError when the caller may not write to the
+   *   context, and also when the context does not exist or the caller
+   *   cannot see it: the server answers every access failure here with
+   *   `permission_denied`, never `context_not_found`, and sends no
+   *   `required_role`, so `requiredRole` is `null` whatever the cause.
    */
   async updateSearchConfig(
     options: UpdateSearchConfigOptions,
@@ -2160,8 +2192,12 @@ export class KaguraClient {
    * clean run would have returned: the counts say what was reversed, and
    * `summary.errors` names each action that was not (a merge a later write
    * changed is counted in `merges_unreversible` and listed there too). The
-   * reversed steps stay committed and the report is marked `failed`, so
-   * read `err.summary` before deciding whether to retry.
+   * reversed steps stay committed and the report is marked `failed`.
+   *
+   * There is no retry: the server rolls back only a `completed` or
+   * `degraded` report, so calling this again on a `failed` one is refused
+   * with a plain {@link KaguraError} (`invalid_status`). The actions in
+   * `err.summary.errors` stay unreversed and need handling some other way.
    *
    * @throws KaguraPartialRollbackError when some actions could not be
    *   reversed.

@@ -36,8 +36,8 @@ import {
   extractDetail,
   gateError,
   parseErrorEnvelope,
+  responseRetryAfter,
   REST_GATE_CODES,
-  retryAfterSeconds,
   sanitizeServerDetail,
   SDK_VERSION,
   validateHttpsUrl,
@@ -138,8 +138,9 @@ function jsonTypeName(value: unknown): string {
  *   or quota refusal (see {@link gateRefusal}), else the generic
  *   `HTTP 403: <detail>` mapping
  * - 404 → {@link KaguraNotFoundError} (server detail or "Not found")
- * - 429 → {@link KaguraQuotaError} with a tolerant `Retry-After`, carrying
- *   the refusal's gate payload when the body has one
+ * - 429 → {@link KaguraQuotaError} with a tolerant `Retry-After` (else the
+ *   body's `details.retry_after`), carrying the refusal's gate payload
+ *   when the body has one
  * - other statuses → {@link KaguraConnectionError}
  * - transport errors → {@link KaguraConnectionError}
  */
@@ -410,20 +411,27 @@ export class KaguraRestClient {
   }
 
   /**
-   * 429 → quota error with a tolerant `Retry-After` parse. A typed
+   * 429 → quota error with a tolerant `Retry-After` parse, falling back to
+   * the body's `details.retry_after` when there is no header. A typed
    * refusal (the member seat cap, a daily quota) keeps the server's
-   * message and adds its gate payload; a bare 429 keeps the fixed text.
-   * A 429 stays a {@link KaguraQuotaError} even when its body reads as a
-   * plan refusal.
+   * message and adds its gate payload. A `RATE-001` body (the resource
+   * events-per-hour quota, which sends its retry hint only in the body)
+   * keeps the server's message too, scrubbed of credential markers; any
+   * other 429 gets the fixed text. A 429 stays a {@link KaguraQuotaError}
+   * even when its body reads as a plan refusal.
    */
   protected error429(response: RestResponse): KaguraError {
     const gated = this.gateRefusal(response);
     if (gated instanceof KaguraQuotaError) {
       return gated;
     }
+    const serverMessage =
+      parseErrorEnvelope(response.text)?.code === "RATE-001"
+        ? sanitizeServerDetail(extractDetail(response.text))
+        : null;
     return new KaguraQuotaError(
-      "Quota exceeded. Try again later.",
-      retryAfterSeconds(response.headers),
+      serverMessage ?? "Quota exceeded. Try again later.",
+      responseRetryAfter(response.headers, response.text),
     );
   }
 
@@ -455,7 +463,7 @@ export class KaguraRestClient {
       envelope.code,
       REST_GATE_CODES,
       sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
-      retryAfterSeconds(response.headers),
+      responseRetryAfter(response.headers, response.text),
     );
   }
 

@@ -24,7 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `KaguraFeatureNotAvailableError` (new) | MCP `plan_required` / `feature_not_available`, REST 403 `FEAT-001` | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
   | `KaguraQuotaError` (extended) | MCP `quota_exceeded` / `CONNECTOR-001`, REST `QUOTA-001` / `QUOTA-002` / `CONNECTOR-001` | the above plus `quotaType`, `current`, `limit`, `usedToday`, `resetsAt` |
   | `KaguraPartialRollbackError` (new) | `rollbackSleepRun` reversing only part of a run | `reportId`, `summary` |
-  | `KaguraPermissionError` (new) | MCP `permission_denied` | `requiredRole` |
+  | `KaguraPermissionError` (new) | MCP `permission_denied`: usually a role too low, but on `updateSearchConfig` also a context that does not exist or that the caller cannot see | `requiredRole` (`null` on `updateSearchConfig` and the analysis tools, which never send it) |
 
   All of them extend `KaguraError`, so existing `instanceof KaguraError`
   handling still catches them, and the MCP ones keep the exact message the
@@ -42,7 +42,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the code alone.** v0.75.0 tags every plan and quota refusal with
   `gate` (`plan`, `quota`, `allowlist`, `deployment`) — at the top level of
   an MCP envelope, under `details` on REST — and the SDK reads it first,
-  falling back to the code for older servers. That matters because a 403 is
+  falling back to the code for older servers. From an older server, which
+  sends no canonical `current` / `limit`, the counts are read from the
+  legacy names each cap sent: `used_today` / `limit_today` (the daily
+  memory and analysis quotas), `owned_count` / `cap` (the workspace cap)
+  and `active_connectors` / `max_connectors` (the connector seat cap).
+  That matters because a 403 is
   not always a plan refusal: the resource-token cap on
   `ResourceClient.createToken` is a `QUOTA-001` that still answers **403**,
   and becomes a `KaguraQuotaError`. v0.75.0 also turned `createContext`'s
@@ -52,7 +57,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an older server's bare `FEAT-001` already gets — with `requiredPlan`
   `null`, because no upgrade lifts it. `gate: "quota"`, by contrast, marks
   every typed cap, including one no tier raises, so an upgrade helps only
-  when `requiredPlan` is not `null`.
+  when `requiredPlan` is not `null`. That reading needs a `gate`: with
+  none (an older server, or `createContext`'s own context-limit check), a
+  `null` `requiredPlan` means the plan is unknown.
 
   Every REST client's 403 hook checks for a gate refusal before its own
   message, so a plan refusal no longer picks up `FilesClient`'s
@@ -72,9 +79,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and lose the `rollback_summary` the README told callers to read.
   `err.summary` is the same `RollbackSummary` a clean run returns, which
   gains `merges_unreversible`, `importance_kept` and `promotions_kept`.
-  `createContext`'s own context-limit pre-check fills in
-  `quotaType: "contexts"`, `current` and `limit` too, so the error reads the
-  same whichever side caught the cap.
+  The report is `failed` afterwards, and the server will not roll back a
+  `failed` report again, so there is no retry: the actions listed in
+  `err.summary.errors` need handling some other way.
+
+- **`createContext`'s context-limit error carries its counts.** The SDK
+  checks `listContexts()` before it calls `create_context`, and throws its
+  own `KaguraQuotaError` when `can_create` is false, as the Python SDK
+  does. That error now fills in `quotaType: "contexts"`, `current` and
+  `limit`. It has no `gate` and no plan fields, because `list_contexts`
+  does not send them, so it says less than the server's own context-cap
+  refusal, which names the plan that lifts the cap. The server's refusal
+  arrives only when a concurrent create gets past the check.
 
 - **`KaguraClient.loadGuardrails({ contextId, cap? })`**
   ([#41](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/41),
@@ -103,10 +119,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   write, and only a context editor or above, using a user credential, may
   set, change or delete one. Because `updateMemory({ details })` replaces
   `details` wholesale, leaving `tool_trigger` out silently turns the
-  guardrail off. `forget` skips any target the caller may not delete, or
-  one already gone, instead of refusing it; that now includes every
-  guardrail for a caller without those rights. So `deleted_count` can be 0
-  even for an explicit `memoryId`.
+  guardrail off. For a caller who may write to the workspace, `forget`
+  skips any target it may not delete, or one already gone, instead of
+  refusing it; that now includes every guardrail for a caller without
+  those rights. So `deleted_count` can be 0 even for an explicit
+  `memoryId`. A workspace viewer may not delete at all, and its `forget` is
+  refused with `KaguraPermissionError` (`requiredRole: "member"`).
 
 - **Server tool inputs the typed wrappers could not set**
   ([#42](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/42)).
@@ -199,6 +217,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   these calls stops matching them; catch the typed class, or `KaguraError`.
   A typed 429 on the base mapping stays a `KaguraQuotaError`, but its
   message is now the server's instead of `Quota exceeded. Try again later.`
+  A `RATE-001` 429 keeps the server's message too, scrubbed of credential
+  markers: the resource events-per-hour quota on
+  `ResourceClient.ingestEvent` / `ingestEvents` now reads "Event quota
+  exceeded: N/M events per hour".
 
 - **`listContexts()` returns `ListContextsResponse` instead of
   `ToolResult`.** The runtime value is the same object. Code that reads a
@@ -233,6 +255,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `recent_events`, stays a number because the server sends a number there.
 
 ### Fixed
+
+- **`retryAfter` reads the retry hint a body carries**
+  ([#40](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/40)).
+  It came only from a `Retry-After` header or from `resetsAt`, so the
+  resource events-per-hour quota, which sends neither, left it `null` even
+  though the server says to wait an hour. With no header, a 429 now falls
+  back to the body's `details.retry_after` (a REST client's
+  `KaguraQuotaError`, and `KaguraClient`'s own `KaguraRateLimitError`),
+  and an MCP quota refusal to its `retry_after_seconds` (`ingest_events`
+  through `callRawTool`).
+
+- **`kagura-memory context search-config --reranker self_hosted`** was
+  refused locally ("is not one of 'voyage', 'cohere'") and never reached
+  the server, which has accepted `self_hosted` since v0.42.0. The flag now
+  takes all three providers, as the Python CLI's does.
 
 - **Docs that no longer matched the server**
   ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43)):

@@ -241,6 +241,33 @@ describe("error mapping", () => {
     expect(error).toBeInstanceOf(KaguraQuotaError);
     expect((error as KaguraQuotaError).retryAfter).toBe(42);
   });
+
+  it("reads the events-per-hour quota's retry hint from the body on both ingest calls", async () => {
+    // The server raises RateLimitError(retry_after=3600) inside the ingest
+    // route, and the global handler sends no Retry-After header.
+    const server = new FakeRest();
+    const quota = {
+      status: 429,
+      body: {
+        error: "RATE-001",
+        message: "Event quota exceeded: 10/10 events per hour",
+        details: { retry_after: 3600 },
+      },
+    };
+    server.routes["/api/v1/resources/slack/events"] = quota;
+    server.routes["/api/v1/resources/slack/events/batch"] = quota;
+    const client = makeClient(server);
+
+    for (const call of [
+      () => client.ingestEvent("slack", "rk", { op: "upsert", docId: "a" }),
+      () => client.ingestEvents("slack", "rk", [{ op: "upsert", docId: "a" }]),
+    ]) {
+      const error = (await call().catch((e: unknown) => e)) as KaguraQuotaError;
+      expect(error).toBeInstanceOf(KaguraQuotaError);
+      expect(error.message).toBe("Event quota exceeded: 10/10 events per hour");
+      expect(error.retryAfter).toBe(3600);
+    }
+  });
 });
 
 describe("gate refusals on createToken (#40)", () => {

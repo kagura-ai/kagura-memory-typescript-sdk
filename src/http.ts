@@ -228,6 +228,45 @@ function numberField(block: Record<string, unknown>, key: string): number | null
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** The first of `keys` that holds a number in `block`, else `null`. */
+function firstNumberField(block: Record<string, unknown>, keys: readonly string[]): number | null {
+  for (const key of keys) {
+    const value = numberField(block, key);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * A retry hint sent in the body rather than as a `Retry-After` header:
+ * `block[key]` in whole seconds, rounded up, or `null` when it is absent,
+ * not a number, or negative.
+ *
+ * The resource events-per-hour quota is the case that needs it: REST sends
+ * `details.retry_after` with no header, and MCP sends `retry_after_seconds`
+ * at the top of the envelope.
+ */
+export function bodyRetryAfter(block: Record<string, unknown>, key: string): number | null {
+  const value = numberField(block, key);
+  return value === null || value < 0 ? null : Math.ceil(value);
+}
+
+/**
+ * Seconds to wait before retrying a REST error response: its numeric
+ * `Retry-After` header, else the `details.retry_after` of a canonical
+ * error body, else `null`.
+ */
+export function responseRetryAfter(headers: Headers, bodyText: string): number | null {
+  const header = retryAfterSeconds(headers);
+  if (header !== null) {
+    return header;
+  }
+  const envelope = parseErrorEnvelope(bodyText);
+  return envelope === null ? null : bodyRetryAfter(envelope.details, "retry_after");
+}
+
 /**
  * Which refusal `block` is: `"plan"`, `"quota"`, or `null` for neither.
  *
@@ -262,9 +301,21 @@ function gateKind(
 }
 
 /**
+ * Where a refusal's counts live when the canonical `current` / `limit`
+ * are absent: the names servers older than v0.75.0 sent instead (v0.75.0
+ * adds the canonical pair and keeps these beside it). The daily memory and
+ * analysis quotas send `used_today`, the analysis one with `limit_today`;
+ * the workspace cap sends `owned_count` / `cap`, and the connector seat
+ * cap `active_connectors` / `max_connectors`.
+ */
+const LEGACY_CURRENT_KEYS = ["used_today", "owned_count", "active_connectors"] as const;
+const LEGACY_LIMIT_KEYS = ["limit_today", "cap", "max_connectors"] as const;
+
+/**
  * The gate payload in `block`, camelCased. Wire keys are snake_case; a
  * missing or wrong-typed one reads as `null` rather than trusting the
- * shape.
+ * shape. `current` and `limit` fall back to the legacy count names an
+ * older server sent instead.
  */
 function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
   return {
@@ -274,8 +325,8 @@ function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
     requiredPlanDisplay: stringField(block, "required_plan_display"),
     currentPlan: stringField(block, "current_plan"),
     quotaType: stringField(block, "quota_type"),
-    current: numberField(block, "current"),
-    limit: numberField(block, "limit"),
+    current: firstNumberField(block, ["current", ...LEGACY_CURRENT_KEYS]),
+    limit: firstNumberField(block, ["limit", ...LEGACY_LIMIT_KEYS]),
     usedToday: numberField(block, "used_today"),
     resetsAt: stringField(block, "resets_at"),
   };
@@ -284,7 +335,9 @@ function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
 /**
  * Build the typed error for a plan or quota refusal, or `null` if it is
  * neither: {@link KaguraFeatureNotAvailableError} or {@link KaguraQuotaError}, as
- * `gateKind` decides, carrying the payload `block` holds.
+ * `gateKind` decides, carrying the payload `block` holds. `retryAfter` is
+ * the caller's reading of the response's retry hint; with none, a quota
+ * error derives it from `resets_at`.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -334,7 +387,8 @@ export function parseErrorEnvelope(
  * Translate a non-2xx HTTP response into the matching Kagura error.
  *
  * Maps 401 → KaguraAuthError, 429 → KaguraRateLimitError (honoring a
- * numeric `Retry-After` header), and every other status →
+ * numeric `Retry-After` header, else the body's `details.retry_after`),
+ * and every other status →
  * KaguraConnectionError. The server-supplied detail is appended when
  * present, otherwise `fallbackMessage` is used so the status is never
  * left bare. This function always throws.
@@ -357,7 +411,7 @@ export function throwForKaguraStatus(
     const envelope = parseErrorEnvelope(bodyText);
     throw new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
-      retryAfterSeconds(headers),
+      responseRetryAfter(headers, bodyText),
       envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
         ? gateOptions(envelope.details)
         : {},

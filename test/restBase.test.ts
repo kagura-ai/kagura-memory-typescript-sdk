@@ -398,6 +398,50 @@ describe("status mapping", () => {
     expect(quota.message).toBe("Connector seat limit reached. Your plan allows 2 connector(s).");
     expect(quota.gate).toBeNull();
     expect(quota.quotaType).toBeNull();
+    // The legacy seat counts stand in for the canonical current / limit.
+    expect(quota.current).toBe(2);
+    expect(quota.limit).toBe(2);
+  });
+
+  it("reads the workspace cap's pre-v0.75 owned_count / cap as current / limit", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Workspace limit reached.",
+      details: {
+        quota_type: "workspace_limit_reached",
+        owned_count: 1,
+        cap: 1,
+        tier: "free",
+        next_tier: "basic",
+      },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/workspaces"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.quotaType).toBe("workspace_limit_reached");
+    expect(quota.current).toBe(1);
+    expect(quota.limit).toBe(1);
+  });
+
+  it("reads the analysis quota's pre-v0.75 used_today / limit_today as current / limit", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Analysis daily quota exceeded: 3/3 runs today (addon bonus 0).",
+      details: { quota_type: "memory_analysis", used_today: 3, limit_today: 3 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/analyses"));
+    const quota = err as KaguraQuotaError;
+    expect(quota).toBeInstanceOf(KaguraQuotaError);
+    expect(quota.current).toBe(3);
+    expect(quota.limit).toBe(3);
   });
 
   it("maps a pre-v0.75 429 QUOTA-001 by its code, with the payload", async () => {
@@ -571,6 +615,78 @@ describe("status mapping", () => {
     expect(err).toBeInstanceOf(KaguraQuotaError);
     expect((err as KaguraQuotaError).message).toBe("Quota exceeded. Try again later.");
     expect((err as KaguraQuotaError).retryAfter).toBe(7);
+  });
+
+  it("keeps a RATE-001 body's message and reads its details.retry_after with no header", async () => {
+    // The resource events-per-hour quota: a 429 RATE-001 whose only retry
+    // hint is in the body.
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "RATE-001",
+      message: "Event quota exceeded: 10/10 events per hour",
+      details: { retry_after: 3600 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/resources/r/events"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.message).toBe("Event quota exceeded: 10/10 events per hour");
+    expect(quota.retryAfter).toBe(3600);
+    // Not a typed cap: no gate payload is read from it.
+    expect(quota.gate).toBeNull();
+    expect(quota.limit).toBeNull();
+
+    // A Retry-After header, when sent, wins over the body.
+    server.responseHeaders = { "Retry-After": "60" };
+    const withHeader = await caught(probe.requestPublic("POST", "/api/v1/resources/r/events"));
+    expect((withHeader as KaguraQuotaError).retryAfter).toBe(60);
+  });
+
+  it("scrubs a RATE-001 message carrying credential markers back to the fixed text", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "RATE-001",
+      message: "Slow down. Echo: Authorization: Bearer kagura_leaked_key_value",
+      details: { retry_after: 60 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("POST", "/api/v1/things"));
+    expect((err as KaguraQuotaError).message).toBe("Quota exceeded. Try again later.");
+    expect((err as KaguraQuotaError).retryAfter).toBe(60);
+  });
+
+  it("reads details.retry_after on a typed 429 that sent no Retry-After", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    server.body = JSON.stringify({
+      error: "QUOTA-001",
+      message: "Daily REST quota exceeded.",
+      details: { gate: "quota", quota_type: "api_rest_daily", retry_after: 86400 },
+    });
+    const probe = makeProbe(server);
+
+    const err = await caught(probe.requestPublic("GET", "/api/v1/things"));
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    expect((err as KaguraQuotaError).retryAfter).toBe(86400);
+  });
+
+  it("ignores a negative or non-numeric details.retry_after", async () => {
+    const server = new FakeRest();
+    server.status = 429;
+    const probe = makeProbe(server);
+    for (const retryAfter of [-5, "3600", null]) {
+      server.body = JSON.stringify({
+        error: "RATE-001",
+        message: "Too many requests.",
+        details: { retry_after: retryAfter },
+      });
+      const err = await caught(probe.requestPublic("GET", "/api/v1/things"));
+      expect((err as KaguraQuotaError).retryAfter).toBeNull();
+    }
   });
 
   it("treats a non-numeric Retry-After as absent on 429", async () => {
