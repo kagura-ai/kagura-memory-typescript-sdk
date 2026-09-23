@@ -4,6 +4,8 @@ import {
   DEFAULT_CLIENT_ID,
   authorizeDevice,
   buildInviteLink,
+  checkInviteOrigin,
+  inviteBaseUrl,
   parseInvite,
   pollForToken,
   refreshAccessToken,
@@ -460,24 +462,58 @@ const INVITE = "inv_ABCDEFGHIJKLMNOPQRSTUV-123";
  * A device response whose frontend (`app.test`) is not the API host, as on
  * a deployment that serves them apart: the link must follow the frontend.
  */
-const DEVICE = {
-  userCode: "WDJB-MJHT",
-  verificationUri: "https://app.test/device",
-  verificationUriComplete: "https://app.test/device?user_code=WDJB-MJHT",
-};
+const VERIFY = "https://app.test/device";
+const COMPLETE = "https://app.test/device?user_code=WDJB-MJHT";
 
 const LINK = `https://app.test/join/${INVITE}?return_to=%2Fdevice%3Fuser_code%3DWDJB-MJHT`;
 
+/** What a function threw, so a test can inspect the error it chose. */
+function thrown(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  return undefined;
+}
+
 describe("parseInvite", () => {
   it("accepts a bare token", () => {
-    expect(parseInvite(INVITE)).toEqual({ token: INVITE, origin: null });
+    expect(parseInvite(INVITE)).toEqual({ token: INVITE, origin: null, link: null });
   });
 
   it("accepts a /join/<token> link, ignoring any query or fragment", () => {
     expect(parseInvite(`https://app.test/join/${INVITE}?utm=mail#top`)).toEqual({
       token: INVITE,
       origin: "https://app.test",
+      link: `https://app.test/join/${INVITE}`,
     });
+  });
+
+  it("accepts a link under a base path, keeping the path in the link", () => {
+    expect(parseInvite(`https://app.test/kagura/app/join/${INVITE}`)).toEqual({
+      token: INVITE,
+      origin: "https://app.test",
+      link: `https://app.test/kagura/app/join/${INVITE}`,
+    });
+  });
+
+  it("accepts a trailing slash, as a frontend with trailingSlash produces", () => {
+    expect(parseInvite(`https://app.test/join/${INVITE}/`)).toEqual({
+      token: INVITE,
+      origin: "https://app.test",
+      link: `https://app.test/join/${INVITE}`,
+    });
+  });
+
+  it("drops the scheme's default port from the origin, as a browser does", () => {
+    expect(parseInvite(`https://app.test:443/join/${INVITE}`)?.origin).toBe("https://app.test");
+  });
+
+  it("accepts plain HTTP on localhost, as --server does", () => {
+    expect(parseInvite(`http://localhost:3000/join/${INVITE}`)?.origin).toBe(
+      "http://localhost:3000",
+    );
   });
 
   it("tolerates the whitespace a paste drags along", () => {
@@ -494,54 +530,124 @@ describe("parseInvite", () => {
     ["a link whose token is malformed", "https://app.test/join/short"],
     ["a link on a non-web scheme", `ftp://app.test/join/${INVITE}`],
     ["a host without a scheme", `app.test/join/${INVITE}`],
+    // The link carries a sign-up credential; the same rule as --server.
+    ["a plain-HTTP link off localhost", `http://app.test/join/${INVITE}`],
   ])("returns null for %s", (_label, value) => {
     expect(parseInvite(value)).toBeNull();
   });
 });
 
+describe("inviteBaseUrl", () => {
+  it.each([
+    ["the frontend root", VERIFY, "https://app.test"],
+    [
+      "a frontend under a base path",
+      "https://app.test/kagura/app/device",
+      "https://app.test/kagura/app",
+    ],
+    ["a trailing slash", "https://app.test/device/", "https://app.test"],
+    ["plain HTTP on localhost", "http://localhost:3000/device", "http://localhost:3000"],
+  ])("strips the final /device from %s", (_label, uri, base) => {
+    expect(inviteBaseUrl(uri)).toBe(base);
+  });
+
+  it.each([
+    ["a URI that does not end in /device", "https://app.test/activate"],
+    ["a segment that only ends in 'device'", "https://app.test/mydevice"],
+    ["plain HTTP off localhost", "http://app.test/device"],
+    ["a non-web scheme", "ftp://app.test/device"],
+    ["something that is not a URL", "device"],
+  ])("returns null for %s", (_label, uri) => {
+    expect(inviteBaseUrl(uri)).toBeNull();
+  });
+});
+
 describe("buildInviteLink", () => {
-  it("builds <frontend>/join/<token>?return_to=<device path and query>", () => {
-    expect(buildInviteLink(INVITE, DEVICE)).toBe(LINK);
+  it("builds <base>/join/<token>?return_to=<device path and query>", () => {
+    expect(buildInviteLink(VERIFY, COMPLETE, INVITE)).toBe(LINK);
   });
 
-  it("builds the same link from a pasted link on the same origin", () => {
-    expect(buildInviteLink(`https://app.test/join/${INVITE}?x=1`, DEVICE)).toBe(LINK);
+  it("places /join beside /device on a frontend under a base path", () => {
+    expect(
+      buildInviteLink(
+        "https://app.test/kagura/app/device",
+        "https://app.test/kagura/app/device?user_code=WDJB-MJHT",
+        INVITE,
+      ),
+    ).toBe(
+      `https://app.test/kagura/app/join/${INVITE}` +
+        "?return_to=%2Fkagura%2Fapp%2Fdevice%3Fuser_code%3DWDJB-MJHT",
+    );
   });
 
-  it("joins at the frontend origin's /join, whatever path the pasted link had", () => {
-    // Only the pasted link's origin is compared; the path the link is
-    // rebuilt on is the frontend's own /join, where the hand-off lives.
-    expect(buildInviteLink(`https://app.test/app/join/${INVITE}`, DEVICE)).toBe(LINK);
+  it("round-trips return_to to exactly the path and query of the complete form", () => {
+    const link = new URL(buildInviteLink(VERIFY, COMPLETE, INVITE)!);
+    expect(link.searchParams.get("return_to")).toBe("/device?user_code=WDJB-MJHT");
   });
 
-  it("falls back to verificationUri's path plus the user code when the complete form is empty", () => {
-    expect(buildInviteLink(INVITE, { ...DEVICE, verificationUriComplete: "" })).toBe(LINK);
+  it("uses the bare path when the complete form carries no query", () => {
+    expect(buildInviteLink(VERIFY, VERIFY, INVITE)).toBe(
+      `https://app.test/join/${INVITE}?return_to=%2Fdevice`,
+    );
   });
 
-  it("refuses a link from another deployment, naming origins but never the token", () => {
-    let caught: unknown;
-    try {
-      buildInviteLink(`https://other.test/join/${INVITE}`, DEVICE);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(KaguraAuthError);
-    const msg = (caught as Error).message;
-    expect(msg).toMatch(/another deployment/);
-    expect(msg).toContain("https://other.test");
-    expect(msg).toContain("https://app.test");
-    expect(msg).not.toContain(INVITE);
+  it.each([
+    [
+      "verificationUri does not end in /device",
+      "https://app.test/activate",
+      "https://app.test/activate?user_code=X",
+    ],
+    // The link carries the token: never over plaintext to a remote host.
+    [
+      "verificationUri is plain HTTP off localhost",
+      "http://app.test/device",
+      "http://app.test/device?user_code=X",
+    ],
+    ["the complete form is on another origin", VERIFY, "https://other.test/device?user_code=X"],
+    ["the complete form is empty", VERIFY, ""],
+  ])("returns null when %s", (_label, uri, complete) => {
+    expect(buildInviteLink(uri, complete, INVITE)).toBeNull();
   });
 
-  it("refuses a malformed invite without quoting it", () => {
+  it("refuses a malformed token without quoting it", () => {
     const bad = "not-a-real-invite-but-close!";
-    let caught: unknown;
-    try {
-      buildInviteLink(bad, DEVICE);
-    } catch (e) {
-      caught = e;
-    }
+    const caught = thrown(() => buildInviteLink(VERIFY, COMPLETE, bad));
     expect(caught).toBeInstanceOf(KaguraAuthError);
     expect((caught as Error).message).not.toContain(bad);
+  });
+
+  it("takes a token, not a link", () => {
+    // A link is reduced to its token by parseInvite; handed here whole, it
+    // would be interpolated into the path.
+    const link = `https://app.test/join/${INVITE}`;
+    const caught = thrown(() => buildInviteLink(VERIFY, COMPLETE, link));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    expect((caught as Error).message).not.toContain(INVITE);
+  });
+});
+
+describe("checkInviteOrigin", () => {
+  it.each([
+    ["a bare token", INVITE],
+    ["a link on the frontend's origin", `https://app.test/join/${INVITE}`],
+    ["a link under a base path on that origin", `https://app.test/kagura/join/${INVITE}`],
+    ["a link spelling out the default port", `https://app.test:443/join/${INVITE}`],
+  ])("passes %s", (_label, value) => {
+    expect(() => checkInviteOrigin(parseInvite(value)!, VERIFY)).not.toThrow();
+  });
+
+  it.each([
+    ["another host", `https://other.test/join/${INVITE}`, VERIFY],
+    ["another port", `https://app.test:8443/join/${INVITE}`, VERIFY],
+    ["another scheme", `http://localhost/join/${INVITE}`, "https://localhost/device"],
+  ])("refuses a link on %s, naming both origins but never the token", (_label, value, uri) => {
+    const invite = parseInvite(value)!;
+    const caught = thrown(() => checkInviteOrigin(invite, uri));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    const msg = (caught as Error).message;
+    expect(msg).toMatch(/different server/);
+    expect(msg).toContain(invite.origin!);
+    expect(msg).toContain(new URL(uri).origin);
+    expect(msg).not.toContain(INVITE);
   });
 });

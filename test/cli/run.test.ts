@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   loadCredentialsFile,
@@ -94,8 +94,9 @@ function harness(over: Partial<CliDeps> = {}): Harness {
       refreshCalls.push(o);
       return creds({ accessToken: "at-2" });
     },
-    // Only `--invite` sends a request of the CLI's own; a test that forgets
-    // to supply a server must fail rather than reach the network.
+    // Only `--invite` sends a request of the CLI's own; this stub keeps the
+    // suite off the network. It does not fail a test that forgets to supply
+    // a server: the feature check reads any error as "unknown".
     fetch: async () => {
       throw new Error("no network in tests");
     },
@@ -324,10 +325,12 @@ const INVITES_OFF = { name: "memory-cloud", version: "0.76.0", features: { beta_
  * The frontend (`app.test`, in the device response) is deliberately not
  * the API host (`api.test`), so a test can tell which one the invite link
  * was built on. `/system/info` answers `info`, or fails when it is an
- * Error; the token endpoint approves on the first poll. Every URL is
- * recorded, so a test can prove what was never requested.
+ * Error; `device` overrides fields of the device response, and a field set
+ * to `undefined` is left out of it. The token endpoint approves on the
+ * first poll. Every URL is recorded, so a test can prove what was never
+ * requested.
  */
-function loginServer(info: unknown) {
+function loginServer(info: unknown, device: Record<string, unknown> = {}) {
   const urls: string[] = [];
   const impl = async (input: string | URL | Request): Promise<Response> => {
     const url = String(input);
@@ -345,6 +348,7 @@ function loginServer(info: unknown) {
           verification_uri_complete: APPROVE,
           expires_in: 600,
           interval: 5,
+          ...device,
         }),
         { status: 200 },
       );
@@ -367,9 +371,9 @@ function loginServer(info: unknown) {
 }
 
 /** A harness running the real `login()` against {@link loginServer}. */
-function inviteHarness(info: unknown, over: Partial<CliDeps> = {}) {
-  const server = loginServer(info);
-  const h = harness({ login, fetch: server.fetch, ...over });
+function inviteHarness(info: unknown, device: Record<string, unknown> = {}) {
+  const server = loginServer(info, device);
+  const h = harness({ login, fetch: server.fetch });
   return { ...h, urls: server.urls };
 }
 
@@ -382,10 +386,23 @@ function filesUnder(root: string): string[] {
   });
 }
 
+/** The two-step prompt's step lines, as the Python CLI words them. */
+function stepOne(join: string): string {
+  return `    1. Open your invite link and sign up:   ${join}`;
+}
+function stepTwo(approve: string): string {
+  return `    2. Then open this URL and approve:       ${approve}`;
+}
+
 describe("cli: login --invite (#44)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it.each([
     ["a bare token", INVITE],
     ["a pasted link", `https://app.test/join/${INVITE}?utm=mail#top`],
+    ["a pasted link with a trailing slash", `https://app.test/join/${INVITE}/`],
   ])("prints and opens the one link for %s", async (_label, invite) => {
     const h = inviteHarness(SUPPORTED);
     expect(await runCli(["auth", "login", ...SERVER_ARGS, "--invite", invite], h.deps)).toBe(0);
@@ -402,14 +419,53 @@ describe("cli: login --invite (#44)", () => {
     await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps);
 
     const codeAt = h.out.findIndex((l) => l.includes("one-time code: WDJB-MJHT"));
-    const linkAt = h.out.indexOf(`    ${INVITE_LINK}`);
-    const fallbackAt = h.out.indexOf("  If you land on the dashboard instead, approve here:");
     expect(codeAt).toBeGreaterThanOrEqual(0);
-    expect(linkAt).toBeGreaterThan(codeAt);
-    expect(fallbackAt).toBeGreaterThan(linkAt);
-    // An already-signed-in user, or a /join that still ends on the
-    // dashboard, leaves the device code pending: approve it directly.
-    expect(h.out[fallbackAt + 1]).toBe(`    ${APPROVE}`);
+    // Worded as the Python CLI's (kagura-memory-python-sdk#259).
+    expect(h.out.slice(codeAt + 1, codeAt + 7)).toEqual([
+      "  Open this link to accept your invite and sign in:",
+      `    ${INVITE_LINK}`,
+      "  After sign-up you land on the approval page with the code filled in.",
+      // An already-signed-in user, or a /join that still ends on the
+      // dashboard, leaves the device code pending: approve it directly.
+      "  If you land on the dashboard instead, approve here:",
+      `    ${APPROVE}`,
+      "",
+    ]);
+  });
+
+  it("places the link beside /device on a frontend under a base path", async () => {
+    const h = inviteHarness(SUPPORTED, {
+      verification_uri: "https://app.test/kagura/device",
+      verification_uri_complete: "https://app.test/kagura/device?user_code=WDJB-MJHT",
+    });
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+
+    const link =
+      `https://app.test/kagura/join/${INVITE}` +
+      "?return_to=%2Fkagura%2Fdevice%3Fuser_code%3DWDJB-MJHT";
+    expect(h.out).toContain(`    ${link}`);
+    expect(h.opened).toEqual([link]);
+  });
+
+  it("fills the code in when the server omits verification_uri_complete", async () => {
+    // RFC 8628 makes it optional; authorizeDevice then carries the bare
+    // verification_uri, which on its own would land on an empty form.
+    const h = inviteHarness(SUPPORTED, { verification_uri_complete: undefined });
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+
+    expect(h.opened).toEqual([INVITE_LINK]);
+    expect(h.opened[0]).toMatch(/return_to=%2Fdevice%3Fuser_code%3DWDJB-MJHT$/);
+  });
+
+  it("checks the server KAGURA_MCP_URL names when --server is absent", async () => {
+    vi.stubEnv("KAGURA_MCP_URL", "https://api.test/mcp");
+    const h = inviteHarness(SUPPORTED);
+    expect(await runCli(["login", "--invite", INVITE], h.deps)).toBe(0);
+
+    // The feature check and the device flow reach the same server.
+    expect(h.urls[0]).toBe("https://api.test/api/v1/system/info");
+    expect(h.urls[1]).toBe("https://api.test/api/v1/oauth/device/authorize");
+    expect(h.opened).toEqual([INVITE_LINK]);
   });
 
   it("accepts a token that begins with a dash", async () => {
@@ -428,6 +484,8 @@ describe("cli: login --invite (#44)", () => {
     ["an empty value", ""],
     ["a link whose token is malformed", "https://app.test/join/short-token"],
     ["a link with no /join/ segment", `https://app.test/invite/${INVITE}`],
+    // The link carries a sign-up credential; the same rule as --server.
+    ["a plain-HTTP link off localhost", `http://app.test/join/${INVITE}`],
   ])("exits 2 before any request for %s, without echoing it", async (_label, invite) => {
     const urls: string[] = [];
     const h = harness({
@@ -446,7 +504,7 @@ describe("cli: login --invite (#44)", () => {
     }
   });
 
-  it("aborts before polling on a link from another deployment, writing nothing", async () => {
+  it("aborts before polling on a link from another server, writing nothing", async () => {
     const h = inviteHarness(SUPPORTED);
     const code = await runCli(
       ["login", ...SERVER_ARGS, "--invite", `https://other.test/join/${INVITE}`],
@@ -454,8 +512,12 @@ describe("cli: login --invite (#44)", () => {
     );
 
     expect(code).toBe(1);
-    expect(h.err.join("\n")).toMatch(/another deployment/);
-    expect(h.err.join("\n")).not.toContain(INVITE);
+    const err = h.err.join("\n");
+    expect(err).toMatch(/different server \(https:\/\/other\.test\)/);
+    expect(err).toContain("(https://app.test)");
+    // The way out: log in to the server the invite belongs to.
+    expect(err).toContain("--server <its MCP URL> --invite <link>");
+    expect(err).not.toContain(INVITE);
     expect(h.urls.some((u) => u.includes("/oauth/token"))).toBe(false);
     expect(h.opened).toEqual([]);
     expect(fs.existsSync(credentialsPath)).toBe(false);
@@ -468,7 +530,9 @@ describe("cli: login --invite (#44)", () => {
     const h = inviteHarness(info);
     expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
 
-    const noticeAt = h.out.findIndex((l) => /does not take invite links/.test(l));
+    const noticeAt = h.out.indexOf(
+      "  Note: this server does not accept invites, so --invite has no effect.",
+    );
     const codeAt = h.out.findIndex((l) => l.includes("one-time code: WDJB-MJHT"));
     expect(noticeAt).toBeGreaterThanOrEqual(0);
     expect(codeAt).toBeGreaterThan(noticeAt);
@@ -486,15 +550,77 @@ describe("cli: login --invite (#44)", () => {
     const h = inviteHarness(info);
     expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
 
-    const joinAt = h.out.indexOf(`    ${JOIN_LINK}`);
-    const approveAt = h.out.indexOf(`    ${APPROVE}`);
-    expect(joinAt).toBeGreaterThanOrEqual(0);
-    expect(h.out[joinAt - 1]).toMatch(/^ {2}1\. /);
-    expect(approveAt).toBeGreaterThan(joinAt);
-    expect(h.out[approveAt - 1]).toMatch(/^ {2}2\. /);
+    const codeAt = h.out.findIndex((l) => l.includes("one-time code: WDJB-MJHT"));
+    expect(codeAt).toBeGreaterThanOrEqual(0);
+    // Worded as the Python CLI's; the expiry comes from expires_in (600 s).
+    expect(h.out.slice(codeAt + 1, codeAt + 5)).toEqual([
+      "  Accept your invite before you approve the code, in this order:",
+      stepOne(JOIN_LINK),
+      stepTwo(APPROVE),
+      "  Polling continues here until the code expires (in 10 min).",
+    ]);
     // Step 1 is what the browser opens; return_to would be ignored here.
     expect(h.opened).toEqual([JOIN_LINK]);
     expect(h.out.join("\n")).not.toContain("return_to");
+  });
+
+  it("puts the two-step /join link beside /device on a frontend under a base path", async () => {
+    const h = inviteHarness(OLDER, {
+      verification_uri: "https://app.test/kagura/device",
+      verification_uri_complete: "https://app.test/kagura/device?user_code=WDJB-MJHT",
+    });
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+
+    expect(h.out).toContain(stepOne(`https://app.test/kagura/join/${INVITE}`));
+    expect(h.opened).toEqual([`https://app.test/kagura/join/${INVITE}`]);
+  });
+
+  describe("when verification_uri does not end in /device", () => {
+    const ACTIVATE = {
+      verification_uri: "https://app.test/activate",
+      verification_uri_complete: "https://app.test/activate?user_code=WDJB-MJHT",
+    };
+
+    it.each([
+      ["a server with the hand-off", SUPPORTED],
+      ["an older server", OLDER],
+    ])("takes two steps on %s, step 1 being the link the user gave", async (_label, info) => {
+      const h = inviteHarness(info, ACTIVATE);
+      const given = `https://app.test/kagura/join/${INVITE}`;
+      expect(
+        await runCli(["login", ...SERVER_ARGS, "--invite", `${given}?utm=mail`], h.deps),
+      ).toBe(0);
+
+      // /join cannot be placed beside /activate, so no link is invented.
+      expect(h.out).toContain(stepOne(given));
+      expect(h.out).toContain(stepTwo("https://app.test/activate?user_code=WDJB-MJHT"));
+      expect(h.opened).toEqual([given]);
+      expect(h.out.join("\n")).not.toContain("return_to");
+    });
+
+    it("points at the invite the user was sent, and opens nothing, for a bare token", async () => {
+      const h = inviteHarness(SUPPORTED, ACTIVATE);
+      expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+
+      expect(h.out).toContain("    1. Open the invite link you were sent and sign up.");
+      expect(h.out).toContain(stepTwo("https://app.test/activate?user_code=WDJB-MJHT"));
+      // Opening the approval page first would send a signed-out user to
+      // a login that drops the invite.
+      expect(h.opened).toEqual([]);
+      expect(h.out.join("\n")).not.toContain(INVITE);
+    });
+  });
+
+  it("never builds a /join link on a plain-HTTP frontend off localhost", async () => {
+    const h = inviteHarness(SUPPORTED, {
+      verification_uri: "http://app.test/device",
+      verification_uri_complete: "http://app.test/device?user_code=WDJB-MJHT",
+    });
+    expect(await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps)).toBe(0);
+
+    // The token would travel in the clear; the user opens their own link.
+    expect(h.out.join("\n")).not.toContain(INVITE);
+    expect(h.opened).toEqual([]);
   });
 
   it.each([
@@ -504,15 +630,18 @@ describe("cli: login --invite (#44)", () => {
   ])("prints the approval URL whenever --invite is given (%s)", async (_label, info) => {
     const h = inviteHarness(info);
     await runCli(["login", ...SERVER_ARGS, "--invite", INVITE], h.deps);
-    expect(h.out).toContain(`    ${APPROVE}`);
+    expect(h.out.some((l) => l.endsWith(` ${APPROVE}`))).toBe(true);
   });
 
-  it("prints the link and opens nothing with --no-browser", async () => {
-    const h = inviteHarness(SUPPORTED);
+  it.each([
+    ["one link", SUPPORTED, `    ${INVITE_LINK}`],
+    ["two steps", OLDER, stepOne(JOIN_LINK)],
+  ])("prints the link and opens nothing with --no-browser (%s)", async (_label, info, line) => {
+    const h = inviteHarness(info);
     expect(
       await runCli(["login", ...SERVER_ARGS, "--invite", INVITE, "--no-browser"], h.deps),
     ).toBe(0);
-    expect(h.out).toContain(`    ${INVITE_LINK}`);
+    expect(h.out).toContain(line);
     expect(h.opened).toEqual([]);
     expect(h.out.join("\n")).toMatch(/not opening a browser/);
   });
@@ -541,7 +670,8 @@ describe("cli: login --invite (#44)", () => {
     const h = harness();
     expect(await runCli(["auth", "login", "--help"], h.deps)).toBe(0);
     const text = h.out.join("\n");
-    expect(text).toMatch(/--invite TOKEN_OR_LINK\s+.*invite/);
+    // The Python CLI's metavar.
+    expect(text).toMatch(/--invite LINK_OR_TOKEN\s+.*invite/);
     expect(text).toMatch(/\/join\/<token>/);
   });
 

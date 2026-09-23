@@ -157,7 +157,7 @@ invite to `auth login`, either as the bare token or as the
 `https://…/join/<token>` link it arrived in:
 
 ```bash
-npx kagura-memory auth login --invite <token-or-link>
+npx kagura-memory auth login --invite <link-or-token>
 ```
 
 Without it, a new user who starts from `auth login` is refused at sign-up:
@@ -171,16 +171,27 @@ the invite (`GET /api/v1/system/info`, which takes no credentials):
   code filled in. The browser opens that link. Below it, "If you land on the
   dashboard instead, approve here:" and the approval URL cover a user who
   is already signed in.
-- **An older or unrecognised version, or the check failed**: two steps. The
-  plain `/join/<token>` link, which the browser opens, then the approval URL.
+- **An older or unrecognised version, or the check failed**: two steps, in
+  order. The plain `/join/<token>` link, which the browser opens, then the
+  approval URL, and how long the code stays valid.
 - **The server does not take invites** (`features.beta_invites` off): a
-  one-line notice, then the ordinary prompt.
+  one-line note, then the ordinary prompt.
+
+`<frontend>` is the device response's approval URL with its final
+`/device` removed, so a frontend under a base path gets its `/join` beside
+its `/device`. When that URL does not end in `/device`, the CLI does not
+guess where `/join` lives: it takes the two steps, with your own link as
+step 1, or tells you to open the invite you were sent when you gave a bare
+token.
 
 The invite is checked before any request, and a malformed one exits 2. A
-link from a different deployment than the one being logged into aborts
-before the device code is polled, so no profile is written. The token is
+pasted link must be HTTPS, as `--server` must (plain HTTP only on
+localhost), and a `/join` link is never built on a plain-HTTP frontend: the
+token would travel in the clear. A link for a different server than the one
+being logged into aborts before the device code is polled, so no profile is
+written; the error suggests logging in with `--server` instead. The token is
 never saved, in `credentials.json` or anywhere else, and never appears in an
-error message: it is printed only inside the link. Every other `auth`
+error message: it is printed only inside a link. Every other `auth`
 subcommand rejects `--invite` with exit 2 rather than ignoring it.
 `--no-browser` works as it does without an invite.
 
@@ -237,27 +248,31 @@ primitives are exported too: `authorizeDevice`, `pollForToken`,
 `deleteProfile`, …).
 
 For a new user holding a beta invite, `buildInviteLink` builds the same
-sign-up-and-approve link the CLI's `--invite` prints. `onUserCode` is the
-first point where both the invite and the user code are known, so call it
-there. It is a pure function and does not check the server version; that
-check is the CLI's own.
+sign-up-and-approve link the CLI's `--invite` prints. It takes the Python
+SDK's `build_invite_link` arguments in the same order: the two approval
+URLs from the device response, then the invite token. `onUserCode` is the
+first point where both are known, so call it there. It is a pure function
+and does not check the server version; that check is the CLI's own.
 
 ```ts
 import { buildInviteLink, login } from "kagura-memory";
 
-const invite = "https://memory.kagura-ai.com/join/<token>"; // or the bare token
+const token = "<token>"; // the last path segment of https://…/join/<token>
 
 await login({
-  onUserCode: (auth) => {
-    // Throws KaguraAuthError, before any polling, if the link belongs to
-    // another deployment than the one being logged into.
-    console.log(`Sign up and approve: ${buildInviteLink(invite, auth)}`);
+  onUserCode: ({ verificationUri, verificationUriComplete }) => {
+    // null when /join cannot be placed: the approval URL does not end in
+    // /device, or is plain HTTP off localhost.
+    const link = buildInviteLink(verificationUri, verificationUriComplete, token);
+    if (link !== null) console.log(`Sign up and approve: ${link}`);
     // A signed-in user, or a server older than memory-cloud 0.76.0, ends
     // up on the dashboard instead; the pending code is approved here.
-    console.log(`Or approve at: ${auth.verificationUriComplete}`);
+    console.log(`Or approve at: ${verificationUriComplete}`);
   },
 });
 ```
+
+A malformed token throws `KaguraAuthError`, whose message never quotes it.
 
 #### Refreshing
 

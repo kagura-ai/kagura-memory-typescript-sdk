@@ -24,7 +24,7 @@ import {
   KaguraConnectionError,
   excMessage,
 } from "../errors.js";
-import { extractDetail } from "../http.js";
+import { extractDetail, validateHttpsUrl } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 
 // OAuth2 endpoint paths under {server}.
@@ -477,11 +477,42 @@ export interface ParsedInvite {
   token: string;
   /** Origin of a pasted `/join/<token>` link; `null` for a bare token. */
   origin: string | null;
+  /**
+   * The pasted link without its query or fragment; `null` for a bare
+   * token. Step one of the two-step prompt when `/join` cannot be placed
+   * on the frontend.
+   */
+  link: string | null;
+}
+
+/**
+ * `value` as a URL when it is http(s) and passes the same HTTPS rule as
+ * `--server` (plain HTTP only for localhost); `null` otherwise. Every URL
+ * the invite token travels in is held to it.
+ */
+function secureWebUrl(value: string): URL | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return null;
+  }
+  try {
+    validateHttpsUrl(url.origin);
+  } catch {
+    return null;
+  }
+  return url;
 }
 
 /**
  * Read an invite given as a bare token or as a link whose path ends in
- * `/join/<token>`. Any query or fragment on the link is ignored.
+ * `/join/<token>`. The link may sit under a base path and end in a slash;
+ * any query or fragment is ignored. It must pass the `--server` HTTPS rule,
+ * since it carries the token.
  *
  * Returns `null` instead of throwing because the natural error would quote
  * the input, and the token is a sign-up credential: callers word their own
@@ -490,68 +521,115 @@ export interface ParsedInvite {
 export function parseInvite(value: string): ParsedInvite | null {
   const text = value.trim();
   if (INVITE_TOKEN_RE.test(text)) {
-    return { token: text, origin: null };
+    return { token: text, origin: null, link: null };
   }
-  let url: URL;
-  try {
-    url = new URL(text);
-  } catch {
+  const url = secureWebUrl(text);
+  if (url === null) {
     return null;
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return null;
-  }
-  const token = /\/join\/([^/]*)$/.exec(url.pathname)?.[1];
+  const path = url.pathname.replace(/\/+$/, "");
+  const token = /\/join\/([^/]*)$/.exec(path)?.[1];
   if (token === undefined || !INVITE_TOKEN_RE.test(token)) {
     return null;
   }
-  return { token, origin: url.origin };
+  return { token, origin: url.origin, link: `${url.origin}${path}` };
+}
+
+/**
+ * The frontend's base URL: `verificationUri` minus its final `/device`.
+ *
+ * memory-cloud builds `verificationUri` as `{frontend_url}/device`, and it
+ * is the only frontend location the CLI learns — `--server` is the API,
+ * which can live on another origin. `null` when the URI does not end in a
+ * `/device` segment or fails the `--server` HTTPS rule: `/join` cannot
+ * then be placed safely.
+ */
+export function inviteBaseUrl(verificationUri: string): string | null {
+  const url = secureWebUrl(verificationUri);
+  if (url === null) {
+    return null;
+  }
+  const path = url.pathname.replace(/\/+$/, "");
+  if (!path.endsWith("/device")) {
+    return null;
+  }
+  return `${url.origin}${path.slice(0, -"/device".length)}`;
 }
 
 /**
  * The one link that signs a new account up with an invite and lands it on
  * the approval page with the code filled in:
- * `<origin>/join/<token>?return_to=<path and query of verificationUriComplete>`.
+ * `<base>/join/<token>?return_to=<path and query of verificationUriComplete>`.
  *
- * Pure, and meant for `login()`'s `onUserCode` — the first point where both
- * the invite and the user code are known. The origin is `verificationUri`'s,
- * the frontend, which serves `/join` as well as `/device`. `return_to` is
- * the relative path the server validates as same-origin; when the complete
- * form is empty it is `verificationUri`'s path plus `?user_code=`.
+ * The Python SDK's `build_invite_link`, argument for argument. Pure, and
+ * meant for `login()`'s `onUserCode` — the first point where both the
+ * invite and the user code are known. `base` is {@link inviteBaseUrl}: the
+ * frontend serves `/join` beside `/device`, under whatever base path it
+ * has. `return_to` is the relative path the server validates as
+ * same-origin. `authorizeDevice` fills a missing `verification_uri_complete`
+ * with the bare `verificationUri`, which lands on an empty code form; the
+ * CLI passes `verificationUri` plus `?user_code=` in that case.
  *
  * Needs a memory-cloud whose `/join` honours `return_to` (memory-cloud
  * #1655). An older one signs the user up and stops on its dashboard, where
  * `verificationUriComplete` still approves the pending code — so show that
  * too.
  *
- * @param invite a bare token or a `…/join/<token>` link.
- * @throws KaguraAuthError the invite is malformed (the message never quotes
- *   it), or a pasted link belongs to a different deployment than `auth`.
+ * @param token a bare invite token; a pasted link reduced to its token.
+ * @returns the link, or `null` when `/join` cannot be placed:
+ *   `verificationUri` does not end in `/device` or is plain HTTP off
+ *   localhost, or `verificationUriComplete` is on another origin.
+ * @throws KaguraAuthError the token is malformed (the message never
+ *   quotes it).
  */
 export function buildInviteLink(
-  invite: string,
-  auth: Pick<DeviceAuthorizationResponse, "userCode" | "verificationUri" | "verificationUriComplete">,
-): string {
-  const parsed = parseInvite(invite);
-  if (parsed === null) {
+  verificationUri: string,
+  verificationUriComplete: string,
+  token: string,
+): string | null {
+  if (!INVITE_TOKEN_RE.test(token)) {
     throw new KaguraAuthError(
-      "The invite is neither an invite token nor a /join/<token> link.",
+      "An invite token must be 20-128 characters from A-Z, a-z, 0-9, '_' and '-'.",
     );
   }
-  const frontend = new URL(auth.verificationUri);
-  if (parsed.origin !== null && parsed.origin !== frontend.origin) {
+  const base = inviteBaseUrl(verificationUri);
+  const complete = secureWebUrl(verificationUriComplete);
+  if (
+    base === null ||
+    complete === null ||
+    complete.origin !== new URL(verificationUri).origin
+  ) {
+    return null;
+  }
+  const returnTo = `${complete.pathname}${complete.search}`;
+  return `${base}/join/${token}?return_to=${encodeURIComponent(returnTo)}`;
+}
+
+/**
+ * Refuse a pasted invite link whose origin is not the frontend's.
+ *
+ * The frontend's origin is `verificationUri`'s — `--server` is the API,
+ * which can differ. A link is never rewritten onto another host, so a
+ * mismatch means the login is going to the wrong server. A bare token
+ * carries no origin and always passes.
+ *
+ * @throws KaguraAuthError the origins differ. The message names both,
+ *   never the token.
+ */
+export function checkInviteOrigin(invite: ParsedInvite, verificationUri: string): void {
+  if (invite.origin === null) {
+    return;
+  }
+  let frontend: string;
+  try {
+    frontend = new URL(verificationUri).origin;
+  } catch {
+    frontend = verificationUri;
+  }
+  if (invite.origin !== frontend) {
     throw new KaguraAuthError(
-      `This invite belongs to another deployment (${parsed.origin}), ` +
-        `not the one being logged into (${frontend.origin}).\n` +
-        "  Log in to the server that issued it, or use an invite for this one.",
+      `This invite is for a different server (${invite.origin}) than the one ` +
+        `you are logging in to (${frontend}).`,
     );
   }
-  let returnTo: string;
-  if (auth.verificationUriComplete) {
-    const complete = new URL(auth.verificationUriComplete, frontend);
-    returnTo = `${complete.pathname}${complete.search}`;
-  } else {
-    returnTo = `${frontend.pathname}?${new URLSearchParams({ user_code: auth.userCode })}`;
-  }
-  return `${frontend.origin}/join/${parsed.token}?return_to=${encodeURIComponent(returnTo)}`;
 }

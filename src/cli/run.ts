@@ -30,10 +30,13 @@ import {
 } from "../auth/credentials.js";
 import {
   buildInviteLink,
+  checkInviteOrigin,
+  inviteBaseUrl,
   parseInvite,
   type DeviceAuthorizationResponse,
+  type ParsedInvite,
 } from "../auth/deviceFlow.js";
-import { excMessage } from "../errors.js";
+import { KaguraAuthError, excMessage } from "../errors.js";
 import { baseUrlFromMcp } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 import {
@@ -80,10 +83,10 @@ const AUTH_SPEC: ParseSpec = {
     {
       name: "invite",
       type: "value",
-      metavar: "TOKEN_OR_LINK",
+      metavar: "LINK_OR_TOKEN",
       // A token may begin with "-"; see FlagSpec.dashValue.
       dashValue: true,
-      help: "login: sign up with a beta invite (token or /join/<token> link)",
+      help: "login: sign up with a beta invite (/join/<token> link or bare token)",
     },
     { name: "all", type: "switch", help: "logout: remove every stored profile" },
     { name: "yes", type: "switch", help: "logout: skip the confirmation prompt" },
@@ -118,55 +121,106 @@ re-runs the device flow.`;
 
 /** `--invite`, parsed and checked against the server before login starts. */
 interface InviteHandoff {
-  /** The flag's value, handed to `buildInviteLink`; never printed bare. */
-  value: string;
+  /** The token appears only inside a printed `/join` link, never bare. */
+  invite: ParsedInvite;
   support: InviteSupport;
+}
+
+/**
+ * The approval URL with the code in it, for the one link's `return_to`.
+ *
+ * RFC 8628 makes `verification_uri_complete` optional, and
+ * `authorizeDevice` fills a missing one with the bare `verificationUri`.
+ * Built on that, the link would land on an empty code form, so the code is
+ * put back: `verificationUri`'s path plus `?user_code=`, the shape
+ * memory-cloud itself builds.
+ */
+function approvalWithCode(auth: DeviceAuthorizationResponse): string {
+  if (auth.verificationUriComplete && auth.verificationUriComplete !== auth.verificationUri) {
+    return auth.verificationUriComplete;
+  }
+  try {
+    const url = new URL(auth.verificationUri);
+    url.search = new URLSearchParams({ user_code: auth.userCode }).toString();
+    url.hash = "";
+    return url.toString();
+  } catch {
+    // Not a URL: buildInviteLink returns null for it, and the prompt
+    // falls back to two steps.
+    return auth.verificationUri;
+  }
 }
 
 /**
  * Print the code and URL, then optionally try to open a browser.
  *
- * With `--invite`, the URL printed and opened is the invite link: the one
- * link when the server can return to the approval page after sign-up, the
- * plain `/join` link as step one of two when it cannot or might not, and
- * none at all when the server takes no invites.
+ * With `--invite`, the prompt follows the Python CLI's
+ * (kagura-memory-python-sdk#259): the one link when the server can return
+ * to the approval page after sign-up and `/join` can be placed beside
+ * `/device`; otherwise two steps, the `/join` link and then the approval
+ * URL; and a note plus the ordinary prompt when the server takes no
+ * invites. The browser opens the invite link, never the approval URL
+ * ahead of it.
  */
-function devicePrompt(deps: CliDeps, openBrowserFlag: boolean, invite?: InviteHandoff) {
+function devicePrompt(deps: CliDeps, openBrowserFlag: boolean, handoff?: InviteHandoff) {
   return async (auth: DeviceAuthorizationResponse): Promise<void> => {
     const approveUrl = auth.verificationUriComplete || auth.verificationUri;
-    // Built before anything is printed, whichever way the invite is shown:
-    // a link from another deployment throws here, and login() awaits this
-    // callback, so the login stops before it polls or writes a profile.
-    const link = invite === undefined ? undefined : buildInviteLink(invite.value, auth);
-    let url = approveUrl;
+    let url: string | null = approveUrl;
     let steps = ["  Then approve at:", `    ${approveUrl}`];
 
-    if (invite?.support === "off") {
+    if (handoff !== undefined) {
+      // First, whichever way the invite is shown: login() awaits this
+      // callback, so a throw here stops it before it polls or writes a
+      // profile.
+      try {
+        checkInviteOrigin(handoff.invite, auth.verificationUri);
+      } catch (e) {
+        throw new KaguraAuthError(
+          `${excMessage(e)}\n  Log in to the invite's server instead: ` +
+            "kagura-memory auth login --server <its MCP URL> --invite <link>",
+          { cause: e },
+        );
+      }
+    }
+
+    if (handoff?.support === "off") {
       deps.write("");
-      deps.write("  (--invite: this server does not take invite links; logging in without one.)");
-    } else if (link !== undefined && invite?.support === "one-link") {
-      url = link;
-      steps = [
-        "  Then sign up with your invite and approve at:",
-        `    ${link}`,
-        // An already-signed-in user, or a /join that still ends on the
-        // dashboard, leaves the code pending; this approves it directly.
-        "  If you land on the dashboard instead, approve here:",
-        `    ${approveUrl}`,
-      ];
-    } else if (link !== undefined) {
-      // return_to would be ignored, so the browser opens /join alone.
-      const join = new URL(link);
-      join.search = "";
-      url = join.toString();
-      steps = [
-        "  This server may not return you to the approval page after sign-up,",
-        "  so it takes two steps:",
-        "  1. Sign up with your invite:",
-        `    ${url}`,
-        "  2. Then approve at:",
-        `    ${approveUrl}`,
-      ];
+      deps.write("  Note: this server does not accept invites, so --invite has no effect.");
+    } else if (handoff !== undefined) {
+      const { invite, support } = handoff;
+      const link =
+        support === "one-link"
+          ? buildInviteLink(auth.verificationUri, approvalWithCode(auth), invite.token)
+          : null;
+      if (link !== null) {
+        url = link;
+        steps = [
+          "  Open this link to accept your invite and sign in:",
+          `    ${link}`,
+          "  After sign-up you land on the approval page with the code filled in.",
+          // An already-signed-in user, or a /join that still ends on the
+          // dashboard, leaves the code pending; this approves it directly.
+          "  If you land on the dashboard instead, approve here:",
+          `    ${approveUrl}`,
+        ];
+      } else {
+        // return_to would be ignored, so step 1 is /join alone, placed
+        // beside /device. Where it cannot be, step 1 is the link the user
+        // gave (never a guessed host), and for a bare token no link at all.
+        const base = inviteBaseUrl(auth.verificationUri);
+        url = base !== null ? `${base}/join/${invite.token}` : invite.link;
+        const minutes = Math.max(1, Math.round(auth.expiresIn / 60));
+        steps = [
+          // Worded to hold on every server, including one with the
+          // hand-off whose /join could not be placed.
+          "  Accept your invite before you approve the code, in this order:",
+          url !== null
+            ? `    1. Open your invite link and sign up:   ${url}`
+            : "    1. Open the invite link you were sent and sign up.",
+          `    2. Then open this URL and approve:       ${approveUrl}`,
+          `  Polling continues here until the code expires (in ${minutes} min).`,
+        ];
+      }
     }
 
     // Unconditionally, and before any launch attempt: if the browser opens
@@ -178,6 +232,11 @@ function devicePrompt(deps: CliDeps, openBrowserFlag: boolean, invite?: InviteHa
     }
     deps.write("");
 
+    if (url === null) {
+      // Nothing to open: approval first would send a signed-out user to a
+      // login that drops the invite.
+      return;
+    }
     if (!openBrowserFlag) {
       deps.write("  (--no-browser: not opening a browser; still polling here.)");
       return;
@@ -225,22 +284,24 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
     return 2;
   }
 
-  let invite: InviteHandoff | undefined;
+  let handoff: InviteHandoff | undefined;
   if (args.values.invite !== undefined) {
     // Before any request. The value is not quoted back: an invite is a
     // sign-up credential, and stderr ends up in CI logs.
-    if (parseInvite(args.values.invite) === null) {
+    const invite = parseInvite(args.values.invite);
+    if (invite === null) {
       deps.writeError(
-        "--invite takes an invite token or a /join/<token> link; the value given is neither.",
+        "--invite takes an invite token or an https://<host>/join/<token> link; " +
+          "the value given is neither.",
       );
       return 2;
     }
     const server = baseUrlFromMcp(resolveLoginMcpUrl(args.values.server));
-    invite = { value: args.values.invite, support: await checkInviteSupport(server, deps.fetch) };
+    handoff = { invite, support: await checkInviteSupport(server, deps.fetch) };
   }
 
   const options: LoginOptions = {
-    onUserCode: devicePrompt(deps, !args.flags.has("no-browser"), invite),
+    onUserCode: devicePrompt(deps, !args.flags.has("no-browser"), handoff),
   };
   if (args.values.profile !== undefined) options.profile = args.values.profile;
   if (args.values.server !== undefined) options.mcpUrl = args.values.server;
