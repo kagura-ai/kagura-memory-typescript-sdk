@@ -160,6 +160,23 @@ jobs:
       - run: npm run test:no-webcrypto
       - run: npm run build
 
+      # Zero runtime dependencies is a documented promise, and the optional
+      # `age-encryption` peer must never leak into `dependencies`. Checked
+      # on the manifest npm is about to publish, before the publish, so the
+      # verdict does not depend on how quickly the registry serves the new
+      # version afterwards (#54).
+      - name: The manifest declares no runtime dependencies
+        shell: bash
+        run: |
+          node -e '
+            const deps = require("./package.json").dependencies;
+            if (deps && Object.keys(deps).length > 0) {
+              console.error("unexpected dependencies: " + JSON.stringify(deps));
+              process.exit(1);
+            }
+            console.log("dependencies: none");
+          '
+
       # `prepublishOnly` re-runs typecheck/test/test:no-webcrypto/build, so
       # the gate above is belt-and-braces — it fails faster and names the
       # failing step.
@@ -170,19 +187,22 @@ jobs:
       # if the attestation cannot be produced, rather than quietly shipping
       # a tarball without one.
       #
-      # "Already published" is not treated as a failure, and that is not the
-      # guard going soft. On the v0.8.0 publish npm uploaded the tarball at
-      # 12:15:39 and then reported `cannot publish over the previously
-      # published versions` at 12:15:51 — it had retried internally and
-      # collided with its own successful write. The run went red over a
-      # release that had actually landed, which is the shape of error that
-      # gets a good publish re-run by hand.
+      # How the publish ended is recorded for the next step as `landed`:
       #
-      # Nothing is concluded from the exit code either way: the next step
-      # is the authority, and it checks the registry for *this* version
-      # with zero dependencies. Every other publish error still fails here
-      # — EOTP, 403 and 404 included.
+      # - `accepted`: npm exited 0. The registry took the tarball; how long
+      #   it then takes to serve it is npm's processing time, not a doubt
+      #   about the publish.
+      # - `conflict`: npm said "cannot publish over the previously published
+      #   versions". On the v0.8.0 publish npm uploaded the tarball at
+      #   12:15:39 and then reported exactly that at 12:15:51 — it had
+      #   retried internally and collided with its own successful write. So
+      #   it is not a failure here, but the run cannot know whether its own
+      #   write landed, and the next step must see the version to pass.
+      #
+      # Every other publish error still fails here — EOTP, 403 and 404
+      # included.
       - name: Publish
+        id: publish
         shell: bash
         run: |
           set +e
@@ -191,40 +211,40 @@ jobs:
           echo "$out"
           set -e
           if [ "$code" -eq 0 ]; then
+            echo "landed=accepted" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if echo "$out" | grep -qi 'cannot publish over the previously published version'; then
             echo "::notice::npm reported the version as already present; the next step verifies it."
+            echo "landed=conflict" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           exit "$code"
 
-      # Two questions, asked separately, because npm answers them at
-      # different speeds.
+      # Reads the registry directly and parses on stdin, not argv (see the
+      # guard above). `npm view` is not used here at all: it serves a cache
+      # that reported a stale `latest` for minutes after the 0.5.0 publish.
       #
-      # 1. Is this version on the registry, with no runtime dependencies?
-      #    Asked of the version document, which appears first. This is the
-      #    step's verdict. v0.10.0 showed why it cannot be `latest`: publish
-      #    printed "may take a few minutes to become available", `latest`
-      #    still said 0.9.0 after the old 150 s window, and the run went red
-      #    over a release that had landed (#54). A re-run cannot fix that
-      #    kind of red: the guard above rightly refuses a version that
-      #    exists. So wait up to 10 minutes here.
-      # 2. Has `latest` moved to it? Checked afterwards for up to 5 more
-      #    minutes, and reported as a warning rather than a failure: the
-      #    tarball is published either way, and npm moves the tag on its
-      #    own schedule.
+      # npm now takes minutes to serve a version after accepting it: v0.10.0
+      # needed more than 150 s for `latest`, and v0.10.1 was not served at
+      # all — not even in the packument — until about 11 minutes after
+      # `npm publish` returned (#54). No fixed window is safe, so a slow
+      # registry is a verdict only when the publish itself was in doubt:
       #
-      # Every read goes to the registry directly and is parsed on stdin, not
-      # argv (see the guard above). `npm view` is not used here at all: it
-      # serves a cache that reported a stale `latest` for minutes after the
-      # 0.5.0 publish.
+      # 1. The version document, for up to 20 minutes. When it appears, its
+      #    version and (empty) dependencies are checked, and a mismatch
+      #    fails the run. If it never appears, an `accepted` publish gets a
+      #    warning and a `conflict` one fails.
+      # 2. The `latest` dist-tag, for up to 5 more minutes once the version
+      #    is served; a lagging tag is only ever a warning.
       - name: Confirm the registry agrees
         shell: bash
+        env:
+          LANDED: ${{ steps.publish.outputs.landed }}
         run: |
           version=$(node -p "require('./package.json').version")
           found=
-          for i in $(seq 1 40); do
+          for i in $(seq 1 80); do
             code=$(curl -sS -o version.json -w '%{http_code}' \
               "https://registry.npmjs.org/kagura-memory/$version" || true)
             if [ "$code" = 200 ]; then
@@ -232,8 +252,6 @@ jobs:
                 const m = JSON.parse(require("fs").readFileSync("version.json", "utf8"));
                 console.log("version=" + m.version, "deps=" + JSON.stringify(m.dependencies));
                 if (m.version !== process.argv[1]) process.exit(1);
-                // Zero runtime dependencies is a documented promise; the
-                // optional peer must not have leaked into `dependencies`.
                 if (m.dependencies && Object.keys(m.dependencies).length > 0) {
                   console.error("unexpected dependencies: " + JSON.stringify(m.dependencies));
                   process.exit(1);
@@ -242,13 +260,17 @@ jobs:
               found=1
               break
             fi
-            # 404 until the registry has it; anything else (a 5xx, a failed
-            # connection) is worth another look rather than a verdict.
+            # 404 until the registry serves it; anything else (a 5xx, a
+            # failed connection) is worth another look rather than a verdict.
             echo "attempt $i: $version not on the registry yet (HTTP $code)"
             sleep 15
           done
           if [ -z "$found" ]; then
-            echo "the registry did not serve kagura-memory@$version within 10 minutes" >&2
+            if [ "$LANDED" = accepted ]; then
+              echo "::warning::npm accepted kagura-memory@$version, but the registry did not serve it within 20 minutes. Check https://www.npmjs.com/package/kagura-memory/v/$version before announcing the release."
+              exit 0
+            fi
+            echo "npm did not confirm this run's publish, and the registry did not serve kagura-memory@$version within 20 minutes" >&2
             exit 1
           fi
           echo "published $version"
