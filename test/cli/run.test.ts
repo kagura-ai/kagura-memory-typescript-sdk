@@ -503,15 +503,42 @@ describe("cli: login --invite (#44)", () => {
     expect(h.err.join("\n")).not.toContain(dashed);
   });
 
+  const TOKEN_RULE = "an invite token must be 20-128 characters from A-Z, a-z, 0-9, '_' and '-'";
+
   it.each([
-    ["a token that is too short", "abc123"],
-    ["a token outside the alphabet", `${INVITE}!`],
-    ["an empty value", ""],
-    ["a link whose token is malformed", "https://app.test/join/short-token"],
-    ["a link with no /join/ segment", `https://app.test/invite/${INVITE}`],
+    ["a token that is too short", "abc123", TOKEN_RULE],
+    ["a token outside the alphabet", `${INVITE}!`, TOKEN_RULE],
+    ["an empty value", "", TOKEN_RULE],
+    ["a link whose token is malformed", "https://app.test/join/short-token", TOKEN_RULE],
+    [
+      "a link with no /join/ segment",
+      `https://app.test/invite/${INVITE}`,
+      "an invite link must end in /join/<token>",
+    ],
+    [
+      "a host without a scheme",
+      `app.test/join/${INVITE}`,
+      "an invite link must be a full https://<host>/join/<token> URL",
+    ],
+    // A browser would repair this one; the Python CLI wants "://".
+    [
+      "a link with one slash after the scheme",
+      `https:/app.test/join/${INVITE}`,
+      "an invite link must be a full https://<host>/join/<token> URL",
+    ],
+    [
+      "a link on a non-web scheme",
+      `ftp://app.test/join/${INVITE}`,
+      "an invite link must be an https://<host>/join/<token> URL",
+    ],
     // The link carries a sign-up credential; the same rule as --server.
-    ["a plain-HTTP link off localhost", `http://app.test/join/${INVITE}`],
-  ])("exits 2 before any request for %s, without echoing it", async (_label, invite) => {
+    [
+      "a plain-HTTP link off localhost",
+      `http://app.test/join/${INVITE}`,
+      "An invite link must use HTTPS for security (got: http://app.test). " +
+        "HTTP is only allowed for localhost development.",
+    ],
+  ])("exits 2 before any request for %s, without echoing it", async (_label, invite, reason) => {
     const urls: string[] = [];
     const h = harness({
       fetch: (async (input: string | URL | Request) => {
@@ -523,10 +550,20 @@ describe("cli: login --invite (#44)", () => {
     expect(await runCli(["login", ...SERVER_ARGS, `--invite=${invite}`], h.deps)).toBe(2);
     expect(urls).toEqual([]);
     expect(h.loginCalls).toEqual([]);
-    expect(h.err.join("\n")).toMatch(/--invite/);
+    // Click's BadParameter wording, with the Python CLI's reason.
+    expect(h.err).toEqual([`Error: Invalid value for '--invite': ${reason}`]);
     if (invite !== "") {
       expect([...h.out, ...h.err].join("\n")).not.toContain(invite);
     }
+  });
+
+  it("checks --invite before the other login options, as click does", async () => {
+    // click validates an option as it parses it, before the command body
+    // compares --read-only with --scope.
+    const h = harness();
+    const argv = ["login", "--read-only", "--scope", "memory:read", "--invite", "abc123"];
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err).toEqual([`Error: Invalid value for '--invite': ${TOKEN_RULE}`]);
   });
 
   it("aborts before polling on a link from another server, writing nothing", async () => {

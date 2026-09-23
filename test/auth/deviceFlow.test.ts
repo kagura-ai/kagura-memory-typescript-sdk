@@ -581,34 +581,69 @@ describe("parseInvite", () => {
     });
   });
 
-  it("drops the scheme's default port from the origin, as a browser does", () => {
-    expect(parseInvite(`https://app.test:443/join/${INVITE}`)?.origin).toBe("https://app.test");
-  });
-
-  it("accepts plain HTTP on localhost, as --server does", () => {
-    expect(parseInvite(`http://localhost:3000/join/${INVITE}`)?.origin).toBe(
-      "http://localhost:3000",
-    );
+  it.each([
+    ["a fragment alone", `https://app.test/join/${INVITE}#frag`, "https://app.test"],
+    ["an upper-case scheme and host", `HTTPS://App.Test/join/${INVITE}`, "https://app.test"],
+    ["the scheme's default port", `https://app.test:443/join/${INVITE}`, "https://app.test"],
+    ["another scheme's default port", `https://app.test:80/join/${INVITE}`, "https://app.test:80"],
+    // Plain HTTP on localhost, as --server allows.
+    ["localhost", `http://localhost:3000/join/${INVITE}`, "http://localhost:3000"],
+    ["localhost on port 80", `http://localhost:80/join/${INVITE}`, "http://localhost"],
+    ["an IPv6 loopback", `http://[::1]:3000/join/${INVITE}`, "http://[::1]:3000"],
+  ])("reads the origin as a browser does, from %s", (_label, value, origin) => {
+    expect(parseInvite(value)).toMatchObject({ token: INVITE, origin });
   });
 
   it("tolerates the whitespace a paste drags along", () => {
-    expect(parseInvite(`  ${INVITE}\n`)?.token).toBe(INVITE);
+    expect(parseInvite(`  ${INVITE}\n`).token).toBe(INVITE);
   });
 
+  // The Python CLI's reasons, which click prints after "Invalid value for
+  // '--invite': ".
+  const TOKEN_RULE = "an invite token must be 20-128 characters from A-Z, a-z, 0-9, '_' and '-'";
+  const FULL_URL = "an invite link must be a full https://<host>/join/<token> URL";
+  const WEB_URL = "an invite link must be an https://<host>/join/<token> URL";
+  const JOIN_LAST = "an invite link must end in /join/<token>";
+
   it.each([
-    ["too short", "a".repeat(19)],
-    ["too long", "a".repeat(129)],
-    ["outside the alphabet", `${INVITE}!`],
-    ["empty", ""],
-    ["a link with no /join/ segment", `https://app.test/invite/${INVITE}`],
-    ["a link with a segment after the token", `https://app.test/join/${INVITE}/extra`],
-    ["a link whose token is malformed", "https://app.test/join/short"],
-    ["a link on a non-web scheme", `ftp://app.test/join/${INVITE}`],
-    ["a host without a scheme", `app.test/join/${INVITE}`],
-    // The link carries a sign-up credential; the same rule as --server.
-    ["a plain-HTTP link off localhost", `http://app.test/join/${INVITE}`],
-  ])("returns null for %s", (_label, value) => {
-    expect(parseInvite(value)).toBeNull();
+    ["too short", "a".repeat(19), TOKEN_RULE],
+    ["too long", "a".repeat(129), TOKEN_RULE],
+    ["outside the alphabet", `${INVITE}!`, TOKEN_RULE],
+    ["a dot", "inv_ABCDEFGHIJKLMNOP.QRSTUV-123", TOKEN_RULE],
+    ["empty", "", TOKEN_RULE],
+    ["a token with a newline inside", `inv_ABCDEFGHIJ\nKLMNOPQRSTUV-123`, TOKEN_RULE],
+    ["a link with no /join/ segment", `https://app.test/invite/${INVITE}`, JOIN_LAST],
+    ["a link with a segment after the token", `https://app.test/join/${INVITE}/extra`, JOIN_LAST],
+    ["a link ending in /join", "https://app.test/join", JOIN_LAST],
+    ["a link with the token alone", `https://app.test/${INVITE}`, JOIN_LAST],
+    ["a link whose token is malformed", "https://app.test/join/short", TOKEN_RULE],
+    ["a link on a non-web scheme", `ftp://app.test/join/${INVITE}`, WEB_URL],
+    ["a link with no host", `https:///join/${INVITE}`, WEB_URL],
+    ["a link with a port out of range", `https://app.test:99999/join/${INVITE}`, WEB_URL],
+    ["a host without a scheme", `app.test/join/${INVITE}`, FULL_URL],
+    // A browser would read these as https://app.test/join/<token>; the
+    // Python CLI wants the "://" written out, and so does this one.
+    ["a link with one slash after the scheme", `https:/app.test/join/${INVITE}`, FULL_URL],
+    ["a link with no slash after the scheme", `https:app.test/join/${INVITE}`, FULL_URL],
+    ["a link written with backslashes", `https:\\\\app.test\\join\\${INVITE}`, TOKEN_RULE],
+    ["a host followed by backslashes", `https://app.test\\join\\${INVITE}`, WEB_URL],
+  ])("refuses %s, saying why without quoting it", (_label, value, reason) => {
+    const caught = thrown(() => parseInvite(value));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    const message = (caught as Error).message;
+    expect(message).toBe(reason);
+    expect(message).not.toContain(INVITE);
+  });
+
+  it("refuses a plain-HTTP link off localhost with the --server rule", () => {
+    // The link carries a sign-up credential. The message names the origin,
+    // never the token.
+    const caught = thrown(() => parseInvite(`http://app.test/join/${INVITE}`));
+    expect(caught).toBeInstanceOf(KaguraAuthError);
+    expect((caught as Error).message).toBe(
+      "An invite link must use HTTPS for security (got: http://app.test). " +
+        "HTTP is only allowed for localhost development.",
+    );
   });
 });
 
@@ -632,6 +667,7 @@ describe("inviteBaseUrl", () => {
     ["plain HTTP off localhost", "http://app.test/device"],
     ["a non-web scheme", "ftp://app.test/device"],
     ["something that is not a URL", "device"],
+    ["a scheme with no authority", "javascript:alert(1)/device"],
   ])("returns null for %s", (_label, uri) => {
     expect(inviteBaseUrl(uri)).toBeNull();
   });
@@ -666,6 +702,26 @@ describe("buildInviteLink", () => {
     );
   });
 
+  it("keeps every query parameter of the complete form in return_to", () => {
+    const complete = "https://app.test/device?user_code=WDJB-MJHT&lang=ja";
+    const link = new URL(buildInviteLink(VERIFY, complete, INVITE)!);
+    expect(link.searchParams.get("return_to")).toBe("/device?user_code=WDJB-MJHT&lang=ja");
+  });
+
+  it("treats a spelled-out default port as the same origin", () => {
+    expect(buildInviteLink("https://app.test:443/device", COMPLETE, INVITE)).toBe(LINK);
+  });
+
+  it("builds on a plain-HTTP frontend on localhost", () => {
+    expect(
+      buildInviteLink(
+        "http://localhost:3000/device",
+        "http://localhost:3000/device?user_code=WDJB-MJHT",
+        INVITE,
+      ),
+    ).toBe(`http://localhost:3000/join/${INVITE}?return_to=%2Fdevice%3Fuser_code%3DWDJB-MJHT`);
+  });
+
   it.each([
     [
       "verificationUri does not end in /device",
@@ -678,8 +734,20 @@ describe("buildInviteLink", () => {
       "http://app.test/device",
       "http://app.test/device?user_code=X",
     ],
+    [
+      "verificationUri has a segment after /device",
+      "https://app.test/device/extra",
+      "https://app.test/device/extra?user_code=X",
+    ],
+    ["verificationUri has no authority", "javascript:alert(1)/device", "javascript:alert(1)/device"],
     ["the complete form is on another origin", VERIFY, "https://other.test/device?user_code=X"],
     ["the complete form is empty", VERIFY, ""],
+    // Values memory-cloud's /join drops as return_to (its safeReturnTo),
+    // which would strand the new user on the dashboard: a `//` path (a
+    // FRONTEND_URL with a trailing slash), a backslash, a C0 control.
+    ["return_to would start with //", "https://app.test//device", "https://app.test//device?user_code=X"],
+    ["return_to would hold a backslash", VERIFY, "https://app.test/de\\vice?user_code=X"],
+    ["return_to would hold a control character", VERIFY, "https://app.test/device?user_code=W\x01X"],
   ])("returns null when %s", (_label, uri, complete) => {
     expect(buildInviteLink(uri, complete, INVITE)).toBeNull();
   });
@@ -708,21 +776,28 @@ describe("checkInviteOrigin", () => {
     ["a link under a base path on that origin", `https://app.test/kagura/join/${INVITE}`],
     ["a link spelling out the default port", `https://app.test:443/join/${INVITE}`],
   ])("passes %s", (_label, value) => {
-    expect(() => checkInviteOrigin(parseInvite(value)!, VERIFY)).not.toThrow();
+    expect(() => checkInviteOrigin(parseInvite(value), VERIFY)).not.toThrow();
   });
 
   it.each([
-    ["another host", `https://other.test/join/${INVITE}`, VERIFY],
-    ["another port", `https://app.test:8443/join/${INVITE}`, VERIFY],
-    ["another scheme", `http://localhost/join/${INVITE}`, "https://localhost/device"],
-  ])("refuses a link on %s, naming both origins but never the token", (_label, value, uri) => {
-    const invite = parseInvite(value)!;
+    ["another host", `https://other.test/join/${INVITE}`, VERIFY, "https://app.test"],
+    ["another port", `https://app.test:8443/join/${INVITE}`, VERIFY, "https://app.test"],
+    [
+      "another scheme",
+      `http://localhost/join/${INVITE}`,
+      "https://localhost/device",
+      "https://localhost",
+    ],
+    // No origin to name: the URI is named as given.
+    ["a URI that is not a URL", `https://app.test/join/${INVITE}`, "not a url", "not a url"],
+  ])("refuses a link on %s, naming both origins but never the token", (_label, value, uri, named) => {
+    const invite = parseInvite(value);
     const caught = thrown(() => checkInviteOrigin(invite, uri));
     expect(caught).toBeInstanceOf(KaguraAuthError);
     const msg = (caught as Error).message;
     expect(msg).toMatch(/different server/);
-    expect(msg).toContain(invite.origin!);
-    expect(msg).toContain(new URL(uri).origin);
+    expect(msg).toContain(`(${invite.origin!})`);
+    expect(msg).toContain(`(${named})`);
     expect(msg).not.toContain(INVITE);
   });
 });

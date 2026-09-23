@@ -509,6 +509,7 @@ export async function revokeToken(
 // memory-cloud's beta-invite token shape (its beta_invite_service). Checked
 // client-side so a mistyped invite fails before any request, not at sign-up.
 const INVITE_TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
+const INVITE_TOKEN_RULE = "20-128 characters from A-Z, a-z, 0-9, '_' and '-'";
 
 /** An invite reduced to what the `/join` hand-off needs. */
 export interface ParsedInvite {
@@ -523,54 +524,117 @@ export interface ParsedInvite {
   link: string | null;
 }
 
+/** Throw, without quoting `token`, unless it has the invite-token shape. */
+function checkInviteToken(token: string): void {
+  if (!INVITE_TOKEN_RE.test(token)) {
+    throw new KaguraAuthError(`an invite token must be ${INVITE_TOKEN_RULE}`);
+  }
+}
+
+/** The pieces of a `scheme://netloc/path?query#fragment` URL, unnormalised. */
+interface UrlParts {
+  /** Lower-cased. */
+  scheme: string;
+  netloc: string;
+  path: string;
+  query: string;
+}
+
 /**
- * `value` as a URL when it is http(s) and passes the same HTTPS rule as
- * `--server` (plain HTTP only for localhost); `null` otherwise. Every URL
- * the invite token travels in is held to it.
+ * `url` split as the Python SDK's `urlsplit` splits it; `null` when it has
+ * no `scheme://` authority.
+ *
+ * Not `new URL`: WHATWG parsing repairs what it reads — a backslash becomes
+ * a slash, `https:host` gains its `//`, a control character is
+ * percent-encoded — so an invite link or `return_to` the Python CLI refuses
+ * would pass here. Like `urlsplit`, tab, CR and LF are dropped and leading
+ * controls and spaces stripped.
  */
-function secureWebUrl(value: string): URL | null {
-  let url: URL;
+function splitUrl(url: string): UrlParts | null {
+  const text = url.replace(/[\t\r\n]/g, "").replace(/^[\x00-\x20]+/, "");
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?/.exec(text);
+  if (m === null) {
+    return null;
+  }
+  return { scheme: m[1]!.toLowerCase(), netloc: m[2]!, path: m[3]!, query: m[4] ?? "" };
+}
+
+/**
+ * `scheme://host[:port]` of an http(s) URL, as a browser forms it: lower-cased,
+ * with the scheme's default port dropped. `null` otherwise.
+ *
+ * A backslash in the authority is refused rather than read the way a
+ * browser would (as the start of the path), since the Python CLI does not
+ * read it that way either.
+ */
+function urlOrigin(parts: UrlParts | null): string | null {
+  if (
+    parts === null ||
+    (parts.scheme !== "http" && parts.scheme !== "https") ||
+    parts.netloc === "" ||
+    parts.netloc.includes("\\")
+  ) {
+    return null;
+  }
   try {
-    url = new URL(value);
+    return new URL(`${parts.scheme}://${parts.netloc}`).origin;
   } catch {
+    // An empty host, or a port that is not a number or out of range.
     return null;
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return null;
-  }
-  try {
-    validateHttpsUrl(url.origin);
-  } catch {
-    return null;
-  }
-  return url;
+}
+
+/**
+ * Whether memory-cloud's `/join` keeps `path` as its `return_to`.
+ *
+ * Mirrors the relative-path branch of the frontend's `safeReturnTo`
+ * (memory-cloud v0.76.0): exactly one leading `/`, no backslash and no C0
+ * control character. `/join` drops any other value silently and sends the
+ * invitee to the dashboard, so the CLI prints the two steps instead.
+ */
+function joinKeepsReturnTo(path: string): boolean {
+  return path.startsWith("/") && !path.startsWith("//") && !/[\\\x00-\x1f]/.test(path);
 }
 
 /**
  * Read an invite given as a bare token or as a link whose path ends in
  * `/join/<token>`. The link may sit under a base path and end in a slash;
- * any query or fragment is ignored. It must pass the `--server` HTTPS rule,
- * since it carries the token.
+ * any query or fragment is ignored. It must spell out `://`, and must pass
+ * the `--server` HTTPS rule, since it carries the token. The Python SDK's
+ * `parse_invite`, reason for reason.
  *
- * Returns `null` instead of throwing because the natural error would quote
- * the input, and the token is a sign-up credential: callers word their own
- * error without it.
+ * @throws KaguraAuthError the value is neither. The message says why
+ *   without quoting the value: the token is a sign-up credential. It is
+ *   worded to follow the CLI's "Invalid value for '--invite': ".
  */
-export function parseInvite(value: string): ParsedInvite | null {
+export function parseInvite(value: string): ParsedInvite {
   const text = value.trim();
-  if (INVITE_TOKEN_RE.test(text)) {
+  if (!text.includes("://")) {
+    if (text.includes("/")) {
+      throw new KaguraAuthError("an invite link must be a full https://<host>/join/<token> URL");
+    }
+    checkInviteToken(text);
     return { token: text, origin: null, link: null };
   }
-  const url = secureWebUrl(text);
-  if (url === null) {
-    return null;
+
+  const parts = splitUrl(text);
+  const origin = urlOrigin(parts);
+  if (parts === null || origin === null) {
+    throw new KaguraAuthError("an invite link must be an https://<host>/join/<token> URL");
   }
-  const path = url.pathname.replace(/\/+$/, "");
-  const token = /\/join\/([^/]*)$/.exec(path)?.[1];
-  if (token === undefined || !INVITE_TOKEN_RE.test(token)) {
-    return null;
+  try {
+    validateHttpsUrl(origin, "An invite link");
+  } catch (e) {
+    throw new KaguraAuthError(excMessage(e), { cause: e });
   }
-  return { token, origin: url.origin, link: `${url.origin}${path}` };
+  const path = parts.path.replace(/\/+$/, "");
+  const segments = path.split("/");
+  if (segments.length < 3 || segments[segments.length - 2] !== "join") {
+    throw new KaguraAuthError("an invite link must end in /join/<token>");
+  }
+  const token = segments[segments.length - 1]!;
+  checkInviteToken(token);
+  return { token, origin, link: `${origin}${path}` };
 }
 
 /**
@@ -583,15 +647,19 @@ export function parseInvite(value: string): ParsedInvite | null {
  * then be placed safely.
  */
 export function inviteBaseUrl(verificationUri: string): string | null {
-  const url = secureWebUrl(verificationUri);
-  if (url === null) {
+  const parts = splitUrl(verificationUri);
+  const origin = urlOrigin(parts);
+  const path = parts?.path.replace(/\/+$/, "") ?? "";
+  if (origin === null || !path.endsWith("/device")) {
     return null;
   }
-  const path = url.pathname.replace(/\/+$/, "");
-  if (!path.endsWith("/device")) {
+  const base = `${origin}${path.slice(0, -"/device".length)}`;
+  try {
+    validateHttpsUrl(base);
+  } catch {
     return null;
   }
-  return `${url.origin}${path.slice(0, -"/device".length)}`;
+  return base;
 }
 
 /**
@@ -604,19 +672,21 @@ export function inviteBaseUrl(verificationUri: string): string | null {
  * invite and the user code are known. `base` is {@link inviteBaseUrl}: the
  * frontend serves `/join` beside `/device`, under whatever base path it
  * has. `return_to` is the relative path the server validates as
- * same-origin. `authorizeDevice` fills a missing `verification_uri_complete`
- * with the bare `verificationUri`, which lands on an empty code form; the
- * CLI passes `verificationUri` plus `?user_code=` in that case.
+ * same-origin, percent-encoded whole. `authorizeDevice` fills a missing
+ * `verification_uri_complete` with the bare `verificationUri`, which lands
+ * on an empty code form; the CLI passes `verificationUri` plus
+ * `?user_code=` in that case.
  *
- * Needs a memory-cloud whose `/join` honours `return_to` (memory-cloud
- * #1655). An older one signs the user up and stops on its dashboard, where
- * `verificationUriComplete` still approves the pending code — so show that
- * too.
+ * Needs memory-cloud v0.76.0 or later, whose `/join` honours `return_to`
+ * (memory-cloud#1655). An older one signs the user up and stops on its
+ * dashboard, where `verificationUriComplete` still approves the pending
+ * code — so show that too.
  *
  * @param token a bare invite token; a pasted link reduced to its token.
- * @returns the link, or `null` when `/join` cannot be placed:
- *   `verificationUri` does not end in `/device` or is plain HTTP off
- *   localhost, or `verificationUriComplete` is on another origin.
+ * @returns the link, or `null` when `/join` cannot be placed or would drop
+ *   `return_to`: `verificationUri` does not end in `/device` or is plain
+ *   HTTP off localhost, `verificationUriComplete` is on another origin, or
+ *   its path and query are not a `return_to` memory-cloud keeps.
  * @throws KaguraAuthError the token is malformed (the message never
  *   quotes it).
  */
@@ -625,21 +695,20 @@ export function buildInviteLink(
   verificationUriComplete: string,
   token: string,
 ): string | null {
-  if (!INVITE_TOKEN_RE.test(token)) {
-    throw new KaguraAuthError(
-      "An invite token must be 20-128 characters from A-Z, a-z, 0-9, '_' and '-'.",
-    );
-  }
+  checkInviteToken(token);
   const base = inviteBaseUrl(verificationUri);
-  const complete = secureWebUrl(verificationUriComplete);
+  const complete = splitUrl(verificationUriComplete);
   if (
     base === null ||
     complete === null ||
-    complete.origin !== new URL(verificationUri).origin
+    urlOrigin(complete) !== urlOrigin(splitUrl(verificationUri))
   ) {
     return null;
   }
-  const returnTo = `${complete.pathname}${complete.search}`;
+  const returnTo = complete.query ? `${complete.path}?${complete.query}` : complete.path;
+  if (!joinKeepsReturnTo(returnTo)) {
+    return null;
+  }
   return `${base}/join/${token}?return_to=${encodeURIComponent(returnTo)}`;
 }
 
@@ -658,16 +727,11 @@ export function checkInviteOrigin(invite: ParsedInvite, verificationUri: string)
   if (invite.origin === null) {
     return;
   }
-  let frontend: string;
-  try {
-    frontend = new URL(verificationUri).origin;
-  } catch {
-    frontend = verificationUri;
-  }
+  const frontend = urlOrigin(splitUrl(verificationUri));
   if (invite.origin !== frontend) {
     throw new KaguraAuthError(
       `This invite is for a different server (${invite.origin}) than the one ` +
-        `you are logging in to (${frontend}).`,
+        `you are logging in to (${frontend ?? verificationUri}).`,
     );
   }
 }

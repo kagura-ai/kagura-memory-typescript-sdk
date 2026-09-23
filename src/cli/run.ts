@@ -288,6 +288,18 @@ function describeProfile(name: string, creds: OAuthCredentials, isDefault: boole
 }
 
 async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
+  // First, and before any request, as click validates an option while it
+  // parses. The reason never quotes the value: an invite is a sign-up
+  // credential, and stderr ends up in CI logs.
+  let invite: ParsedInvite | undefined;
+  if (args.values.invite !== undefined) {
+    try {
+      invite = parseInvite(args.values.invite);
+    } catch (e) {
+      throw new CliUsageError(`Invalid value for '--invite': ${excMessage(e)}`);
+    }
+  }
+
   const readOnly = args.flags.has("read-only");
   const scope = args.values.scope;
   if (readOnly && scope !== undefined) {
@@ -296,17 +308,7 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   }
 
   let handoff: InviteHandoff | undefined;
-  if (args.values.invite !== undefined) {
-    // Before any request. The value is not quoted back: an invite is a
-    // sign-up credential, and stderr ends up in CI logs.
-    const invite = parseInvite(args.values.invite);
-    if (invite === null) {
-      deps.writeError(
-        "--invite takes an invite token or an https://<host>/join/<token> link; " +
-          "the value given is neither.",
-      );
-      return 2;
-    }
+  if (invite !== undefined) {
     const server = baseUrlFromMcp(resolveLoginMcpUrl(args.values.server));
     handoff = { invite, support: await checkInviteSupport(server, deps.fetch) };
   }
