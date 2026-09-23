@@ -391,7 +391,7 @@ export class KaguraClient {
   private readonly fetchImpl: typeof globalThis.fetch;
   private sessionId: string | null = null;
   /** The in-flight `initialize`, shared by every caller (see initializeSession). */
-  private sessionOpening: Promise<void> | null = null;
+  private sessionOpening: Promise<string> | null = null;
   private requestIdCounter = 1;
 
   constructor(options: KaguraClientOptions = {}) {
@@ -452,26 +452,30 @@ export class KaguraClient {
   }
 
   /**
-   * Initialize the MCP session if not already initialized.
+   * Initialize the MCP session if not already initialized, and return its id.
    *
    * Single-flight: calls that find no session at the same time (on first
    * use, or after all hitting one expired session) share one `initialize`
    * instead of each opening, and orphaning, a session of their own.
+   *
+   * Callers send the id returned here rather than re-reading `sessionId`:
+   * a concurrent expired-session 404 can clear the field in the tick the
+   * `await` yields, which would send the request with no session at all.
    */
-  private async initializeSession(): Promise<void> {
+  private async initializeSession(): Promise<string> {
     if (this.sessionId) {
-      return;
+      return this.sessionId;
     }
     // Dropped once settled, so a failed handshake is retried by the next
     // call rather than replayed to it.
     this.sessionOpening ??= this.openSession().finally(() => {
       this.sessionOpening = null;
     });
-    await this.sessionOpening;
+    return this.sessionOpening;
   }
 
   /** Run the `initialize` handshake and keep the session id it returns. */
-  private async openSession(): Promise<void> {
+  private async openSession(): Promise<string> {
     const body = {
       jsonrpc: "2.0",
       id: this.nextRequestId(),
@@ -493,6 +497,7 @@ export class KaguraClient {
       throw new KaguraConnectionError("No session ID returned from server");
     }
     this.sessionId = sessionId;
+    return sessionId;
   }
 
   private async safeText(response: Response): Promise<string> {
@@ -516,7 +521,7 @@ export class KaguraClient {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    await this.initializeSession();
+    const sessionId = await this.initializeSession();
 
     const body = {
       jsonrpc: "2.0",
@@ -525,7 +530,6 @@ export class KaguraClient {
       params,
     };
 
-    const sessionId = this.sessionId;
     let response = await this.post(this.mcpUrl, body, mcpSessionHeader(sessionId));
     let text = await this.safeText(response);
     if (mcpSessionExpired(response.status, text, sessionId)) {
@@ -534,8 +538,7 @@ export class KaguraClient {
       if (this.sessionId === sessionId) {
         this.sessionId = null;
       }
-      await this.initializeSession();
-      const retrySessionId = this.sessionId;
+      const retrySessionId = await this.initializeSession();
       response = await this.post(this.mcpUrl, body, mcpSessionHeader(retrySessionId));
       text = await this.safeText(response);
       if (mcpSessionExpired(response.status, text, retrySessionId)) {
