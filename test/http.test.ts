@@ -32,6 +32,34 @@ describe("baseUrlFromMcp", () => {
   it("does not strip an /mcp substring inside a longer segment", () => {
     expect(baseUrlFromMcp("https://x.test/mcpx/foo")).toBe("https://x.test/mcpx/foo");
   });
+
+  // Server v0.73+ reads `?profile=` / `?tools=` / `?guardrails=` off the
+  // MCP URL, so a query can sit directly on `/mcp`. It must not leak into
+  // the REST base as `/mcp?profile=core/api/v1/...`.
+  it.each([
+    "https://x.test/mcp?profile=core",
+    "https://x.test/mcp?tools=a,b&guardrails=off",
+    "https://x.test/mcp#x",
+    "https://x.test/mcp/?profile=core",
+    "https://x.test/mcp/w/abc?profile=core",
+  ])("strips /mcp followed by a query or fragment: %s", (url) => {
+    expect(baseUrlFromMcp(url)).toBe("https://x.test");
+  });
+
+  // The query and fragment address the MCP endpoint, never the REST API,
+  // so they are dropped even when there is no /mcp segment to strip.
+  it.each([
+    ["https://x.test?profile=core", "https://x.test"],
+    ["https://x.test/?profile=core", "https://x.test"],
+    ["https://x.test/mcpx?profile=core", "https://x.test/mcpx"],
+    ["https://x.test/api#x", "https://x.test/api"],
+  ])("drops the query and fragment from %s", (url, expected) => {
+    expect(baseUrlFromMcp(url)).toBe(expected);
+  });
+
+  it("does not take an /mcp inside the query for the path segment", () => {
+    expect(baseUrlFromMcp("https://x.test/api?next=/mcp")).toBe("https://x.test/api");
+  });
 });
 
 describe("extractDetail", () => {

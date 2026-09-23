@@ -26,6 +26,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   v0.69.0 nothing changes: there an omitted value already meant `false`.
   The Python SDK gets the same fix for `use_rerank=False` (python-sdk#251).
 
+- **An MCP URL with a query broke every REST call**
+  ([#38](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/38)):
+  server v0.73 reads `?profile=`, `?tools=` and `?guardrails=` off the MCP
+  URL, but a query sitting directly on `/mcp`
+  (`https://memory.kagura-ai.com/mcp?profile=core`) was not taken as the end
+  of that segment, so the whole URL became the REST base and
+  `getServerInfo()` requested `…/mcp?profile=core/api/v1/system/info`. MCP
+  tool calls kept working, which hid it; the REST methods on `KaguraClient`,
+  every `fromMcpUrl` client and the `login()` device flow did not. The query
+  and fragment are now dropped before `/mcp` is stripped, and dropped from a
+  URL with no `/mcp` segment too, since they configure the MCP endpoint and
+  never the REST API. The MCP URL itself keeps its query, and URLs without
+  one derive the same base as before.
+
 ## [0.8.0] - 2026-08-01
 
 ### Added

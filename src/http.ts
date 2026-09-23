@@ -11,11 +11,18 @@ export { SDK_VERSION } from "./version.js";
 /**
  * Derive the REST API base URL from an MCP URL.
  *
- * Strips `/mcp` and everything after it (e.g. `/mcp/w/{workspace}`).
+ * Drops the query and fragment, then strips `/mcp` and everything after it
+ * (e.g. `/mcp/w/{workspace}`). The query (`?profile=`, `?tools=`,
+ * `?guardrails=`) configures the MCP endpoint alone, so it is dropped even
+ * from a URL with no `/mcp` segment to strip.
  */
 export function baseUrlFromMcp(mcpUrl: string): string {
-  const m = /\/mcp(?=\/|$)/.exec(mcpUrl);
-  return m ? mcpUrl.slice(0, m.index) : mcpUrl;
+  // `?` and `#` end the path. Callers strip trailing slashes from the raw
+  // URL, which misses a slash sitting before the query (`/?profile=core`).
+  const end = mcpUrl.search(/[?#]/);
+  const path = end === -1 ? mcpUrl : mcpUrl.slice(0, end).replace(/\/+$/, "");
+  const m = /\/mcp(?=\/|$)/.exec(path);
+  return m ? path.slice(0, m.index) : path;
 }
 
 function formatValidationErrors(errors: unknown[]): string {

@@ -580,6 +580,16 @@ describe("REST endpoints", () => {
     expect(server.requests[0]!.headers.authorization).toBe("Bearer test-key");
   });
 
+  it("getServerInfo drops the MCP URL's query from the REST base URL (#38)", async () => {
+    const server = new FakeServer();
+    server.restResults["/api/v1/system/info"] = { name: "memory-cloud", version: "0.73.0" };
+    const client = makeClient(server, { mcpUrl: "https://x.test/mcp?profile=core" });
+    await client.getServerInfo();
+    expect(server.requests[0]!.url).toBe("https://x.test/api/v1/system/info");
+    // MCP calls still carry the query: the server reads the profile there.
+    expect(client.mcpUrl).toBe("https://x.test/mcp?profile=core");
+  });
+
   it("checkServerVersion returns info and never throws on old servers", async () => {
     const server = new FakeServer();
     server.restResults["/api/v1/system/info"] = { name: "mc", version: "0.1.0" };
