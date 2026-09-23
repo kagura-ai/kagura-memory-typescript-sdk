@@ -154,6 +154,17 @@ describe("kagura-memory recall", () => {
     expect(args).toMatchObject({ context_id: "ctx-9", query: "q", k: 20 });
   });
 
+  it("sends filters.trust_tier = trusted with --trusted-only", async () => {
+    const { code, args } = await wire(["recall", "q", "--trusted-only"]);
+    expect(code).toBe(0);
+    expect(args).toMatchObject({ query: "q", filters: { trust_tier: "trusted" } });
+  });
+
+  it("sends no filters without --trusted-only", async () => {
+    const { args } = await wire(["recall", "q"]);
+    expect(args).not.toHaveProperty("filters");
+  });
+
   it("rejects --k, which Python does not declare", async () => {
     const { code, h } = await wire(["recall", "q", "--k", "3"]);
     expect(code).toBe(2);

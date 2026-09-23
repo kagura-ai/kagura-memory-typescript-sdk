@@ -176,13 +176,31 @@ const RECALL_K = kFlag("Number of results", "5");
 const recall: Command = {
   summary: "Search memories directly (without AI analysis).",
   args: "QUERY",
-  spec: { flags: [CONTEXT_ID, RECALL_K] },
+  spec: {
+    flags: [
+      CONTEXT_ID,
+      RECALL_K,
+      // Python added this for its SessionStart hook. This bin installs no
+      // hooks, but the flag is mirrored so the two CLIs take the same argv.
+      {
+        name: "trusted-only",
+        type: "switch",
+        help: "Only trusted memories (excludes external/connector-ingested ones)",
+      },
+    ],
+  },
   run: async (deps, args) => {
     const query = requireArg(args, 0, "QUERY");
     rejectExtraArgs(args, 1);
     const k = intOr(args, RECALL_K, 5);
+    const trustedOnly = args.flags.has("trusted-only");
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
-      client.recall({ contextId, query, k }),
+      client.recall({
+        contextId,
+        query,
+        k,
+        ...(trustedOnly ? { filters: { trust_tier: "trusted" } } : {}),
+      }),
     );
   },
 };
