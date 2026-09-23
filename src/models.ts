@@ -70,7 +70,13 @@ export interface UsageInfo {
   mcp_calls_per_day: UsageQuotaLimitOnly;
 }
 
-/** Hybrid search configuration for a context. */
+/**
+ * Hybrid search configuration for a context.
+ *
+ * `update_search_config` echoes every field under `config`;
+ * `get_context_info` may leave out the reinforce and routing ones, so they
+ * are optional like the rest.
+ */
 export interface SearchConfig {
   /** @default 0.6 */
   semantic_weight?: number;
@@ -80,8 +86,21 @@ export interface SearchConfig {
   fetch_factor?: number;
   /** @default false */
   use_rerank?: boolean;
+  /** Known values: `voyage`, `cohere`, `self_hosted`. */
   reranker_provider?: string | null;
   reranker_model?: string | null;
+  /** Bounded adoption + feedback re-rank. New contexts start enabled. */
+  reinforce_enabled?: boolean;
+  /** Bound on the reinforce adjustment, range 0.0-0.5. @default 0.15 */
+  reinforce_max_boost?: number;
+  /** Count only host-arbitrated feedback toward reinforce. @default false */
+  reinforce_require_host_arbitration?: boolean;
+  /**
+   * Query-intent router: `off`, `log_only`, or `active`. Typed `string`
+   * (not a literal union) for forward compatibility; the request-side
+   * option uses the closed enum. @default "off"
+   */
+  routing_mode?: string;
 }
 
 /** Context metadata returned by `get_context_info`. */
@@ -136,6 +155,54 @@ export interface ContextInfo {
    * same as "no guardrails"; otherwise it is a {@link ContextGuardrails}.
    */
   guardrails?: ContextGuardrails | null;
+}
+
+// ---------------------------------------------------------------------------
+// Context directory (server v0.73.0+, SDK issue #42)
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry in a `list_contexts` response.
+ *
+ * Since server v0.73.0 the default item is the slim name→id row
+ * (`id`, `name`, `is_private`, `is_locked`, `last_used_at`). Everything
+ * else is opt-in and absent unless its flag was sent: `summary` with
+ * `include_summary` (capped at 300 characters) or `include_details` (full,
+ * plus `embedding_model`), and `memory_count` with `include_stats`.
+ */
+export interface ContextListItem {
+  id: string;
+  name: string;
+  is_private: boolean;
+  is_locked: boolean;
+  /** ISO 8601 datetime string; `null` for a context never used. */
+  last_used_at?: string | null;
+  summary?: string | null;
+  /** Present, and `true`, only on a summary preview that was cut. */
+  summary_truncated?: boolean;
+  embedding_model?: string | null;
+  memory_count?: number;
+}
+
+/**
+ * Response from `list_contexts`: the contexts the caller can see, most
+ * recently used first.
+ *
+ * `count` is the workspace's quota usage and never tracks `name_contains`;
+ * the number of items returned is `total` (server v0.73.0+). `limit` and
+ * `can_create` are absent when the caller has no current workspace.
+ * `hint` (server v0.75.0+) appears only when the caller can see no context
+ * at all, and says how to create one or get access.
+ */
+export interface ListContextsResponse {
+  /** @default "success" */
+  status?: string;
+  contexts: ContextListItem[];
+  count: number;
+  total?: number;
+  limit?: number;
+  can_create?: boolean;
+  hint?: string;
 }
 
 // ---------------------------------------------------------------------------

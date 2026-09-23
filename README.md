@@ -295,12 +295,13 @@ try {
 ## `KaguraClient` method reference
 
 Methods return the parsed server response. Most take a single camelCase
-options object; `getAgent`, `deleteAgent`, `listAgentBindings` and
-`deleteContext` take the id directly, and the workspace-wide calls
-(`listContexts`, `listAgents`, `getUsage`, `getServerInfo`,
-`checkServerVersion`, `getEmbeddingStatus`, `listEmbeddingModels`,
-`getToolDefinitions`, `close`) take no arguments. The wire stays
-snake_case; optional fields are omitted from the request when `undefined`.
+options object (optional for `listContexts` and `listMemories`);
+`getAgent`, `deleteAgent`, `listAgentBindings` and `deleteContext` take
+the id directly, and the workspace-wide calls (`listAgents`, `getUsage`,
+`getServerInfo`, `checkServerVersion`, `getEmbeddingStatus`,
+`listEmbeddingModels`, `getToolDefinitions`, `close`) take no arguments.
+The wire stays snake_case; optional fields are omitted from the request
+when `undefined`.
 
 ### Memories
 
@@ -309,7 +310,7 @@ snake_case; optional fields are omitted from the request when `undefined`.
 | `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. |
 | `reference` | Full detail for one memory, under `result.memory`. |
-| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. |
+| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. |
 | `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. A target the caller may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. |
 | `listMemories` | Browse with substring, facet, and time-window filters. Omit `contextId` for the caller's cross-context view. |
 
@@ -322,7 +323,7 @@ the counterpart to `recall`'s probabilistic search.
 |--------|------|
 | `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. |
 | `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`. |
-| `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. |
+| `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. Items carry `trigger`, not `details` (server v0.73.0+); `includeDetails: true` returns the full `details` object instead. |
 | `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. See [the WHERE axis](#the-where-axis--geospatial-memories). |
 
 ### Tags and the neural graph
@@ -340,13 +341,13 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | What it does |
 |--------|--------------|
-| `listContexts` | All contexts, with the workspace's `can_create` quota flag. |
+| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters; `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. |
 | `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraPlanError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` is immutable afterwards. |
 | `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed. |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraPlanError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
-| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01) and reranking; the `useRerank` set here is what a `recall` that omits it follows. Owner/editor only. |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only. |
 | `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. Plan-gated: throws `KaguraPlanError` on a plan without resources. |
 
 ### Agent run-state

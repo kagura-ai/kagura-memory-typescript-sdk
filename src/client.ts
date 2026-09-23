@@ -35,6 +35,7 @@ import type {
   Edge,
   EmbeddingModelsResponse,
   EmbeddingStatus,
+  ListContextsResponse,
   ListTagsResponse,
   LoadGuardrailsResponse,
   MemoryListResponse,
@@ -77,6 +78,8 @@ export type MemoryStatsSortField =
   | "created_at"
   | "last_used_at";
 export type SearchMode = "hybrid" | "semantic" | "keyword";
+/** Query-intent router gate for a context's recall (`updateSearchConfig`). */
+export type RoutingMode = "off" | "log_only" | "active";
 export type SourceType = "file" | "url" | "vault" | "api" | "manual";
 
 /** Agent lifecycle state — `updateAgent`'s fail-closed kill switch. */
@@ -226,6 +229,32 @@ export interface UpdateMemoryOptions {
   details?: Record<string, unknown>;
   /** `"always"` pins, `"on_recall"` unpins; omit to leave unchanged. */
   deliveryMode?: DeliveryMode;
+  /**
+   * Reject this memory's current `supersede_candidate` (server v0.65.0+)
+   * — for two memories that are deliberately separate, so the suggestion
+   * stops resurfacing on recall and reference. Nothing is deleted or
+   * shadowed. To accept a candidate instead, create a `"supersedes"` edge.
+   *
+   * In-place mode only: requires `memoryId`. Only `true` is sent.
+   */
+  dismissSupersedeCandidate?: boolean;
+}
+
+export interface ListContextsOptions {
+  /**
+   * Only contexts whose name or display name contains this text
+   * (case-insensitive, max 100 chars; blank means no filter).
+   */
+  nameContains?: string;
+  /** Add each context's `summary`, capped at 300 characters. */
+  includeSummary?: boolean;
+  /**
+   * Add the full `summary` and `embedding_model`. Large on a big
+   * workspace, so pair it with `nameContains`. Wins over `includeSummary`.
+   */
+  includeDetails?: boolean;
+  /** Add `memory_count` per context. */
+  includeStats?: boolean;
 }
 
 export interface CreateContextOptions {
@@ -396,9 +425,30 @@ export interface UpdateSearchConfigOptions {
   fetchFactor?: number;
   /** Enable AI reranking; a `recall` that omits `useRerank` follows it (server v0.69.0+). */
   useRerank?: boolean;
-  /** "voyage", "cohere", or "ollama". */
+  /**
+   * `"voyage"`, `"cohere"`, or `"self_hosted"` (a local OpenAI-compatible
+   * backend such as Ollama or vLLM; needs no API key).
+   */
   rerankerProvider?: string;
   rerankerModel?: string;
+  /**
+   * Bounded adoption + feedback re-rank: memories that get referenced and
+   * marked helpful gain a small standing boost. New contexts start enabled.
+   */
+  reinforceEnabled?: boolean;
+  /** Bound on the reinforce adjustment (0.0-0.5, server default 0.15). */
+  reinforceMaxBoost?: number;
+  /**
+   * Count only host-arbitrated feedback, so an untrusted agent's own
+   * `feedback({ helpful: true })` cannot boost its ranking.
+   */
+  reinforceRequireHostArbitration?: boolean;
+  /**
+   * `"off"` (server default); `"log_only"` records the routing decision
+   * with no ranking change; `"active"` routes a `recall` that omits
+   * `searchMode`. An explicit `searchMode` always wins.
+   */
+  routingMode?: RoutingMode;
 }
 
 /**
@@ -898,6 +948,11 @@ export class KaguraClient {
    * List Time Memories whose scheduled window overlaps a range, soonest
    * first. A deterministic time query over `type="time"` memories — not
    * semantic search, no Hebbian side-effects.
+   *
+   * Since server v0.73.0 each item carries `trigger` (the memory's
+   * `details.trigger`) instead of the full `details` object, so
+   * `item.details` is `undefined` by default. Pass `includeDetails: true`
+   * to get `details` back, or call {@link reference} for one memory.
    */
   async recallUpcoming(options: {
     contextId: string;
@@ -907,6 +962,8 @@ export class KaguraClient {
     until?: string;
     /** Maximum results (default 20, server max 100). */
     k?: number;
+    /** Return each item's full `details` instead of its `trigger` (default false). */
+    includeDetails?: boolean;
   }): Promise<ToolResult> {
     const args: Record<string, unknown> = {
       context_id: options.contextId,
@@ -917,6 +974,9 @@ export class KaguraClient {
     }
     if (options.until !== undefined) {
       args.until = options.until;
+    }
+    if (options.includeDetails) {
+      args.include_details = true;
     }
     return this.callToolChecked("recall_upcoming", args);
   }
@@ -1346,9 +1406,35 @@ export class KaguraClient {
     return result as unknown as AgentBootstrapResponse;
   }
 
-  /** List available contexts. */
-  async listContexts(): Promise<ToolResult> {
-    return this.callToolChecked("list_contexts", {});
+  /**
+   * List the contexts the caller can see, most recently used first.
+   *
+   * Since server v0.73.0 this is a slim name→id directory: each item is
+   * `{id, name, is_private, is_locked, last_used_at}` and carries no
+   * `summary` or `embedding_model` unless asked for. Narrow a large
+   * workspace with `listContexts({ nameContains, includeDetails: true })`,
+   * or read one context in full with {@link getContextInfo}.
+   *
+   * `count` is workspace quota usage, not the number returned — that is
+   * `total`. When the caller can see no context at all, `hint` says how
+   * to create one or get access.
+   */
+  async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
+    const args: Record<string, unknown> = {};
+    if (options.nameContains !== undefined) {
+      args.name_contains = options.nameContains;
+    }
+    if (options.includeSummary) {
+      args.include_summary = true;
+    }
+    if (options.includeDetails) {
+      args.include_details = true;
+    }
+    if (options.includeStats) {
+      args.include_stats = true;
+    }
+    const result = await this.callToolChecked("list_contexts", args);
+    return result as unknown as ListContextsResponse;
   }
 
   /**
@@ -1430,7 +1516,11 @@ export class KaguraClient {
    * Update an existing memory in-place (memoryId) or upsert by external
    * ID (externalId — requires summary, content, and type).
    *
-   * @throws Error unless exactly one of memoryId/externalId is provided.
+   * Reject a `supersede_candidate` the server suggested with
+   * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
+   *
+   * @throws Error unless exactly one of memoryId/externalId is provided,
+   *   or if `dismissSupersedeCandidate` is combined with `externalId`.
    */
   async updateMemory(options: UpdateMemoryOptions): Promise<ToolResult> {
     if (!options.memoryId && !options.externalId) {
@@ -1438,6 +1528,14 @@ export class KaguraClient {
     }
     if (options.memoryId && options.externalId) {
       throw new Error("Provide exactly one of memoryId or externalId");
+    }
+    // The server rejects this pair too; an upsert replaces the memory, so
+    // there is no stored suggestion left to dismiss.
+    if (options.dismissSupersedeCandidate && options.externalId) {
+      throw new Error(
+        "dismissSupersedeCandidate requires memoryId; an externalId upsert " +
+          "replaces the memory and its suggestion",
+      );
     }
 
     const args: Record<string, unknown> = { context_id: options.contextId };
@@ -1470,6 +1568,9 @@ export class KaguraClient {
     }
     if (options.deliveryMode !== undefined) {
       args.delivery_mode = options.deliveryMode;
+    }
+    if (options.dismissSupersedeCandidate) {
+      args.dismiss_supersede_candidate = true;
     }
     return this.callToolChecked("update_memory", args);
   }
@@ -1791,8 +1892,10 @@ export class KaguraClient {
   }
 
   /**
-   * Update hybrid search configuration for a context. Weights must sum
-   * to 1.0 (±0.01). Requires owner or editor permission.
+   * Update a context's search configuration: hybrid weights, reranker,
+   * reinforce re-rank, and query routing. Weights must sum to 1.0
+   * (±0.01). Requires owner or editor permission. Omitted fields keep
+   * their current values.
    */
   async updateSearchConfig(options: UpdateSearchConfigOptions): Promise<ToolResult> {
     const args: Record<string, unknown> = { context_id: options.contextId };
@@ -1813,6 +1916,18 @@ export class KaguraClient {
     }
     if (options.rerankerModel !== undefined) {
       args.reranker_model = options.rerankerModel;
+    }
+    if (options.reinforceEnabled !== undefined) {
+      args.reinforce_enabled = options.reinforceEnabled;
+    }
+    if (options.reinforceMaxBoost !== undefined) {
+      args.reinforce_max_boost = options.reinforceMaxBoost;
+    }
+    if (options.reinforceRequireHostArbitration !== undefined) {
+      args.reinforce_require_host_arbitration = options.reinforceRequireHostArbitration;
+    }
+    if (options.routingMode !== undefined) {
+      args.routing_mode = options.routingMode;
     }
     return this.callToolChecked("update_search_config", args);
   }

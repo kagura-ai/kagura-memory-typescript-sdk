@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import type {
   ContextInfo,
   Edge,
+  ListContextsResponse,
   ListTagsResponse,
   LoadGuardrailsResponse,
+  SearchConfig,
   SleepReportDetail,
   ToolTrigger,
 } from "../src/models.js";
@@ -131,6 +133,51 @@ const listTags: ListTagsResponse = {
   total: 2,
 };
 
+// The `config` echoed by update_search_config: every field, including the
+// reinforce re-rank and routing knobs get_context_info may leave out.
+const searchConfig: SearchConfig = {
+  semantic_weight: 0.6,
+  bm25_weight: 0.4,
+  fetch_factor: 3,
+  use_rerank: true,
+  reranker_provider: "self_hosted",
+  reranker_model: null,
+  reinforce_enabled: true,
+  reinforce_max_boost: 0.15,
+  reinforce_require_host_arbitration: false,
+  routing_mode: "log_only",
+};
+
+// One default item and one carrying every opt-in field, so both shapes
+// type-check against the same item interface.
+const listContexts: ListContextsResponse = {
+  status: "success",
+  contexts: [
+    {
+      id: "ctx_abc123",
+      name: "engineering-notes",
+      is_private: true,
+      is_locked: false,
+      last_used_at: "2026-09-21T08:00:00Z",
+    },
+    {
+      id: "ctx_def456",
+      name: "never-used",
+      is_private: false,
+      is_locked: false,
+      last_used_at: null,
+      summary: "A long summary cut at 300 characters…",
+      summary_truncated: true,
+      embedding_model: "text-embedding-3-small",
+      memory_count: 0,
+    },
+  ],
+  count: 2,
+  total: 2,
+  limit: 10,
+  can_create: true,
+};
+
 const edge: Edge = {
   source_id: "mem_a",
   target_id: "mem_b",
@@ -190,6 +237,17 @@ describe("models", () => {
     expect(guardrails.pinned[0]?.tool_trigger).toBeNull();
     expect(guardrails.tool_triggered[0]?.tool_trigger?.action).toBe("block");
     expect(minimalTrigger.on).toBeUndefined();
+  });
+
+  it("SearchConfig carries the reinforce and routing fields", () => {
+    expect(searchConfig.reinforce_max_boost).toBe(0.15);
+    expect(searchConfig.routing_mode).toBe("log_only");
+  });
+
+  it("ListContextsResponse compiles and reads", () => {
+    expect(listContexts.contexts[0]?.summary).toBeUndefined();
+    expect(listContexts.contexts[1]?.summary_truncated).toBe(true);
+    expect(listContexts.hint).toBeUndefined();
   });
 
   it("ListTagsResponse compiles and reads", () => {

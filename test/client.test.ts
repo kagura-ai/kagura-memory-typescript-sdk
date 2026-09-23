@@ -12,6 +12,7 @@ import {
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
+import type { ListContextsResponse } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
 
 describe("construction", () => {
@@ -1032,6 +1033,75 @@ describe("recall", () => {
   });
 });
 
+describe("recallUpcoming", () => {
+  it("sends include_details only when includeDetails is true (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.recallUpcoming({ contextId: "c", from: "now" });
+    await client.recallUpcoming({ contextId: "c", includeDetails: true });
+    await client.recallUpcoming({ contextId: "c", includeDetails: false });
+
+    // Since server v0.73.0 items carry `trigger` by default; the flag is the
+    // only way back to the full `details` object.
+    expect(server.toolCallArgs(0)).toEqual({ context_id: "c", k: 20, from: "now" });
+    expect(server.toolCallArgs(1)).toEqual({ context_id: "c", k: 20, include_details: true });
+    expect(server.toolCallArgs(2)).not.toHaveProperty("include_details");
+  });
+});
+
+describe("listContexts (#42)", () => {
+  it("stays callable with no arguments and sends no flags", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    expect(server.toolCallArgs()).toEqual({});
+  });
+
+  it("maps each option to its snake_case wire name", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts({
+      nameContains: "notes",
+      includeSummary: true,
+      includeDetails: true,
+      includeStats: true,
+    });
+    expect(server.toolCallArgs()).toEqual({
+      name_contains: "notes",
+      include_summary: true,
+      include_details: true,
+      include_stats: true,
+    });
+  });
+
+  it("omits flags that are false or unset", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts({ includeSummary: false, includeDetails: false, includeStats: false });
+    await client.listContexts({ nameContains: "notes" });
+    expect(server.toolCallArgs(0)).toEqual({});
+    expect(server.toolCallArgs(1)).toEqual({ name_contains: "notes" });
+  });
+
+  it("returns the envelope typed, including the empty-workspace hint", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = {
+      status: "success",
+      contexts: [],
+      count: 0,
+      total: 0,
+      limit: 5,
+      can_create: true,
+      hint: "No contexts are visible to you yet.",
+    };
+    const client = makeClient(server);
+    const result: ListContextsResponse = await client.listContexts();
+    expect(result.contexts).toEqual([]);
+    expect(result.can_create).toBe(true);
+    expect(result.hint).toBe("No contexts are visible to you yet.");
+  });
+});
+
 describe("memory mutation guards", () => {
   it("updateMemory requires exactly one of memoryId/externalId", async () => {
     const client = makeClient(new FakeServer());
@@ -1064,6 +1134,39 @@ describe("memory mutation guards", () => {
     const client = makeClient(server);
     await client.updateMemory({ contextId: "c", memoryId: "m1", details: {} });
     expect(server.toolCallArgs(0)).toHaveProperty("details", {});
+  });
+
+  it("updateMemory maps dismissSupersedeCandidate and omits it unless true (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateMemory({ contextId: "c", memoryId: "m1", dismissSupersedeCandidate: true });
+    await client.updateMemory({ contextId: "c", memoryId: "m1", dismissSupersedeCandidate: false });
+    await client.updateMemory({ contextId: "c", memoryId: "m1", summary: "s" });
+
+    expect(server.toolCallArgs(0)).toEqual({
+      context_id: "c",
+      memory_id: "m1",
+      dismiss_supersede_candidate: true,
+    });
+    expect(server.toolCallArgs(1)).not.toHaveProperty("dismiss_supersede_candidate");
+    expect(server.toolCallArgs(2)).not.toHaveProperty("dismiss_supersede_candidate");
+  });
+
+  it("updateMemory rejects dismissSupersedeCandidate with externalId before any request (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(
+      client.updateMemory({
+        contextId: "c",
+        externalId: "doc-1",
+        summary: "s",
+        content: "c",
+        type: "note",
+        dismissSupersedeCandidate: true,
+      }),
+    ).rejects.toThrow(/dismissSupersedeCandidate requires memoryId/);
+    // Not even the MCP session was opened.
+    expect(server.requests).toHaveLength(0);
   });
 
   it("forget requires memoryId or query, and only query mode sends k", async () => {
@@ -1155,6 +1258,53 @@ describe("createContext quota pre-check", () => {
       name: "notes",
       is_private: true,
       display_name: "Notes",
+    });
+  });
+});
+
+describe("updateSearchConfig", () => {
+  it("sends only the context id when nothing else is set", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateSearchConfig({ contextId: "c" });
+    expect(server.toolCallArgs()).toEqual({ context_id: "c" });
+  });
+
+  it("maps the reinforce and routing options to snake_case (#42)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateSearchConfig({
+      contextId: "c",
+      reinforceEnabled: true,
+      reinforceMaxBoost: 0.2,
+      reinforceRequireHostArbitration: true,
+      routingMode: "log_only",
+    });
+    expect(server.toolCallArgs()).toEqual({
+      context_id: "c",
+      reinforce_enabled: true,
+      reinforce_max_boost: 0.2,
+      reinforce_require_host_arbitration: true,
+      routing_mode: "log_only",
+    });
+  });
+
+  it("sends false and 0, which are settings rather than absent flags (#42)", async () => {
+    // New contexts start with reinforce enabled, so `false` is the whole
+    // point of passing it — it must reach the wire, not be dropped.
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.updateSearchConfig({
+      contextId: "c",
+      reinforceEnabled: false,
+      reinforceMaxBoost: 0,
+      reinforceRequireHostArbitration: false,
+    });
+    expect(server.toolCallArgs()).toEqual({
+      context_id: "c",
+      reinforce_enabled: false,
+      reinforce_max_boost: 0,
+      reinforce_require_host_arbitration: false,
     });
   });
 });
