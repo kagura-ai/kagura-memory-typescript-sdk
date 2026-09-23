@@ -5,13 +5,13 @@ import {
   hermesEnvVar,
   hermesYamlBlock,
   json5HasServer,
+  mcpUrlWithQuery,
   openclawBlock,
   pluginServerUrl,
   queryParam,
   shellCommand,
   tomlHasServer,
   upsertEnvLine,
-  withQueryParam,
   withoutQuery,
   withoutQueryParam,
   yamlHasServer,
@@ -19,9 +19,9 @@ import {
 
 const UUID = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
 
-describe("withQueryParam", () => {
+describe("mcpUrlWithQuery", () => {
   it("adds the first parameter with ?", () => {
-    expect(withQueryParam("https://x.test/mcp", "guardrails", "off")).toBe(
+    expect(mcpUrlWithQuery("https://x.test/mcp", { guardrails: "off" })).toBe(
       "https://x.test/mcp?guardrails=off",
     );
   });
@@ -29,25 +29,54 @@ describe("withQueryParam", () => {
   it("joins with & and keeps every other parameter byte-for-byte", () => {
     // Re-serialising through URLSearchParams would turn `tools=a,b` into
     // `tools=a%2Cb`; the server reads both, but "kept" means kept.
-    expect(withQueryParam("https://x.test/mcp?profile=core&tools=a,b", "guardrails", "off")).toBe(
+    expect(mcpUrlWithQuery("https://x.test/mcp?profile=core&tools=a,b", { guardrails: "off" })).toBe(
       "https://x.test/mcp?profile=core&tools=a,b&guardrails=off",
     );
   });
 
-  it("replaces an existing value in place and drops repeats", () => {
+  it("puts guardrails before profile, both after the kept parameters, as Python does", () => {
     expect(
-      withQueryParam(`https://x.test/mcp?guardrails=${UUID}&profile=core&guardrails=x`, "guardrails", "off"),
-    ).toBe("https://x.test/mcp?guardrails=off&profile=core");
+      mcpUrlWithQuery("https://x.test/mcp?profile=full&tools=a", { guardrails: UUID, profile: "core" }),
+    ).toBe(`https://x.test/mcp?tools=a&guardrails=${UUID}&profile=core`);
+  });
+
+  it("moves a key it sets to the end and drops every earlier value of it", () => {
+    // The server reads the first value it finds, so a stale one must go.
+    expect(
+      mcpUrlWithQuery(`https://x.test/mcp?guardrails=${UUID}&profile=core&guardrails=x`, { guardrails: "off" }),
+    ).toBe("https://x.test/mcp?profile=core&guardrails=off");
+  });
+
+  it("leaves a key it does not set where it stands", () => {
+    expect(mcpUrlWithQuery(`https://x.test/mcp?guardrails=${UUID}&tools=a`, { profile: "core" })).toBe(
+      `https://x.test/mcp?guardrails=${UUID}&tools=a&profile=core`,
+    );
+  });
+
+  it("matches a key by its decoded name", () => {
+    expect(mcpUrlWithQuery("https://x.test/mcp?guard%72ails=x&a=1", { guardrails: "off" })).toBe(
+      "https://x.test/mcp?a=1&guardrails=off",
+    );
   });
 
   it("does not mistake a parameter whose name merely starts the same", () => {
-    expect(withQueryParam("https://x.test/mcp?guardrails_x=1", "guardrails", "off")).toBe(
+    expect(mcpUrlWithQuery("https://x.test/mcp?guardrails_x=1", { guardrails: "off" })).toBe(
       "https://x.test/mcp?guardrails_x=1&guardrails=off",
     );
   });
 
+  it("form-encodes a value as Python's urlencode does", () => {
+    expect(mcpUrlWithQuery("https://x.test/mcp", { profile: "a b!(c)~" })).toBe(
+      "https://x.test/mcp?profile=a+b%21%28c%29~",
+    );
+  });
+
+  it("returns the URL untouched when nothing is set", () => {
+    expect(mcpUrlWithQuery("https://x.test/mcp?b=2&a=1", {})).toBe("https://x.test/mcp?b=2&a=1");
+  });
+
   it("keeps a fragment after the query", () => {
-    expect(withQueryParam("https://x.test/mcp#frag", "profile", "core")).toBe(
+    expect(mcpUrlWithQuery("https://x.test/mcp#frag", { profile: "core" })).toBe(
       "https://x.test/mcp?profile=core#frag",
     );
   });
@@ -92,6 +121,8 @@ describe("pluginServerUrl", () => {
     expect(pluginServerUrl("https://x.test/mcp?profile=core&guardrails=OFF")).toBe(
       "https://x.test/mcp?guardrails=off",
     );
+    // Python strips the value before comparing it.
+    expect(pluginServerUrl("https://x.test/mcp?guardrails=+off")).toBe("https://x.test/mcp?guardrails=off");
   });
 });
 

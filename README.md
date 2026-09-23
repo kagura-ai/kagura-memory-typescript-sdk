@@ -126,14 +126,15 @@ then uses.
 
 **Connecting a harness.** Each `setup` subcommand writes `.kagura.json`
 (0600, gitignored) and an MCP entry named `kagura-memory`: the URL plus a
-Bearer header. `.kagura.json` gets the URL without its query, since the
-REST base is derived from it. The key is never printed, and outside
+Bearer header. `.kagura.json` gets the URL as given; the parameters that
+`--guardrails` and `--tool-profile` set go on the entry's URL only. The
+key is never printed, and outside
 Claude Code it never goes into the harness's config file. `setup codex`
 also leaves a key it found in `KAGURA_API_KEY` out of `.kagura.json`.
 
 | Subcommand | How the entry is applied | Where the key lives |
 |---|---|---|
-| `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json … --scope user` | in the entry |
+| `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json --scope user …` | in the entry |
 | `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `KAGURA_API_KEY`, exported in the shell that starts Codex |
 | `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` always prompts | `$HERMES_HOME/.env`, as `MCP_KAGURA_MEMORY_API_KEY` |
 | `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe` | `~/.openclaw/.env`, as `KAGURA_API_KEY` |
@@ -149,16 +150,23 @@ arguments.
 `setup claude` and `setup codex`. Hermes and OpenClaw do not pass the
 server's instructions to the model, so there `off` is refused and a
 context id is dropped, whether it comes from the flag or from the URL.
-`--tool-profile` (claude, codex) sets `profile`. `--name`, `--force` and
+`--tool-profile` (claude, codex) sets `profile` and refuses an empty name.
+Both go at the end of the query, `guardrails` first, replacing any value
+already there, as the Python CLI writes them. `--name`, `--force` and
 `--dry-run` (codex, hermes, openclaw) name the entry, replace an existing
 one, and show what would be configured without changing anything.
 
-`setup claude` stops with the matching `claude mcp remove` command when a
-stronger Claude Code scope already defines the entry, and when the Kagura
-Memory plugin is enabled it lists the plugin settings to enter. With
-`--scope user`, an existing user-scope entry is replaced: `claude mcp
-remove` runs before `claude mcp add-json`, and if the add then fails, the
-error says so and prints the command to add the entry by hand.
+Claude Code uses the `kagura-memory` entry from the strongest scope
+(local > project > user). `setup claude` writes nothing when a stronger
+scope already defines one, and prints the `claude mcp remove --scope …`
+command for it; an entry the new one hides in a weaker scope is noted.
+With `--scope user`, an identical user-scope entry is left as it is and a
+different one is replaced: `claude mcp remove` runs before `claude mcp
+add-json`, and if the add then fails, the old entry is put back (if that
+fails too, the error prints the command to add the new one by hand).
+Without `claude` on `PATH`, `--scope user` prints the commands to run and
+writes nothing. When the Kagura Memory plugin is enabled, the notes list
+the plugin settings to enter.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;

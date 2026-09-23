@@ -21,6 +21,11 @@ export interface ExecOptions {
    * project it is setting up.
    */
   cwd?: string;
+  /**
+   * How long the program may run before it is killed; EXEC_TIMEOUT_MS when
+   * unset. `setup claude` gives `claude` Python's 30 s.
+   */
+  timeoutMs?: number;
 }
 
 export interface ExecResult {
@@ -121,7 +126,7 @@ export function execFile(
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         windowsHide: true,
-        timeout: EXEC_TIMEOUT_MS,
+        timeout: options.timeoutMs ?? EXEC_TIMEOUT_MS,
       });
     } catch (e) {
       settle(127, e instanceof Error ? e.message : String(e));

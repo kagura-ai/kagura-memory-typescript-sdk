@@ -51,7 +51,12 @@ export function queryParam(url: string, key: string): string | undefined {
   if (param === undefined) return undefined;
   const eq = param.indexOf("=");
   if (eq === -1) return "";
-  const raw = param.slice(eq + 1).replace(/\+/g, " ");
+  return unquotePlus(param.slice(eq + 1));
+}
+
+/** A name or value as Python's `unquote_plus` reads it; left raw if malformed. */
+function unquotePlus(text: string): string {
+  const raw = text.replace(/\+/g, " ");
   try {
     return decodeURIComponent(raw);
   } catch {
@@ -60,26 +65,34 @@ export function queryParam(url: string, key: string): string | undefined {
 }
 
 /**
- * Set `key=value` in the URL's query.
- *
- * An existing value is replaced where it stands, and any repeat of the
- * key dropped, so the server cannot read a stale one first. Every other
- * parameter is kept as written; a URL that already has a query gets `&`.
+ * A value as Python's `urlencode` writes it (`quote_plus`): `+` for a
+ * space, and `!'()*`, which `encodeURIComponent` leaves bare, escaped.
  */
-export function withQueryParam(url: string, key: string, value: string): string {
+function quotePlus(text: string): string {
+  return encodeURIComponent(text)
+    .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/%20/g, "+");
+}
+
+/**
+ * The MCP URL with memory-cloud's `guardrails` / `profile` parameters set
+ * — the port of Python's `mcp_url_with_query`, so both CLIs write the same
+ * entry for the same flags.
+ *
+ * A key being set loses every earlier value of it (the server reads only
+ * the first it finds) and goes at the end, `guardrails` before `profile`.
+ * Every other parameter is kept as written; an unset key is left alone.
+ */
+export function mcpUrlWithQuery(
+  url: string,
+  updates: { guardrails?: string | undefined; profile?: string | undefined },
+): string {
+  const set = (["guardrails", "profile"] as const).filter((key) => updates[key] !== undefined);
+  if (set.length === 0) return url;
   const { base, params, fragment } = splitUrl(url);
-  const pair = `${key}=${encodeURIComponent(value)}`;
-  const out: string[] = [];
-  let placed = false;
-  for (const param of params) {
-    if (paramName(param) !== key) out.push(param);
-    else if (!placed) {
-      out.push(pair);
-      placed = true;
-    }
-  }
-  if (!placed) out.push(pair);
-  return `${base}?${out.join("&")}${fragment}`;
+  const kept = params.filter((param) => !(set as readonly string[]).includes(unquotePlus(paramName(param))));
+  const added = set.map((key) => `${key}=${quotePlus(updates[key]!)}`);
+  return `${base}?${[...kept, ...added].join("&")}${fragment}`;
 }
 
 /**
@@ -107,7 +120,7 @@ export function withoutQuery(url: string): string {
  */
 export function pluginServerUrl(url: string): string {
   const base = withoutQuery(url);
-  return queryParam(url, "guardrails")?.toLowerCase() === "off" ? `${base}?guardrails=off` : base;
+  return queryParam(url, "guardrails")?.trim().toLowerCase() === "off" ? `${base}?guardrails=off` : base;
 }
 
 /**

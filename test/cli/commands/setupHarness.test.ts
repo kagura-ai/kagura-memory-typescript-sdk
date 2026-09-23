@@ -138,14 +138,14 @@ describe("setup codex", () => {
     expect(fs.existsSync(configToml())).toBe(false);
   });
 
-  it("keeps .kagura.json on the URL without its query, which the SDK's REST base needs", async () => {
-    // baseUrlFromMcp strips `/mcp` only at the end of the path; a query
-    // after it would leave the whole URL as the REST base.
+  it("writes --mcp-url to .kagura.json as given, without the flags' parameters", async () => {
+    // As setup claude does, after Python: baseUrlFromMcp finds the REST
+    // base in the path, so the query does no harm there.
     const h = harness(codex);
-    const given = `${MCP_URL}?profile=core&tools=a,b`;
-    await runCli(setup("codex", "--mcp-url", given), h.deps);
-    expect(h.runs[0]![5]).toBe(given);
-    expect(JSON.parse(fs.readFileSync(path.join(sandbox, ".kagura.json"), "utf-8")).mcp_url).toBe(MCP_URL);
+    const given = `${MCP_URL}?tools=a,b`;
+    await runCli(setup("codex", "--mcp-url", given, "--tool-profile", "core", "-c", CONTEXT), h.deps);
+    expect(h.runs[0]![5]).toBe(`${given}&guardrails=${CONTEXT}&profile=core`);
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, ".kagura.json"), "utf-8")).mcp_url).toBe(given);
   });
 
   it("does not copy a key that came from KAGURA_API_KEY into .kagura.json", async () => {
@@ -255,6 +255,20 @@ describe("setup codex", () => {
       const h = harness(codex);
       await runCli(setup("codex", "--mcp-url", `${MCP_URL}?tools=recall`, "--tool-profile", "core"), h.deps);
       expect(addedUrl(h)).toBe(`${MCP_URL}?tools=recall&profile=core`);
+    });
+
+    it("puts guardrails before profile, as setup claude does", async () => {
+      hooksOn();
+      const h = harness(codex);
+      await runCli(setup("codex", "--mcp-url", `${MCP_URL}?profile=full`, "--tool-profile", "core"), h.deps);
+      expect(addedUrl(h)).toBe(`${MCP_URL}?guardrails=off&profile=core`);
+    });
+
+    it("rejects an empty --tool-profile", async () => {
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "--tool-profile="), h.deps)).toBe(2);
+      expect(h.err).toContain("Error: Invalid value for '--tool-profile': must not be empty");
+      expect(h.runs).toEqual([]);
     });
 
     it("rejects a --guardrails that is neither a UUID nor off", async () => {

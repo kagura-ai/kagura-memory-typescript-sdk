@@ -111,6 +111,21 @@ describe("execFile", () => {
     expect(options.cwd).toBe(dir);
   });
 
+  it("kills the program after the timeout it is given, 60 s by default", async () => {
+    // A wedged CLI must not hang `setup`; `claude` gets Python's 30 s.
+    const timeouts: unknown[] = [];
+    for (const options of [{}, { timeoutMs: 30_000 }]) {
+      const child = fakeChild();
+      const pending = execFile("/bin/claude", [], options, ((...args: unknown[]) => {
+        timeouts.push((args[2] as Record<string, unknown>).timeout);
+        return child;
+      }) as never);
+      child.emit("close", 0, null);
+      await pending;
+    }
+    expect(timeouts).toEqual([60_000, 30_000]);
+  });
+
   it("reports the exit code of a failing program", async () => {
     const child = fakeChild();
     const pending = execFile("x", [], {}, (() => child) as never);
