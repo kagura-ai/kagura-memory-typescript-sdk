@@ -327,10 +327,13 @@ describe("setup codex", () => {
     expect(h.err.join("\n")).toMatch(/Invalid value for '--name'/);
   });
 
-  it("refuses --profile, naming the Python path for Codex", async () => {
+  it("refuses --profile without naming a Python command that does not exist yet", async () => {
     const h = harness(codex);
     expect(await runCli(["setup", "codex", "--profile", "work", "--project-dir", sandbox], h.deps)).toBe(1);
-    expect(h.err.join("\n")).toMatch(/kagura-mcp.*kagura setup codex --profile work/s);
+    const err = h.err.join("\n");
+    expect(err).toMatch(/kagura-mcp.*--api-key/s);
+    // The Python CLI has only `setup claude --profile` today (python-sdk#260).
+    expect(err).not.toMatch(/kagura setup codex/);
   });
 });
 

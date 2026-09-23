@@ -374,11 +374,17 @@ function resolveInput(deps: CommandDeps, args: ParsedArgs, harness: Harness): Se
     // Writing the stdio form would name `kagura-mcp`, a Python console
     // script this package does not install — the config would look right
     // and fail at launch.
+    // Only `kagura setup claude --profile` exists in the Python CLI today
+    // (python-sdk#260 adds the other harnesses), so name it for claude alone.
+    const pythonRoute =
+      harness === "claude"
+        ? `  Use \`pip install kagura-memory && kagura setup claude --profile ${profile}\`, ` +
+          "or set up the static-token form here with --api-key."
+        : "  Set up the static-token form here with --api-key.";
     throw new CliError(
       `the OAuth (--profile) setup writes ${OAUTH_TARGET[harness]} that launches the \`kagura-mcp\` stdio\n` +
         "  proxy, which ships with the Python package, not this one.\n" +
-        `  Use \`pip install kagura-memory && kagura setup ${harness} --profile ` +
-        `${profile}\`, or set up the static-token form here with --api-key.`,
+        pythonRoute,
     );
   }
 
