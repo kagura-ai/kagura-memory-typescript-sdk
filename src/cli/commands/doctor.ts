@@ -21,6 +21,7 @@ import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { mcpOptions } from "../runClientCommand.js";
+import { findClaudeEntries } from "./setup.js";
 
 type Status = "pass" | "warn" | "fail" | "info";
 
@@ -136,6 +137,32 @@ function safeConfig(deps: CommandDeps): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Remote types Claude Code accepts (`streamable-http` is an alias of
+ * `http`), plus `url`, which `setup claude` wrote before and Claude Code
+ * does not accept: recognised alike, so an old entry is still classified.
+ */
+const HTTP_TYPES: ReadonlySet<unknown> = new Set(["http", "streamable-http", "url"]);
+
+/** Python's `classify_mcp_entry`, for an entry already known to be an object. */
+function mcpMode(entry: Record<string, unknown>): "stdio" | "static-token" | "url" | "absent" {
+  const kind = entry.type;
+  // Claude Code reads an entry without a type as stdio.
+  if ((kind === undefined || kind === null || kind === "stdio") && entry.command === "kagura-mcp") {
+    return "stdio";
+  }
+  if (HTTP_TYPES.has(kind)) {
+    const headers = entry.headers;
+    const bearer =
+      typeof headers === "object" &&
+      headers !== null &&
+      !Array.isArray(headers) &&
+      Object.keys(headers).some((k) => k.toLowerCase() === "authorization");
+    return bearer ? "static-token" : "url";
+  }
+  return "absent";
+}
+
 function checkMcp(deps: CommandDeps): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const config = safeConfig(deps);
@@ -157,41 +184,73 @@ function checkMcp(deps: CommandDeps): DoctorCheck[] {
     checks.push({ section: "mcp", status: "info", message: "no mcp_url configured; the default is used" });
   }
 
-  const mcpJson = path.join(process.cwd(), ".mcp.json");
-  if (!fs.existsSync(mcpJson)) {
-    checks.push({ section: "mcp", status: "info", message: "no .mcp.json in this directory" });
+  const cwd = process.cwd();
+  const mcpJson = path.join(cwd, ".mcp.json");
+  const hasMcpJson = fs.existsSync(mcpJson);
+  if (hasMcpJson) {
+    try {
+      JSON.parse(fs.readFileSync(mcpJson, "utf-8"));
+    } catch (e) {
+      // Python reads such a file as empty; Claude Code cannot load it either,
+      // which is worth more than a missing entry.
+      checks.push({
+        section: "mcp",
+        status: "fail",
+        message: `.mcp.json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+
+  // Python's _check_mcp: the entry Claude Code uses (the strongest scope)
+  // first, then every one it hides.
+  const entries = findClaudeEntries(cwd);
+  const used = entries[0];
+  if (used === undefined) {
+    checks.push(
+      hasMcpJson
+        ? { section: "mcp", status: "warn", message: "No usable kagura-memory entry found in .mcp.json" }
+        : { section: "mcp", status: "info", message: "No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)" },
+    );
     return checks;
   }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(mcpJson, "utf-8")) as {
-      mcpServers?: Record<string, unknown>;
-    };
-    const entry = parsed.mcpServers?.["kagura-memory"];
-    if (entry === undefined) {
-      checks.push({
-        section: "mcp",
-        status: "warn",
-        message: ".mcp.json has no 'kagura-memory' server; run: kagura-memory setup claude",
-      });
-    } else if ((entry as { type?: unknown } | null)?.type === "url") {
-      // What `setup claude` wrote before it switched to `http`. Accepted
-      // here, but Claude Code skips it as an unknown server type, so the
-      // fix is worth saying.
-      checks.push({
-        section: "mcp",
-        status: "warn",
-        message:
-          '.mcp.json configures kagura-memory with type "url", which Claude Code does not recognise; ' +
-          "re-run: kagura-memory setup claude",
-      });
-    } else {
-      checks.push({ section: "mcp", status: "pass", message: ".mcp.json configures kagura-memory" });
-    }
-  } catch (e) {
+  const details = { scope: used.scope, source: used.source };
+  const mode = mcpMode(used.config);
+  if (mode === "absent") {
     checks.push({
       section: "mcp",
-      status: "fail",
-      message: `.mcp.json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+      status: "warn",
+      message: `No usable kagura-memory entry found in ${used.source} (${used.scope} scope)`,
+      details,
+    });
+  } else {
+    // Python warns about a static-token entry and points at `setup claude
+    // --profile`, whose stdio proxy this package does not ship; here that
+    // entry is the one `setup claude` writes, so it passes.
+    checks.push({
+      section: "mcp",
+      status: "pass",
+      message: `MCP Mode: ${mode} (${used.scope} scope, ${used.source})`,
+      details,
+    });
+  }
+  if (used.config.type === "url") {
+    checks.push({
+      section: "mcp",
+      status: "warn",
+      message:
+        'The kagura-memory entry has type "url", which Claude Code does not accept; ' +
+        're-run `kagura-memory setup claude` to rewrite it as "http"',
+      details,
+    });
+  }
+  for (const hidden of entries.slice(1)) {
+    checks.push({
+      section: "mcp",
+      status: "warn",
+      message:
+        `kagura-memory is also defined in ${hidden.scope} scope (${hidden.source}), ` +
+        `but Claude Code uses the ${used.scope}-scope entry here`,
+      details: { scope: hidden.scope, source: hidden.source },
     });
   }
   return checks;

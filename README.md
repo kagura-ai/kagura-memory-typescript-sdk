@@ -166,7 +166,9 @@ add-json`, and if the add then fails, the old entry is put back (if that
 fails too, the error prints the command to add the new one by hand).
 Without `claude` on `PATH`, `--scope user` prints the commands to run and
 writes nothing. When the Kagura Memory plugin is enabled, the notes list
-the plugin settings to enter.
+the plugin settings to enter. `doctor` reports the entry Claude Code uses
+in the current directory, with its scope and file, and warns about each
+entry that one hides.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;

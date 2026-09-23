@@ -202,30 +202,102 @@ describe("kagura-memory doctor", () => {
     expect(h.out.join("\n")).toMatch(/WARN KAGURA_AGE_IDENTITY holds the private key/);
   });
 
-  it("passes a type http .mcp.json entry", async () => {
-    fs.writeFileSync(
-      path.join(sandbox, ".mcp.json"),
-      JSON.stringify({ mcpServers: { "kagura-memory": { type: "http", url: "https://x.test/mcp" } } }),
-    );
-    process.chdir(sandbox);
-    const h = harness();
-    await runCli(["doctor"], h.deps);
-    expect(h.out.join("\n")).toMatch(/PASS \.mcp\.json configures kagura-memory/);
-  });
+  describe("the Claude Code entry", () => {
+    const BEARER = { type: "http", url: "https://x.test/mcp", headers: { Authorization: "Bearer k" } };
 
-  it("still accepts an entry setup claude wrote as type url, and suggests re-running it", async () => {
-    // Earlier releases wrote `url`. Not a failure here, but Claude Code
-    // skips an entry of that type, so the fix is worth saying.
-    fs.writeFileSync(
-      path.join(sandbox, ".mcp.json"),
-      JSON.stringify({ mcpServers: { "kagura-memory": { type: "url", url: "https://x.test/mcp" } } }),
-    );
-    process.chdir(sandbox);
-    const h = harness();
-    await runCli(["doctor"], h.deps);
-    const text = h.out.join("\n");
-    expect(text).toMatch(/WARN .*type "url".*kagura-memory setup claude/);
-    expect(text).not.toMatch(/FAIL .*\.mcp\.json/);
+    function writeMcpJson(servers: Record<string, unknown>): void {
+      fs.writeFileSync(path.join(sandbox, ".mcp.json"), JSON.stringify({ mcpServers: servers }));
+    }
+    function writeClaudeJson(data: unknown): void {
+      fs.writeFileSync(path.join(process.env.HOME!, ".claude.json"), JSON.stringify(data));
+    }
+    /** The mcp-section checks of `doctor --json`, run in the sandbox. */
+    async function mcpChecks(): Promise<{ status: string; message: string; details?: unknown }[]> {
+      process.chdir(sandbox);
+      const h = harness();
+      await runCli(["doctor", "--json"], h.deps);
+      const report = JSON.parse(h.out.join("\n")) as { checks: { section: string; status: string; message: string }[] };
+      // The mcp_url check comes first and is not about the entry.
+      return report.checks.filter((c) => c.section === "mcp").slice(1);
+    }
+
+    it("reports the entry in use with its scope and file", async () => {
+      writeMcpJson({ "kagura-memory": BEARER });
+      expect(await mcpChecks()).toEqual([
+        {
+          section: "mcp",
+          status: "pass",
+          message: "MCP Mode: static-token (project scope, .mcp.json)",
+          details: { scope: "project", source: ".mcp.json" },
+        },
+      ]);
+    });
+
+    it("finds a user-scope entry, which is no .mcp.json at all", async () => {
+      writeClaudeJson({ mcpServers: { "kagura-memory": { type: "http", url: "https://x.test/mcp" } } });
+      const checks = await mcpChecks();
+      expect(checks.map((c) => `${c.status} ${c.message}`)).toEqual(["pass MCP Mode: url (user scope, ~/.claude.json)"]);
+    });
+
+    it("finds a local-scope entry under the project's real path, and knows a stdio one", async () => {
+      writeClaudeJson({
+        projects: { [fs.realpathSync(sandbox)]: { mcpServers: { "kagura-memory": { command: "kagura-mcp" } } } },
+      });
+      const checks = await mcpChecks();
+      expect(checks[0]).toMatchObject({ status: "pass", message: "MCP Mode: stdio (local scope, ~/.claude.json)" });
+    });
+
+    it("warns once for each entry the one in use hides", async () => {
+      writeClaudeJson({
+        mcpServers: { "kagura-memory": BEARER },
+        projects: { [fs.realpathSync(sandbox)]: { mcpServers: { "kagura-memory": BEARER } } },
+      });
+      writeMcpJson({ "kagura-memory": BEARER });
+      const checks = await mcpChecks();
+      expect(checks.map((c) => `${c.status} ${c.message}`)).toEqual([
+        "pass MCP Mode: static-token (local scope, ~/.claude.json)",
+        "warn kagura-memory is also defined in project scope (.mcp.json), but Claude Code uses the local-scope entry here",
+        "warn kagura-memory is also defined in user scope (~/.claude.json), but Claude Code uses the local-scope entry here",
+      ]);
+      expect(checks[2]!.details).toEqual({ scope: "user", source: "~/.claude.json" });
+    });
+
+    it('warns about a type "url" entry, which setup claude wrote before, and says how to fix it', async () => {
+      // Recognised like "http", but Claude Code skips an entry of that type.
+      writeMcpJson({ "kagura-memory": { ...BEARER, type: "url" } });
+      const checks = await mcpChecks();
+      expect(checks.map((c) => `${c.status} ${c.message}`)).toEqual([
+        "pass MCP Mode: static-token (project scope, .mcp.json)",
+        'warn The kagura-memory entry has type "url", which Claude Code does not accept; ' +
+          're-run `kagura-memory setup claude` to rewrite it as "http"',
+      ]);
+    });
+
+    it("warns about an entry that is no form it knows", async () => {
+      writeMcpJson({ "kagura-memory": { type: "sse", url: "https://x.test/sse" } });
+      expect((await mcpChecks()).map((c) => `${c.status} ${c.message}`)).toEqual([
+        "warn No usable kagura-memory entry found in .mcp.json (project scope)",
+      ]);
+    });
+
+    it("warns about a .mcp.json without the entry", async () => {
+      writeMcpJson({ github: {} });
+      expect((await mcpChecks()).map((c) => `${c.status} ${c.message}`)).toEqual([
+        "warn No usable kagura-memory entry found in .mcp.json",
+      ]);
+    });
+
+    it("says so, as info, when no scope defines the entry", async () => {
+      expect((await mcpChecks()).map((c) => `${c.status} ${c.message}`)).toEqual([
+        "info No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)",
+      ]);
+    });
+
+    it("fails on a .mcp.json that is not JSON", async () => {
+      fs.writeFileSync(path.join(sandbox, ".mcp.json"), "{ not json");
+      const checks = await mcpChecks();
+      expect(checks[0]).toMatchObject({ status: "fail", message: expect.stringMatching(/^\.mcp\.json is not valid JSON/) });
+    });
   });
 });
 
