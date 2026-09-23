@@ -11,7 +11,15 @@ import {
   KaguraNotFoundError,
   KaguraQuotaError,
 } from "./errors.js";
-import { baseUrlFromMcp, SDK_VERSION, throwForKaguraStatus, validateHttpsUrl } from "./http.js";
+import {
+  baseUrlFromMcp,
+  extractDetail,
+  mcpSessionExpired,
+  mcpSessionHeader,
+  SDK_VERSION,
+  throwForKaguraStatus,
+  validateHttpsUrl,
+} from "./http.js";
 import type {
   Agent,
   AgentBinding,
@@ -51,6 +59,13 @@ const MIN_SERVER_VERSION_TUPLE = MIN_SERVER_VERSION.split(".").slice(0, 3).map(N
 export type ToolResult = Record<string, unknown>;
 
 export type DeliveryMode = "always" | "on_recall" | "on_trigger";
+/** Sort fields `getMemoryStats` accepts on server v0.34.0+ (#1046). */
+export type MemoryStatsSortField =
+  | "access_count"
+  | "reference_count"
+  | "importance"
+  | "created_at"
+  | "last_used_at";
 export type SearchMode = "hybrid" | "semantic" | "keyword";
 export type SourceType = "file" | "url" | "vault" | "api" | "manual";
 
@@ -135,7 +150,14 @@ export interface RecallOptions {
   query: string;
   /** Number of results (default 5). */
   k?: number;
-  /** Enable AI reranking for higher quality results. */
+  /**
+   * AI reranking, tri-state since server v0.69.0. Omit it to follow the
+   * context's search config (set via {@link KaguraClient.updateSearchConfig});
+   * `true` requests reranking, which applies only when the context enables
+   * it and the workspace plan and deployment allow it; `false` skips it for
+   * this call. With `contextIds`, the first listed context's config decides.
+   * Servers before v0.69.0 rerank only on `true`.
+   */
   useRerank?: boolean;
   /**
    * Optional filters: `type`, `tags`, `tags_match` ("any"/"all"),
@@ -340,6 +362,7 @@ export interface UpdateSearchConfigOptions {
   bm25Weight?: number;
   /** Candidate fetch multiplier (1-10). */
   fetchFactor?: number;
+  /** Enable AI reranking; a `recall` that omits `useRerank` follows it (server v0.69.0+). */
   useRerank?: boolean;
   /** "voyage", "cohere", or "ollama". */
   rerankerProvider?: string;
@@ -374,6 +397,10 @@ export class KaguraClient {
   private readonly auth: AuthProvider;
   private readonly fetchImpl: typeof globalThis.fetch;
   private sessionId: string | null = null;
+  /** The in-flight `initialize`, shared by every caller (see initializeSession). */
+  private sessionOpening: Promise<string> | null = null;
+  /** Bumped by close(), so a handshake it interrupted cannot re-adopt its session. */
+  private sessionEpoch = 0;
   private requestIdCounter = 1;
 
   constructor(options: KaguraClientOptions = {}) {
@@ -433,12 +460,42 @@ export class KaguraClient {
     }
   }
 
-  /** Initialize the MCP session if not already initialized. */
-  private async initializeSession(): Promise<void> {
+  /**
+   * Initialize the MCP session if not already initialized, and return its id.
+   *
+   * Single-flight: calls that find no session at the same time (on first
+   * use, or after all hitting one expired session) share one `initialize`
+   * instead of each opening, and orphaning, a session of their own.
+   *
+   * Callers send the id returned here rather than re-reading `sessionId`:
+   * a concurrent expired-session 404 can clear the field in the tick the
+   * `await` yields, which would send the request with no session at all.
+   */
+  private async initializeSession(): Promise<string> {
     if (this.sessionId) {
-      return;
+      return this.sessionId;
     }
+    // Dropped once settled, so a failed handshake is retried by the next
+    // call rather than replayed to it.
+    if (!this.sessionOpening) {
+      const opening = this.openSession().finally(() => {
+        // close() may have dropped this handshake and a newer one started.
+        if (this.sessionOpening === opening) {
+          this.sessionOpening = null;
+        }
+      });
+      this.sessionOpening = opening;
+    }
+    return this.sessionOpening;
+  }
 
+  /**
+   * Run the `initialize` handshake and keep the session id it returns —
+   * unless close() ran meanwhile, in which case the id serves only the
+   * calls already waiting on it.
+   */
+  private async openSession(): Promise<string> {
+    const epoch = this.sessionEpoch;
     const body = {
       jsonrpc: "2.0",
       id: this.nextRequestId(),
@@ -459,7 +516,10 @@ export class KaguraClient {
     if (!sessionId) {
       throw new KaguraConnectionError("No session ID returned from server");
     }
-    this.sessionId = sessionId;
+    if (epoch === this.sessionEpoch) {
+      this.sessionId = sessionId;
+    }
+    return sessionId;
   }
 
   private async safeText(response: Response): Promise<string> {
@@ -470,12 +530,23 @@ export class KaguraClient {
     }
   }
 
-  /** Make a JSON-RPC 2.0 request to the MCP server. */
+  /**
+   * Make a JSON-RPC 2.0 request to the MCP server.
+   *
+   * MCP Streamable HTTP answers a request naming a session the server has
+   * dropped (idle hour, restart) with a 404 and requires a new `initialize`;
+   * without recovery a long-lived client would fail every call from then on
+   * (#39). The session is re-opened and the request retried exactly once.
+   * The server rejects it before dispatch, which makes that retry safe even
+   * for a non-idempotent `tools/call`. (As deployed, server v0.75.0
+   * re-adopts an unknown session id instead, so against it this never
+   * fires.)
+   */
   private async makeJsonRpcRequest(
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    await this.initializeSession();
+    const sessionId = await this.initializeSession();
 
     const body = {
       jsonrpc: "2.0",
@@ -484,11 +555,25 @@ export class KaguraClient {
       params,
     };
 
-    const headers: Record<string, string> = this.sessionId
-      ? { "mcp-session-id": this.sessionId }
-      : {};
-    const response = await this.post(this.mcpUrl, body, headers);
-    const text = await this.safeText(response);
+    let response = await this.post(this.mcpUrl, body, mcpSessionHeader(sessionId));
+    let text = await this.safeText(response);
+    if (mcpSessionExpired(response.status, text, sessionId)) {
+      // Forget the session only while it is still the stale one: a
+      // concurrent call may already have re-opened it, and that one stays.
+      if (this.sessionId === sessionId) {
+        this.sessionId = null;
+      }
+      const retrySessionId = await this.initializeSession();
+      response = await this.post(this.mcpUrl, body, mcpSessionHeader(retrySessionId));
+      text = await this.safeText(response);
+      if (mcpSessionExpired(response.status, text, retrySessionId)) {
+        const detail = extractDetail(text);
+        throw new KaguraConnectionError(
+          "MCP session expired; the client re-initialized once and the retry still got " +
+            (detail ? `HTTP 404: ${detail}` : "HTTP 404"),
+        );
+      }
+    }
     if (!response.ok) {
       throwForKaguraStatus(response.status, response.headers, text);
     }
@@ -725,8 +810,10 @@ export class KaguraClient {
     } else {
       args.context_id = contextId;
     }
-    if (options.useRerank) {
-      args.use_rerank = true;
+    // Send an explicit false: since server v0.69.0 an omitted use_rerank
+    // follows the context config, so dropping false would still rerank.
+    if (options.useRerank !== undefined) {
+      args.use_rerank = options.useRerank;
     }
     if (options.filters && Object.keys(options.filters).length > 0) {
       args.filters = options.filters;
@@ -1664,8 +1751,12 @@ export class KaguraClient {
   /** Get per-memory usage statistics for a context. */
   async getMemoryStats(options: {
     contextId: string;
-    /** Sort field (default "use_count"). */
-    sortBy?: string;
+    /**
+     * Sort field (default `"access_count"`, the server's own default); see
+     * {@link MemoryStatsSortField}. Server v0.34.0 (#1046) dropped
+     * `use_count` and answers any field outside that set with HTTP 400.
+     */
+    sortBy?: MemoryStatsSortField | (string & {});
     /** "asc" or "desc" (default "desc"). */
     sortOrder?: "asc" | "desc";
     /** Maximum results (1-200, default 50). */
@@ -1675,7 +1766,7 @@ export class KaguraClient {
     return this.restGet<MemoryStatsResponse>(
       `/api/v1/contexts/${options.contextId}/memory-stats`,
       {
-        sort_by: options.sortBy ?? "use_count",
+        sort_by: options.sortBy ?? "access_count",
         sort_order: options.sortOrder ?? "desc",
         limit: options.limit ?? 50,
         offset: options.offset ?? 0,
@@ -1802,6 +1893,8 @@ export class KaguraClient {
 
   /** Release resources. (fetch has no persistent connection to close; kept for API parity.) */
   async close(): Promise<void> {
+    this.sessionEpoch++;
     this.sessionId = null;
+    this.sessionOpening = null;
   }
 }

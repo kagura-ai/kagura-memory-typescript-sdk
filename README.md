@@ -265,7 +265,7 @@ snake_case; optional fields are omitted from the request when `undefined`.
 | Method | What it does |
 |--------|--------------|
 | `remember` | Store a memory. `details` accepts arbitrary JSON (including `location`, see below); `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
-| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep. |
 | `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. |
@@ -303,7 +303,7 @@ the counterpart to `recall`'s probabilistic search.
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
-| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01). Owner/editor only. |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01) and reranking; the `useRerank` set here is what a `recall` that omits it follows. Owner/editor only. |
 | `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. |
 
 ### Agent run-state

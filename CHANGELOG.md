@@ -6,6 +6,99 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`recall({ useRerank: false })` now turns reranking off instead of being
+  dropped**
+  ([#37](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/37)):
+  since memory-cloud v0.69.0 `use_rerank` has three states: omitted follows
+  the context's search config, `false` forces reranking off, and `true` asks
+  for it but still needs the context to allow it. The SDK only ever sent
+  `true`, so a `false` never reached the wire, and on a context whose search
+  config enables reranking the server reranked anyway — the opposite of what
+  the caller asked for, paid for in reranker latency and quota, with results
+  in a different order than the caller expected.
+
+  `use_rerank` is now sent whenever `useRerank` is not `undefined`, `false`
+  included. Leaving it `undefined` still omits it, which is what "follow the
+  context default" means. With `contextIds`, the first listed context's
+  search config is the one that decides. Against a server older than
+  v0.69.0 nothing changes: there an omitted value already meant `false`.
+  The Python SDK gets the same fix for `use_rerank=False` (python-sdk#251).
+
+- **An MCP URL with a query broke every REST call**
+  ([#38](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/38)):
+  server v0.73 reads `?profile=` and `?tools=` off the MCP URL (v0.74 adds
+  `?guardrails=`), but a query sitting directly on `/mcp`
+  (`https://memory.kagura-ai.com/mcp?profile=core`) was not taken as the end
+  of that segment, so the whole URL became the REST base and
+  `getServerInfo()` requested `…/mcp?profile=core/api/v1/system/info`. MCP
+  tool calls kept working, which hid it; the REST methods on `KaguraClient`,
+  every `fromMcpUrl` client and the `login()` device flow did not. The query
+  and fragment are now dropped before `/mcp` is stripped, and dropped from a
+  URL with no `/mcp` segment too, since they configure the MCP endpoint and
+  never the REST API. The MCP URL itself keeps its query, and URLs without
+  one derive the same base as before, except that a host literally named
+  `mcp` (`https://mcp/mcp`) no longer reads as a `/mcp` segment.
+
+- **A long-lived `KaguraClient` recovers when a server drops its MCP
+  session**
+  ([#39](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/39)):
+  MCP Streamable HTTP requires a server to answer a request naming a session
+  it no longer holds with HTTP 404, and the client to send a new
+  `initialize`. The server keeps `initialize`-based sessions in memory and
+  drops them after an idle hour and on every restart. The client cached the
+  session id until `close()`, so against a server that enforces that 404, a
+  server process, bot or agent loop that sat idle for an hour or lived
+  through a deploy would fail every MCP call from then on with a bare
+  `HTTP 404` — which gave no hint that a new client would fix it. A 404 on
+  a request that carried a session id now re-opens the session and retries
+  the request exactly once; the server rejects the request before dispatch,
+  so the retry is safe even for a write. If the retry 404s too, the
+  `KaguraConnectionError` says the session expired and the client
+  re-initialized once. A 404 on `initialize` itself is not retried, and
+  neither is a 404 `-32601` Method-not-found, which is not about the
+  session. The currently deployed server (v0.75.0) re-adopts an unknown
+  session id instead of answering 404, so against it the recovery never
+  fires; it is there for a server that enforces the spec. `close()` during
+  an in-flight `initialize` now also wins: the interrupted handshake serves
+  only the calls already waiting on it, and the next call opens a fresh
+  session.
+
+- **Concurrent calls share one `initialize`.** Calls that found no session
+  at the same moment each sent their own handshake, so N parallel first
+  calls opened N sessions and kept whichever answered last. They now wait
+  on one in-flight `initialize` — on first use, and again when they all hit
+  the same expired session. A call whose 404 lands after another call has
+  already re-opened the session keeps that session instead of discarding
+  it. A failed handshake is not cached: every waiter gets the error and the
+  next call tries again.
+
+- **JSON-RPC error bodies carry the server's message.** The MCP transport
+  answers a request it rejects before dispatch with a JSON-RPC `error` body
+  rather than a `detail` envelope, and the shared error extractor did not
+  read that shape, so such an error surfaced as a bare `HTTP <status>`. It
+  now ends with the body's `error.message`: a session that stays expired
+  across the retry reads `MCP session expired; the client re-initialized
+  once and the retry still got HTTP 404: MCP session not found or expired.
+  …`. The extractor is shared, so a REST client that meets the same shape
+  (from a proxy, say) shows it too; memory-cloud's REST routes never send
+  it.
+
+- **`getMemoryStats()` no longer fails with HTTP 400 when called with its
+  defaults**
+  ([#46](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/46)):
+  it sent `sort_by=use_count`, a field memory-cloud
+  v0.34.0 (#1046) dropped; the server rejects any sort field outside
+  `access_count`, `reference_count`, `importance`, `created_at` and
+  `last_used_at`. The default is now `access_count`, the server's own. The
+  five fields are exported as `MemoryStatsSortField` and offered as
+  completions for `sortBy`, which still takes any `string`.
+  `MemoryStatItem` gains an optional `reference_count` (sent by server
+  v0.34.0+), and `use_count`, which those servers no longer send, becomes
+  optional and deprecated — code that assigns `item.use_count` to a `number`
+  now needs a fallback.
+
 ## [0.8.0] - 2026-08-01
 
 ### Added

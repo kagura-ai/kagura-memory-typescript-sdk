@@ -8,6 +8,8 @@ import {
 import {
   baseUrlFromMcp,
   extractDetail,
+  mcpSessionExpired,
+  mcpSessionHeader,
   retryAfterSeconds,
   sanitizeServerDetail,
   throwForKaguraStatus,
@@ -29,8 +31,42 @@ describe("baseUrlFromMcp", () => {
     expect(baseUrlFromMcp("https://x.test")).toBe("https://x.test");
   });
 
+  it("never matches /mcp inside the scheme or the host", () => {
+    expect(baseUrlFromMcp("https://mcp/mcp")).toBe("https://mcp");
+    expect(baseUrlFromMcp("https://mcp")).toBe("https://mcp");
+    expect(baseUrlFromMcp("http://mcp:8080/mcp?profile=core")).toBe("http://mcp:8080");
+  });
+
   it("does not strip an /mcp substring inside a longer segment", () => {
     expect(baseUrlFromMcp("https://x.test/mcpx/foo")).toBe("https://x.test/mcpx/foo");
+  });
+
+  // Server v0.73+ reads `?profile=` / `?tools=` (v0.74+ `?guardrails=`) off
+  // the MCP URL, so a query can sit directly on `/mcp`. It must not leak into
+  // the REST base as `/mcp?profile=core/api/v1/...`.
+  it.each([
+    "https://x.test/mcp?profile=core",
+    "https://x.test/mcp?tools=a,b&guardrails=off",
+    "https://x.test/mcp#x",
+    "https://x.test/mcp/?profile=core",
+    "https://x.test/mcp/w/abc?profile=core",
+  ])("strips /mcp followed by a query or fragment: %s", (url) => {
+    expect(baseUrlFromMcp(url)).toBe("https://x.test");
+  });
+
+  // The query and fragment address the MCP endpoint, never the REST API,
+  // so they are dropped even when there is no /mcp segment to strip.
+  it.each([
+    ["https://x.test?profile=core", "https://x.test"],
+    ["https://x.test/?profile=core", "https://x.test"],
+    ["https://x.test/mcpx?profile=core", "https://x.test/mcpx"],
+    ["https://x.test/api#x", "https://x.test/api"],
+  ])("drops the query and fragment from %s", (url, expected) => {
+    expect(baseUrlFromMcp(url)).toBe(expected);
+  });
+
+  it("does not take an /mcp inside the query for the path segment", () => {
+    expect(baseUrlFromMcp("https://x.test/api?next=/mcp")).toBe("https://x.test/api");
   });
 });
 
@@ -73,10 +109,60 @@ describe("extractDetail", () => {
     expect(extractDetail(body)).toBe("Request validation failed: query.k: too big");
   });
 
+  it("returns error.message from a JSON-RPC error body (#39)", () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32603, message: "MCP session not found or expired." },
+      id: null,
+    });
+    expect(extractDetail(body)).toBe("MCP session not found or expired.");
+  });
+
   it("returns empty string for non-JSON, non-object, or unknown shapes", () => {
     expect(extractDetail("<html>maintenance</html>")).toBe("");
     expect(extractDetail("[1,2]")).toBe("");
     expect(extractDetail(JSON.stringify({ other: 1 }))).toBe("");
+    expect(extractDetail(JSON.stringify({ error: { code: -32603 } }))).toBe("");
+  });
+});
+
+describe("mcpSessionHeader", () => {
+  it("names the session", () => {
+    expect(mcpSessionHeader("s-1")).toEqual({ "mcp-session-id": "s-1" });
+  });
+
+  it("is empty before a session exists", () => {
+    expect(mcpSessionHeader(null)).toEqual({});
+  });
+});
+
+describe("mcpSessionExpired (#39)", () => {
+  const expired = JSON.stringify({
+    jsonrpc: "2.0",
+    error: { code: -32603, message: "MCP session not found or expired." },
+    id: null,
+  });
+
+  it("is true for a 404 on a request that carried a session id", () => {
+    expect(mcpSessionExpired(404, expired, "s-1")).toBe(true);
+    expect(mcpSessionExpired(404, "", "s-1")).toBe(true);
+  });
+
+  it("is false when the request carried no session id", () => {
+    expect(mcpSessionExpired(404, expired, null)).toBe(false);
+  });
+
+  it.each([200, 400, 401, 500])("is false for HTTP %i", (status) => {
+    expect(mcpSessionExpired(status, expired, "s-1")).toBe(false);
+  });
+
+  it("is false for the 404 Method-not-found reply, which ignores the session", () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32601, message: "Method not found" },
+      id: 1,
+    });
+    expect(mcpSessionExpired(404, body, "s-1")).toBe(false);
   });
 });
 

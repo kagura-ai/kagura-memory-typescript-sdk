@@ -9,7 +9,7 @@ import {
   KaguraQuotaError,
   KaguraRateLimitError,
 } from "../src/errors.js";
-import { FakeServer, makeClient } from "./fakeServer.js";
+import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
 
 describe("construction", () => {
   it("accepts an explicit api key and https MCP URL", () => {
@@ -103,6 +103,336 @@ describe("MCP session", () => {
       { status: 200 },
     );
     await expect(client.listContexts()).rejects.toThrow(/MCP error: bad request/);
+  });
+});
+
+/** Drop session-123 server-side, as an idle hour or a deploy does. */
+function expire(server: FakeServer): void {
+  server.expiredSessions.add("session-123");
+  server.sessionId = "session-456"; // what the next initialize opens
+}
+
+describe("expired MCP session recovery (#39)", () => {
+  it("re-initializes once without the stale session id and retries the call", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { status: "success", contexts: ["c1"] };
+    const client = makeClient(server);
+    await client.listContexts();
+    expire(server);
+
+    const result = await client.listContexts();
+
+    expect(result.contexts).toEqual(["c1"]);
+    expect(server.calls().slice(2)).toEqual([
+      ["tools/call", "session-123"], // rejected: the session is gone
+      ["initialize", undefined], // exactly one re-initialize, without the stale id
+      ["tools/call", "session-456"], // exactly one retry, on the new session
+    ]);
+    expect(server.requests[4]!.body).toEqual(server.requests[2]!.body);
+
+    // The new session is kept: the next call needs no initialize.
+    await client.listContexts();
+    expect(server.calls().slice(5)).toEqual([["tools/call", "session-456"]]);
+  });
+
+  it("surfaces a second 404 as KaguraConnectionError naming the expired session", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    expire(server);
+    server.expiredSessions.add("session-456"); // dropped again straight away
+
+    const error = await client.listContexts().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as KaguraConnectionError).message).toBe(
+      "MCP session expired; the client re-initialized once and the retry still got " +
+        `HTTP 404: ${SESSION_EXPIRED_BODY.error.message}`,
+    );
+    // One re-initialize and one retry, then the error: no loop.
+    expect(server.calls().slice(2)).toEqual([
+      ["tools/call", "session-123"],
+      ["initialize", undefined],
+      ["tools/call", "session-456"],
+    ]);
+  });
+
+  it("says only HTTP 404 when neither 404 has a body to quote", async () => {
+    const server = new FakeServer();
+    let dropped = false;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await server.fetch(input, init);
+      // Once dropped, every request naming a session gets an empty 404.
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      return dropped && headers["mcp-session-id"] ? new Response("", { status: 404 }) : response;
+    };
+    const client = makeClient(server, { fetch });
+    await client.listContexts();
+    dropped = true;
+    server.sessionId = "session-456";
+
+    const error = await client.listContexts().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as KaguraConnectionError).message).toBe(
+      "MCP session expired; the client re-initialized once and the retry still got HTTP 404",
+    );
+    expect(server.calls().slice(2)).toEqual([
+      ["tools/call", "session-123"],
+      ["initialize", undefined],
+      ["tools/call", "session-456"],
+    ]);
+  });
+
+  it("keeps the typed error when the retry fails for another reason", async () => {
+    const server = new FakeServer();
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await server.fetch(input, init);
+      // The retry, on the re-opened session, is rate limited.
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (headers["mcp-session-id"] === "session-456") {
+        return new Response(JSON.stringify({ detail: "slow down" }), {
+          status: 429,
+          headers: { "Retry-After": "7" },
+        });
+      }
+      return response;
+    };
+    const client = makeClient(server, { fetch });
+    await client.listContexts();
+    expire(server);
+
+    const error = await client.listContexts().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(KaguraRateLimitError);
+    expect((error as KaguraRateLimitError).retryAfter).toBe(7);
+    expect(server.calls().slice(2)).toEqual([
+      ["tools/call", "session-123"],
+      ["initialize", undefined],
+      ["tools/call", "session-456"],
+    ]);
+  });
+
+  it("does not retry a 404 on the first initialize", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(JSON.stringify(SESSION_EXPIRED_BODY), { status: 404 });
+    const client = makeClient(server);
+
+    const error = await client.listContexts().catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as KaguraConnectionError).message).toBe(
+      `HTTP 404: ${SESSION_EXPIRED_BODY.error.message}`,
+    );
+    expect(server.calls()).toEqual([["initialize", undefined]]);
+  });
+
+  it("does not retry a 404 on the re-initialize, and the next call opens a fresh session", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    server.forcedResponse = new Response(JSON.stringify(SESSION_EXPIRED_BODY), { status: 404 });
+
+    await expect(client.listContexts()).rejects.toThrow(
+      `HTTP 404: ${SESSION_EXPIRED_BODY.error.message}`,
+    );
+    expect(server.calls().slice(2)).toEqual([
+      ["tools/call", "session-123"],
+      ["initialize", undefined],
+    ]);
+
+    server.forcedResponse = null;
+    server.sessionId = "session-456";
+    await client.listContexts();
+    expect(server.calls().slice(4)).toEqual([
+      ["initialize", undefined],
+      ["tools/call", "session-456"],
+    ]);
+  });
+
+  it("does not re-initialize on a 404 Method-not-found, which is not about the session", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    server.forcedResponse = new Response(
+      JSON.stringify({ jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found" } }),
+      { status: 404 },
+    );
+
+    await expect(client.listContexts()).rejects.toThrow("HTTP 404: Method not found");
+    expect(server.calls().slice(2)).toEqual([["tools/call", "session-123"]]);
+  });
+
+  it("does not re-initialize on a 401", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    server.forcedResponse = new Response("{}", { status: 401 });
+
+    await expect(client.listContexts()).rejects.toBeInstanceOf(KaguraAuthError);
+    expect(server.calls().slice(2)).toEqual([["tools/call", "session-123"]]);
+  });
+});
+
+describe("concurrent MCP session opens (#39)", () => {
+  it("shares one initialize between concurrent first calls", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+
+    await Promise.all([client.listContexts(), client.listContexts(), client.listContexts()]);
+
+    expect(server.calls()).toEqual([
+      ["initialize", undefined],
+      ["tools/call", "session-123"],
+      ["tools/call", "session-123"],
+      ["tools/call", "session-123"],
+    ]);
+  });
+
+  it("shares one re-initialize between concurrent calls on an expired session", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.listContexts();
+    expire(server);
+
+    await Promise.all(Array.from({ length: 5 }, () => client.listContexts()));
+
+    // The first handshake plus ONE re-open, not one per caller.
+    expect(server.calls().filter(([method]) => method === "initialize")).toHaveLength(2);
+    expect(server.calls().slice(-5)).toEqual(Array(5).fill(["tools/call", "session-456"]));
+  });
+
+  it("close() during an in-flight initialize is not undone by it", async () => {
+    const server = new FakeServer();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (server.requests.length === 1) {
+        await gate; // hold the first initialize reply
+      }
+      return response;
+    };
+    const client = makeClient(server, { fetch });
+
+    const first = client.listContexts();
+    while (server.requests.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await client.close();
+    release();
+    await first;
+    server.sessionId = "session-456";
+    await client.listContexts();
+
+    // The handshake close() interrupted served the call that started it,
+    // but the next call opens a fresh session instead of reusing it.
+    expect(server.calls()).toEqual([
+      ["initialize", undefined],
+      ["tools/call", "session-123"],
+      ["initialize", undefined],
+      ["tools/call", "session-456"],
+    ]);
+  });
+
+  it("keeps a session another call re-opened when a late 404 names the old one", async () => {
+    const server = new FakeServer();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await server.fetch(input, init);
+      // Hold back the first reply to the "slow" call, so its 404 for the
+      // old session lands after another call has re-opened a new one.
+      if (!held && typeof init?.body === "string" && init.body.includes('"name":"slow"')) {
+        held = true;
+        await gate;
+      }
+      return response;
+    };
+    const client = makeClient(server, { fetch });
+    await client.listContexts();
+    expire(server);
+
+    const slow = client.callRawTool("slow");
+    await client.listContexts();
+    release();
+    await slow;
+
+    expect(server.calls().filter(([method]) => method === "initialize")).toHaveLength(2);
+    expect(server.calls().at(-1)).toEqual(["tools/call", "session-456"]);
+  });
+
+  it("never sends a call without a session id while another call forgets the stale one", async () => {
+    // A call that finds the session just before a concurrent 404 forgets it
+    // must send the id it found, not re-read the field after an await. The
+    // window is a few microtask ticks wide, so start that call on each tick
+    // after the 404 is let through.
+    for (let ticks = 0; ticks < 20; ticks++) {
+      const server = new FakeServer();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let held = false;
+      const fetch: typeof globalThis.fetch = async (input, init) => {
+        const response = await server.fetch(input, init);
+        // Hold back the body of the "slow" call's 404 for the old session.
+        if (!held && typeof init?.body === "string" && init.body.includes('"name":"slow"')) {
+          const text = await response.text();
+          Object.defineProperty(response, "text", {
+            value: async () => {
+              await gate;
+              return text;
+            },
+          });
+          held = true;
+        }
+        return response;
+      };
+      const client = makeClient(server, { fetch });
+      await client.listContexts();
+      expire(server);
+
+      const slow = client.callRawTool("slow");
+      while (!held) {
+        await Promise.resolve();
+      }
+      release();
+      for (let i = 0; i < ticks; i++) {
+        await Promise.resolve();
+      }
+      await Promise.all([slow, client.callRawTool("other")]);
+
+      const toolCalls = server.calls().filter(([method]) => method === "tools/call");
+      expect(toolCalls.filter(([, session]) => session === undefined), `ticks=${ticks}`).toEqual([]);
+      expect(
+        server.calls().filter(([method]) => method === "initialize"),
+        `ticks=${ticks}`,
+      ).toHaveLength(2);
+    }
+  });
+
+  it("rejects every caller of a failed shared initialize and retries on the next call", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response("", { status: 503 });
+    const client = makeClient(server);
+
+    const results = await Promise.allSettled([client.listContexts(), client.listContexts()]);
+
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    expect(server.calls()).toEqual([["initialize", undefined]]);
+
+    server.forcedResponse = null;
+    await client.listContexts();
+    expect(server.calls().slice(1)).toEqual([
+      ["initialize", undefined],
+      ["tools/call", "session-123"],
+    ]);
   });
 });
 
@@ -275,6 +605,23 @@ describe("recall", () => {
       include_explore_hints: true,
       include_superseded: true,
     });
+  });
+
+  it("sends useRerank: false rather than dropping it (#37)", async () => {
+    // Since server v0.69.0 an omitted use_rerank follows the context's
+    // search config, so dropping false would let a rerank-enabled context
+    // rerank anyway. Only undefined may leave the key off the wire.
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.recall({ contextId: "c", query: "q", useRerank: false });
+    await client.recall({ contextIds: ["a", "b"], query: "q", useRerank: false });
+    await client.recall({ contextId: "c", query: "q", useRerank: undefined });
+    await client.recall({ contextId: "c", query: "q" });
+
+    expect(server.toolCallArgs(0).use_rerank).toBe(false);
+    expect(server.toolCallArgs(1).use_rerank).toBe(false);
+    expect(server.toolCallArgs(2)).not.toHaveProperty("use_rerank");
+    expect(server.toolCallArgs(3)).not.toHaveProperty("use_rerank");
   });
 
   it("reads back what supersedes shadowed, and only when asked (#25)", async () => {
@@ -563,6 +910,20 @@ describe("REST endpoints", () => {
     expect(server.requests[0]!.headers.authorization).toBe("Bearer test-key");
   });
 
+  it("getServerInfo drops the MCP URL's query from the REST base URL (#38)", async () => {
+    const server = new FakeServer();
+    server.restResults["/api/v1/system/info"] = { name: "memory-cloud", version: "0.73.0" };
+    const client = makeClient(server, { mcpUrl: "https://x.test/mcp?profile=core" });
+    await client.getServerInfo();
+    expect(server.requests[0]!.url).toBe("https://x.test/api/v1/system/info");
+    // MCP calls still carry the query: the server reads the profile there.
+    await client.listContexts();
+    expect(server.requests).toHaveLength(3); // REST + MCP init + tool call
+    for (const request of server.requests.slice(1)) {
+      expect(request.url).toBe("https://x.test/mcp?profile=core");
+    }
+  });
+
   it("checkServerVersion returns info and never throws on old servers", async () => {
     const server = new FakeServer();
     server.restResults["/api/v1/system/info"] = { name: "mc", version: "0.1.0" };
@@ -587,6 +948,28 @@ describe("REST endpoints", () => {
     await client.listMemories({ q: "  auth  " });
     const url2 = new URL(server.requests[1]!.url);
     expect(url2.searchParams.get("q")).toBe("auth");
+  });
+
+  it("getMemoryStats defaults to a sort field the server accepts", async () => {
+    // Server v0.34.0 (#1046) dropped `use_count`; sending it is a 400.
+    const server = new FakeServer();
+    server.restResults["/api/v1/contexts/ctx/memory-stats"] = {
+      memories: [],
+      total: 0,
+      sort_by: "access_count",
+      sort_order: "desc",
+    };
+    const client = makeClient(server);
+    await client.getMemoryStats({ contextId: "ctx" });
+    const url = new URL(server.requests[0]!.url);
+    expect(url.pathname).toBe("/api/v1/contexts/ctx/memory-stats");
+    expect(url.searchParams.get("sort_by")).toBe("access_count");
+    expect(url.searchParams.get("sort_order")).toBe("desc");
+
+    await client.getMemoryStats({ contextId: "ctx", sortBy: "reference_count", sortOrder: "asc" });
+    const url2 = new URL(server.requests[1]!.url);
+    expect(url2.searchParams.get("sort_by")).toBe("reference_count");
+    expect(url2.searchParams.get("sort_order")).toBe("asc");
   });
 
   it("maps REST 404 through the standard status mapping", async () => {

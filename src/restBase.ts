@@ -197,7 +197,8 @@ export class KaguraRestClient {
    * Precedence: explicit `apiKey` > `KAGURA_API_KEY` env > OAuth profile
    * from `~/.kagura/credentials.json` > `.kagura.json`. The REST
    * `baseUrl` is derived from the resolved MCP URL (strips `/mcp` and any
-   * `/mcp/w/{workspaceId}` suffix); a static key bakes the Bearer header
+   * `/mcp/w/{workspaceId}` suffix, and drops any query such as
+   * `?profile=core`); a static key bakes the Bearer header
    * once, an OAuth profile installs an auto-refreshing `AuthProvider`.
    *
    * Declared with a polymorphic `this` so every subclass inherits a

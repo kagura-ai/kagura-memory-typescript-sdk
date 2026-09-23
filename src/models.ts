@@ -160,8 +160,16 @@ export interface MemoryStatItem {
   type: string;
   importance: number;
   scope: string;
-  use_count: number;
+  /**
+   * @deprecated Server v0.34.0 (#1046) dropped this always-zero column and
+   * no longer sends it; read {@link MemoryStatItem.reference_count} or
+   * {@link MemoryStatItem.access_count} instead.
+   */
+  use_count?: number;
+  /** Surfacing count: recall results, explore and reference all count. */
   access_count: number;
+  /** Adoption count: only reference() counts (server v0.34.0+, #1046). */
+  reference_count?: number;
   /** ISO 8601 datetime string. */
   last_used_at?: string | null;
   embedding_status: string;

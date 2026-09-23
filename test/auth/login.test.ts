@@ -285,6 +285,21 @@ describe("login (#9)", () => {
     expect(creds.server).toBe("http://localhost:8000");
   });
 
+  it("runs the device flow against the REST base of an MCP URL with a query (#38)", async () => {
+    const server = new FakeOAuthServer();
+    const creds = await login({
+      mcpUrl: "https://x.test/mcp?profile=core",
+      credentialsPath,
+      fetch: server.fetch,
+    });
+
+    expect(server.urls[0]).toBe("https://x.test/api/v1/oauth/device/authorize");
+    expect(server.urls[1]).toBe("https://x.test/api/v1/oauth/token/");
+    expect(creds.server).toBe("https://x.test");
+    // The stored MCP URL keeps the query for later MCP connections.
+    expect(creds.mcpUrl).toBe("https://x.test/mcp?profile=core");
+  });
+
   it("falls back to KAGURA_MCP_URL before the public default", async () => {
     const server = new FakeOAuthServer();
     // A self-hosted user with KAGURA_MCP_URL set must not be silently

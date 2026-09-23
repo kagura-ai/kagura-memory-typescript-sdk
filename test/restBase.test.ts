@@ -381,6 +381,20 @@ describe("fromMcpUrl", () => {
     expect(server.requests[0]!.headers.authorization).toBe("Bearer explicit-key");
   });
 
+  it("drops the MCP URL's query from the derived base URL (#38)", async () => {
+    const server = new FakeRest();
+    const client = ProbeClient.fromMcpUrl({
+      apiKey: "k",
+      mcpUrl: "https://x.test/mcp?tools=recall&guardrails=off",
+      fetch: server.fetch,
+      env: {},
+    });
+
+    expect(client.baseUrl).toBe("https://x.test");
+    await client.requestPublic("GET", "/api/v1/things");
+    expect(server.requests[0]!.url).toBe("https://x.test/api/v1/things");
+  });
+
   it("defaults to the production base URL when no MCP URL is stored", () => {
     const client = ProbeClient.fromMcpUrl({ apiKey: "k", env: {} });
     expect(client.baseUrl).toBe(DEFAULT_REST_BASE_URL);

@@ -11,11 +11,22 @@ export { SDK_VERSION } from "./version.js";
 /**
  * Derive the REST API base URL from an MCP URL.
  *
- * Strips `/mcp` and everything after it (e.g. `/mcp/w/{workspace}`).
+ * Drops the query and fragment, then strips `/mcp` and everything after it
+ * (e.g. `/mcp/w/{workspace}`). The query (`?profile=`, `?tools=`,
+ * `?guardrails=`) configures the MCP endpoint alone, so it is dropped even
+ * from a URL with no `/mcp` segment to strip.
  */
 export function baseUrlFromMcp(mcpUrl: string): string {
-  const m = /\/mcp(?=\/|$)/.exec(mcpUrl);
-  return m ? mcpUrl.slice(0, m.index) : mcpUrl;
+  // `?` and `#` end the path. Callers strip trailing slashes from the raw
+  // URL, which misses a slash sitting before the query (`/?profile=core`).
+  const end = mcpUrl.search(/[?#]/);
+  const path = end === -1 ? mcpUrl : mcpUrl.slice(0, end).replace(/\/+$/, "");
+  // Search the path only: the `//` of `https://mcp/mcp` would otherwise
+  // read as a `/mcp` segment and cut the URL down to `https:/`.
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(path);
+  const from = authority ? authority[0].length : 0;
+  const m = /\/mcp(?=\/|$)/.exec(path.slice(from));
+  return m ? path.slice(0, from + m.index) : path;
 }
 
 function formatValidationErrors(errors: unknown[]): string {
@@ -40,16 +51,30 @@ function formatValidationErrors(errors: unknown[]): string {
   return parts.join("; ");
 }
 
+/** The `error` object of a JSON-RPC error body, else `null`. */
+function jsonRpcError(body: unknown): Record<string, unknown> | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return null;
+  }
+  const error = (body as Record<string, unknown>).error;
+  return typeof error === "object" && error !== null && !Array.isArray(error)
+    ? (error as Record<string, unknown>)
+    : null;
+}
+
 /**
  * Return a useful server-supplied error string from a response body.
  *
- * Handles four response shapes:
+ * Handles five response shapes:
  * - `{"detail": "string"}` — returned as-is (FastAPI HTTPException default).
  * - `{"detail": [{"loc": [...], "msg": "...", ...}, ...]}` — FastAPI's
  *   validation-error format; each entry becomes `"<loc.path>: <msg>"`.
  * - `{"error": "<CODE>", "message": "string", "details": {...}}` — the
  *   memory-cloud canonical envelope; returns `message`, appending
  *   `details.errors` validation entries when present.
+ * - `{"jsonrpc": "2.0", "error": {"code": int, "message": "string"}}` — the
+ *   MCP transport's 4xx for a request it rejects before dispatch; returns
+ *   `error.message`, e.g. the expired-session 404's re-initialize hint.
  * - Anything else — returns an empty string so callers can fall back.
  */
 export function extractDetail(bodyText: string): string {
@@ -84,7 +109,50 @@ export function extractDetail(bodyText: string): string {
     }
     return message;
   }
+  const rpcMessage = jsonRpcError(rec)?.message;
+  if (typeof rpcMessage === "string" && rpcMessage) {
+    return rpcMessage;
+  }
   return "";
+}
+
+/** Headers naming the MCP session `sessionId` — none before a session exists. */
+export function mcpSessionHeader(sessionId: string | null): Record<string, string> {
+  return sessionId ? { "mcp-session-id": sessionId } : {};
+}
+
+const JSONRPC_METHOD_NOT_FOUND = -32601;
+
+/**
+ * Whether a response says the MCP session a request carried is gone (#39).
+ *
+ * MCP Streamable HTTP answers a request naming a session the server no
+ * longer holds with `404`, and the client must then send a new
+ * `initialize`. The server keeps legacy (`initialize`-handshake) sessions
+ * in process memory and drops them after an idle hour and on every restart.
+ * (As deployed, v0.75.0 re-adopts an unknown session id instead of
+ * answering `404`, so against it this never fires; it is reached against a
+ * server that enforces the spec.)
+ *
+ * The one `404` that is not about the session is the stateless 2026-07-28
+ * `-32601` Method-not-found reply: that path ignores the session id, so
+ * re-initializing would only open an orphan session.
+ */
+export function mcpSessionExpired(
+  status: number,
+  bodyText: string,
+  sessionId: string | null,
+): boolean {
+  if (!sessionId || status !== 404) {
+    return false;
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return true;
+  }
+  return jsonRpcError(body)?.code !== JSONRPC_METHOD_NOT_FOUND;
 }
 
 /**

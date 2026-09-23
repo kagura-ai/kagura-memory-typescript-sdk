@@ -12,6 +12,7 @@ export type {
   KaguraClientOptions,
   ListMemoriesOptions,
   ListTagsOptions,
+  MemoryStatsSortField,
   RecallOptions,
   RegisterAgentOptions,
   RememberOptions,
