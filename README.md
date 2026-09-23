@@ -90,10 +90,11 @@ Four ways to authenticate, in resolution order:
 
 ### Command line
 
-`kagura-memory` mirrors the Python CLI's `kagura` command: the same
-subcommand and flag names, the same JSON on stdout, and the same exit codes
-(2 for a usage error, 1 for a runtime failure). The commands and options
-not ported yet, and the few deliberate differences, are listed below.
+`kagura-memory` mirrors the Python CLI's `kagura` command: its subcommands
+and flags take the Python CLI's names, and it prints the same JSON on
+stdout and exits with the same codes (2 for a usage error, 1 for a runtime
+failure). The commands and options not ported yet, the few options only
+this bin has, and the deliberate differences are listed below.
 
 ```bash
 npx kagura-memory --help
@@ -232,13 +233,23 @@ the zero-dependency promise. Not ported yet: `auth create-key`,
 `auth list-keys` and `auth revoke-key`; the `workspace` group
 (`member list|add|set-role|remove`, `invite create|list|revoke`);
 `guardrails load` and `guardrails digest`; `measure record` and
-`measure series`; and the `-v/--verbose` and `--progress` options of
-`files upload` and `resource import`, which this CLI rejects as unknown
-options. Use the Python CLI for those. The Claude Code extras of
+`measure series`; the `-v/--verbose` and `--progress` options of
+`files upload` and `resource import`; and the `--url-form`,
+`--api-key-env` and `--agents-md` options of `setup codex`,
+`setup hermes` and `setup openclaw`, which this CLI rejects as unknown
+options. Use the Python CLI for all of these. The Claude Code extras of
 `kagura setup claude` are not ported either: its SessionStart and
 PostToolUse hooks and its `/kagura-recall` and `/kagura-remember`
 commands. `setup claude` here writes `.kagura.json` and the MCP entry
 only, and takes their flags as inert (see above).
+
+**Only in this bin.** `secret keygen --reveal`: keygen prints the private
+key (see key custody below) and refuses to print it to a terminal without
+`--reveal`. `-c` is short for `--context-id` on every `setup` subcommand.
+`setup codex`, `setup hermes` and `setup openclaw` take `--api-key` and
+`--project-dir`, and `setup codex` also takes `--tool-profile`; the Python
+CLI has these three options only on `setup claude`. Every `setup` entry
+here is built from an API key, as described above.
 
 **Three deliberate divergences.**
 
@@ -257,17 +268,30 @@ only, and takes their flags as inert (see above).
   (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12 characters
   and print the whole secret twice.
 
-Three small divergences run the other way: this CLI refuses what click
+Some small divergences run the other way: this CLI refuses what click
 would accept.
 
 - `--profile=` and `--scope=` reject an explicitly empty value. An empty
   profile name would create a nameless profile and an empty scope would go
-  to the server verbatim. Every other option treats `--flag=` as Python
-  does.
+  to the server verbatim. Other options take `--flag=` as Python does,
+  apart from `--external-id=` in the `update-memory` case below.
 - `context update --lock --unlock` is a usage error (exit 2, "mutually
   exclusive; pick one"), where click takes whichever flag comes last.
 - `--rerank --no-rerank` is the same usage error, on `recall` and on
   `context search-config`.
+- `auth logout --all --profile NAME` is the same usage error, where click
+  ignores `--profile` and logs out every profile.
+- `update-memory --dismiss-supersede-candidate` exits 1 beside any
+  `--external-id`, before anything is sent. The Python CLI refuses only a
+  non-empty one, and sends an empty `--external-id=` to the server; this
+  CLI refuses that too, as `updateMemory` does.
+- An option that takes a value does not take a following argument that
+  begins with a dash and is not a number (a lone `-` is still a value):
+  `--name-contains -auth` is a missing value here, where click takes
+  `-auth`. Write `--name-contains=-auth`. `auth login --invite` is the
+  exception, since an invite token may begin with a dash.
+- A short option's value is not attached, and short options are not
+  grouped: `-k10` is an unknown option here, where click reads `-k 10`.
 
 **Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
 requests per client address. When the server refuses one with HTTP 429,

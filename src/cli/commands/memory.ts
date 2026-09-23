@@ -265,11 +265,13 @@ const forget: Command = {
     rejectExtraArgs(args);
     const memoryId = args.values["memory-id"];
     const query = args.values.query;
+    // Converted first, as click does `type=int`: a bad -k exits 2 even
+    // when neither --memory-id nor --query was given.
+    const k = intOr(args, FORGET_K, 10);
     if (!memoryId && !query) {
       // ClickException, not UsageError: exit 1, matching Python.
       throw new CliError("Either --memory-id or --query is required");
     }
-    const k = intOr(args, FORGET_K, 10);
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
       client.forget({
         contextId,
@@ -313,6 +315,9 @@ const updateMemory: Command = {
     const memoryId = args.values["memory-id"];
     const externalId = args.values["external-id"];
     const dismissSupersedeCandidate = args.flags.has("dismiss-supersede-candidate");
+    // Click converts `type=float` before the function body runs, so a bad
+    // -i is a usage error (exit 2) even when the checks below would fail.
+    const importance = optionalFloat(args, IMPORTANCE);
     if (!memoryId && !externalId) {
       throw new CliError("Either --memory-id or --external-id is required");
     }
@@ -328,7 +333,6 @@ const updateMemory: Command = {
     const summary = args.values.summary;
     const content = args.values.content;
     const type = args.values.type;
-    const importance = optionalFloat(args, IMPORTANCE);
     const tags = parseTags(args.values.tags);
 
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>

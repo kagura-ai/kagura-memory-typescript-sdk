@@ -306,6 +306,15 @@ describe("kagura-memory forget", () => {
     const { args } = await wire(["forget", "-q", "stale"]);
     expect(args).toMatchObject({ query: "stale", k: 10 });
   });
+
+  it("converts -k before the memory-id/query check, so a bad -k exits 2 as in click", async () => {
+    // click coerces `type=int` before the body's ClickException can run.
+    const { code, h } = await wire(["forget", "-k", "abc"]);
+    expect(code).toBe(2);
+    expect(h.err.join("\n")).toContain("'abc' is not a valid integer.");
+    expect(h.err.join("\n")).not.toContain("Either --memory-id or --query is required");
+    expect(h.server.requests).toHaveLength(0);
+  });
 });
 
 describe("kagura-memory update-memory", () => {
@@ -378,6 +387,23 @@ describe("kagura-memory update-memory", () => {
     const { code, h } = await wire(["update-memory", "--dismiss-supersede-candidate"]);
     expect(code).toBe(1);
     expect(h.err.join("\n")).toBe("Error: Either --memory-id or --external-id is required");
+  });
+
+  it("converts -i before any of those checks, so a bad float exits 2 as in click", async () => {
+    // click coerces `type=float` before the body's ClickExceptions run, so
+    // the usage error wins over every exit-1 check.
+    for (const argv of [
+      ["update-memory", "-i", "abc", "--dismiss-supersede-candidate", "--external-id", "y"],
+      ["update-memory", "-i", "abc"],
+      ["update-memory", "-m", "m", "--external-id", "e", "-i", "abc"],
+    ]) {
+      const { code, h } = await wire(argv);
+      expect(code, argv.join(" ")).toBe(2);
+      expect(h.err.join("\n")).toContain(
+        "Invalid value for '--importance' / '-i': 'abc' is not a valid float.",
+      );
+      expect(h.server.requests).toHaveLength(0);
+    }
   });
 
   it("describes --dismiss-supersede-candidate in the Python CLI's words, with its example", async () => {
