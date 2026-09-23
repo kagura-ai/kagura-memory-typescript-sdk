@@ -59,6 +59,7 @@ import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
 import { SETUP_GROUP } from "./commands/setup.js";
+import type { ExecResult } from "./exec.js";
 import { checkInviteSupport, type InviteSupport } from "./invite.js";
 import { CliUsageError } from "./parse.js";
 import { parseArgs, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
@@ -96,6 +97,16 @@ const AUTH_SPEC: ParseSpec = {
 export interface CliDeps extends CommandDeps {
   /** Best-effort browser launch; returns false when it could not open. */
   openBrowser: (url: string) => Promise<boolean>;
+  /**
+   * Find a program on PATH; null when it is not there.
+   *
+   * `setup` uses this and {@link CliDeps.execFile} to apply an entry with
+   * the harness's own CLI. Both are injected so its tests never read the
+   * real PATH or start a process.
+   */
+  which: (name: string) => string | null;
+  /** Run a program with no shell and no stdin; never rejects. */
+  execFile: (file: string, argv: readonly string[]) => Promise<ExecResult>;
   login: typeof login;
   refresh: typeof refresh;
   /** Overrides for tests; production passes nothing. */
