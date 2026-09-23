@@ -165,10 +165,11 @@ different one is replaced: `claude mcp remove` runs before `claude mcp
 add-json`, and if the add then fails, the old entry is put back (if that
 fails too, the error prints the command to add the new one by hand).
 Without `claude` on `PATH`, `--scope user` prints the commands to run and
-writes nothing. When the Kagura Memory plugin is enabled, the notes list
-the plugin settings to enter. `doctor` reports the entry Claude Code uses
-in the current directory, with its scope and file, and warns about each
-entry that one hides.
+writes nothing, unless the user-scope entry is already identical. When
+`claude plugin list --json` shows the Kagura Memory plugin enabled, the
+notes list the plugin settings to enter. `doctor` reports the entry
+Claude Code uses in the current directory, with its scope and file, and
+warns about each entry that one hides.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
 Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
@@ -201,7 +202,8 @@ Python does.
 **Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
 requests per client address. When the server refuses one with HTTP 429,
 `auth login` says so and how many seconds to wait (from the `Retry-After`
-header, 60 when it is missing), with the server's reason on the next line.
+header, 60 when it is missing or not a number of seconds), with the
+server's reason, when it gives one, on the next line.
 `login()` and `authorizeDevice` throw the same message as a
 `KaguraAuthError`.
 

@@ -6,6 +6,213 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`auth login --invite` signs a new account up with a beta invite**
+  ([#44](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/44)).
+  On a deployment that admits new accounts only by invite, a new user who
+  started from `auth login` was refused at sign-up even with a valid
+  invite: the approval page sends a signed-out visitor to the login page,
+  which does not carry one. Only the CLI knows both the invite and the user
+  code, so it now builds the link that does both,
+  `<frontend>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>`,
+  prints it under the code and opens it. The approval URL follows, under
+  "If you land on the dashboard instead, approve here:", for a user who is
+  already signed in. The flag takes the bare token or the
+  `https://…/join/<token>` link it arrived in, and the prompts follow the
+  Python CLI's (python-sdk#259).
+
+  Once the device code is issued, an unauthenticated
+  `GET /api/v1/system/info`, allowed 5 seconds, decides what is printed.
+  memory-cloud v0.76.0 or later, the first release whose `/join` honours
+  `return_to` (memory-cloud#1655), gets the one link; `v0.76.0` and
+  suffixed versions such as `0.76.0+build.7` count. An older or unparseable
+  version, an empty body or a failed request gets two steps: the plain
+  `/join/<token>` link, then the approval URL, then how many minutes the
+  code has left. A `features` object without `beta_invites: true` gets a
+  one-line note and the ordinary prompt. A body with no `features` object
+  says nothing about invites, so the version decides.
+
+  `<frontend>` is the approval URL with its final `/device` removed, so a
+  frontend under a base path gets `/join` beside `/device`. The CLI takes
+  the two steps rather than guess when that URL does not end in `/device`
+  (step 1 is then your own link or, for a bare token, the invite you were
+  sent), when it is plain HTTP off localhost, and when memory-cloud's
+  `/join` would silently drop the `return_to`: a path starting with `//`,
+  as a frontend URL configured with a trailing slash produces, or one
+  holding a backslash or a control character. A server that omits
+  `verification_uri_complete` still gets the code in `return_to`.
+
+  The token is a credential and is handled as one. It is checked before any
+  request, and a malformed value exits 2 with `Error: Invalid value for
+  '--invite': <reason>`, a reason that never quotes it. A pasted link must
+  spell out `://`, since the CLI does not repair `https:/host/…` as a
+  browser would, and must pass the `--server` HTTPS rule. A link for a
+  different server than the one being logged into aborts before
+  `/system/info` is asked and before polling, so no profile is written, and
+  the error suggests `--server`. The token is never written to
+  `credentials.json` or any other file, and is printed only inside a link.
+  Every other `auth` subcommand rejects `--invite` with exit 2. `--invite`
+  takes its value even when it begins with `-`, as about one base64url
+  token in 64 does.
+
+- **`buildInviteLink(verificationUri, verificationUriComplete, token)`**
+  ([#44](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/44))
+  builds the same link for an app that embeds `login()`, from its
+  `onUserCode`, the first point where both the invite and the code are
+  known. It takes the Python SDK's `build_invite_link` arguments in the
+  same order and, like it, returns `null` when `/join` cannot be placed or
+  would drop `return_to`. It is pure: it does not check the server version,
+  and a malformed token throws `KaguraAuthError` without being quoted.
+
+- **`setup codex`, `setup hermes` and `setup openclaw`**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45))
+  connect OpenAI Codex, Hermes Agent and OpenClaw the way `setup claude`
+  connects Claude Code: `.kagura.json` in the project, plus a
+  `kagura-memory` entry holding the URL and a Bearer header. The key never
+  goes into the harness's config file and is never printed. Codex reads it
+  from `KAGURA_API_KEY` in the shell that starts it
+  (`bearer_token_env_var`, since Codex rejects an inline `bearer_token` on
+  an HTTP server and then fails to load the whole file), and a key found in
+  that variable is not copied into `.kagura.json`. Hermes and OpenClaw read
+  it from their own `.env` (`MCP_KAGURA_MEMORY_API_KEY` in
+  `$HERMES_HOME/.env`, `KAGURA_API_KEY` in `~/.openclaw/.env`), which is
+  written 0600 with that one line replaced or appended.
+
+  This package has no TOML, YAML or JSON5 parser and takes no runtime
+  dependencies, so it never rewrites those configs. The entry goes in
+  through `codex mcp add` or `openclaw mcp add` (`openclaw mcp set` with
+  `--force`) when that CLI is on `PATH`, run without a shell; otherwise the
+  block is printed on stderr with the file it belongs in, and stdout stays
+  one JSON document. On Windows, a CLI installed only as an npm `.cmd` shim
+  counts as not found, because Node runs one only through a shell that
+  would re-parse the arguments. Hermes always gets the printed block,
+  because `hermes mcp add` always prompts. An existing entry of the same
+  name stops the command with exit 1 unless `--force` is given; `--name`
+  renames the entry, and `--dry-run` shows what would be configured without
+  writing or running anything. Hermes and OpenClaw do not pass the server's
+  instructions to the model, so there `guardrails=off` is refused and a
+  guardrails context id is dropped with a note, whether it comes from
+  `--guardrails` or from the URL: `off` would also remove the
+  `get_context_info` block, the only guardrail lane they have.
+
+- **`setup claude --scope user`**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45))
+  writes the entry with `claude mcp add-json --scope user kagura-memory
+  <json>`, as the Python CLI does (python-sdk#258). `~/.claude.json` also
+  holds the rest of Claude Code's state, so this bin reads it and never
+  writes it. The entry is an argument, so the key is in that child's
+  argument list while it runs; the help says so. An identical user-scope
+  entry is left alone and needs no `claude`. A different one is replaced:
+  `claude mcp remove --scope user kagura-memory` runs first, and if
+  `add-json` then fails, the old entry is put back. Only if that fails too
+  does the error say that none is configured, with the command that adds
+  the new one. Without `claude` on `PATH`, the commands to run are printed
+  and the command exits 1, writing nothing.
+
+- **`--guardrails <context-id|off>` and `--tool-profile <name>`** on
+  `setup claude` and `setup codex`
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45))
+  set the entry URL's `guardrails` and `profile` parameters as the Python
+  CLI does: an existing value is removed and the new one appended,
+  `guardrails` before `profile`, and every other parameter is kept as
+  written. `.kagura.json` gets `--mcp-url` as given; the flags' parameters
+  go on the entry only. A `--guardrails` value that is neither `off` nor a
+  UUID exits 2, since the server silently ignores it, and so does an empty
+  `--tool-profile`. On Codex, when neither the flag nor the URL sets
+  `guardrails`, it defaults to `off` if the Kagura plugin's Codex hooks are
+  on, and otherwise to the `-c` context when that is a UUID.
+
+- **`setup claude` notices the Kagura Memory plugin.** When
+  `claude plugin list --json`, run in `--project-dir`, shows it enabled,
+  the notes list the plugin's `server_url` and `context_id` settings to
+  enter and, unless the URL already carries `guardrails=off`, recommend
+  re-running with `--guardrails off` once its hooks deliver guardrails.
+  The URL is not changed for you: `off` also removes the guardrails block
+  from `get_context_info`.
+
+- **`recall --trusted-only`**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45))
+  sends `filters.trust_tier = "trusted"`, so external and
+  connector-ingested memories are left out of the results. The Python CLI
+  added it for its SessionStart hook; this bin installs no hooks, but
+  mirrors the flag and its help so the two CLIs take the same argv.
+
+### Changed
+
+- **The device-flow prompt is worded as the Python CLI's**
+  ([#44](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/44)),
+  for `auth login` with or without `--invite`, and for an `auth refresh`
+  that re-runs the device flow. The code line now starts with `!`
+  (`! First copy your one-time code: <code>`), `Then approve at:` reads
+  `Open this URL in your browser to approve:`, the `--no-browser` line says
+  `polling will continue here` instead of `still polling here`, and a
+  browser that cannot be opened gives `Could not auto-open the browser.
+  Open the URL above manually. Polling will continue here.` A script that
+  scrapes these lines needs updating.
+
+- **`setup claude`'s JSON report gains `harness`, `applied_with`,
+  `guardrails` and `notes`**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45)),
+  the shape every `setup` subcommand prints. The keys it already had stay;
+  `mcp_url` is the entry's URL, so it includes the parameters the new
+  flags set.
+
+- **`doctor` reports the Claude Code entry in use, whichever scope it is
+  in**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45)).
+  It read only `./.mcp.json`, so a user- or local-scope entry read as
+  missing and one scope hiding another went unreported. It now reads the
+  same three scopes as `setup claude` and reports the entry Claude Code
+  uses as `MCP Mode: <mode> (<scope> scope, <file>)`, with `scope` and
+  `source` in the check's `details`, plus a warning for each entry that one
+  hides, in the Python CLI's words. The other messages change too: an
+  `info` "No kagura-memory MCP entry found (.mcp.json, ~/.claude.json)"
+  when no scope has one, and a `warn` "No usable kagura-memory entry found
+  in …" for a `.mcp.json` without one, or for an entry that is neither the
+  `kagura-mcp` stdio proxy nor an HTTP entry. A static-token entry passes,
+  where Python's `doctor` points at `setup claude --profile`, whose proxy
+  this package does not ship. A `.mcp.json` that is not JSON still fails.
+
+### Fixed
+
+- **`setup claude` wrote an entry that Claude Code skips**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45)).
+  The `.mcp.json` entry had `type: "url"`, which is not one of Claude
+  Code's transports: Claude Code 2.1.280 reports it as
+  `Skipped — unknown MCP server type "url"`, and
+  `claude mcp get kagura-memory` finds no such server, while the command
+  reported success. The entry is now `type: "http"`. Re-run `setup claude`
+  to rewrite an existing one; `doctor` warns about a `url` entry and says
+  so.
+
+- **`setup claude` could report success for an entry that never takes
+  effect**
+  ([#45](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/45)).
+  Claude Code uses the `kagura-memory` entry from the strongest scope
+  (local, then project, then user), so one in a stronger scope silently
+  hid the entry just written. The command now writes nothing and exits 1,
+  printing `claude mcp remove --scope <scope> kagura-memory` for each such
+  entry. For the default `--scope project` that is a local-scope entry; for
+  `--scope user` a project `.mcp.json` entry, such as the one earlier
+  releases wrote, counts too. An entry the new one hides in a weaker scope
+  is noted instead. An `.mcp.json` it cannot parse now also stops the
+  command before `.kagura.json` is rewritten rather than after.
+
+- **A rate-limited device sign-in says how long to wait**
+  ([#44](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/44)).
+  memory-cloud v0.76.0 limits `POST /api/v1/oauth/device/authorize` per
+  client address (memory-cloud#1656), and `authorizeDevice` reported its
+  429 as `Device authorization failed (HTTP 429)` with a hint to check the
+  client id. It now throws `KaguraAuthError` "Too many sign-in attempts
+  from this address (HTTP 429). Retry after N seconds.", with N from a
+  numeric `Retry-After` (60 otherwise) and the server's
+  `error_description` on a `Server said:` line: the Python CLI's text.
+  `login()`, a `refresh()` that re-runs the device flow, and the `auth`
+  commands all get it. Other authorize failures quote an RFC 6749
+  `error_description` instead of the raw JSON body. The token poll is
+  unchanged.
+
 ## [0.9.0] - 2026-09-23
 
 ### Added
