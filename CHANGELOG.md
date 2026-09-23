@@ -16,12 +16,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   vocabulary, with no error. A non-empty `withTags` now calls
   `GET /api/v1/contexts/{id}/tags`, which has had the filter since server
   v0.17.2, with one `with_tags` key per tag. The result has the MCP path's
-  shape: `status`, `context_id`, `context_name`, and `tags` of `tag`,
-  `count` and `last_used_at`. The REST route sends no `context_name`, so
-  the client looks it up once per context with a one-tag `list_tags` call
-  (the same access check as the route, and exempt from the MCP daily
-  limit) and keeps it. A plain `listTags` call fills the same cache, so the
-  usual browse-then-drill-down flow costs one request per drill-down.
+  shape: `status`, `context_id`, `context_name`, `tags` of `tag`, `count`
+  and `last_used_at`, and `total`. The REST route sends no
+  `context_name`, so the client looks it up once per context with a
+  one-tag `list_tags` call (the same access check as the route, and exempt
+  from the MCP daily limit) and keeps it. A plain `listTags` call fills
+  the same cache, so the usual browse-then-drill-down flow costs one
+  request per drill-down.
   `withTags` values are trimmed and blank ones dropped, as the server does.
   More than 50 tags, or one over 200 characters, now throws before any
   request. A missing or hidden context throws `KaguraNotFoundError`, and a
