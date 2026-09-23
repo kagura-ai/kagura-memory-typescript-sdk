@@ -78,6 +78,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shape. So `HTTP 404` becomes `HTTP 404: MCP session not found or
   expired. …`, and any other JSON-RPC 4xx shows its `error.message` too.
 
+- **`getMemoryStats()` no longer fails with HTTP 400 when called with its
+  defaults** (#46). It sent `sort_by=use_count`, a field memory-cloud
+  v0.34.0 (#1046) dropped; the server rejects any sort field outside
+  `access_count`, `reference_count`, `importance`, `created_at` and
+  `last_used_at`. The default is now `access_count`, the server's own, and
+  `sortBy` is typed as that union so a stale value fails to compile.
+  `MemoryStatItem` gains the `reference_count` the server sends, and
+  `use_count`, which it no longer sends, becomes optional and deprecated.
+
 ## [0.8.0] - 2026-08-01
 
 ### Added

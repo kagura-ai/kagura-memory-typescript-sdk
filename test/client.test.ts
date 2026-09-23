@@ -915,6 +915,28 @@ describe("REST endpoints", () => {
     expect(url2.searchParams.get("q")).toBe("auth");
   });
 
+  it("getMemoryStats defaults to a sort field the server accepts", async () => {
+    // Server v0.34.0 (#1046) dropped `use_count`; sending it is a 400.
+    const server = new FakeServer();
+    server.restResults["/api/v1/contexts/ctx/memory-stats"] = {
+      memories: [],
+      total: 0,
+      sort_by: "access_count",
+      sort_order: "desc",
+    };
+    const client = makeClient(server);
+    await client.getMemoryStats({ contextId: "ctx" });
+    const url = new URL(server.requests[0]!.url);
+    expect(url.pathname).toBe("/api/v1/contexts/ctx/memory-stats");
+    expect(url.searchParams.get("sort_by")).toBe("access_count");
+    expect(url.searchParams.get("sort_order")).toBe("desc");
+
+    await client.getMemoryStats({ contextId: "ctx", sortBy: "reference_count", sortOrder: "asc" });
+    const url2 = new URL(server.requests[1]!.url);
+    expect(url2.searchParams.get("sort_by")).toBe("reference_count");
+    expect(url2.searchParams.get("sort_order")).toBe("asc");
+  });
+
   it("maps REST 404 through the standard status mapping", async () => {
     const server = new FakeServer();
     const client = makeClient(server);

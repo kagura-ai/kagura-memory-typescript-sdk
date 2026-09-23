@@ -1729,8 +1729,12 @@ export class KaguraClient {
   /** Get per-memory usage statistics for a context. */
   async getMemoryStats(options: {
     contextId: string;
-    /** Sort field (default "use_count"). */
-    sortBy?: string;
+    /**
+     * Sort field (default `"access_count"`, the server's own default).
+     * Server v0.34.0 (#1046) dropped `use_count`; the server answers any
+     * other value with HTTP 400.
+     */
+    sortBy?: "access_count" | "reference_count" | "importance" | "created_at" | "last_used_at";
     /** "asc" or "desc" (default "desc"). */
     sortOrder?: "asc" | "desc";
     /** Maximum results (1-200, default 50). */
@@ -1740,7 +1744,7 @@ export class KaguraClient {
     return this.restGet<MemoryStatsResponse>(
       `/api/v1/contexts/${options.contextId}/memory-stats`,
       {
-        sort_by: options.sortBy ?? "use_count",
+        sort_by: options.sortBy ?? "access_count",
         sort_order: options.sortOrder ?? "desc",
         limit: options.limit ?? 50,
         offset: options.offset ?? 0,
