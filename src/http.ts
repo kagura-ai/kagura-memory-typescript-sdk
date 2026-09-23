@@ -69,7 +69,7 @@ function jsonRpcError(body: unknown): Record<string, unknown> | null {
 /**
  * Return a useful server-supplied error string from a response body.
  *
- * Handles five response shapes:
+ * Handles six response shapes:
  * - `{"detail": "string"}` — returned as-is (FastAPI HTTPException default).
  * - `{"detail": [{"loc": [...], "msg": "...", ...}, ...]}` — FastAPI's
  *   validation-error format; each entry becomes `"<loc.path>: <msg>"`.
@@ -79,6 +79,10 @@ function jsonRpcError(body: unknown): Record<string, unknown> | null {
  * - `{"jsonrpc": "2.0", "error": {"code": int, "message": "string"}}` — the
  *   MCP transport's 4xx for a request it rejects before dispatch; returns
  *   `error.message`, e.g. the expired-session 404's re-initialize hint.
+ * - `{"error": "<code>", "error_description": "string"}` — the OAuth-style
+ *   body of the MCP transport's workspace-URL 400/403 (and its 401), and of
+ *   the OAuth endpoints; returns `error_description`, e.g. "You are not a
+ *   member of this workspace."
  * - Anything else — returns an empty string so callers can fall back.
  */
 export function extractDetail(bodyText: string): string {
@@ -116,6 +120,10 @@ export function extractDetail(bodyText: string): string {
   const rpcMessage = jsonRpcError(rec)?.message;
   if (typeof rpcMessage === "string" && rpcMessage) {
     return rpcMessage;
+  }
+  const description = rec.error_description;
+  if (typeof description === "string") {
+    return description;
   }
   return "";
 }

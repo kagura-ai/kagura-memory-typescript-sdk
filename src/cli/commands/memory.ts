@@ -18,6 +18,7 @@ import {
   CliError,
   CliUsageError,
   buildDetails,
+  pairedFlag,
   parseFloatOption,
   parseIntOption,
   parseTags,
@@ -176,10 +177,29 @@ const RECALL_K = kFlag("Number of results", "5");
 const recall: Command = {
   summary: "Search memories directly (without AI analysis).",
   args: "QUERY",
+  description:
+    "  Without --rerank/--no-rerank the server follows the context's search\n" +
+    "  config (memory-cloud v0.69.0+). --rerank applies only when the context\n" +
+    "  enables reranking; --no-rerank always skips it.\n\n" +
+    "  Examples:\n" +
+    '    kagura-memory recall "FastAPI dependency injection"\n' +
+    '    kagura-memory recall "OAuth2 implementation" -k 10\n' +
+    '    kagura-memory recall -c dev "error handling pattern"\n' +
+    '    kagura-memory recall "latency-sensitive lookup" --no-rerank\n' +
+    '    kagura-memory recall "project context" --trusted-only',
   spec: {
     flags: [
       CONTEXT_ID,
       RECALL_K,
+      // Python's `--rerank/--no-rerank` is one option with `default=None`;
+      // here it is two switches resolved by `pairedFlag`, which keeps
+      // "neither" (no use_rerank key) apart from an explicit false.
+      {
+        name: "rerank",
+        type: "switch",
+        help: "Request reranking for this call (default: follow the context's search config)",
+      },
+      { name: "no-rerank", type: "switch", help: "Skip reranking for this call" },
       // Python added this for its SessionStart hook. This bin installs no
       // hooks, but the flag is mirrored so the two CLIs take the same argv,
       // and its help is Python's: a hook of the user's own is the same case.
@@ -196,12 +216,19 @@ const recall: Command = {
     const query = requireArg(args, 0, "QUERY");
     rejectExtraArgs(args, 1);
     const k = intOr(args, RECALL_K, 5);
+    // click takes the last of the pair; like `context search-config`, this
+    // refuses both rather than depend on argv order.
+    const useRerank = pairedFlag(args.flags.has("rerank"), args.flags.has("no-rerank"), [
+      "--rerank",
+      "--no-rerank",
+    ]);
     const trustedOnly = args.flags.has("trusted-only");
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
       client.recall({
         contextId,
         query,
         k,
+        ...(useRerank !== undefined ? { useRerank } : {}),
         ...(trustedOnly ? { filters: { trust_tier: "trusted" } } : {}),
       }),
     );
@@ -256,6 +283,12 @@ const forget: Command = {
 
 const updateMemory: Command = {
   summary: "Update an existing memory or upsert by external ID.",
+  description:
+    "  Use --memory-id for in-place update, or --external-id for upsert.\n\n" +
+    "  Examples:\n" +
+    '    kagura-memory update-memory -m MEM_UUID -s "updated summary"\n' +
+    '    kagura-memory update-memory --external-id ext-key -s "summary" --content "..." -t note\n' +
+    "    kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate",
   spec: {
     flags: [
       CONTEXT_ID,
@@ -266,17 +299,31 @@ const updateMemory: Command = {
       { ...TYPE, help: "Updated memory type" },
       { ...IMPORTANCE, help: "Updated importance 0.0-1.0" },
       { ...TAGS, help: "Comma-separated tags" },
+      {
+        name: "dismiss-supersede-candidate",
+        type: "switch",
+        help:
+          "Reject this memory's supersede_candidate suggestion (needs --memory-id; " +
+          "server v0.65.0+, older servers drop it silently)",
+      },
     ],
   },
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const memoryId = args.values["memory-id"];
     const externalId = args.values["external-id"];
+    const dismissSupersedeCandidate = args.flags.has("dismiss-supersede-candidate");
     if (!memoryId && !externalId) {
       throw new CliError("Either --memory-id or --external-id is required");
     }
     if (memoryId && externalId) {
       throw new CliError("Provide only one of --memory-id or --external-id");
+    }
+    // Python tests `external_id` for truthiness; this tests for presence,
+    // as `updateMemory` does, because an empty `--external-id=` still goes
+    // out as external_id and the client would refuse the pair itself.
+    if (dismissSupersedeCandidate && externalId !== undefined) {
+      throw new CliError("--dismiss-supersede-candidate requires --memory-id (not --external-id)");
     }
     const summary = args.values.summary;
     const content = args.values.content;
@@ -297,6 +344,7 @@ const updateMemory: Command = {
         ...(type !== undefined ? { type } : {}),
         ...(importance !== undefined ? { importance } : {}),
         ...(tags ? { tags } : {}),
+        ...(dismissSupersedeCandidate ? { dismissSupersedeCandidate } : {}),
       }),
     );
   },

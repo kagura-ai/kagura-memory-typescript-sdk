@@ -90,9 +90,10 @@ Four ways to authenticate, in resolution order:
 
 ### Command line
 
-`kagura-memory` mirrors the Python CLI's `kagura` command — same
-subcommands, same flag names, same JSON on stdout, same exit codes (2 for
-a usage error, 1 for a runtime failure).
+`kagura-memory` mirrors the Python CLI's `kagura` command: the same
+subcommand and flag names, the same JSON on stdout, and the same exit codes
+(2 for a usage error, 1 for a runtime failure). The commands and options
+not ported yet, and the few deliberate differences, are listed below.
 
 ```bash
 npx kagura-memory --help
@@ -114,6 +115,7 @@ npx kagura-memory --help
 ```bash
 npx kagura-memory auth login --profile work --read-only
 npx kagura-memory recall "OAuth setup" -c dev -k 10
+npx kagura-memory recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
 npx kagura-memory setup codex --dry-run   # key from .kagura.json or KAGURA_API_KEY
 npx kagura-memory doctor
@@ -225,9 +227,14 @@ releases wrote and Claude Code skips, it names the fix for the entry's
 scope.
 
 **Not ported.** `kagura ingest` needs the text-extraction pipeline (PDF,
-Office, EPUB, audio) and `kagura process` needs the litellm-backed agent;
-neither exists in this package and both would cost the zero-dependency
-promise. Use the Python CLI for those. The Claude Code extras of
+Office, EPUB, audio), which does not exist in this package and would cost
+the zero-dependency promise. Not ported yet: `auth create-key`,
+`auth list-keys` and `auth revoke-key`; the `workspace` group
+(`member list|add|set-role|remove`, `invite create|list|revoke`);
+`guardrails load` and `guardrails digest`; `measure record` and
+`measure series`; and the `-v/--verbose` and `--progress` options of
+`files upload` and `resource import`, which this CLI rejects as unknown
+options. Use the Python CLI for those. The Claude Code extras of
 `kagura setup claude` are not ported either: its SessionStart and
 PostToolUse hooks and its `/kagura-recall` and `/kagura-remember`
 commands. `setup claude` here writes `.kagura.json` and the MCP entry
@@ -250,11 +257,17 @@ only, and takes their flags as inert (see above).
   (`key[:8] + "..." + key[-4:]`), whose halves overlap below 12 characters
   and print the whole secret twice.
 
-One divergence runs the other way, and it is small: `--profile=` and
-`--scope=` reject an explicitly empty value, where click would accept it.
-An empty profile name would create a nameless profile and an empty scope
-would go to the server verbatim. Every other option treats `--flag=` as
-Python does.
+Three small divergences run the other way: this CLI refuses what click
+would accept.
+
+- `--profile=` and `--scope=` reject an explicitly empty value. An empty
+  profile name would create a nameless profile and an empty scope would go
+  to the server verbatim. Every other option treats `--flag=` as Python
+  does.
+- `context update --lock --unlock` is a usage error (exit 2, "mutually
+  exclusive; pick one"), where click takes whichever flag comes last.
+- `--rerank --no-rerank` is the same usage error, on `recall` and on
+  `context search-config`.
 
 **Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
 requests per client address. When the server refuses one with HTTP 429,
@@ -312,7 +325,9 @@ takes no credentials, allowed 5 seconds):
   order. The plain `/join/<token>` link, which the browser opens, then the
   approval URL, and how long the code stays valid.
 - **The server does not take invites** (a `features` object without
-  `beta_invites: true`): a one-line note, then the ordinary prompt. A body
+  `beta_invites: true`: invites are turned off, or the server is older than
+  memory-cloud 0.70.0, which has no `/join`): a one-line note, then the
+  ordinary prompt. A body
   with no `features` object says nothing about invites, so the version
   decides.
 
@@ -794,20 +809,23 @@ Python uses, so a shared backend interoperates.
 ## Relationship to the Python SDK
 
 This package ports the Python SDK's core (client, auth, REST clients,
-models, the zero-knowledge secret client) and, since 0.8.0, 17 of the
-`kagura` CLI's 19 top-level commands — see [Command line](#command-line).
+models, the zero-knowledge secret client) and, since 0.8.0, its `kagura`
+CLI as `kagura-memory`: 17 of the 21 top-level commands, counting the
+`contexts` alias. [Command line](#command-line) lists the commands and
+options not ported yet (`guardrails`, `measure`, `workspace`, and the
+`auth` key commands among them).
 
-Two things are deliberately not ported, and both would cost the
+One thing is deliberately not ported, because it would cost the
 zero-dependency promise:
 
 - **The document-ingestion pipeline** (`FileIngestor`, `kagura ingest`),
   which needs text extraction from PDF, Office, EPUB and audio plus LLM
   providers.
-- **`kagura process`**, which needs the litellm-backed agent.
 
-(`KaguraAgent` was removed from the Python SDK in v0.37.0 — the actor role
-lives in the [kagura-agent](https://pypi.org/project/kagura-agent/)
-package, so it will not be ported here either.)
+(`KaguraAgent` and `kagura process` were removed from the Python SDK in
+v0.37.0 — the actor role lives in the
+[kagura-agent](https://pypi.org/project/kagura-agent/) package, so neither
+will be ported here.)
 
 Use the Python SDK for those. Both SDKs share the same credential files
 and server APIs, so they interoperate — with one exception, noted above:

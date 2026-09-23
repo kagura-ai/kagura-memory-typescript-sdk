@@ -86,6 +86,21 @@ describe("MCP session", () => {
     expect((error as KaguraRateLimitError).retryAfter).toBe(7);
   });
 
+  it("quotes the error_description of a workspace-URL 403", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({
+        error: "access_denied",
+        error_description: "You are not a member of this workspace.",
+      }),
+      { status: 403 },
+    );
+    const client = makeClient(server);
+    const error = await client.listContexts().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe("HTTP 403: You are not a member of this workspace.");
+  });
+
   it("wraps network failures in KaguraConnectionError", async () => {
     const failingFetch: typeof globalThis.fetch = async () => {
       throw new TypeError("fetch failed");

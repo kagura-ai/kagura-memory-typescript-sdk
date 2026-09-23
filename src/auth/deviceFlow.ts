@@ -154,15 +154,6 @@ function safeJson(bodyText: string): Record<string, unknown> {
 }
 
 /**
- * The server's reason from an error body: whatever `extractDetail` finds,
- * else an RFC 6749 `error_description`. The Python SDK's `extract_detail`
- * reads that last shape too; the OAuth endpoints answer with it.
- */
-function oauthDetail(bodyText: string): string {
-  return extractDetail(bodyText) || stringOr(safeJson(bodyText).error_description, "");
-}
-
-/**
  * Explain a 429 from `device/authorize`, with the wait from `Retry-After`.
  *
  * memory-cloud v0.76.0 limits `device/authorize` per client address and
@@ -175,7 +166,7 @@ function deviceRateLimitedMessage(headers: Headers, bodyText: string): string {
   const message =
     "Too many sign-in attempts from this address (HTTP 429). " +
     `Retry after ${retryAfter} seconds.`;
-  const detail = oauthDetail(bodyText);
+  const detail = extractDetail(bodyText);
   return detail ? `${message}\n  Server said: ${detail}` : message;
 }
 
@@ -248,7 +239,7 @@ export async function authorizeDevice(
     throw new KaguraAuthError(deviceRateLimitedMessage(response.headers, text));
   }
   if (!response.ok) {
-    const detail = oauthDetail(text) || text;
+    const detail = extractDetail(text) || text;
     throw new KaguraAuthError(
       `Device authorization failed (HTTP ${response.status}): ${detail}\n` +
         `  Verify the server URL and that '${clientId}' is registered.`,
