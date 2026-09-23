@@ -306,11 +306,11 @@ snake_case; optional fields are omitted from the request when `undefined`.
 
 | Method | What it does |
 |--------|--------------|
-| `remember` | Store a memory. `details` accepts arbitrary JSON (including `location`, see below); `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
+| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `tags`, `tags_match`, date bounds, `trust_tier`), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. |
 | `reference` | Full detail for one memory, under `result.memory`. |
-| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep. |
-| `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. |
+| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. |
+| `forget` | Soft-delete (30-day retention) by `memoryId` or by `query`. Guardrails the caller may not delete are skipped silently, so `deleted_count` can be 0. |
 | `listMemories` | Browse with substring, facet, and time-window filters. Omit `contextId` for the caller's cross-context view. |
 
 ### Deterministic lanes
@@ -321,6 +321,7 @@ the counterpart to `recall`'s probabilistic search.
 | Method | Axis |
 |--------|------|
 | `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. |
+| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`. |
 | `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. |
 | `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. See [the WHERE axis](#the-where-axis--geospatial-memories). |
 
@@ -341,7 +342,7 @@ the counterpart to `recall`'s probabilistic search.
 |--------|--------------|
 | `listContexts` | All contexts, with the workspace's `can_create` quota flag. |
 | `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached, and `KaguraPlanError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` is immutable afterwards. |
-| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. |
+| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed. |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraPlanError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |

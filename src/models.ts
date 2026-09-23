@@ -125,6 +125,17 @@ export interface ContextInfo {
   workspace?: WorkspaceInfo | null;
   stats?: ContextStats | null;
   instructions?: string | null;
+  /**
+   * The context's tool guardrails, trimmed for session start (server
+   * v0.74.0+) — the lane for MCP clients without tool hooks.
+   *
+   * Three states, and they mean different things: the key is **absent**
+   * when the endpoint URL carries `?guardrails=off` (a hook client that
+   * gets guardrails at the call) or the server predates it; it is
+   * **`null`** when the server's guardrail read failed, which is not the
+   * same as "no guardrails"; otherwise it is a {@link ContextGuardrails}.
+   */
+  guardrails?: ContextGuardrails | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,4 +1181,127 @@ export interface AuditVerifyResponse {
   head?: string | null;
   broken_at?: number | null;
   reason?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Tool guardrails (server v0.74.0+, SDK issue #41)
+// ---------------------------------------------------------------------------
+
+/**
+ * A memory's `details.tool_trigger` — the marking that makes it a tool
+ * guardrail, which a client-side hook injects (or, for `action: "block"`,
+ * enforces) when a matching tool call happens.
+ *
+ * `tool` is a regex full-matched against the tool name; `match`, when
+ * present, is searched in the call's subject (command, path, JSON args).
+ * The server validates both on write against a safe-regex subset shared by
+ * Python and JavaScript and never runs them — matching is the hook's job.
+ * `"block"` is only accepted with `on: "pre"` and a specific `match`.
+ *
+ * `on` and `action` are typed `string` for forward compatibility, and are
+ * optional because the server writes the defaults back on save — served
+ * triggers always carry them.
+ */
+export interface ToolTrigger {
+  /** Tool-name regex, full match (max 128 chars), e.g. `"Bash|PowerShell"`. */
+  tool: string;
+  /** `"pre"` (before the call) | `"result"` (on its output). @default "pre" */
+  on?: string;
+  /** Subject regex, searched (max 200 chars); omit to fire on every `tool` call. */
+  match?: string;
+  /** `"inform"` | `"block"`. @default "inform" */
+  action?: string;
+}
+
+/**
+ * One entry in either `load_guardrails` list — one shape for both lanes.
+ *
+ * `summary` is the text a hook injects; never `content`, and never
+ * `details` beyond the normalized `tool_trigger`. `authored_by_caller` and
+ * `source_type` are provenance, so a hook can label a guardrail someone
+ * else wrote.
+ */
+export interface GuardrailItem {
+  memory_id: string;
+  summary: string;
+  /** Pinned items only; `null` on tool-triggered ones. */
+  context_summary?: string | null;
+  type: string;
+  importance: number;
+  delivery_mode: string;
+  /**
+   * Always `null` on pinned items. On a tool-triggered item, `null` means a
+   * legacy non-object value that is not a usable trigger — skip it.
+   */
+  tool_trigger?: ToolTrigger | null;
+  source_type: string;
+  authored_by_caller: boolean;
+  /** ISO 8601 datetime string. */
+  created_at: string;
+  /** ISO 8601 datetime string (falls back to `created_at`). */
+  updated_at: string;
+}
+
+/**
+ * Response from `load_guardrails`: a context's guardrail set for a
+ * client-side hook, in two independently capped lanes.
+ *
+ * `pinned` is the `delivery_mode: "always"` set, bounded by `pinned_cap`;
+ * `tool_triggered` is every memory carrying `details.tool_trigger`, bounded
+ * by `cap` — so a large pinned set can never crowd guardrails out. A memory
+ * that is both appears in both lists (dedupe by `memory_id`). Each list is
+ * trusted-tier only and ordered importance DESC, created_at ASC, id ASC.
+ *
+ * The top-level `total_available` / `truncated` / `cap` are the sum /
+ * either lane / the tool-triggered cap; the per-lane fields say which half
+ * is incomplete. A truncated lane is incomplete protection, never the whole
+ * set.
+ *
+ * `format` is the shared cache/payload format version (additive fields
+ * never bump it). `version` is an opaque per-credential hash of the served
+ * entries — compare it, don't parse it.
+ */
+export interface LoadGuardrailsResponse {
+  /** @default "success" */
+  status?: string;
+  format: number;
+  version: string;
+  pinned: GuardrailItem[];
+  tool_triggered: GuardrailItem[];
+  total_available: number;
+  truncated: boolean;
+  /** The tool-triggered cap. */
+  cap: number;
+  pinned_cap: number;
+  pinned_total_available: number;
+  pinned_truncated: boolean;
+  tool_triggered_total_available: number;
+  tool_triggered_truncated: boolean;
+  context_id: string;
+  context_name: string;
+  context_display_name?: string | null;
+  context_is_private?: boolean;
+  context_is_locked?: boolean;
+}
+
+/**
+ * The `guardrails` block of `get_context_info` — the tool-triggered set,
+ * trimmed for a session-start prompt rather than for a hook.
+ *
+ * The server currently keeps at most 10 items with summaries cut to 300
+ * characters; `truncated` is set when anything was left out. Items carry
+ * no trigger patterns, so a hook still needs `loadGuardrails()`.
+ *
+ * `tool_triggered_version` covers the tool-triggered lane alone, so it is
+ * **not** comparable with {@link LoadGuardrailsResponse.version}, which
+ * also covers the pinned list.
+ */
+export interface ContextGuardrails {
+  items: Pick<
+    GuardrailItem,
+    "memory_id" | "summary" | "importance" | "authored_by_caller" | "source_type"
+  >[];
+  total_available: number;
+  truncated: boolean;
+  tool_triggered_version: string;
 }

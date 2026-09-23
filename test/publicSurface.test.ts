@@ -12,6 +12,12 @@
 import { describe, expect, it } from "vitest";
 
 import * as sdk from "../src/index.js";
+import type {
+  ContextGuardrails,
+  GuardrailItem,
+  LoadGuardrailsResponse,
+  ToolTrigger,
+} from "../src/index.js";
 
 describe("public surface: interactive login (#9)", () => {
   it("exports the one-call login orchestrator", () => {
@@ -69,6 +75,30 @@ describe("public surface: existing entry points", () => {
     expect(typeof sdk.WorkspaceClient).toBe("function");
     expect(typeof sdk.AgentsClient).toBe("function");
     expect(typeof sdk.resolveAuth).toBe("function");
+  });
+});
+
+describe("public surface: tool guardrails (#41)", () => {
+  it("exports loadGuardrails on the client", () => {
+    expect(typeof sdk.KaguraClient.prototype.loadGuardrails).toBe("function");
+  });
+
+  it("exports the guardrail wire types from the entry point", () => {
+    // Compile-time half: these annotations fail typecheck if index.ts
+    // stops re-exporting the types.
+    const trigger: ToolTrigger = { tool: "Bash" };
+    const items: GuardrailItem[] = [];
+    const block: ContextGuardrails = {
+      items: [],
+      total_available: 0,
+      truncated: false,
+      tool_triggered_version: "",
+    };
+    const lanes: Pick<LoadGuardrailsResponse, "pinned" | "tool_triggered"> = {
+      pinned: items,
+      tool_triggered: items,
+    };
+    expect([trigger.tool, block.truncated, lanes.pinned]).toEqual(["Bash", false, []]);
   });
 });
 

@@ -36,6 +36,7 @@ import type {
   EmbeddingModelsResponse,
   EmbeddingStatus,
   ListTagsResponse,
+  LoadGuardrailsResponse,
   MemoryListResponse,
   // Referenced only from JSDoc {@link} on the details/recallNearby options.
   MemoryLocation,
@@ -46,6 +47,8 @@ import type {
   ServerInfo,
   SleepReport,
   SleepReportDetail,
+  // Referenced only from JSDoc {@link} on the details options.
+  ToolTrigger,
   UsageInfo,
 } from "./models.js";
 
@@ -130,6 +133,13 @@ export interface RememberOptions {
    * reachable from {@link recallNearby}. `lat`/`lon` must be JSON numbers —
    * argument coercion does not recurse into `details`, so string-typed
    * numerics are rejected server-side with HTTP 422.
+   *
+   * `tool_trigger` is a reserved key: a {@link ToolTrigger} here makes the
+   * memory a tool guardrail, served by {@link loadGuardrails}. It is
+   * validated on write, and only a context editor or above on a user
+   * credential (not an agent one) may set it — otherwise the call throws
+   * {@link KaguraError}. The same gate covers changing or deleting a
+   * guardrail later; {@link forget} skips one silently rather than throwing.
    */
   details?: Record<string, unknown>;
   /** Open-ended context metadata JSON. */
@@ -204,6 +214,12 @@ export interface UpdateMemoryOptions {
    * Structured details JSON. **Replaces `details` wholesale** — the server
    * does not deep-merge. Round-trip any keys you want to keep (notably
    * `location`, see {@link MemoryLocation}) or they are silently dropped.
+   *
+   * That includes `tool_trigger` ({@link ToolTrigger}): leaving it out of
+   * `updateMemory({ details })` turns the memory's guardrail off. The key
+   * is reserved and validated on write, and any update to a guardrail
+   * memory — not only one that names the key — needs context editor or
+   * above on a user credential; see {@link RememberOptions.details}.
    *
    * Omitted from the request when `undefined`; pass `{}` to clear.
    */
@@ -975,6 +991,32 @@ export class KaguraClient {
   }
 
   /**
+   * Deterministically load a context's guardrail set for a client-side
+   * hook — {@link loadPinned}'s twin (server v0.74.0+).
+   *
+   * Two lanes, each capped on its own: `pinned` (`delivery_mode="always"`)
+   * and `tool_triggered`, every memory carrying `details.tool_trigger`
+   * ({@link ToolTrigger}). `cap` bounds the tool-triggered lane only, so a
+   * large pinned set never crowds guardrails out. Trusted-tier rows only;
+   * the patterns come back as data — the server never runs them.
+   *
+   * Never silently dropped: check `tool_triggered_truncated` /
+   * `pinned_truncated` before treating the set as complete.
+   */
+  async loadGuardrails(options: {
+    contextId: string;
+    /** Override the tool-triggered cap (1-1000); omit for server default. */
+    cap?: number;
+  }): Promise<LoadGuardrailsResponse> {
+    const args: Record<string, unknown> = { context_id: options.contextId };
+    if (options.cap !== undefined) {
+      args.cap = options.cap;
+    }
+    const result = await this.callToolChecked("load_guardrails", args);
+    return result as unknown as LoadGuardrailsResponse;
+  }
+
+  /**
    * Record whether a recalled memory was useful for a query — an
    * append-only usefulness signal, kept in a separate lane from knowledge
    * (never pollutes recall).
@@ -1435,6 +1477,10 @@ export class KaguraClient {
   /**
    * Soft-delete memories (30-day retention) by specific memoryId or by
    * search query.
+   *
+   * Tool guardrails the caller may not delete (below context editor, or on
+   * an agent credential) are skipped silently, not refused — check
+   * `deleted_count`, which can be 0 even for an explicit `memoryId`.
    *
    * @throws Error if neither memoryId nor query is provided.
    */

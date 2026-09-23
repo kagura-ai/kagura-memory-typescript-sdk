@@ -4,7 +4,9 @@ import type {
   ContextInfo,
   Edge,
   ListTagsResponse,
+  LoadGuardrailsResponse,
   SleepReportDetail,
+  ToolTrigger,
 } from "../src/models.js";
 
 // Compile-focused tests: the value here is that realistic wire payloads
@@ -42,6 +44,81 @@ const contextInfo: ContextInfo = {
     details: { by_type: { note: 90, decision: 38 } },
   },
   instructions: null,
+};
+
+const contextInfoWithGuardrails: ContextInfo = {
+  context: { id: "ctx_abc123", name: "engineering-notes" },
+  guardrails: {
+    items: [
+      {
+        memory_id: "mem_g",
+        summary: "Do not delete the branch when merging",
+        importance: 0.9,
+        authored_by_caller: false,
+        source_type: "manual",
+      },
+    ],
+    total_available: 1,
+    truncated: false,
+    tool_triggered_version: "v1-4f2c",
+  },
+};
+
+// The write shape: `on` and `action` default server-side.
+const minimalTrigger: ToolTrigger = { tool: "Bash|PowerShell" };
+
+const guardrails: LoadGuardrailsResponse = {
+  status: "success",
+  format: 1,
+  version: "v1-9a0e",
+  pinned: [
+    {
+      memory_id: "mem_p",
+      summary: "Answer in Japanese",
+      context_summary: "Team convention",
+      type: "rule",
+      importance: 0.8,
+      delivery_mode: "always",
+      tool_trigger: null,
+      source_type: "manual",
+      authored_by_caller: true,
+      created_at: "2026-09-01T00:00:00Z",
+      updated_at: "2026-09-01T00:00:00Z",
+    },
+  ],
+  tool_triggered: [
+    {
+      memory_id: "mem_g",
+      summary: "Do not delete the branch when merging",
+      context_summary: null,
+      type: "rule",
+      importance: 0.9,
+      delivery_mode: "on_recall",
+      tool_trigger: {
+        tool: "Bash",
+        on: "pre",
+        match: "gh pr merge\\b.*--delete-branch",
+        action: "block",
+      },
+      source_type: "manual",
+      authored_by_caller: false,
+      created_at: "2026-09-02T00:00:00Z",
+      updated_at: "2026-09-03T00:00:00Z",
+    },
+  ],
+  total_available: 2,
+  truncated: false,
+  cap: 50,
+  pinned_cap: 100,
+  pinned_total_available: 1,
+  pinned_truncated: false,
+  tool_triggered_total_available: 1,
+  tool_triggered_truncated: false,
+  context_id: "ctx_abc123",
+  context_name: "engineering-notes",
+  context_display_name: null,
+  context_is_private: true,
+  context_is_locked: false,
 };
 
 const listTags: ListTagsResponse = {
@@ -101,6 +178,18 @@ describe("models", () => {
     expect(contextInfo.context.search_config?.semantic_weight).toBe(0.6);
     expect(contextInfo.stats?.total_memories).toBe(128);
     expect(contextInfo.workspace?.name).toBe("kagura-ai");
+  });
+
+  it("ContextInfo carries the optional guardrails block", () => {
+    expect(contextInfoWithGuardrails.guardrails?.items[0]?.memory_id).toBe("mem_g");
+    // Absent, not null: the key is only there when the server sent it.
+    expect(contextInfo.guardrails).toBeUndefined();
+  });
+
+  it("LoadGuardrailsResponse compiles and reads both lanes", () => {
+    expect(guardrails.pinned[0]?.tool_trigger).toBeNull();
+    expect(guardrails.tool_triggered[0]?.tool_trigger?.action).toBe("block");
+    expect(minimalTrigger.on).toBeUndefined();
   });
 
   it("ListTagsResponse compiles and reads", () => {

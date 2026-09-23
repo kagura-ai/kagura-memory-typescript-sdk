@@ -1274,6 +1274,130 @@ describe("recallNearby (#5)", () => {
   });
 });
 
+describe("loadGuardrails (#41)", () => {
+  const item = {
+    summary: "s",
+    type: "rule",
+    importance: 0.9,
+    source_type: "manual",
+    created_at: "2026-09-01T00:00:00Z",
+    updated_at: "2026-09-01T00:00:00Z",
+  };
+  const payload = {
+    status: "success",
+    format: 1,
+    version: "v1-abc",
+    pinned: [
+      {
+        ...item,
+        memory_id: "m-pin",
+        context_summary: "why",
+        delivery_mode: "always",
+        tool_trigger: null,
+        authored_by_caller: true,
+      },
+    ],
+    tool_triggered: [
+      {
+        ...item,
+        memory_id: "m-tool",
+        context_summary: null,
+        delivery_mode: "on_recall",
+        tool_trigger: { tool: "Bash", on: "pre", match: "gh pr merge", action: "block" },
+        authored_by_caller: false,
+      },
+    ],
+    total_available: 2,
+    truncated: false,
+    cap: 50,
+    pinned_cap: 100,
+    pinned_total_available: 1,
+    pinned_truncated: false,
+    tool_triggered_total_available: 1,
+    tool_triggered_truncated: false,
+    context_id: "ctx",
+    context_name: "demo",
+  };
+
+  it("sends only context_id when cap is unset and returns the typed response", async () => {
+    const server = new FakeServer();
+    server.toolResults.load_guardrails = payload;
+    const client = makeClient(server);
+    const result = await client.loadGuardrails({ contextId: "ctx" });
+
+    expect(server.requests[1]!.body!.params).toMatchObject({ name: "load_guardrails" });
+    // No client-side default: omitting cap leaves the server's (50) in charge.
+    expect(server.toolCallArgs()).toEqual({ context_id: "ctx" });
+    expect(result.tool_triggered[0]!.tool_trigger?.action).toBe("block");
+    expect(result.pinned[0]!.tool_trigger).toBeNull();
+    expect(result.tool_triggered_truncated).toBe(false);
+  });
+
+  it("forwards cap when set and omits an explicit undefined", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.loadGuardrails({ contextId: "ctx", cap: 5 });
+    await client.loadGuardrails({ contextId: "ctx", cap: undefined });
+
+    expect(server.toolCallArgs(0)).toEqual({ context_id: "ctx", cap: 5 });
+    expect(server.toolCallArgs(1)).toEqual({ context_id: "ctx" });
+  });
+
+  it("throws KaguraNotFoundError for an unknown context", async () => {
+    const server = new FakeServer();
+    server.toolResults.load_guardrails = {
+      status: "error",
+      error: "context_not_found",
+      message: "Context not found",
+    };
+    const client = makeClient(server);
+    await expect(client.loadGuardrails({ contextId: "nope" })).rejects.toBeInstanceOf(
+      KaguraNotFoundError,
+    );
+  });
+});
+
+describe("getContextInfo guardrails (#41)", () => {
+  const context = { id: "ctx", name: "demo" };
+
+  it("keeps absent, null, and a block distinguishable", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+
+    server.toolResults.get_context_info = {
+      status: "success",
+      context,
+      guardrails: {
+        items: [
+          {
+            memory_id: "m1",
+            summary: "s",
+            importance: 0.8,
+            authored_by_caller: true,
+            source_type: "manual",
+          },
+        ],
+        total_available: 1,
+        truncated: false,
+        tool_triggered_version: "v1-abc",
+      },
+    };
+    const withBlock = await client.getContextInfo({ contextId: "ctx" });
+    expect(withBlock.guardrails?.items[0]!.memory_id).toBe("m1");
+    expect(withBlock.guardrails?.tool_triggered_version).toBe("v1-abc");
+
+    // null (the read failed) and absent (?guardrails=off) mean different
+    // things, so the SDK must not normalize one into the other.
+    server.toolResults.get_context_info = { status: "success", context, guardrails: null };
+    const failed = await client.getContextInfo({ contextId: "ctx" });
+    expect(failed.guardrails).toBeNull();
+
+    server.toolResults.get_context_info = { status: "success", context };
+    const off = await client.getContextInfo({ contextId: "ctx" });
+    expect("guardrails" in off).toBe(false);
+  });
+});
+
 describe("REST endpoints", () => {
   it("getServerInfo hits the REST base URL derived from the MCP URL", async () => {
     const server = new FakeServer();
