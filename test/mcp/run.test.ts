@@ -104,4 +104,10 @@ describe("stdio runner", () => {
     s.controller.abort();
     expect(await done).toBe(0);
   });
+
+  it("returns immediately when already aborted before startup", async () => {
+    const s = io();
+    s.controller.abort();
+    expect(await runProxy([], s.deps)).toBe(0);
+  });
 });

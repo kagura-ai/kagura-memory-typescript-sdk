@@ -83,6 +83,9 @@ jobs:
           CLI=./node_modules/.bin/kagura-memory
 
           "$CLI" --version | grep -qE '^kagura-memory, version [0-9]+\.[0-9]+\.[0-9]+$'
+          MCP=./node_modules/.bin/kagura-memory-mcp
+          "$MCP" --version | grep -qE '^kagura-memory-mcp [0-9]+\.[0-9]+\.[0-9]+$'
+          "$MCP" --help | grep -q 'stdio MCP host'
           # Every group must be reachable from the root listing.
           for cmd in auth config context contexts doctor edge explore files \
                      forget recall reference remember resource secret setup \

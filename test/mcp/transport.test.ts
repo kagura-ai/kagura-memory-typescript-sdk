@@ -60,6 +60,132 @@ function setup(responses: Response[], options: { timeoutMs?: number } = {}) {
 }
 
 describe("transparent MCP transport", () => {
+  it("accepts CR-only SSE and multiline data fields", async () => {
+    const s = setup([
+      new Response(
+        'data: {"jsonrpc":"2.0",\rdata: "id":"call","result":{}}\r\r',
+        { headers: { "Content-Type": "text/event-stream" } },
+      ),
+    ]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output).toEqual([{ jsonrpc: "2.0", id: "call", result: {} }]);
+  });
+
+  it("coalesces concurrent session recovery without replaying initialization twice", async () => {
+    let initialized = 0;
+    let notified = 0;
+    const transport = new McpTransport({
+      url: "https://example.test/mcp",
+      signal: new AbortController().signal,
+      auth: {
+        getAuthHeader: async () => "Bearer test",
+        forceRefresh: async () => {},
+      },
+      fetch: async (_url, request) => {
+        const message = JSON.parse(String(request?.body));
+        const headers = new Headers(request?.headers);
+        if (message.method === "initialize") {
+          initialized++;
+          // Yield so both expired requests reach recovery before it completes.
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return response(
+            message.id,
+            { protocolVersion: "2025-06-18" },
+            `session-${initialized}`,
+          );
+        }
+        if (message.method === "notifications/initialized") {
+          notified++;
+          return new Response(null, { status: 202 });
+        }
+        if (headers.get("mcp-session-id") === "session-1")
+          return new Response(null, { status: 404 });
+        return response(message.id);
+      },
+    });
+    const output: RpcMessage[] = [];
+    await transport.forward(init, (r) => {
+      output.push(r);
+    });
+    await Promise.all(
+      ["first", "second"].map((id) =>
+        transport.forward({ ...call, id }, (r) => {
+          output.push(r);
+        }),
+      ),
+    );
+    expect(initialized).toBe(2);
+    expect(notified).toBe(1);
+    expect(output.map((r) => r.id)).toEqual([0, "first", "second"]);
+  });
+
+  it("forwards host responses while a replayed initialize stream is waiting", async () => {
+    let initialized = 0;
+    let stream: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const transport = new McpTransport({
+      url: "https://example.test/mcp",
+      signal: new AbortController().signal,
+      auth: {
+        getAuthHeader: async () => "Bearer test",
+        forceRefresh: async () => {},
+      },
+      timeoutMs: 1000,
+      fetch: async (_url, request) => {
+        const message = JSON.parse(String(request?.body));
+        if (message.method === "initialize") {
+          if (++initialized === 1)
+            return response(0, { protocolVersion: "2025-06-18" }, "old");
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                stream = controller;
+                controller.enqueue(
+                  encoder.encode(
+                    'data: {"jsonrpc":"2.0","id":"server","method":"ping"}\n\n',
+                  ),
+                );
+              },
+            }),
+            {
+              headers: {
+                "Content-Type": "text/event-stream",
+                "mcp-session-id": "new",
+              },
+            },
+          );
+        }
+        if (message.id === "server") {
+          expect(new Headers(request?.headers).get("mcp-session-id")).toBe("new");
+          stream.enqueue(
+            encoder.encode(
+              'data: {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18"}}\n\n',
+            ),
+          );
+          stream.close();
+          return new Response(null, { status: 202 });
+        }
+        if (message.method === "notifications/initialized")
+          return new Response(null, { status: 202 });
+        if (new Headers(request?.headers).get("mcp-session-id") === "old")
+          return new Response(null, { status: 404 });
+        return response(message.id);
+      },
+    });
+    let replied: Promise<void> | undefined;
+    await transport.forward(init, () => {});
+    const output: RpcMessage[] = [];
+    await transport.forward(call, (message) => {
+      if (message.method === "ping")
+        replied = transport.forward(
+          { jsonrpc: "2.0", id: message.id, result: {} },
+          () => {},
+        );
+      else output.push(message);
+    });
+    await replied;
+    expect(output).toEqual([{ jsonrpc: "2.0", id: "call", result: {} }]);
+  });
   it("forwards unknown tools unchanged, negotiates headers, preserves IDs and Unicode", async () => {
     const s = setup([
       response(

@@ -91,9 +91,19 @@ async function readMessages(
         throw new ProxyError("Upstream message exceeded 16 MiB.");
       if (sse) {
         let newline: number;
-        while ((newline = buffer.indexOf("\n")) >= 0) {
-          if (line(buffer.slice(0, newline).replace(/\r$/, ""))) return;
-          buffer = buffer.slice(newline + 1);
+        while ((newline = buffer.search(/[\r\n]/)) >= 0) {
+          // CR, LF and CRLF are all SSE line endings. Wait for a possible
+          // split CRLF pair rather than treating it as two blank lines.
+          if (
+            !done &&
+            buffer[newline] === "\r" &&
+            newline === buffer.length - 1
+          )
+            break;
+          const width =
+            buffer[newline] === "\r" && buffer[newline + 1] === "\n" ? 2 : 1;
+          if (line(buffer.slice(0, newline))) return;
+          buffer = buffer.slice(newline + width);
         }
       }
       if (done) break;
@@ -118,11 +128,18 @@ export class McpTransport {
   constructor(private readonly options: TransportOptions) {}
 
   async forward(message: RpcMessage, emit: Emit): Promise<void> {
+    // A response to a server request must be able to finish an SSE stream
+    // that recovery is itself waiting on. Cancellation must also flow.
+    if (
+      this.recovery &&
+      typeof message.method === "string" &&
+      message.method !== "notifications/cancelled"
+    )
+      await this.recovery;
     if (message.method === "initialize") {
       this.session = undefined;
       this.protocol = undefined;
     }
-    if (this.recovery) await this.recovery;
     const session = this.session;
     await this.send(message, emit, session, true);
   }
@@ -179,6 +196,7 @@ export class McpTransport {
       else options.signal.addEventListener("abort", abort, { once: true });
       const timer = setTimeout(abort, options.timeoutMs ?? 60_000);
       let response: Response | undefined;
+      let initialized = false;
       try {
         response = await (options.fetch ?? fetch)(options.url, {
           method: "POST",
@@ -218,6 +236,11 @@ export class McpTransport {
             throw new ProxyError(`Upstream HTTP ${response.status}.`);
           return;
         }
+        if (message.method === "initialize" && response.ok) {
+          // The response headers arrive before an SSE body. Server requests
+          // in that body already belong to this session.
+          this.session = response.headers.get("mcp-session-id") || undefined;
+        }
         let replied = false;
         await readMessages(response, (reply) => {
           if (
@@ -236,6 +259,7 @@ export class McpTransport {
               this.session =
                 response!.headers.get("mcp-session-id") || undefined;
               this.initialize = message;
+              initialized = true;
             }
           }
           emit(reply);
@@ -251,6 +275,10 @@ export class McpTransport {
           throw new ProxyError("Kagura request timed out or was cancelled.");
         throw error;
       } finally {
+        if (message.method === "initialize" && !initialized) {
+          this.session = undefined;
+          this.protocol = undefined;
+        }
         clearTimeout(timer);
         options.signal.removeEventListener("abort", abort);
         await response?.body?.cancel().catch(() => {});

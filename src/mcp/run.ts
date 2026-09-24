@@ -55,6 +55,7 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
     io.output(`kagura-memory-mcp ${SDK_VERSION}\n`);
     return 0;
   }
+  if (io.signal.aborted) return 0;
   const loginTimeout = Number(values["login-timeout"] ?? 300);
   if (
     !Number.isFinite(loginTimeout) ||
@@ -125,14 +126,13 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
         continue;
       }
       const rpc = message;
-      if (pending.size >= 128) {
-        if (isRequest(rpc))
-          emit(
-            rpcError(
-              rpc.id,
-              "Too many pending requests. Retry after an earlier request finishes.",
-            ),
-          );
+      if (pending.size >= 128 && isRequest(rpc)) {
+        emit(
+          rpcError(
+            rpc.id,
+            "Too many pending requests. Retry after an earlier request finishes.",
+          ),
+        );
         continue;
       }
       // Keep stdin open for cancellation and replies to server requests during SSE.
