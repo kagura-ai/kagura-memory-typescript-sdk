@@ -247,6 +247,46 @@ describe("kagura-memory secret exec", () => {
     expect(Object.keys(h.spawned[0]!.env)).toEqual(["A"]);
   });
 
+  // Checked against click 8.3.3 with Python's declaration
+  // (ignore_unknown_options + allow_interspersed_args=False): an unknown
+  // option there is kept as an argument, not raised, so `--help` still
+  // answers wherever it stands.
+  it.each([
+    [["--help", "--bogus"]],
+    [["-Q", "--help"]],
+    [["--help", "--zz=1"]],
+    [["--help", "-Q", "x"]],
+    [["--help", "--prof"]],
+    [["--bogus", "--help"]],
+    [["--as", "X=y", "--help", "--bogus"]],
+  ])("prints the help when an unknown option comes with --help: %j", async (argv) => {
+    const h = harness();
+    expect(await runCli(["secret", "exec", ...argv], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toMatch(/^Usage: kagura-memory secret exec /);
+    expect(h.err).toEqual([]);
+    expect(h.spawned).toEqual([]);
+  });
+
+  it.each([
+    [["--help", "--as"], "Error: Option '--as' requires an argument."],
+    [["--bogus", "--help", "--as"], "Error: Option '--as' requires an argument."],
+    [["--help=1"], "Error: Option '--help' does not take a value."],
+  ])("lets click's own errors win over --help there: %j", async (argv, message) => {
+    const h = harness();
+    expect(await runCli(["secret", "exec", ...argv], h.deps)).toBe(2);
+    expect(h.err[0]).toBe(message);
+    expect(h.out).toEqual([]);
+  });
+
+  it("still refuses an unknown option before the child without --help", async () => {
+    // Python would run `--bogus` as the COMMAND; refusing it is the
+    // standing divergence.
+    const h = harness();
+    expect(await runCli(["secret", "exec", "--as", "X=y", "--bogus"], h.deps)).toBe(2);
+    expect(h.err[0]).toBe("Error: No such option: --bogus");
+    expect(h.spawned).toEqual([]);
+  });
+
   it("rejects an --as without an equals sign", async () => {
     process.env.KAGURA_AGE_IDENTITY = TEST_IDENTITY;
     const h = harness();

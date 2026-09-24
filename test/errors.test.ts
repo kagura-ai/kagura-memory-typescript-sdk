@@ -14,6 +14,7 @@ import {
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraResponseError,
 } from "../src/errors.js";
 
 describe("error hierarchy", () => {
@@ -45,6 +46,19 @@ describe("error hierarchy", () => {
   it("KaguraFetchError carries url", () => {
     expect(new KaguraFetchError("bad", "https://x.test").url).toBe("https://x.test");
     expect(new KaguraFetchError("bad").url).toBeNull();
+  });
+
+  it("KaguraResponseError carries the operation, and is no connection error", () => {
+    // Python's class extends KaguraError directly: the call succeeded, so
+    // code retrying on KaguraConnectionError must not retry this.
+    const e = new KaguraResponseError("recall_series: unexpected server response", "recall_series");
+    expect(e).toBeInstanceOf(KaguraError);
+    expect(e).not.toBeInstanceOf(KaguraConnectionError);
+    expect(e.name).toBe("KaguraResponseError");
+    expect(e.operation).toBe("recall_series");
+    expect(new KaguraResponseError("x").operation).toBeUndefined();
+    const cause = new Error("root");
+    expect(new KaguraResponseError("x", "op", { cause }).cause).toBe(cause);
   });
 
   it("supports cause chaining", () => {

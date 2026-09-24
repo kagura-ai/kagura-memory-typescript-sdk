@@ -15,6 +15,8 @@ export type {
   ListTagsOptions,
   MemoryStatsSortField,
   RecallOptions,
+  RecallSeriesOptions,
+  RecordMeasurementOptions,
   RegisterAgentOptions,
   RememberOptions,
   RoutingMode,
@@ -49,6 +51,7 @@ export {
   KaguraPermissionError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraResponseError,
   KaguraCryptoError,
   KaguraKeyCustodyError,
   KaguraSecretError,
@@ -74,8 +77,19 @@ export type {
 export type { GetAgentBootstrapOptions } from "./agentBootstrap.js";
 export { AgentsClient } from "./agentsClient.js";
 
+export { GUARDRAIL_VERSION_HEADER, MemoryClient } from "./memoryClient.js";
+export type {
+  GetGuardrailDigestOptions,
+  MemoryLoadGuardrailsOptions,
+} from "./memoryClient.js";
+
 export { FilesClient } from "./filesClient.js";
 export type { FilesClientOptions, UploadOptions } from "./filesClient.js";
+
+// Progress events from FilesClient.upload and ResourceClient.ingestEvents
+// (the Python SDK's `logger=` hooks, #57).
+export { PROGRESS_SCHEMA_VERSION } from "./progress.js";
+export type { ProgressCallback, ProgressEvent, ProgressKind } from "./progress.js";
 
 export {
   ResourceClient,
@@ -83,6 +97,7 @@ export {
 } from "./resourceClient.js";
 export type {
   CreateTokenOptions,
+  IngestEventsOptions,
   ListResourceEventsOptions,
   ListTokensOptions,
   ResourceEventInput,

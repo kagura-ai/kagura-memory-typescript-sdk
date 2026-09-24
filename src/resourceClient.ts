@@ -20,7 +20,7 @@
 
 import type { ResolvedAuth } from "./auth/types.js";
 import { KaguraClient } from "./client.js";
-import { KaguraAuthError, KaguraNotFoundError } from "./errors.js";
+import { excMessage, KaguraAuthError, KaguraNotFoundError } from "./errors.js";
 import type {
   IndexerStatusResponse,
   PaginatedResourceTokensResponse,
@@ -34,7 +34,9 @@ import type {
   ResourceTokenCreateResponse,
   ResourceTokenResponse,
 } from "./models.js";
-import { KaguraRestClient } from "./restBase.js";
+import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
+import { ResponseReader } from "./responseShape.js";
+import { KaguraRestClient, requireInt } from "./restBase.js";
 
 /**
  * Message surfaced when `setupResource` is called on an OAuth-resolved
@@ -120,6 +122,11 @@ export interface ResourceEventInput {
   eventMetadata?: Record<string, unknown>;
   /** Importance score (0.0-1.0). */
   importance?: number | null;
+}
+
+export interface IngestEventsOptions {
+  /** Receives the batch's progress events (the Python SDK's `logger=`). */
+  onProgress?: ProgressCallback;
 }
 
 export interface ListResourceEventsOptions {
@@ -252,13 +259,16 @@ export class ResourceClient extends KaguraRestClient {
    * Update a resource token's metadata. Only fields that are set are
    * sent on the wire.
    *
-   * @param tokenId Token database ID.
+   * @param tokenId Token database ID. Pass a `bigint` for one past
+   *   `Number.MAX_SAFE_INTEGER`; such a `number` (already rounded to
+   *   another id) or a fractional one throws before anything is sent.
    * @returns Updated token metadata.
    */
   async updateToken(
-    tokenId: number,
+    tokenId: number | bigint,
     options: UpdateTokenOptions = {},
   ): Promise<ResourceTokenResponse> {
+    const id = requireInt(tokenId, "tokenId");
     const body: Record<string, unknown> = {};
     if (options.description !== undefined && options.description !== null) {
       body.description = options.description;
@@ -267,7 +277,7 @@ export class ResourceClient extends KaguraRestClient {
       body.quota_events_per_hour = options.quotaEventsPerHour;
     }
 
-    const response = await this.request("PATCH", `/api/v1/resource-tokens/${tokenId}`, {
+    const response = await this.request("PATCH", `/api/v1/resource-tokens/${id}`, {
       json: body,
     });
     return this.json(response) as unknown as ResourceTokenResponse;
@@ -276,10 +286,12 @@ export class ResourceClient extends KaguraRestClient {
   /**
    * Revoke (soft-delete) a resource token.
    *
-   * @param tokenId Token database ID.
+   * @param tokenId Token database ID. Pass a `bigint` for one past
+   *   `Number.MAX_SAFE_INTEGER`; such a `number` (already rounded to
+   *   another id) or a fractional one throws before anything is sent.
    */
-  async revokeToken(tokenId: number): Promise<void> {
-    await this.request("DELETE", `/api/v1/resource-tokens/${tokenId}`);
+  async revokeToken(tokenId: number | bigint): Promise<void> {
+    await this.request("DELETE", `/api/v1/resource-tokens/${requireInt(tokenId, "tokenId")}`);
   }
 
   // -------------------------------------------------------------------
@@ -498,17 +510,54 @@ export class ResourceClient extends KaguraRestClient {
    *
    * @param resourceApiKey Resource API key (`X-Resource-API-Key`
    *   header) — sent per-call, never stored on the client.
+   * @param options.onProgress Receives an `ingest_events` action, then one
+   *   terminal `complete` event: `success` with `{ created, failed }`, or
+   *   `error` with `{ events_attempted, resource_id }`. See
+   *   {@link ProgressEvent}.
    * @returns Batch ingestion result with created/failed counts.
+   * @throws KaguraResponseError The 2xx body is not a JSON object.
    */
   async ingestEvents(
     resourceId: string,
     resourceApiKey: string,
     events: ResourceEventInput[],
+    options: IngestEventsOptions = {},
   ): Promise<ResourceEventBatchResponse> {
-    const response = await this.request("POST", `/api/v1/resources/${resourceId}/events/batch`, {
-      json: { events: events.map(serializeEvent) },
-      extraHeaders: { "X-Resource-API-Key": resourceApiKey },
+    const emit = (event: ProgressEvent) => emitProgress(options.onProgress, event);
+    emit({
+      stage: "ingest_events",
+      kind: "action",
+      msg: "Ingesting events batch",
+      detail: { desc: `${events.length} event(s) for resource ${resourceId}` },
     });
-    return this.json(response) as unknown as ResourceEventBatchResponse;
+    let result: ResourceEventBatchResponse;
+    try {
+      const response = await this.request("POST", `/api/v1/resources/${resourceId}/events/batch`, {
+        json: { events: events.map(serializeEvent) },
+        extraHeaders: { "X-Resource-API-Key": resourceApiKey },
+      });
+      // Checked inside the guard: a body that is no object (`null`, `[]`)
+      // would otherwise fail on reading its counts below and end the stream
+      // with no terminal event. Python's model check refuses it here too.
+      const reader = new ResponseReader("ResourceClient.ingest_events", "ResourceEventBatchResponse");
+      const body = reader.object(this.json(response));
+      reader.check();
+      result = body as unknown as ResourceEventBatchResponse;
+    } catch (e) {
+      emit({
+        stage: "complete",
+        kind: "error",
+        msg: `Batch ingest failed: ${excMessage(e)}`,
+        detail: { events_attempted: events.length, resource_id: resourceId },
+      });
+      throw e;
+    }
+    emit({
+      stage: "complete",
+      kind: "success",
+      msg: "Batch ingested",
+      detail: { created: result.created_count, failed: result.failed_count },
+    });
+    return result;
   }
 }

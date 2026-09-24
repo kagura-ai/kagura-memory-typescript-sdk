@@ -1,14 +1,19 @@
 /**
  * Value parsing shared by the data subcommands — the port of `_parse_tags`,
  * `_parse_details`, `_parse_location` and `_build_details` in the Python
- * CLI's `cli.py`, plus the numeric coercion click performs for
- * `type=int` / `type=float` options.
+ * CLI's `cli.py`, plus the conversions click performs for `type=int`,
+ * `type=float`, `click.IntRange` / `click.FloatRange` and `click.Choice`.
  *
- * Every message here is quoted from the Python CLI so an operator moving
- * between the two tools reads the same guidance.
+ * Every message here is quoted from the Python CLI, or from click 8.3.3,
+ * the version its lockfile pins, so an operator moving between the two
+ * tools reads the same guidance.
  */
 
-import { PY_FLOAT, type FlagSpec } from "./parseArgs.js";
+import { pyStrip } from "../pyCompat.js";
+import { PY_INT, pyBigInt, pyFloat, pyFloatRepr, pyInt, pyRepr, pyTypeName } from "../python.js";
+import type { FlagSpec } from "./parseArgs.js";
+
+export { PY_INT, pyFloatRepr, pyRepr };
 
 /**
  * A usage error: bad input, detected before anything is sent.
@@ -35,12 +40,23 @@ export class CliError extends Error {
 }
 
 /**
+ * A click parameter, as its errors name it: an option by its spec, or an
+ * argument by its metavar (`"VALUE"`, `"TOKEN_ID"`).
+ */
+export type Param = FlagSpec | string;
+
+/**
  * `'--importance' / '-i'`, the way click names an option in its errors;
  * `'-k'` for a short-only one, which has no long form to name.
  */
 export function flagLabel(flag: FlagSpec): string {
   if (flag.short !== undefined && flag.shortOnly === true) return `'-${flag.short}'`;
   return flag.short === undefined ? `'--${flag.name}'` : `'--${flag.name}' / '-${flag.short}'`;
+}
+
+/** {@link flagLabel} for an option, `'VALUE'` for an argument. */
+export function paramLabel(param: Param): string {
+  return typeof param === "string" ? `'${param}'` : flagLabel(param);
 }
 
 /**
@@ -61,35 +77,45 @@ export function parseTags(raw: string | undefined): string[] | undefined {
 }
 
 /**
- * Python's `int()` grammar. The float counterpart lives in `parseArgs.ts`
- * because the parser needs it to tell `-0.1` (a value) from `-x` (a flag).
+ * Coerce a `type=float` option or argument, or raise click's message for it.
  *
- * `Number()` is not a substitute for either: it accepts `0x10`, `0b11` and
- * `""`, all of which Python rejects, so the CLI would silently accept
- * input the Python CLI refuses.
+ * Python's `float()` grammar (`PY_FLOAT`), not `Number()`, which accepts
+ * `0x10` and `""`; underscores between digits are accepted, as Python
+ * accepts them.
  */
-const PY_INT = /^[+-]?\d+$/;
-
-/** Coerce a `type=float` option, or raise click's message for it. */
-export function parseFloatOption(flag: FlagSpec, raw: string): number {
-  const text = raw.trim();
-  if (!PY_FLOAT.test(text)) {
-    throw new CliUsageError(
-      `Invalid value for ${flagLabel(flag)}: ${quote(raw)} is not a valid float.`,
-    );
+export function parseFloatOption(param: Param, raw: string): number {
+  const value = pyFloat(raw);
+  if (value === undefined) {
+    throw new CliUsageError(`Invalid value for ${paramLabel(param)}: ${pyRepr(raw)} is not a valid float.`);
   }
-  return Number(text.replace(/^([+-]?)inf(inity)?$/i, "$1Infinity"));
+  return value;
 }
 
-/** Coerce a `type=int` option, or raise click's message for it. */
-export function parseIntOption(flag: FlagSpec, raw: string): number {
-  const text = raw.trim();
-  if (!PY_INT.test(text)) {
-    throw new CliUsageError(
-      `Invalid value for ${flagLabel(flag)}: ${quote(raw)} is not a valid integer.`,
-    );
-  }
-  return Number(text);
+/** Click's error for a value `int()` refuses. */
+function notAnInteger(param: Param, raw: string): CliUsageError {
+  return new CliUsageError(`Invalid value for ${paramLabel(param)}: ${pyRepr(raw)} is not a valid integer.`);
+}
+
+/** Coerce a `type=int` option or argument, or raise click's message for it. */
+export function parseIntOption(param: Param, raw: string): number {
+  const value = pyInt(raw);
+  if (value === undefined) throw notAnInteger(param, raw);
+  return value;
+}
+
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
+ * Coerce a `type=int` id argument (`TOKEN_ID`, `INVITATION_ID`, `KEY_ID`)
+ * exactly, as Python's `int` holds it: a `number` while it is safe, else a
+ * `bigint`. A `number` would round `9007199254740993` to a neighbouring
+ * id, and the request would revoke or update that one. Click's message
+ * for anything `int()` refuses.
+ */
+export function parseIdArg(param: Param, raw: string): number | bigint {
+  const value = pyBigInt(raw);
+  if (value === undefined) throw notAnInteger(param, raw);
+  return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : value;
 }
 
 /**
@@ -98,44 +124,109 @@ export function parseIntOption(flag: FlagSpec, raw: string): number {
  * `rangeLabel` is passed rather than derived because click renders the
  * bounds as the Python literals they were declared with: `0.0<=x<=1.0`,
  * where JS would produce `0<=x<=1`.
+ *
+ * An out-of-range value is printed as click prints it, converted: the
+ * int for an IntRange (`+4000` and `04000` both read `4000`), the Python
+ * float repr for a FloatRange (`2` reads `2.0`, `1e1` reads `10.0`).
+ * NaN is refused, which click's FloatRange is not: its comparisons are
+ * all false for NaN, so it lets `nan` through.
  */
 export function parseRanged(
-  flag: FlagSpec,
+  param: Param,
   raw: string,
   options: { min: number; max: number; rangeLabel: string; integer?: boolean },
 ): number {
   const integer = options.integer === true;
-  let value: number;
-  try {
-    value = integer ? parseIntOption(flag, raw) : parseFloatOption(flag, raw);
-  } catch {
+  const value = integer ? pyInt(raw) : pyFloat(raw);
+  if (value === undefined) {
     // A ranged option reports "not a valid float range", not "not a valid
     // float" — click names the *type* it declared, which is the Range.
     throw new CliUsageError(
-      `Invalid value for ${flagLabel(flag)}: ${quote(raw)} is not a valid ${integer ? "integer" : "float"} range.`,
+      `Invalid value for ${paramLabel(param)}: ${pyRepr(raw)} is not a valid ${integer ? "integer" : "float"} range.`,
     );
   }
   if (!(value >= options.min && value <= options.max)) {
+    // The exact int, so a value past 2^53 prints the digits it was given
+    // rather than a rounded Number.
+    const shown = integer ? String(pyBigInt(raw)) : pyFloatRepr(value);
     throw new CliUsageError(
-      `Invalid value for ${flagLabel(flag)}: ${raw.trim()} is not in the range ${options.rangeLabel}.`,
+      `Invalid value for ${paramLabel(param)}: ${shown} is not in the range ${options.rangeLabel}.`,
     );
   }
   return value;
 }
 
-/** Coerce a `click.Choice` option, matching case-insensitively. */
+export interface ChoiceOptions {
+  /**
+   * Match as `click.Choice(..., case_sensitive=False)` does: casefolded on
+   * both sides, returning the declared spelling. Off by default, as it is
+   * in click — set it only where the Python declaration says so.
+   */
+  caseInsensitive?: boolean;
+}
+
+/**
+ * The characters `str.casefold()` folds into ASCII that `toLowerCase()`
+ * leaves alone. The choices are ASCII, so these are the only differences
+ * that can decide a match: click takes `JſON` for `json`.
+ */
+const ASCII_FOLDS: Record<string, string> = {
+  "\u00df": "ss",
+  "\u017f": "s",
+  "\ufb00": "ff",
+  "\ufb01": "fi",
+  "\ufb02": "fl",
+  "\ufb03": "ffi",
+  "\ufb04": "ffl",
+  "\ufb05": "st",
+  "\ufb06": "st",
+};
+
+function casefold(value: string): string {
+  // The capital sharp s (U+1E9E) lowercases to U+00DF, which the map folds.
+  return value.toLowerCase().replace(/[\u00df\u017f\ufb00-\ufb06]/g, (c) => ASCII_FOLDS[c] ?? c);
+}
+
+/** The choices as click lists them: casefolded when matching ignores case. */
+function shownChoices(choices: readonly string[], options: ChoiceOptions): string[] {
+  return options.caseInsensitive === true ? choices.map(casefold) : [...choices];
+}
+
+/**
+ * Coerce a `click.Choice` option or argument, or raise click's message:
+ * `'x' is not one of 'a', 'b'.`, or `'x' is not 'a'.` for a single choice.
+ */
 export function parseChoice<T extends string>(
-  flag: FlagSpec,
+  param: Param,
   raw: string,
   choices: readonly T[],
+  options: ChoiceOptions = {},
 ): T {
-  const match = choices.find((c) => c === raw.toLowerCase());
+  const fold = options.caseInsensitive === true ? casefold : (s: string) => s;
+  const wanted = fold(raw);
+  const match = choices.find((c) => fold(c) === wanted);
   if (match === undefined) {
-    throw new CliUsageError(
-      `Invalid value for ${flagLabel(flag)}: ${quote(raw)} is not one of ${choices.map(quote).join(", ")}.`,
-    );
+    const listed = shownChoices(choices, options).map(pyRepr).join(", ");
+    const verdict = choices.length === 1 ? `is not ${listed}` : `is not one of ${listed}`;
+    throw new CliUsageError(`Invalid value for ${paramLabel(param)}: ${pyRepr(raw)} ${verdict}.`);
   }
   return match;
+}
+
+/**
+ * Click's error for a required option or argument that was not given:
+ * `Missing option '--user' / '-u'.`, and for a Choice the choices, one per
+ * line after a tab, comma-separated and with no final period:
+ * `Missing option '--role'. Choose from:\n\tmember,\n\tadmin,\n\tviewer`.
+ */
+export function missingParam(
+  param: Param,
+  choices?: readonly string[],
+  options: ChoiceOptions = {},
+): CliUsageError {
+  const kind = typeof param === "string" ? "argument" : "option";
+  const extra = choices === undefined ? "" : ` Choose from:\n\t${shownChoices(choices, options).join(",\n\t")}`;
+  return new CliUsageError(`Missing ${kind} ${paramLabel(param)}.${extra}`);
 }
 
 /**
@@ -161,33 +252,11 @@ export function pairedFlag(
 /**
  * Python's `repr()` of a string, which click interpolates into errors.
  *
- * Escapes matter: a value containing a newline would otherwise split the
- * error across lines, and a Windows path would lose its backslashes.
- * Pinned against the real `repr()` output in the tests.
- *
- *   'a\n b'          -> 'a\\n b'          (control characters escaped)
- *   'C:\\Users'      -> 'C:\\\\Users'     (backslash doubled)
- *   "it's"           -> "it's"            (double-quoted to avoid escaping)
- *   "both ' and \""  -> 'both \\' and "'  (single-quoted, apostrophe escaped)
+ * The name the CLI has always used for {@link pyRepr}; kept so its
+ * callers read as before.
  */
 export function quote(value: string): string {
-  // Python prefers single quotes, switching to double only when the value
-  // contains an apostrophe and no double quote.
-  const double = value.includes("'") && !value.includes('"');
-  const quoteChar = double ? '"' : "'";
-
-  let out = "";
-  for (const ch of value) {
-    const code = ch.codePointAt(0)!;
-    if (ch === "\\") out += "\\\\";
-    else if (ch === quoteChar) out += `\\${ch}`;
-    else if (ch === "\n") out += "\\n";
-    else if (ch === "\r") out += "\\r";
-    else if (ch === "\t") out += "\\t";
-    else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, "0")}`;
-    else out += ch;
-  }
-  return `${quoteChar}${out}${quoteChar}`;
+  return pyRepr(value);
 }
 
 /**
@@ -208,27 +277,11 @@ export function parseDetails(raw: string | undefined): Record<string, unknown> |
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new CliUsageError(
-      `--details must be a JSON object, got ${jsonTypeName(parsed)}. ` +
+      `--details must be a JSON object, got ${pyTypeName(parsed)}. ` +
         `Example: --details '{"location": {"lat": 35.68, "lon": 139.76}}'`,
     );
   }
   return parsed as Record<string, unknown>;
-}
-
-/** The Python type name click reports for a non-object `--details`. */
-function jsonTypeName(value: unknown): string {
-  if (value === null) return "NoneType";
-  if (Array.isArray(value)) return "list";
-  switch (typeof value) {
-    case "string":
-      return "str";
-    case "boolean":
-      return "bool";
-    case "number":
-      return Number.isInteger(value) ? "int" : "float";
-    default:
-      return typeof value;
-  }
 }
 
 export interface LocationPayload {
@@ -242,7 +295,8 @@ export interface LocationPayload {
  *
  * The comparison is written as a range containment rather than
  * `value < -limit || value > limit` because the latter evaluates false for
- * NaN and would let it through.
+ * NaN and would let it through. The value is printed as Python prints the
+ * float it parsed: `91.0`, `nan`, `inf`.
  */
 function validateLatLon(lat: number, lon: number): void {
   for (const [label, value, limit] of [
@@ -250,7 +304,9 @@ function validateLatLon(lat: number, lon: number): void {
     ["lon", lon, 180],
   ] as const) {
     if (!(value >= -limit && value <= limit)) {
-      throw new CliUsageError(`--location ${label} must be between -${limit} and ${limit}, got ${value}`);
+      throw new CliUsageError(
+        `--location ${label} must be between -${limit} and ${limit}, got ${pyFloatRepr(value)}`,
+      );
     }
   }
 }
@@ -261,21 +317,22 @@ function validateLatLon(lat: number, lon: number): void {
  * Port of `_parse_location`.
  */
 export function parseLocation(raw: string | undefined): LocationPayload | undefined {
-  if (raw === undefined || !raw.trim()) return undefined;
-  const parts = raw.split(",").map((p) => p.trim());
+  // Python's strip(), not trim(): a BOM is kept, and float() refuses it.
+  if (raw === undefined || !pyStrip(raw)) return undefined;
+  const parts = raw.split(",").map((p) => pyStrip(p));
   if (parts.length !== 2 && parts.length !== 3) {
     throw new CliUsageError(
       `--location must be 'lat,lon' or 'lat,lon,label', got ${quote(raw)}`,
     );
   }
   const [rawLat, rawLon] = parts as [string, string];
-  if (!PY_FLOAT.test(rawLat) || !PY_FLOAT.test(rawLon)) {
+  const lat = pyFloat(rawLat);
+  const lon = pyFloat(rawLon);
+  if (lat === undefined || lon === undefined) {
     throw new CliUsageError(
       `--location lat/lon must be numbers, got ${quote(rawLat)},${quote(rawLon)}`,
     );
   }
-  const lat = Number(rawLat);
-  const lon = Number(rawLon);
   validateLatLon(lat, lon);
 
   const payload: LocationPayload = { lat, lon };

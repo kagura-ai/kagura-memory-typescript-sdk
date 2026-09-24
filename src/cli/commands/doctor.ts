@@ -17,6 +17,7 @@ import * as path from "node:path";
 
 import { defaultCredentialsPath, loadCredentialsFile, isExpired } from "../../auth/credentials.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
+import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -182,8 +183,16 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
   if (url) {
     // A plaintext MCP URL means the bearer token crosses the wire in the
     // clear; localhost is the one place that is a deliberate dev choice.
-    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(url);
-    if (url.startsWith("https://") || isLocal) {
+    // The clients' own check decides, so doctor fails exactly the plain
+    // HTTP they refuse and passes HTTPS in any case (`HTTPS://`); a URL
+    // that is not http(s) at all still fails.
+    let refused = false;
+    try {
+      validateHttpsUrl(url);
+    } catch {
+      refused = true;
+    }
+    if (!refused && /^https?:/i.test(normalizeUrl(url))) {
       checks.push({ section: "mcp", status: "pass", message: `mcp_url is ${url}` });
     } else {
       checks.push({

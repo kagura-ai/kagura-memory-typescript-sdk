@@ -5,8 +5,8 @@
  * deliberate — pulling in commander to read flags would trade that away.
  * Scope is correspondingly small: long flags, registered short flags
  * (combined as click combines them: `-yv`, `-k5`), repeatable count and
- * multiple flags, positionals, and `--` as the end-of-options marker. No
- * negation.
+ * multiple flags, options whose value may be omitted, positionals, and
+ * `--` as the end-of-options marker. No negation.
  *
  * Each command passes its own {@link ParseSpec}. That is the point: a flag
  * that is real for `auth login` must still be *rejected* by `recall`,
@@ -15,10 +15,12 @@
  * prevent.
  *
  * Unknown and value-less flags are *reported* rather than ignored or
- * thrown on, so the caller can print one message listing everything wrong
- * instead of failing on the first problem. They are reported by the name
+ * thrown on, in argv order, so the caller can report the first as click
+ * does, even when `--help` follows it. They are reported by the name
  * click's error gives them, never with a value written into the token.
  */
+
+import { PY_FLOAT, pyFloat } from "../python.js";
 
 /**
  * One option a command accepts.
@@ -35,9 +37,22 @@ export interface FlagSpec {
   /**
    * `value` takes an argument, `switch` is a boolean, `count` is a
    * repeatable verbosity dial, `multiple` accumulates every occurrence
-   * (click's `multiple=True`). Defaults to `switch`.
+   * (click's `multiple=True`), `optional` takes an argument that may be
+   * left out (click's `is_flag=False, flag_value=…`, as in
+   * `--agents-md [PATH]`). Defaults to `switch`.
+   *
+   * An `optional` flag given alone reads as {@link FlagSpec.flagValue}.
+   * Given `--flag VALUE`, it takes the next token only when that does not
+   * look like an option, as click decides it: a token of more than one
+   * character that begins with `-` is left to be parsed as the next option
+   * (even `-5`), and a lone `-` is taken. `--flag=VALUE` takes VALUE
+   * literally, even when it begins with `-`, where click drops such a
+   * value and parses it as an option instead (`--agents-md=-y` would
+   * silently set `-y`).
    */
-  type?: "value" | "switch" | "count" | "multiple";
+  type?: "value" | "switch" | "count" | "multiple" | "optional";
+  /** What an `optional` flag given without a value reads as (default `""`). */
+  flagValue?: string;
   /** One-line description for `--help`. */
   help?: string;
   /** Value placeholder shown in `--help` (default: `TEXT` for value flags). */
@@ -80,7 +95,9 @@ export interface FlagSpec {
    * option named in the error. Click consumes whatever
    * follows a value option anyway; this restores that for the one flag
    * whose values need it, and the flag's own validation catches a flag
-   * that was swallowed by mistake.
+   * that was swallowed by mistake. On an `optional` flag it takes any next
+   * token the same way, and reads as {@link FlagSpec.flagValue} only when
+   * none follows.
    */
   dashValue?: boolean;
   /**
@@ -92,6 +109,12 @@ export interface FlagSpec {
    * listed, it would advertise an option the command does not take.
    */
   hidden?: boolean;
+  /**
+   * Declared only to be refused: given at all, with a value or without,
+   * the command prints this line and exits 2 before anything else runs,
+   * `--help` included, as click's "No such option" would.
+   */
+  refusal?: string;
 }
 
 export interface ParseSpec {
@@ -110,11 +133,37 @@ export interface ParseOptions {
    * unknown option of ours.
    */
   stopAtPositional?: boolean;
+  /**
+   * Keep an option the spec does not declare as a positional, whole,
+   * instead of reporting it: click's `ignore_unknown_options=True`, which
+   * `measure record` needs so that `-3.5` is a VALUE rather than an
+   * unknown `-3`. A long token is kept as written, `--metric=x` included.
+   * A short cluster is read as click reads it: its declared letters still
+   * act, and the rest are kept together as one `-` token (`-3.5` whole;
+   * `-yx` sets `-y` and keeps `-x`). `-h` alone still asks for help, and
+   * `--` still ends the options.
+   */
+  ignoreUnknownOptions?: boolean;
+}
+
+/** One option problem in argv, of the three kinds click's parser raises. */
+export interface ParseProblem {
+  /**
+   * `unknown`: no such option; `noValue`: a switch given a value
+   * (`--json=true`); `missingValue`: an option that takes a value, given
+   * none.
+   */
+  kind: "unknown" | "noValue" | "missingValue";
+  /** The option as click's error names it, as typed: `--porfile`, `-x`, `-w`. */
+  name: string;
 }
 
 export interface ParsedArgs {
-  /** First non-flag token, or `""` when absent. */
-  command: string;
+  /**
+   * First non-flag token, or `undefined` when there is none. An empty
+   * argument (`''`) is a token like any other, as click passes it through.
+   */
+  command: string | undefined;
   /** Remaining non-flag tokens. */
   positionals: string[];
   /** Switches that were present, keyed by long name. */
@@ -137,6 +186,12 @@ export interface ParsedArgs {
   /** Value flags that ran out of argv before their value. */
   missingValue: string[];
   /**
+   * Every entry of {@link ParsedArgs.unknown}, {@link ParsedArgs.noValue}
+   * and {@link ParsedArgs.missingValue}, in argv order: click stops at the
+   * first, so that is the one to report.
+   */
+  problems: ParseProblem[];
+  /**
    * Unparsed remainder, when `stopAtPositional` was set. Empty otherwise.
    * A leading `--` separator is stripped; anything after it is verbatim.
    */
@@ -147,13 +202,16 @@ export interface ParsedArgs {
 const HELP: FlagSpec = { name: "help", type: "switch" };
 
 /**
- * Python's `float()` grammar, shared with `parse.ts`.
- *
- * Lives here because the parser needs it too: a dash-prefixed token that
- * is a number is a *value*, not a flag.
+ * Python's `float()` grammar, which the parser needs: a dash-prefixed
+ * token that is a number is a *value*, not a flag. Defined with the other
+ * Python semantics in `python.ts`.
  */
-export const PY_FLOAT =
-  /^[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)$/i;
+export { PY_FLOAT };
+
+/** Option types that take an argument, always or when one is given. */
+function takesValue(flag: FlagSpec): boolean {
+  return flag.type === "value" || flag.type === "multiple" || flag.type === "optional";
+}
 
 interface Index {
   long: Map<string, FlagSpec>;
@@ -177,6 +235,7 @@ export function parseArgs(
 ): ParsedArgs {
   const { long, short } = indexSpec(spec);
   const stopAtPositional = options.stopAtPositional === true;
+  const ignoreUnknown = options.ignoreUnknownOptions === true;
   let rest: string[] = [];
 
   const positionals: string[] = [];
@@ -184,9 +243,10 @@ export function parseArgs(
   const values: Record<string, string | undefined> = {};
   const counts: Record<string, number> = {};
   const many: Record<string, string[]> = {};
-  const unknown: string[] = [];
-  const noValue: string[] = [];
-  const missingValue: string[] = [];
+  // In argv order; `unknown`, `noValue` and `missingValue` are its slices.
+  const problems: ParseProblem[] = [];
+  const problem = (kind: ParseProblem["kind"], name: string) => void problems.push({ kind, name });
+  const named = (kind: ParseProblem["kind"]) => problems.filter((p) => p.kind === kind).map((p) => p.name);
 
   // Registered count and multiple flags read as 0 / [] rather than
   // undefined, so callers can use them without a `?? 0` at every site.
@@ -213,8 +273,9 @@ export function parseArgs(
       return 0;
     }
     // Any following flag means the value was omitted, not that the flag is
-    // the value — `--profile --yes` must not set profile="--yes", and
-    // `--profile -h` is a request for help, not a profile named "-h".
+    // the value — `--profile --yes` must not set profile="--yes", nor
+    // `--profile -h` a profile named "-h". The flag is reported as missing
+    // its value; the token is read as what it looks like.
     //
     // A negative number is the exception: `--bm25 -0.1` and `--limit -5`
     // are values, and click accepts them. (Click is in fact laxer still —
@@ -223,7 +284,7 @@ export function parseArgs(
     // stricter rule stays.)
     if (
       next === undefined ||
-      (flag.dashValue !== true && next.startsWith("-") && next.length > 1 && !PY_FLOAT.test(next))
+      (flag.dashValue !== true && next.startsWith("-") && next.length > 1 && pyFloat(next) === undefined)
     ) {
       return -1;
     }
@@ -232,10 +293,22 @@ export function parseArgs(
   };
 
   const record = (flag: FlagSpec, inline: string | null, next: string | undefined, token: string) => {
+    if (flag.type === "optional") {
+      if (inline !== null) {
+        store(flag, inline);
+        return 0;
+      }
+      if (next === undefined || (flag.dashValue !== true && next.startsWith("-") && next.length > 1)) {
+        store(flag, flag.flagValue ?? "");
+        return 0;
+      }
+      store(flag, next);
+      return 1;
+    }
     if (flag.type === "value" || flag.type === "multiple") {
       const eaten = takeValue(flag, inline, next);
       if (eaten === -1) {
-        missingValue.push(token);
+        problem("missingValue", token);
         return 0;
       }
       return eaten;
@@ -243,7 +316,7 @@ export function parseArgs(
     if (inline !== null) {
       // `--json=true`: accepting it would silently discard the value.
       // Named without it, as click names it.
-      noValue.push(token.slice(0, token.indexOf("=")));
+      problem("noValue", token.slice(0, token.indexOf("=")));
       return 0;
     }
     if (flag.type === "count") counts[flag.name] = (counts[flag.name] ?? 0) + 1;
@@ -285,8 +358,9 @@ export function parseArgs(
       const inline = eq === -1 ? null : token.slice(eq + 1);
       const flag = long.get(name);
       if (flag === undefined) {
+        if (ignoreUnknown) positionals.push(token);
         // `--x=value` is reported as `--x`: the value may be a secret.
-        unknown.push(`--${name}`);
+        else problem("unknown", `--${name}`);
         continue;
       }
       i += record(flag, inline, argv[i + 1], token);
@@ -309,7 +383,7 @@ export function parseArgs(
 
     // `-c value`, `-c=value`.
     const flag = short.get(body);
-    if (flag !== undefined && (inline === null || flag.type === "value" || flag.type === "multiple")) {
+    if (flag !== undefined && (inline === null || takesValue(flag))) {
       i += record(flag, inline, argv[i + 1], token);
       continue;
     }
@@ -322,34 +396,43 @@ export function parseArgs(
     // demoting `-p work` to positionals instead would mean the flag is
     // ignored and the command runs with defaults — the same failure mode
     // as an accepted-but-unread switch.
-    // By code point, as click reads a Python string.
+    // By code point, as click reads a Python string. With
+    // ignoreUnknownOptions, click collects the letters that are no option
+    // and keeps them, rejoined behind one `-`, as a positional.
     const letters = Array.from(token.slice(1));
+    const ignored: string[] = [];
     for (let at = 0; at < letters.length; at++) {
       const letter = letters[at]!;
       const option = short.get(letter);
       if (option === undefined) {
-        unknown.push(`-${letter}`);
+        if (ignoreUnknown) {
+          ignored.push(letter);
+          continue;
+        }
+        problem("unknown", `-${letter}`);
         break;
       }
-      if (option.type === "value" || option.type === "multiple") {
+      if (takesValue(option)) {
         const attached = letters.slice(at + 1).join("");
         i += record(option, attached === "" ? null : attached, argv[i + 1], `-${letter}`);
         break;
       }
       record(option, null, undefined, `-${letter}`);
     }
+    if (ignored.length > 0) positionals.push(`-${ignored.join("")}`);
   }
 
   return {
-    command: positionals.shift() ?? "",
+    command: positionals.shift(),
     positionals,
     flags,
     values,
     counts,
     many,
-    unknown,
-    noValue,
-    missingValue,
+    unknown: named("unknown"),
+    noValue: named("noValue"),
+    missingValue: named("missingValue"),
+    problems,
     rest,
   };
 }

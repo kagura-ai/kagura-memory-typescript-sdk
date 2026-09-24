@@ -10,6 +10,9 @@
  * A docstring that names a sibling method's option is an API promise. These
  * assertions resolve each one against the option interface that method
  * actually takes, so the next such promise either exists or fails the build.
+ *
+ * It also pins public doc text that once outlived the behaviour it
+ * described, where the d.ts would otherwise ship the stale sentence.
  */
 
 import * as fs from "node:fs";
@@ -180,6 +183,51 @@ describe("the extractors these assertions rest on", () => {
     // `filters` is documented with nested keys in prose but declared as a
     // Record; nothing from inside another type should appear here.
     expect(fields).not.toContain("trust_tier");
+  });
+});
+
+/**
+ * The doc comment directly above the first line matching `declaration`,
+ * as one line of prose (leading `*` and line breaks folded to spaces), so
+ * a phrase wrapped across lines still matches.
+ */
+function docCommentBefore(declaration: RegExp, source: string): string {
+  const lines = source.split(/\r?\n/);
+  const at = lines.findIndex((l) => declaration.test(l));
+  if (at === -1 || !lines[at - 1]?.trim().endsWith("*/")) {
+    throw new Error(`no doc comment directly above ${declaration}`);
+  }
+  let start = at - 1;
+  while (start > 0 && !lines[start]!.trim().startsWith("/**")) {
+    start--;
+  }
+  return lines
+    .slice(start, at)
+    .map((l) => l.trim().replace(/^\/\*\*|\*\/$|^\*/g, "").trim())
+    .filter((l) => l !== "")
+    .join(" ");
+}
+
+describe("the listTags drill-down docs say where its context_name comes from", () => {
+  // The REST tags route sends `context_name` from server v0.77.0 and the
+  // client takes it, with no lookup. The public `withTags` doc (in the
+  // d.ts) and the cache's comment once still said the route sends none.
+  const docs = {
+    "ListTagsOptions.withTags": docCommentBefore(/^ {2}withTags\?: string\[\];/, clientSource),
+    contextNames: docCommentBefore(/^ {2}private readonly contextNames\b/, clientSource),
+  };
+
+  it.each(Object.entries(docs))("%s", (_name, doc) => {
+    expect(doc).not.toMatch(/sends no (`context_name`|name)/);
+    expect(doc).toMatch(/v0\.77\.0/);
+    // The fallback is still documented: one list_tags lookup.
+    expect(doc).toMatch(/`list_tags`/);
+  });
+
+  it("reads a whole doc comment, folded to one line", () => {
+    const sample = ["  /**", "   * One", "   * two.", "   */", "  field?: string;"].join("\n");
+    expect(docCommentBefore(/^ {2}field\?/, sample)).toBe("One two.");
+    expect(() => docCommentBefore(/^ {2}nothing/, sample)).toThrow(/no doc comment/);
   });
 });
 

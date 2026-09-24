@@ -83,7 +83,10 @@ describe("validation", () => {
     const client = makeClient(new FakeServer());
     await expect(
       client.upload({ contextId: "auto", source: new Uint8Array([1]), filename: "a.bin" }),
-    ).rejects.toThrow(/contextId must be a UUID/);
+    ).rejects.toThrow(
+      "context_id must be a UUID; got 'auto'. Use the OAuth profile's workspace_id, " +
+        "a UUID from `kagura context list`, or run `kagura auth login` first.",
+    );
   });
 
   it("requires a filename for byte sources", async () => {

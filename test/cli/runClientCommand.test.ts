@@ -1,13 +1,24 @@
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
-import type { KaguraClient } from "../../src/client.js";
-import type { KaguraConfig } from "../../src/config.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import {
+  defaultCredentialsPath,
+  emptyCredentialsFile,
+  resetStateCache,
+  saveCredentialsFile,
+  setProfile,
+} from "../../src/auth/credentials.js";
+import { KaguraClient } from "../../src/client.js";
+import { loadConfig, type KaguraConfig } from "../../src/config.js";
 import {
   mcpOptions,
   runClientCommand,
   type ClientCommandContext,
 } from "../../src/cli/runClientCommand.js";
-import { KaguraError } from "../../src/errors.js";
+import { KaguraError, KaguraQuotaError } from "../../src/errors.js";
 import { CliUsageError } from "../../src/cli/parse.js";
 import { FakeServer, makeClient } from "../fakeServer.js";
 
@@ -34,9 +45,12 @@ function harness(config: KaguraConfig = {}): Harness {
   h.ctx = {
     write: (line) => out.push(line),
     writeError: (line) => err.push(line),
+    resolveAuth: unusedRestClient,
     makeFilesClient: unusedRestClient,
     makeResourceClient: unusedRestClient,
     makeSecretClient: unusedRestClient,
+    makeMemoryClient: unusedRestClient,
+    makeWorkspaceClient: unusedRestClient,
     isTty: () => false,
     readStdin: () => null,
     spawnChild: async () => 0,
@@ -85,7 +99,7 @@ describe("runClientCommand: context resolution", () => {
       // the exit code, so there is exactly one place that formats them.
       const h = harness({ context_id: configured as string | null | undefined });
       await expect(runClientCommand(h.ctx, undefined, noop)).rejects.toThrow(
-        "context_id required. Use --context-id or set in .kagura.json",
+        "context_id required. Pass the context ID or set context_id in .kagura.json",
       );
       expect(h.out).toEqual([]);
     },
@@ -165,6 +179,24 @@ describe("runClientCommand: output and exit codes", () => {
     expect(h.out).toEqual([]);
   });
 
+  it("keeps a gate refusal's Resets at / Required plan lines when it wraps it", async () => {
+    // The CliError it throws is all the router sees: the lines must be in
+    // its message already (Python's _cli_error_message, in the helper).
+    const h = harness({ context_id: "c" });
+    await expect(
+      runClientCommand(h.ctx, undefined, async () => {
+        throw new KaguraQuotaError("Daily limit.", null, {
+          resetsAt: "2026-09-26T00:00:00Z",
+          requiredPlan: "pro",
+          requiredPlanDisplay: "Pro",
+        });
+      }),
+    ).rejects.toMatchObject({
+      message: "Daily limit.\n  Resets at: 2026-09-26T00:00:00+00:00\n  Required plan: Pro (pro)",
+      exitCode: 1,
+    });
+  });
+
   it("forwards a non-Error throw rather than [object Object]", async () => {
     const h = harness({ context_id: "c" });
     await expect(
@@ -236,5 +268,77 @@ describe("mcpOptions", () => {
     // send `Authorization: Bearer ` and always 401 instead of letting the
     // OAuth profile resolve.
     expect(mcpOptions({ api_key: "", mcp_url: "" })).toEqual({});
+  });
+});
+
+describe("mcpOptions without a .kagura.json", () => {
+  // loadConfig then fills mcp_url from KAGURA_MCP_URL or the default.
+  // Forwarded as an explicit URL, that overrode an OAuth profile's own
+  // server: `guardrails load`, `measure`, `recall` and the other MCP
+  // commands sent the profile's token to https://memory.kagura-ai.com/mcp.
+  let sandbox: string;
+
+  beforeEach(() => {
+    sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-mcpopts-"));
+    resetStateCache();
+  });
+
+  afterEach(() => {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+    resetStateCache();
+  });
+
+  /** One OAuth profile, `default`, bound to `mcpUrl`, in the sandbox's credentials file. */
+  function seedProfile(mcpUrl: string): void {
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "default", {
+      server: new URL(mcpUrl).origin,
+      mcpUrl,
+      clientId: "kagura-cli",
+      accessToken: "at-self-hosted",
+      refreshToken: "rt-1",
+      tokenType: "Bearer",
+      expiresAt: new Date(Date.now() + 3600_000),
+      scope: "memory:read memory:write",
+      workspaceId: "ws-1",
+      workspaceName: "Acme",
+      userEmail: "dev@example.test",
+      issuedAt: new Date(),
+    });
+    saveCredentialsFile(cf, defaultCredentialsPath(sandbox));
+  }
+
+  /** The URL the CLI's MCP client ends up at, built as the CLI builds it. */
+  function clientUrl(env: Record<string, string>): string {
+    const config = loadConfig({ cwd: sandbox, home: sandbox, env });
+    return new KaguraClient({ ...mcpOptions(config), env, home: sandbox }).mcpUrl;
+  }
+
+  it("forwards neither the default URL nor the key it filled in", () => {
+    const config = loadConfig({ cwd: sandbox, home: sandbox, env: { KAGURA_API_KEY: "k" } });
+    expect(config.mcp_url).toBe("https://memory.kagura-ai.com/mcp");
+    expect(mcpOptions(config)).toEqual({});
+  });
+
+  it("leaves an OAuth profile on its own server", () => {
+    seedProfile("https://self.hosted.test/mcp");
+    expect(clientUrl({})).toBe("https://self.hosted.test/mcp");
+  });
+
+  it("still sends KAGURA_API_KEY to KAGURA_MCP_URL, else the default", () => {
+    seedProfile("https://self.hosted.test/mcp");
+    expect(clientUrl({ KAGURA_API_KEY: "k", KAGURA_MCP_URL: "https://env.test/mcp" })).toBe("https://env.test/mcp");
+    expect(clientUrl({ KAGURA_API_KEY: "k" })).toBe("https://memory.kagura-ai.com/mcp");
+  });
+
+  it("still forwards a real file's mcp_url and key", () => {
+    fs.writeFileSync(
+      path.join(sandbox, ".kagura.json"),
+      JSON.stringify({ api_key: "k-file", mcp_url: "https://file.test/mcp" }),
+    );
+    expect(mcpOptions(loadConfig({ cwd: sandbox, home: sandbox, env: {} }))).toEqual({
+      apiKey: "k-file",
+      mcpUrl: "https://file.test/mcp",
+    });
   });
 });

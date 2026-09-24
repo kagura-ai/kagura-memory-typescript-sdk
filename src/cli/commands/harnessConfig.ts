@@ -11,11 +11,78 @@
  * replace an entry nobody asked it to touch.
  */
 
+import * as net from "node:net";
+
 /**
  * The variable Codex and OpenClaw entries read the key from unless
  * `--api-key-env` names another — Python's `DEFAULT_KEY_ENV`.
  */
 export const KEY_ENV_VAR = "KAGURA_API_KEY";
+
+/**
+ * `url` as a URL parser reads it — Python's `normalize_url`
+ * (python-sdk#279), shared with the HTTPS check in `http.ts`. The harness
+ * setups check this form and write it, so an entry never carries padding
+ * or a control character its harness might keep.
+ */
+export { normalizeUrl } from "../../http.js";
+
+/**
+ * Python's `urlsplit` checks of a bracketed host (`_check_bracketed_netloc`):
+ * only the host may be bracketed, nothing but a port may follow it, and
+ * what is inside is an IPv6 address or an `IPvFuture` literal.
+ */
+function bracketedNetlocOk(netloc: string): boolean {
+  const hostAndPort = netloc.slice(netloc.lastIndexOf("@") + 1);
+  const open = hostAndPort.indexOf("[");
+  let host: string;
+  if (open !== -1) {
+    if (open > 0) return false;
+    const inner = hostAndPort.slice(1);
+    const close = inner.indexOf("]");
+    host = close === -1 ? inner : inner.slice(0, close);
+    const port = close === -1 ? "" : inner.slice(close + 1);
+    if (port && !port.startsWith(":")) return false;
+  } else {
+    const colon = hostAndPort.indexOf(":");
+    host = colon === -1 ? hostAndPort : hostAndPort.slice(0, colon);
+  }
+  if (host.startsWith("v")) return /^v[a-fA-F0-9]+\.[^\n]+$/.test(host);
+  return net.isIPv6(host);
+}
+
+/**
+ * Python's `_checknetloc`: a non-ASCII host whose NFKC form spells one of
+ * `/?#@:` (U+2100 `℀` is `a/c`) would read as another URL once a client
+ * normalizes it.
+ */
+function nfkcNetlocOk(netloc: string): boolean {
+  if (!/[^\x00-\x7f]/.test(netloc)) return true;
+  const n = netloc.replace(/[@:#?]/g, "");
+  const normalized = n.normalize("NFKC");
+  return n === normalized || !/[/?#@:]/.test(normalized);
+}
+
+/**
+ * Whether `url` is an http(s) URL with a host, as Python's `urlsplit` reads
+ * it: the check `setup` puts on the MCP URL after the HTTPS one
+ * (python-sdk#279). The URL follows `--url` on a harness argv, where
+ * `--help` would read as an option, and anything without a host would be
+ * saved as an entry no client can reach. An unbalanced or malformed IPv6
+ * bracket fails, as `urlsplit` raises for it.
+ *
+ * Expects a {@link normalizeUrl}-ed URL, as Python's check gets one.
+ */
+export function isHttpUrl(url: string): boolean {
+  const match = /^https?:\/\/([^/?#]*)/i.exec(url);
+  if (match === null) return false;
+  const netloc = match[1]!;
+  if (netloc === "") return false;
+  const open = netloc.includes("[");
+  if (open !== netloc.includes("]")) return false;
+  if (open && !bracketedNetlocOk(netloc)) return false;
+  return nfkcNetlocOk(netloc);
+}
 
 interface SplitUrl {
   base: string;
@@ -40,18 +107,37 @@ function splitUrl(url: string): SplitUrl {
   };
 }
 
+/**
+ * A parameter's name, decoded: the server (`parse_qsl`) and Python's
+ * `_query_without` both compare names that way, so `guard%72ails` is
+ * `guardrails`.
+ */
 function paramName(param: string): string {
   const eq = param.indexOf("=");
-  return eq === -1 ? param : param.slice(0, eq);
+  return unquotePlus(eq === -1 ? param : param.slice(0, eq));
 }
 
-/** The decoded value of `key` in the URL's query, or undefined. */
+/**
+ * The decoded value of the first `key` in the URL's query — the one the
+ * server reads — or undefined. Names compare decoded.
+ */
 export function queryParam(url: string, key: string): string | undefined {
   const param = splitUrl(url).params.find((p) => paramName(p) === key);
   if (param === undefined) return undefined;
   const eq = param.indexOf("=");
   if (eq === -1) return "";
   return unquotePlus(param.slice(eq + 1));
+}
+
+/**
+ * A split URL put back together with a new query, as Python's
+ * `urlunsplit(urlsplit(url)._replace(query=…))` rebuilds it: the scheme
+ * lower-cased (`HTTP://` is written `http://`), no `?` for an empty query
+ * and no `#` for an empty fragment. The rest stays as written.
+ */
+function joinUrl(base: string, params: string[], fragment: string): string {
+  const scheme = base.replace(/^[A-Za-z][A-Za-z0-9+.-]*:/, (s) => s.toLowerCase());
+  return `${scheme}${params.length > 0 ? `?${params.join("&")}` : ""}${fragment.length > 1 ? fragment : ""}`;
 }
 
 /** A name or value as Python's `unquote_plus` reads it; left raw if malformed. */
@@ -81,7 +167,9 @@ function quotePlus(text: string): string {
  *
  * A key being set loses every earlier value of it (the server reads only
  * the first it finds) and goes at the end, `guardrails` before `profile`.
- * Every other parameter is kept as written; an unset key is left alone.
+ * Every other parameter is kept as written; an unset key is left alone,
+ * and with nothing to set the URL comes back as written. A URL it rewrites
+ * is rebuilt as Python's is ({@link joinUrl}).
  */
 export function mcpUrlWithQuery(
   url: string,
@@ -90,19 +178,23 @@ export function mcpUrlWithQuery(
   const set = (["guardrails", "profile"] as const).filter((key) => updates[key] !== undefined);
   if (set.length === 0) return url;
   const { base, params, fragment } = splitUrl(url);
-  const kept = params.filter((param) => !(set as readonly string[]).includes(unquotePlus(paramName(param))));
+  const kept = params.filter((param) => !(set as readonly string[]).includes(paramName(param)));
   const added = set.map((key) => `${key}=${quotePlus(updates[key]!)}`);
-  return `${base}?${[...kept, ...added].join("&")}${fragment}`;
+  return joinUrl(base, [...kept, ...added], fragment);
 }
 
 /**
  * Drop `key` from the URL's query, every occurrence, keeping the other
- * parameters as written and leaving no bare `?` behind.
+ * parameters as written and leaving no bare `?` behind — Python's
+ * `mcp_url_without_query_param`. Names compare decoded; a URL without the
+ * key comes back as written, and one it rewrites is rebuilt as Python's is
+ * ({@link joinUrl}).
  */
 export function withoutQueryParam(url: string, key: string): string {
   const { base, params, fragment } = splitUrl(url);
   const kept = params.filter((param) => paramName(param) !== key);
-  return `${base}${kept.length > 0 ? `?${kept.join("&")}` : ""}${fragment}`;
+  if (kept.length === params.length) return url;
+  return joinUrl(base, kept, fragment);
 }
 
 /** The URL with its query and fragment dropped. */

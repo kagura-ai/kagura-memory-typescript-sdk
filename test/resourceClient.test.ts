@@ -130,6 +130,29 @@ describe("token CRUD", () => {
     await expect(client.revokeToken(9)).resolves.toBeUndefined();
     expect(server.last().method).toBe("DELETE");
   });
+
+  it("sends a bigint token id exactly, as Python's int is", async () => {
+    const server = new FakeRest();
+    server.fallback = { status: 200, body: { id: 1 } };
+    const client = makeClient(server);
+    await client.revokeToken(9007199254740993n);
+    expect(new URL(server.last().url).pathname).toBe("/api/v1/resource-tokens/9007199254740993");
+    await client.updateToken(10n ** 21n, { description: "x" });
+    expect(new URL(server.last().url).pathname).toBe("/api/v1/resource-tokens/1000000000000000000000");
+  });
+
+  it.each([
+    // Already rounded: 9007199254740993 reads as ...992, another token's id.
+    [9007199254740992, /tokenId must be a safe integer or a bigint, got 9007199254740992/],
+    [1e21, /tokenId must be a safe integer or a bigint, got 1e\+21/],
+    [7.9, /tokenId must be an integer, got 7\.9/],
+  ])("refuses the token id %s before anything is sent", async (id, message) => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    await expect(client.revokeToken(id)).rejects.toThrow(message);
+    await expect(client.updateToken(id, { description: "x" })).rejects.toThrow(message);
+    expect(server.requests).toEqual([]);
+  });
 });
 
 describe("event ingestion (X-Resource-API-Key)", () => {

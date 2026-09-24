@@ -31,13 +31,15 @@ import type {
   FileObject,
   FileReserveResponse,
 } from "./models.js";
+import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
+import { normalizeUuid, pyRepr } from "./pyCompat.js";
+import { laxStr, ResponseReader } from "./responseShape.js";
 import {
   KaguraRestClient,
   type KaguraRestClientOptions,
   type RequestContext,
   type RestResponse,
 } from "./restBase.js";
-import { isUuid } from "./uuid.js";
 
 /** A `KaguraConnectionError` carrying the raw non-2xx body for dedup inspection. */
 interface ErrorWithResponse extends KaguraConnectionError {
@@ -71,6 +73,17 @@ export interface UploadOptions {
    * from `contextId` above, which maps to `workspace_id`.
    */
   bindingContextId?: string;
+  /**
+   * Receives the upload's progress events, the Python SDK's `logger=`
+   * stream: `reserve`, `upload` and `confirm` actions, then one terminal
+   * `complete` event — `success` with `{ file_id, size_bytes }` (or, on a
+   * 409 dedup hit, `{ file_id, deduped: true }`), or `error` with how far
+   * the upload got: `{ reserved_file_id, uploaded, confirm_started,
+   * confirmed }`. `confirm_started` without `confirmed` means the server
+   * may have finalized the file: check before uploading again. See
+   * {@link ProgressEvent}.
+   */
+  onProgress?: ProgressCallback;
 }
 
 /** Minimal extension→MIME map (Node has no `mimetypes` module). */
@@ -117,71 +130,136 @@ export class FilesClient extends KaguraRestClient {
    * the server returns 409 and this surfaces the existing FileObject
    * (dedup happy-path) rather than throwing.
    *
-   * @throws Error if `source` is bytes and `filename` is not provided.
+   * `contextId` is sent in its canonical form: a `{braced}`, `urn:uuid:` or
+   * dashless UUID is accepted, as the Python SDK accepts it.
+   *
+   * @throws Error if `contextId` is not a UUID, or `source` is bytes and
+   *   `filename` is not provided.
    * @throws KaguraIntegrityError if R2 rejected the body sha256 binding.
+   * @throws KaguraResponseError if the confirm's 2xx body is not an object
+   *   with a string `id`.
    */
   async upload(options: UploadOptions): Promise<FileObject> {
-    validateContextId(options.contextId);
-    const { filename, body, sha256Hex, sha256Base64 } = await prepareSource(
-      options.source,
-      options.filename,
-    );
-    const sizeBytes = body.byteLength;
-    const contentType = resolveContentType(options.contentType, filename);
-
-    const reserveBody: Record<string, unknown> = {
-      workspace_id: options.contextId,
-      filename,
-      content_type: contentType,
-      size_bytes: sizeBytes,
-      sha256: sha256Hex,
-    };
-    // Only send context_id when a binding was requested — omitting it keeps
-    // the upload NULL-context (workspace-scoped, legacy behaviour).
-    if (options.bindingContextId !== undefined) {
-      reserveBody.context_id = options.bindingContextId;
-    }
-
-    let reserveResp: RestResponse;
+    const emit = (event: ProgressEvent) => emitProgress(options.onProgress, event);
+    // How far the upload got, for the terminal error event. `confirmStarted`
+    // without `confirmed` is the ambiguous case: the confirm was sent and
+    // its answer lost, so the file may be finalized after all.
+    let reservedFileId: string | null = null;
+    let uploaded = false;
+    let confirmStarted = false;
+    let confirmed = false;
     try {
-      reserveResp = await this.request("POST", "/api/v1/files/reserve", { json: reserveBody });
-    } catch (e) {
-      // 409 dedup happy-path: the server reports the existing file in the
-      // error body; surface it as a FileObject so callers need not special-
-      // case duplicates.
-      const existing = extractExistingFile(e);
-      if (existing !== null) {
-        return existing;
+      // The checks and the read are inside the try too, so that a failure
+      // there still ends the event stream with an error, as in Python.
+      const contextId = normalizeContextId(options.contextId);
+      const { filename, body, sha256Hex, sha256Base64 } = await prepareSource(
+        options.source,
+        options.filename,
+      );
+      const sizeBytes = body.byteLength;
+      const contentType = resolveContentType(options.contentType, filename);
+
+      emit({
+        stage: "reserve",
+        kind: "action",
+        msg: "Reserving upload",
+        detail: { desc: `${filename} (${sizeBytes} bytes)` },
+      });
+      const reserveBody: Record<string, unknown> = {
+        workspace_id: contextId,
+        filename,
+        content_type: contentType,
+        size_bytes: sizeBytes,
+        sha256: sha256Hex,
+      };
+      // Only send context_id when a binding was requested — omitting it keeps
+      // the upload NULL-context (workspace-scoped, legacy behaviour).
+      if (options.bindingContextId !== undefined) {
+        reserveBody.context_id = options.bindingContextId;
       }
+
+      let reserveResp: RestResponse;
+      try {
+        reserveResp = await this.request("POST", "/api/v1/files/reserve", { json: reserveBody });
+      } catch (e) {
+        // 409 dedup happy-path: the server reports the existing file in the
+        // error body; surface it as a FileObject so callers need not special-
+        // case duplicates.
+        const existing = extractExistingFile(e);
+        if (existing !== null) {
+          emit({
+            stage: "complete",
+            kind: "success",
+            msg: "Dedup hit — existing file returned",
+            detail: { file_id: existing.id, deduped: true },
+          });
+          return existing;
+        }
+        throw e;
+      }
+
+      const reserve = this.json(reserveResp) as FileReserveResponse;
+      reservedFileId = reserve.file_id ?? null;
+      emit({ stage: "upload", kind: "action", msg: "Uploading to object store" });
+      await this.putToObjectStore(reserve.upload_url, body, sha256Base64, contentType);
+      uploaded = true;
+
+      emit({ stage: "confirm", kind: "action", msg: "Confirming upload" });
+      confirmStarted = true;
+      // workspace_id is required on the confirm query string (memory-cloud
+      // v0.41.0); omitting it returns 422 and the upload never finalizes.
+      const confirmResp = await this.request("POST", `/api/v1/files/${reserve.file_id}/confirm`, {
+        params: { workspace_id: contextId },
+        json: { sha256: sha256Hex },
+      });
+      // Read before `confirmed`, as Python parses its FileObject first: a
+      // body with no file id is no confirmation, and the terminal error
+      // must not say it was.
+      const reader = new ResponseReader("FilesClient.upload", "FileObject");
+      const confirmedBody = reader.object(this.json(confirmResp));
+      if (confirmedBody !== null) reader.field(confirmedBody, "id", laxStr);
+      reader.check();
+      const result = confirmedBody as unknown as FileObject;
+      confirmed = true;
+      emit({
+        stage: "complete",
+        kind: "success",
+        msg: "Upload complete",
+        detail: { file_id: result.id, size_bytes: sizeBytes },
+      });
+      return result;
+    } catch (e) {
+      // excMessage, not String(e): an error without a message still says
+      // what it was, where Python's `f"{e}"` leaves nothing after the colon.
+      emit({
+        stage: "complete",
+        kind: "error",
+        msg: `Upload failed: ${excMessage(e)}`,
+        detail: {
+          reserved_file_id: reservedFileId,
+          uploaded,
+          confirm_started: confirmStarted,
+          confirmed,
+        },
+      });
       throw e;
     }
-
-    const reserve = this.json(reserveResp) as FileReserveResponse;
-    await this.putToObjectStore(reserve.upload_url, body, sha256Base64, contentType);
-
-    // workspace_id is required on the confirm query string (memory-cloud
-    // v0.41.0); omitting it returns 422 and the upload never finalizes.
-    const confirmResp = await this.request("POST", `/api/v1/files/${reserve.file_id}/confirm`, {
-      params: { workspace_id: options.contextId },
-      json: { sha256: sha256Hex },
-    });
-    return this.json(confirmResp) as FileObject;
   }
 
   /** Return a short-lived presigned GET URL for `fileId`. */
   async downloadUrl(fileId: string, options: { contextId: string }): Promise<string> {
-    validateContextId(options.contextId);
+    const contextId = normalizeContextId(options.contextId);
     const response = await this.request("GET", `/api/v1/files/${fileId}/download-url`, {
-      params: { workspace_id: options.contextId },
+      params: { workspace_id: contextId },
     });
     return (this.json(response) as FileDownloadUrlResponse).download_url;
   }
 
   /** Soft-delete a file by id (server hard-deletes after retention). */
   async delete(fileId: string, options: { contextId: string }): Promise<void> {
-    validateContextId(options.contextId);
+    const contextId = normalizeContextId(options.contextId);
     await this.request("DELETE", `/api/v1/files/${fileId}`, {
-      params: { workspace_id: options.contextId },
+      params: { workspace_id: contextId },
     });
   }
 
@@ -193,9 +271,8 @@ export class FilesClient extends KaguraRestClient {
     /** Forward-compatible pagination cursor (ignored by the current server). */
     cursor?: string;
   }): Promise<FileListResponse> {
-    validateContextId(options.contextId);
     const params: Record<string, unknown> = {
-      workspace_id: options.contextId,
+      workspace_id: normalizeContextId(options.contextId),
       limit: options.limit ?? 50,
     };
     if (options.cursor !== undefined) {
@@ -346,7 +423,7 @@ function formatWorkspace403Hint(args: {
   ];
   if (requestedWorkspace) {
     lines.push(`  workspace requested: ${shortWorkspace(requestedWorkspace)}`);
-    lines.push("  Hint: contextId may not match the workspace bound to your api_key.");
+    lines.push("  Hint: --context-id may not match the workspace bound to your api_key.");
   }
   const safeDetail = sanitizeServerDetail(serverDetail);
   if (safeDetail) {
@@ -380,11 +457,22 @@ function extractExistingFile(error: unknown): FileObject | null {
   return existing as FileObject;
 }
 
-/** Fail fast on a non-UUID `contextId`. */
-function validateContextId(contextId: string): void {
-  if (!isUuid(contextId)) {
+/**
+ * The canonical form of `contextId`, or the Python SDK's error for one that
+ * is not a UUID — port of `_normalize_context_id`.
+ *
+ * Canonicalized rather than only checked: the server takes a `{braced}` or
+ * dashless spelling as another, unknown id and answers with its uniform
+ * 404 (Python #236). A padded UUID is refused, as `uuid.UUID` refuses it.
+ * The message points at the two places a workspace id comes from.
+ */
+function normalizeContextId(contextId: string): string {
+  try {
+    return normalizeUuid(contextId, "context_id");
+  } catch {
+    const shown = typeof contextId === "string" ? pyRepr(contextId) : String(contextId);
     throw new Error(
-      `contextId must be a UUID; got ${JSON.stringify(contextId)}. ` +
+      `context_id must be a UUID; got ${shown}. ` +
         "Use the OAuth profile's workspace_id, a UUID from `kagura context list`, " +
         "or run `kagura auth login` first.",
     );

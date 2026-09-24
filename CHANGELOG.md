@@ -14,6 +14,501 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   forwarding, bounded session recovery, deterministic bundles and Windows/macOS
   artifact validation. See [installation and host validation](docs/mcpb.md).
 
+- **`workspace` group**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  `workspace member list|add|set-role|remove` and `workspace invite
+  create|list|revoke`, the Python CLI's workspace administration commands
+  (memory-cloud v0.42.0+), with its options, help, tables and exit codes.
+  The server takes only the workspace owner's static API key here; an OAuth
+  profile gets an access-denied error saying so. As in Python (its #115),
+  the workspace comes from the same source as the key: `-w/--workspace`,
+  else the OAuth profile's workspace, else `context_id` in the
+  `.kagura.json` holding the key, and a `KAGURA_API_KEY` key needs `-w`.
+  An empty or `auto` `-w` is refused (exit 1) rather than falling back to
+  the source's workspace. `member remove` asks first, naming the
+  workspace, unless `--yes`. `invite create` prints the invitation URL
+  once, on stdout, after a warning on stderr; `invite list` never shows it.
+  `--json` prints each record as the Python model dumps it: its fields in
+  its order, `null` or `false` for what the server left out, unknown ones
+  dropped, and never a join credential. A record missing a required field,
+  or holding a scalar, list or mapping of the wrong type
+  (`allowed_context_ids: Input should be a valid list`), is refused with
+  `KaguraResponseError`'s message (`WorkspaceClient.list_members:
+  unexpected server response for WorkspaceMember (role: Field required).
+  …`), exit 1. `--role` matches
+  exactly, as click's `Choice` does. `invite revoke` reads its id as
+  Python's `int()` does, and exactly: `9007199254740993` is not rounded to
+  a neighbouring invitation's id. Four things differ on purpose: a
+  workspace that is not a UUID is refused before `member remove` asks,
+  where Python asks first; each `invite create -c` must be a context UUID
+  (exit 1, `context_id must be a UUID, got '…'`), where Python sends it as
+  typed and the server answers `HTTP 500`; a `USER_ID` of `.` or `..` is
+  refused (exit 2, `Invalid value for 'USER_ID': '..' is not a valid user
+  id.`) before anything is asked or sent, where Python sends it and URL
+  resolution turns `member remove .. --yes` into a `DELETE` of the
+  workspace's own URL; and an invitation with no email prints `-`, as
+  `invite list` does, where Python prints `None`.
+
+- **`auth create-key`, `auth list-keys` and `auth revoke-key`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  which mint, list and revoke an API key for another member of the
+  workspace, as the Python CLI's do, through the same workspace pairing
+  and owner-key rule as the `workspace` group. `create-key` needs
+  `--expires-days` (1-3650) and prints the key once, on stdout, after a
+  warning on stderr; `list-keys` never shows a plaintext, not even under
+  `--json` if a server sent one; `revoke-key` asks first unless `--yes`,
+  refuses a workspace that is not a UUID before it asks, and revokes the
+  `KEY_ID` typed, exactly, however large. `create-key` reads the server's
+  answer as Python's `MemberAPIKey` model does (an `id` of `"42"` is key
+  #42). A `--user` of `.` or `..` is refused (exit 2) before anything is
+  asked or sent, where Python sends it to another endpoint. They refuse
+  `--invite` as every `auth` subcommand but `login` does, and have no bare
+  `kagura-memory create-key` spelling: the bare aliases stay the seven
+  subcommands v0.7.0 had.
+
+- **`guardrails load` and `guardrails digest`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the Python CLI's `guardrails` group (memory-cloud v0.74.0+). Both take
+  the context as an optional argument, else `context_id` from
+  `.kagura.json`. `load [CONTEXT_ID] [--cap 1-1000]` calls the MCP
+  `load_guardrails` tool and prints the set as Python's `GuardrailSet`
+  prints it: its fifteen keys in the model's order (the tool's
+  `context_display_name`, `context_is_private` and `context_is_locked` left
+  out), each item's eleven, scalars read as pydantic reads them (`"50"` is
+  `50`), and a `tool_trigger` Python cannot read as `null`, with
+  `match: null` filled in. A set missing a required field, a truncation
+  flag above all, exits 1 with the Python SDK's `KaguraResponseError` text
+  (`load_guardrails: unexpected server response for GuardrailSet
+  (pinned_truncated: Field required). …`) instead of printing a set that
+  reads as complete. `digest [CONTEXT_ID] [--target export|instructions]
+  [--out FILE] [--profile P] [--tools T]` reads the REST digest route with
+  the credential chain and prints the export block, or the MCP server
+  instructions preview; an empty set prints nothing and says so on stderr.
+  With `--out`, the block is spliced into FILE between its marker lines
+  (replaced in place, left alone when unchanged, removed when the set is
+  empty), a symlink, the file's mode and its CRLF line endings kept, and
+  one JSON line reports `path`, `status` (`written`, `unchanged` or
+  `removed`) and `tool_triggered_version`. Options, messages and exit codes
+  are the Python CLI's: `--target` is case-sensitive, `--out` refuses a
+  directory or an unreadable file (exit 2), `--out` with `--target
+  instructions` and `--profile` / `--tools` without it are usage errors,
+  and a context that is not a UUID is refused with `context_id must be a
+  UUID, got '…'` (exit 1). Unlike the Python CLI, `--out ''` is a usage
+  error (exit 2), where click takes the empty path as the current
+  directory and the write then fails (exit 1). The help examples name
+  `kagura-memory`, one per line.
+
+- **`setup codex|hermes|openclaw --agents-md [PATH]`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the guardrail export (memory-cloud v0.74.0+). It fetches the context's
+  tool guardrail export block and splices it into a file the harness loads
+  every session, between its `kagura-memory:guardrails` marker lines, with
+  the rules `guardrails digest --out` follows: an earlier block is replaced
+  in place, an unchanged set rewrites nothing, and the rest of the file
+  keeps its text, line endings and links. Without PATH the file is the
+  harness's own, as in Python: `$CODEX_HOME/AGENTS.md` (or
+  `AGENTS.override.md` when that exists), the first of `.hermes.md`,
+  `HERMES.md`, `AGENTS.override.md`, `AGENTS.md` and `CLAUDE.md` in the
+  current directory for Hermes, and `AGENTS.md` in OpenClaw's workspace
+  (`$OPENCLAW_WORKSPACE_DIR`, else `workspace/` in its state directory). The
+  context is `--context-id`, else a `--guardrails` context UUID; without one
+  the flag is a usage error (exit 2), since this port never asks. The block
+  is fetched on the usual credential chain, settled before anything runs,
+  a dry run included: no credential, or one for another server than the
+  entry's, stops setup with nothing run (exit 1). The written file is in
+  `wrote`, and the notes carry Python's lines: the refresh command
+  (`kagura-memory guardrails digest <ctx> --out <file>`), a warning past the
+  32 KiB Codex reads or the 20,000 characters OpenClaw reads, and Hermes's
+  prompt-injection note. An empty digest writes nothing and says so, a
+  failed export prints the report and then the error (exit 1), and
+  `--dry-run` names what the export would do to the file. Hermes and
+  OpenClaw runs without it end with Python's "Re-run with --agents-md
+  --context-id <id> …" hint.
+
+- **The measurement lane: `recordMeasurement` and `recallSeries`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the port of the Python SDK's `record_measurement` / `recall_series`
+  (memory-cloud v0.54.0+, the HOW-MUCH axis). `recordMeasurement({
+  contextId, metric, value, measuredAt, unit, details })` appends one
+  number to a metric's series; `recallSeries({ contextId, metric, period,
+  agg, start, end })` reads it back bucketed by `day`, `week` or `month`
+  and aggregated by `avg`, `min`, `max`, `sum`, `count` or `last`.
+  Measurements are not memories: never embedded, recalled or
+  consolidated, and append-only. The metric (1-64 characters, counted as
+  Python counts them), the value (a finite number; a string or a boolean
+  is refused, not coerced) and the unit (1-32 characters) are checked
+  before any request, with the Python SDK's messages. `measuredAt`,
+  `start` and `end` take an ISO 8601 string, sent as given, or a `Date`,
+  sent as its UTC instant. Both return the Python SDK's model, its keys in
+  its order, `unit` `null` and `status` `"success"` when the server leaves
+  them out and other fields dropped, and a result that does not read as
+  one raises `KaguraResponseError` (`operation` `record_measurement` /
+  `recall_series`) in the Python SDK's words. The models
+  `MeasurementResult`, `MeasurementSeries`, `SeriesBucket`,
+  `MeasurementPeriod` and `MeasurementAggregate`, and the option types
+  `RecordMeasurementOptions` and `RecallSeriesOptions`, are exported.
+
+- **`listMemories` bounding box**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  `latMin`, `latMax`, `lonMin` and `lonMax` (memory-cloud v0.54.0+), in
+  any combination, keep only memories with a location; `lonMin > lonMax`
+  is the box across the antimeridian. A bound that is not a number or is
+  out of range is refused before any request, with the Python SDK's
+  sentence and the option's name (`latMax must be between -90 and 90,
+  got 91`). An older server ignores the bounds and returns an unfiltered
+  page. `MemoryListItemLocation` names the `{ lat, lon }` each item
+  carries.
+
+- **`measure record` and `measure series`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the Python CLI's `measure` group, with its arguments, options, help and
+  errors. The context is the first argument, never read from
+  `.kagura.json`. A negative VALUE needs no `--` (`measure record
+  <context-id> pnl_usd -120`); an option `record` does not declare is
+  refused as `No such option: <token>` when it lands in CONTEXT_ID or
+  METRIC, as click refuses it, even after `--`. Unlike click, these
+  errors never print the value of a `--name=value` token: it is named
+  `--name`, as in every other command, since the value may be a key.
+  `--period` and `--agg` match exactly. A non-finite VALUE, a bad metric or a bad unit exits 1
+  with the SDK's message, as in the Python CLI. The result prints as the
+  Python CLI prints it, apart from a whole float (`72.0` prints `72`).
+
+- **`files upload -v/--verbose` and `--progress`, and `resource import -v/--verbose`
+  and `--progress`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  `--progress json` writes the Python CLI's NDJSON on stderr, one event per
+  line (`{"v": 1, "ts": …, "stage": …, "kind": …, "msg": …, "detail": …}`),
+  ending with the operation's one `success` or `error`; `-v`, or
+  `--progress rich`, writes the lines the Python CLI shows (`→ Reserving
+  upload report.pdf (1234 bytes)`, `✓ Upload complete`, `✗ Upload failed:
+  …`), as plain text; `--progress none` is silent even with `-v`. `-v` is
+  repeatable, and `--progress` takes any case, as click declares them.
+  Stdout carries the same result JSON either way. Unlike the Python CLI,
+  `files upload --remember` reports `success` only once the linked memory
+  is written, and `resource import` ends with an `error` event when the
+  credential fails after its start event.
+
+- **`onProgress` on `FilesClient.upload` and `ResourceClient.ingestEvents`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the Python SDK's `logger=` hooks as a callback: each event is the NDJSON
+  line without `v` and `ts`. An upload reports `reserve`, `upload` and
+  `confirm`, then one terminal `complete` event, even when it throws: a
+  `success` with the file id, or an `error` saying how far it got
+  (`reserved_file_id`, `uploaded`, `confirm_started`, `confirmed`).
+  `ingestEvents` takes it as a new optional fourth argument,
+  `{ onProgress }`. `ProgressEvent`, `ProgressKind`, `ProgressCallback`,
+  `IngestEventsOptions` and `PROGRESS_SCHEMA_VERSION` are exported. Without
+  a callback nothing is emitted, and one that throws, or an `async` one
+  that rejects, is ignored.
+
+- **`resource setup --name` (`-n`)**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  as in the Python CLI 0.40.1: the context's name, which defaults to the
+  resource id. A workspace that already has a context of that name needs
+  it, since the server refuses a second one. `--name=` is sent as given,
+  and the server refuses it, as with Python. The help texts, the summary
+  and the examples are Python's.
+
+- **`MemoryClient`, the REST guardrail client**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the port of the Python SDK's `MemoryClient` (memory-cloud v0.74.0+).
+  `getGuardrailDigest(contextId, { target, profile, tools })` returns the
+  `AGENTS.md` export block (`target: "export"`, the default; `""` when the
+  context has no tool guardrails) or the MCP server instructions this
+  credential would receive (`"instructions"`), as a `GuardrailDigest` with
+  the text as is and the `X-Kagura-Guardrails-Tool-Triggered-Version` header
+  as `tool_triggered_version` (`null` when the server sends none).
+  `loadGuardrails(contextId, { cap })` is the REST twin of
+  `KaguraClient.loadGuardrails`, returning the new `GuardrailSet` type (the
+  MCP `LoadGuardrailsResponse` is now that set plus its context block). It
+  reads the set as the Python SDK's `GuardrailSet` model does, with the
+  reader `guardrails load` prints through, so the two accept and refuse
+  the same sets: the model's fields only, in its order, `null` for an
+  optional one left out (the context block included), and a `tool_trigger`
+  that is no trigger `null`. A set missing a required field, a truncation
+  flag included, or holding one of the wrong type raises
+  `KaguraResponseError` (`operation` `MemoryClient.load_guardrails`)
+  rather than read as complete. The types say so too: `GuardrailItem`'s
+  `type`, `delivery_mode`, `source_type`, `authored_by_caller`,
+  `created_at` and `updated_at` are now `… | null`, and `ToolTrigger.match`
+  `string | null`, as in the Python SDK's model, so strict code that used
+  them as plain strings (or tested `match === undefined`) no longer
+  compiles rather than failing on a `null` at run time. A
+  `contextId` that is not a UUID is refused before any request with the
+  Python SDK's `context_id must be a UUID, got '…'`; like Python's
+  `uuid.UUID`, a braced, `urn:uuid:` or dashless spelling is sent in
+  canonical form, and one padded with whitespace is refused. A caller with
+  only an API key, an agent-bound one included, reads guardrails without
+  an MCP session. `GUARDRAIL_VERSION_HEADER`, `GetGuardrailDigestOptions`,
+  `MemoryLoadGuardrailsOptions`, `GuardrailDigest` and
+  `GuardrailDigestTarget` are exported too.
+
+- **`KaguraResponseError`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  the Python SDK's class for a successful response the SDK cannot read,
+  usually because the server is newer than the SDK. Its message reads as
+  Python's, `<operation>: unexpected server response for <Model> (<field>:
+  Field required). The server may be newer than this SDK; upgrading
+  kagura-memory may help.`, naming at most three failing fields (then
+  `(+N more)`) and never their values, and `operation` names the call. It
+  extends `KaguraError`, not `KaguraConnectionError`: the call succeeded,
+  so a retry fails the same way. The methods added in this release raise
+  it, and so do `ResourceClient.ingestEvents` and `FilesClient.upload` for
+  a 2xx body they cannot read (see Changed); every other existing method
+  keeps the errors it raised.
+
+- **Quota and plan details on CLI errors**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  A quota refusal (`KaguraQuotaError`) adds `  Resets at: <time>` after
+  `Error: <message>`, in Python's `isoformat()` form (`+00:00`, never `Z`;
+  microseconds only when not zero), and a quota or feature refusal adds
+  `  Required plan: <label> (<key>)`, as the Python CLI prints them. Every
+  command gets them.
+
+### Changed
+
+- **`auth use` reads as the Python CLI's**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57),
+  as Python #206). Its argument is `NAME`, and success prints `Default
+  profile set to '<name>' (workspace '<workspace>').`, with a note when
+  `KAGURA_PROFILE` is set and still overrides the new default, where it
+  printed `Default profile is now '<name>'.`. An unknown name exits 1 with
+  `Profile '<name>' not found. Available: <the stored profiles, sorted>`
+  (or `(none — run: kagura-memory auth login)`), where the message named
+  the credentials file; a missing name is click's `Missing argument
+  'NAME'.` (exit 2), where it printed a usage line; and an extra argument
+  is refused (exit 2), where it was ignored. A name such as `constructor`
+  is no longer taken for a stored profile.
+
+- **`WorkspaceClient`'s shape errors read as the Python SDK's**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  which the new commands print: `WorkspaceClient.list_members: unexpected
+  server response (GET …: expected a JSON array, got dict). The server may
+  be newer than this SDK; upgrading kagura-memory may help.` for
+  `listMembers` and `listInvitations`, the same with `expected an object
+  carrying a 'api_keys' array` for `listMemberKeys`, and a mis-shaped
+  `mintMemberKey` response prefixed `WorkspaceClient.mint_member_key: `.
+  The classes are unchanged (`KaguraConnectionError`, and `KaguraError`
+  for the mint).
+
+- **The REST clients name a request's whole path in their diagnostics**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  as the Python SDK does (httpx's `url.path`): a base URL's own prefix
+  included and `%XX` escapes decoded, so a `non-JSON body` or shape error
+  reads `GET /kagura/api/v1/workspaces/…/members/a@b/credentials` for a
+  server at `https://host/kagura`, where it read
+  `GET /api/v1/workspaces/…/members/a%40b/credentials`.
+
+- **`WorkspaceClient.mintMemberKey` reads its response as the Python
+  SDK's `MemberAPIKey` model does**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  leniently, as pydantic does (an `id` of `"42"` is 42, where it was
+  refused as a mis-shaped mint), and whole (a `plaintext_key` that is no
+  string is refused, where it was returned). The key it returns has the
+  model's fields only, with `null` or `false` for what the server left
+  out.
+
+- **`setup codex|hermes|openclaw` read `--mcp-url` as a URL parser does**
+  (python-sdk#279): whitespace and control characters around it, and any
+  tab or newline inside it, are dropped before the checks, and the entry
+  gets that URL. Anything but an http(s) URL with a host is refused
+  (`--mcp-url=--help`, `memory.kagura-ai.com/mcp` or `https://[::1/mcp`,
+  exit 2 with Python's `use an https:// URL, e.g. …`), since it would go on
+  the harness's command line after `--url`. A configured `mcp_url` gets the
+  same checks and exits 1, saying to pass `--mcp-url`.
+
+- **A `?guardrails=` in the MCP URL of `setup hermes|openclaw` is handled
+  as Python does now** (python-sdk#279). Every context value is dropped,
+  names compared decoded as the server reads them (`guard%72ails`), with
+  one warning that names `--guardrails` and the URL's value together and
+  points at the AGENTS.md export. A first `off`, the value the server
+  reads, is kept alone (`?guardrails=OFF&guardrails=<ctx>` is written
+  `?guardrails=off`), where the whole query was kept and the context with
+  it.
+
+- **`setup codex|hermes|openclaw --context-id` must be a context UUID**
+  (exit 2, as in Python without `--profile`; this port lists no contexts):
+  `-c proj`, a padded UUID or `-c ''` is refused, where Codex went on
+  without the lane and Hermes and OpenClaw ignored it. A braced or
+  dashless UUID is written canonically.
+
+- **`$OPENCLAW_STATE_DIR` and `$OPENCLAW_CONFIG_PATH` are read as OpenClaw
+  reads them** (python-sdk#279): stripped, and a leading `~` expanded to
+  the home directory, where a padded value named another path and `~/oc`
+  one under the current directory. `~user/…` is left as written.
+
+- **`setup hermes` notes an existing `mcp_servers:` key, an inline one and
+  an unreadable `config.yaml` in Python's words** (python-sdk#279), and
+  reads that file as strict UTF-8, as Python does.
+
+- The Codex digest note previews with `kagura-memory guardrails digest …
+  --target instructions`, this bin's own command, and the help of `--name`,
+  `--context-id`, `--guardrails`, `--api-key-env` and `--dry-run` on the
+  harness setups is Python's.
+
+- **An MCP URL whose query `setup` rewrites is written with a lower-case
+  scheme**, as Python writes it: `setup codex --mcp-url HTTP://…/mcp -c
+  <ctx>` gets `http://…/mcp?guardrails=<ctx>`, as do `setup claude
+  --guardrails` or `--tool-profile` and the `?guardrails=` edits of `setup
+  hermes|openclaw`, and an empty `#` at the end goes. A URL whose query
+  setup leaves alone is still written as given.
+
+- **`files` commands pair the workspace with the credential**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  as the Python CLI does (its #115): `--context-id` when given, else the
+  OAuth profile's workspace, else the `context_id` of the `.kagura.json`
+  that holds the key, and the client is built from that same credential.
+  A `KAGURA_API_KEY` key now needs `--context-id` (exit 1, in Python's
+  words), where it took `.kagura.json`'s `context_id`, a workspace another
+  key belongs to.
+
+- **`files delete` prints `Deleted <file_id>` and `files download-url` the
+  bare URL**, as the Python CLI does, where they printed JSON.
+
+- **`files upload --remember` writes the Python CLI's memory**: the content
+  `` Uploaded file `<name>` (<n> bytes, <type>). Stored as file_object
+  <id>. ``, `source_uri` the file's `file://` URI (resolved as Python's
+  non-strict `resolve()` does, so a file removed after the upload still
+  has one), `source_type` `file`, and `details` with the file's id,
+  sha256, size and type; the summary defaults to `File: <name>` from the
+  server's filename. The memory client
+  resolves its credential as the upload's did, not from `.kagura.json`'s
+  key. A write that reports no `memory_id` is a failure, and a failed
+  write says `File uploaded (file_id=…), but creating the linked memory
+  failed: …`, with a quota refusal's `Resets at:` / `Required plan:` lines.
+
+- **`files upload` checks its options first, as click does**: an invalid
+  `--importance` or `--progress` is reported before a missing or wrong
+  PATH, and PATH errors read `File '<path>' does not exist.` / `… is a
+  directory.`. `--summary` or `--tags` without `--remember` is refused
+  (`--summary and --tags require --remember.`, exit 2), where they were
+  ignored.
+
+- **`resource import` reads its input as the Python CLI does**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  `--format auto` goes by the file's extension (`.csv`, `.jsonl`, `.json`),
+  so stdin needs `--format` (`Cannot detect format. Use --format
+  csv|json|jsonl`), where the content was sniffed. `--format json` needs
+  an array of objects; a single object is refused. CSV is read as
+  Python's `csv.DictReader` reads it: blank lines are skipped, and a
+  short row's missing cells are `null`, where they were `""`. Its errors
+  are Python's, with exit 1: `Invalid JSON: Expecting value: line 1
+  column 1 (char 0)`, `JSON item 0 is not an object: int`, `Invalid JSONL
+  at line 2: …`, `No data found in input`, `Row 1: column 'sku' not
+  found. Keys: ['name', 'price']`, and `Failed to read input: …` for a
+  stdin that cannot be read. `--id-column=` numbers the rows, as in
+  Python, where it was refused. The help texts are Python's.
+
+- **`resource import` keeps what the Python CLI keeps of each row**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  A row lists its keys in the order read, integer-like ones included, in
+  the `Keys: […]` of an error and in the request body, where `1` and
+  `2024` came first. A doc_id taken from a number is Python's `str()` of
+  it as written: `1234567890123456789` keeps its digits, where two ids
+  past 2^53 rounded to one doc_id and the second row was upserted over the
+  first, and `10.0` and `1e20` read `10.0` and `1e+20`, where they read
+  `10` and `100000000000000000000`. `NaN`, `Infinity` and `1e400` are read
+  as `json.loads` reads them and fail the batch holding them, as the
+  Python CLI's request encoding does (`Out of range float values are not
+  JSON compliant: nan`, exit 1; the batches before it are sent), rather
+  than being sent as `null`. A number in the payload is still sent as
+  JavaScript reads it: an integer past 2^53 loses its last digits.
+
+- **`ResourceClient.ingestEvents` and `FilesClient.upload` refuse a 2xx
+  answer they cannot read**, with a `KaguraResponseError` in the Python
+  SDK's words (`ResourceClient.ingest_events: unexpected server response
+  for ResourceEventBatchResponse (…)`): a batch answered with anything but
+  a JSON object, and a confirm answered without a string `id`, which were
+  returned as the result. The progress stream ends with that `error`, and
+  such a confirm is not reported as `confirmed`.
+
+- **`FilesClient` sends a `contextId`'s canonical form and refuses it in
+  the Python SDK's words**: a `{braced}`, `urn:uuid:` or dashless UUID is
+  sent as `xxxxxxxx-xxxx-…`, where it was sent as typed and met the
+  server's 404, and a padded one is refused, with `context_id must be a
+  UUID; got '<value>'. …`. A 403's hint names `--context-id`, as
+  Python's does.
+
+- **`resource setup` prints the Python CLI's `ResourceSetupResponse`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  `context_id`, `context_name`, `resource_id`, `token`, `token_id` and
+  `warning`, in that order, with `warning` null when the server sends
+  none, and without the tool result's `status` and `message`. A result
+  missing one of those fields exits 1 with Python's `KaguraResponseError`
+  message, which names the fields and never the token. The `--summary`
+  note says that only the context's owner can set the summary, and it is
+  printed before the configuration is read, so it appears even when that
+  then fails.
+
+- **`resource tokens revoke` prints `Token revoked.`**, and **`resource
+  schema` prints `No schema registered for this resource.`** when there is
+  none, as the Python CLI does
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  They printed `{"status": "success", "token_id": N}` and `null`.
+
+- **Server versions are read as the Python SDK reads them**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  `checkServerVersion()` and `auth login --invite` share one parser:
+  `v?MAJOR.MINOR.PATCH` at the start, where `+build`, more `.N`
+  components and `.postN` mark a release and anything else after the
+  triple a pre-release, which comes before its own version. So
+  `checkServerVersion()` now warns on `0.75.0-rc1` and `v0.74.0`, and no
+  longer on `0.74`, which it cannot compare; `--invite` against a
+  `0.76.0-rc.1` server takes the two steps instead of the hand-off.
+
+- **A `listTags` drill-down names the context with the `context_name`
+  the REST tags endpoint sends** (memory-cloud v0.77.0 and later), and
+  caches it, so it makes no MCP `list_tags` call for the name. An older
+  server's reply, or an empty name, still gets the one lookup.
+
+- **Choice options match case-sensitively where the Python CLI declares
+  them so**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  as click's `Choice` does: `context search-config --reranker`,
+  `resource events --op`, `resource ingest --op` and `setup claude
+  --scope` now refuse `Voyage`, `UPSERT` or `Project` with exit 2, where
+  they took any case. `remember --source-type` still takes any case, as
+  Python declares it, now casefolded as click folds it (`ﬁle`, with the
+  `fi` ligature, is `file`).
+
+- **The missing-context error reads as the Python CLI's does now**:
+  `context_id required. Pass the context ID or set context_id in
+  .kagura.json`.
+
+- **Numbers are read as Python's `int()` and `float()` read them**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  digit-group underscores (`--limit 1_000`, `--importance 0.000_5`) and
+  any Unicode decimal digit (`١٢`, `１２`) are taken, where they were
+  refused (exit 2), and the whitespace around a number is what they skip:
+  NEL (`\x85`) is, where it was refused, and a BOM (`\ufeff`) is not, so
+  `measure record … $'\ufeff5'` is refused (exit 2), where it was read as
+  5.
+
+- **An unknown option gets click's suggestion**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  a long option close to one the command takes is refused as the Python
+  CLI refuses it, `No such option: --js Did you mean --json?`, or `No such
+  option: --per (Possible options: --end, --period)` for more than one
+  (`difflib`'s close matches, as click 8.3 finds them).
+
+- **An option given no value reads as click's error**: `Error: Option '-w'
+  requires an argument.`, where it printed `Option -w needs a value.`
+  without the `Error:` prefix. One mistake is one error: `--name -bad`,
+  whose dash-led value this bin does not take, no longer adds `No such
+  option: -b`.
+
+- **An option error wins over `--help`**, before it or after it, as click
+  reads the options first: `workspace member list --help --bogus`,
+  `workspace --help --bogus` and `--version --bogus` exit 2 with `No such
+  option: --bogus`, where they printed the help or the version and exited
+  0. `secret exec`, where click passes an unknown option on, still prints
+  its help for `secret exec --help --bogus`; a missing value, as in
+  `secret exec --help --as`, wins there too. `--invite` on an `auth`
+  subcommand other than `login`, which stands for click's `No such option:
+  --invite`, wins over `--help` the same way, and is refused as `--invite
+  applies only to 'auth login'.` without a value too, where it read as a
+  missing value.
+
 ### Fixed
 
 - Reject malformed JSON-RPC envelopes in the desktop proxy, count separators
@@ -22,6 +517,148 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Quote Windows browser URLs for Explorer's argument parser so OAuth links
   containing `=` open the browser instead of the Documents folder. Keep URLs
   out of command shells and encode embedded quotes before verbatim passing.
+
+- **`WorkspaceClient` refuses a `userId` of `.` or `..`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  Percent-encoding leaves both as they are, and URL resolution then
+  dropped or climbed the segment: `removeMember(ws, "..")` sent `DELETE
+  /api/v1/workspaces/<ws>`, the workspace itself, and `updateMemberRole`
+  a `PUT` there. Every method that takes a `userId` now throws before
+  sending anything.
+
+- **`WorkspaceClient.revokeInvitation` and `revokeMemberKey` no longer
+  revoke a rounded id**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  A `number` past `Number.MAX_SAFE_INTEGER` may already be a different id
+  (`9007199254740993` is `9007199254740992`), and one of `1e21` was sent
+  as `1e+21`; such a `number` is now refused, and the id can be passed as
+  a `bigint`, which is sent exactly.
+
+- **A `setup hermes|openclaw` warning no longer names a context id it
+  dropped**: the URL's `?guardrails=<ctx>` warning quoted the id.
+
+- A relative `$CODEX_HOME`, `$HERMES_HOME` or `$OPENCLAW_*` path is named
+  as given in `setup`'s messages, as Python names it, where it read as a
+  path under `~` when setup ran from the home directory.
+
+- **A `..` in `$CODEX_HOME`, `$HERMES_HOME` or `$OPENCLAW_STATE_DIR` is
+  kept, as Python's pathlib keeps it**: setup folded `~/a/../b` to `~/b`,
+  so with `~/a` a link it read the harness's config from, and named,
+  another directory than the one the system (and the Python CLI) goes to
+  through the link. `setup`'s messages also name a path under the home
+  directory as Python does, segment by segment: `~/x/../y/z.md` and
+  `~/..notes/A.md`, where the first was folded and the second printed in
+  full.
+
+- **A doc_id outside 1-255 characters and a CSV row with more cells than
+  the header are refused before anything is sent** (exit 1), where the
+  Python CLI stops with a traceback from its event model.
+
+- **A stderr closed early no longer kills the bin**: an `EPIPE` on stderr
+  (`… -v 2>&1 | head -1`) is ignored, so the upload or import it was
+  reporting on finishes.
+
+- **`resource import -V` above 2^53 is refused for what it is**: `… is too
+  large for this CLI to send exactly (at most 9007199254740991).` (exit
+  2), where it said the value was not in the range `x>=1`. (The Python
+  CLI sends it; a JavaScript number would round it.)
+
+- **Security: the HTTPS check refused too little.**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57))
+  A URL that `fetch` reads as plain HTTP to a remote host passed it when
+  it was spelled with a leading control character (`\x01http://…`), a
+  tab or newline inside (`ht\ttp://…`), no slashes (`http:host`,
+  `http:/host`) or backslashes (`http:\\host`), so the clients, `login()`
+  and `auth login --server` talked to it unencrypted, credentials
+  included. The check now
+  reads the URL as a URL parser does, as the Python SDK's does since its
+  0.40.1: it drops whitespace and control characters around the URL and
+  tabs and newlines inside it, then refuses any `http:` scheme, in any
+  case and with or without its slashes, unless the host is `localhost`,
+  `127.0.0.1` or `[::1]`. The error shows the URL as it was read.
+
+- **Security: `setup claude` refuses a plain-HTTP URL to a remote host**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
+  whether it came from `--mcp-url`, the project's `.kagura.json` or
+  `KAGURA_MCP_URL`, before anything is written or run: `Error: Connection
+  failed: MCP URL must use HTTPS for security (got: …). HTTP is only
+  allowed for localhost development.` (exit 1), the Python CLI's words,
+  whose connection test refuses it. It wrote the key into `.mcp.json` and
+  `.kagura.json` beside that URL, and Claude Code then sent it in the
+  clear. (The 0.11.0 note that Python's `setup claude` does not check was
+  wrong.)
+
+- **Security: an OAuth profile's token stays with its own server**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  With no `.kagura.json`, the MCP-backed commands (`recall`, `guardrails
+  load`, `measure record|series` and the rest) and `doctor` took the URL
+  the config loader fills in, `KAGURA_MCP_URL` or else
+  `https://memory.kagura-ai.com/mcp`, as the server, so a profile bound to
+  another server had its token sent there. They now leave the URL to the
+  credential chain, which pairs each credential with its own, as the REST
+  commands already did: an OAuth profile's `mcp_url`, and for
+  `KAGURA_API_KEY` still `KAGURA_MCP_URL` or the default. So
+  `KAGURA_MCP_URL` no longer redirects an OAuth profile's MCP calls. A
+  `.kagura.json`'s `mcp_url` is still used as before. (The Python CLI
+  0.40.1 sends the token to the loader's URL.)
+
+- **`setup claude --mcp-url ""` (or `--mcp-url=`) falls back to the
+  project's URL**, as Python's `mcp_url or …` does: the `.kagura.json`
+  `mcp_url`, then `KAGURA_MCP_URL`, then the default. It wrote `"url": ""`
+  into the entry, blanked the project's `mcp_url` and exited 0, and so
+  skipped the HTTPS check of the URL it should have used.
+
+- `checkServerVersion()` no longer throws a `TypeError` when the server
+  reports a version that is not a string; it returns without a warning.
+
+- `doctor` passes an `mcp_url` written `HTTPS://…` or
+  `HTTP://LOCALHOST:…`, which it failed as not HTTPS: it now judges plain
+  HTTP with the clients' own check.
+
+- **`resource tokens update` and `resource tokens revoke` act on the
+  `TOKEN_ID` typed** ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  it is read as Python's `int()` reads it, so `1_000` is token 1000, where
+  it was refused (exit 2), and exactly, as `invite revoke` and `revoke-key`
+  read their ids: `9007199254740993` revoked token `9007199254740992`, and
+  `1000000000000000000000` was sent as `1e+21`. `ResourceClient.revokeToken`
+  and `updateToken` take a `bigint` for such an id, and refuse a `number`
+  past `Number.MAX_SAFE_INTEGER` or with a fraction before anything is
+  sent, as `WorkspaceClient` does.
+
+- `resource ingest-batch --file` words a file it cannot open as click
+  does, and as `resource import --file` does: `Invalid value for '--file'
+  / '-f': 'missing.json': No such file or directory`, where it gave Node's
+  `ENOENT: no such file or directory, open 'missing.json'`.
+
+- **The daily MCP call cap is a `KaguraQuotaError`**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57),
+  as Python #268). A tool that refuses the cap in its reply,
+  `rate_limit_exceeded`, used to raise a plain `KaguraError`, with nothing
+  to say when the cap resets. It now raises `KaguraQuotaError` with
+  `quotaType: "api_mcp_daily"`, `current` and `limit` from the reply's
+  `used_today` and `daily_limit`, `resetsAt` the next UTC midnight (in
+  Python's `+00:00` form) and a `retryAfter` counting down to it; fields the
+  server does send win. The HTTP 429 the rate-limit middleware sends for
+  the same cap is still a `KaguraRateLimitError`.
+
+- **An out-of-range option is echoed as click converted it**
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)):
+  `files upload --importance 2` is refused as `2.0 is not in the range
+  0.0<=x<=1.0.` and `resource events --limit 0101` as `101 is not in the
+  range 1<=x<=100.`, where the value was printed as typed.
+
+- `--location` out of range prints the value as the Python CLI does
+  (`got 91.0`, `got inf`), where it printed `91`, and `NaN` for `inf`.
+
+- A value quoted in an error escapes what Python's `repr()` escapes beyond
+  ASCII too, such as a no-break space (`'a\xa0b'`) or a zero-width space.
+
+- An empty argument (`''`) reaches the command in its place, as click
+  passes it through
+  ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)).
+  An empty first argument was dropped, so each later one moved up into
+  its place: `recall '' -k 5` reported a missing `QUERY`, and a command
+  taking three arguments read its second as its first.
 
 ## [0.11.0] - 2026-09-24
 

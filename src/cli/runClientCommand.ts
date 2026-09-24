@@ -7,17 +7,26 @@
  * one call each and cannot drift apart in how they report failure.
  */
 
+import type { resolveAuth as resolveAuthImpl } from "../auth/resolve.js";
+import type { ResolvedAuth } from "../auth/types.js";
 import type { KaguraClient, KaguraClientOptions } from "../client.js";
-import { loadConfig as loadConfigImpl, type KaguraConfig } from "../config.js";
+import { isEnvFallbackConfig, loadConfig as loadConfigImpl, type KaguraConfig } from "../config.js";
 import type { FilesClient } from "../filesClient.js";
+import type { MemoryClient } from "../memoryClient.js";
 import type { ResourceClient } from "../resourceClient.js";
 import type { SecretClient } from "../secrets/client.js";
+import type { WorkspaceClient } from "../workspaceClient.js";
 import { excMessage } from "../errors.js";
-import { formatJson } from "./output.js";
+import { cliErrorMessage, formatJson } from "./output.js";
 import { CliError, CliUsageError } from "./parse.js";
 
-/** Verbatim from the Python CLI, so the fix instruction is identical. */
-export const NO_CONTEXT_MESSAGE = "context_id required. Use --context-id or set in .kagura.json";
+/**
+ * Verbatim from the Python CLI's `_require_context_id`, so the fix
+ * instruction is identical. It names neither `--context-id` nor a
+ * positional argument: commands take the context either way.
+ */
+export const NO_CONTEXT_MESSAGE =
+  "context_id required. Pass the context ID or set context_id in .kagura.json";
 
 export interface ClientCommandContext {
   write: (line: string) => void;
@@ -27,24 +36,38 @@ export interface ClientCommandContext {
   /** Injected so tests can supply a fetch stub. */
   makeClient: (options: KaguraClientOptions) => KaguraClient;
   /**
-   * REST counterparts, for the `files`, `resource` and `secret` groups.
+   * The SDK credential chain (env > OAuth profile > .kagura.json), for a
+   * command that has to know which source won before it builds a client:
+   * an API key belongs to one workspace, so the workspace a command
+   * targets must come from the same source (#115). See
+   * `credentialSource.ts`. Injected so tests can fake any source without
+   * credential files.
+   */
+  resolveAuth: typeof resolveAuthImpl;
+  /**
+   * REST counterparts, for the `files`, `resource`, `secret`, `guardrails`
+   * and `workspace` groups.
    *
-   * They take nothing on purpose: a REST client has to be built through
-   * `fromMcpUrl`, which runs the full credential chain (env > OAuth
-   * profile > .kagura.json) and stamps the MCP URL the chosen branch
-   * belongs to. Bare construction throws without a static api_key — so
-   * every REST command would fail for anyone who authenticated with
-   * `auth login` — and leaves `resource setup` permanently broken, since
-   * it needs that stamped URL.
+   * Called with no credential, they run the chain themselves through
+   * `fromMcpUrl`, which stamps the MCP URL the chosen branch belongs to.
+   * Bare construction would throw without a static api_key — so every
+   * REST command would fail for anyone who authenticated with `auth
+   * login` — and leave `resource setup` permanently broken, since it needs
+   * that stamped URL. Called with the credential from {@link resolveAuth},
+   * they are built from exactly that one (and the workspace hint its 403
+   * messages show), so a command that paired a workspace with a source
+   * talks to the server with that same source.
    *
    * Python is explicit here and carries a note from its own review: pass
    * no mcp_url, so each resolver branch pairs its credential with its own
    * URL source. Forwarding the config file's mcp_url would override an
    * OAuth profile bound to a non-default server.
    */
-  makeFilesClient: () => FilesClient;
-  makeResourceClient: () => ResourceClient;
+  makeFilesClient: (auth?: ResolvedAuth, workspaceIdHint?: string | null) => FilesClient;
+  makeResourceClient: (auth?: ResolvedAuth) => ResourceClient;
   makeSecretClient: () => SecretClient;
+  makeMemoryClient: (auth?: ResolvedAuth) => MemoryClient;
+  makeWorkspaceClient: (auth?: ResolvedAuth, workspaceIdHint?: string | null) => WorkspaceClient;
   /**
    * True when stdout is a terminal.
    *
@@ -52,8 +75,12 @@ export interface ClientCommandContext {
    * test can assert both sides of that guard.
    */
   isTty: () => boolean;
-  /** Read all of stdin, or null when it is a terminal / already closed. */
-  readStdin: () => string | null;
+  /**
+   * Read all of stdin, or null when it is a terminal. A read that fails is
+   * null too, unless `throwOnError` is set: then it throws, so the caller
+   * can say why (`resource import`'s `Failed to read input: …`).
+   */
+  readStdin: (options?: { throwOnError?: boolean }) => string | null;
   /**
    * Run a child with extra environment; resolves to its exit code.
    *
@@ -102,15 +129,23 @@ export function resolveConfig(
  * The MCP-client options a config produces.
  *
  * Only the MCP client takes options: the REST clients go through
- * `fromMcpUrl`, which resolves everything itself. This one needs
+ * `fromMcpUrl`, which resolves everything itself. This one needs a file's
  * `mcp_url` explicitly, and forgetting it silently drops a self-hosted
  * server and sends the call to the default cloud one.
+ *
+ * Without a `.kagura.json`, nothing: the config is then loadConfig's
+ * environment fallback, whose `mcp_url` (`KAGURA_MCP_URL` or the default)
+ * would override an OAuth profile's own server, sending the profile's
+ * token to the default one, as Python's CLI does. The client's resolver
+ * pairs each credential with its own URL instead, and gives
+ * `KAGURA_API_KEY` the same `KAGURA_MCP_URL` or default as before.
  */
 export function mcpOptions(config: KaguraConfig): KaguraClientOptions {
+  const options: KaguraClientOptions = {};
+  if (isEnvFallbackConfig(config)) return options;
   // Python: `api_key=config.get("api_key") or None`. An empty value must be
   // omitted, not forwarded — `Authorization: Bearer ` always 401s, and
   // omitting lets the OAuth profile resolve instead.
-  const options: KaguraClientOptions = {};
   if (config.api_key) options.apiKey = config.api_key;
   if (config.mcp_url) options.mcpUrl = config.mcp_url;
   return options;
@@ -129,7 +164,7 @@ export async function runAndPrint(
     ctx.write(formatJson(result));
     return 0;
   } catch (e) {
-    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(excMessage(e));
+    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));
   }
 }
 
@@ -149,7 +184,8 @@ export interface RunClientCommandOptions {
  * @throws CliError for every expected failure. Reporting is the router's
  *   job so the `Error: ` prefix and the exit code are decided in exactly
  *   one place; Kagura errors carry their own next-step guidance and are
- *   forwarded verbatim rather than as a stack trace.
+ *   forwarded verbatim rather than as a stack trace, with a quota or plan
+ *   refusal's `Resets at:` / `Required plan:` lines (`cliErrorMessage`).
  */
 export async function runClientCommand(
   ctx: ClientCommandContext,
@@ -169,7 +205,7 @@ export async function runClientCommand(
     ctx.write(formatJson(result));
     return 0;
   } catch (e) {
-    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(excMessage(e));
+    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));
   } finally {
     // The Python helper uses `async with client:`; a leaked MCP session
     // keeps the process alive past the command.

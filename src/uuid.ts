@@ -1,7 +1,8 @@
 /**
  * Internal UUID parsing/validation — the analogue of Python's `uuid.UUID`.
  *
- * Not part of the public API surface; used by FilesClient (validate-only).
+ * Not part of the public API surface; used by AgentsClient and `setup`.
+ * (FilesClient follows Python's `normalize_uuid`, in `pyCompat.ts`.)
  */
 
 const CANONICAL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

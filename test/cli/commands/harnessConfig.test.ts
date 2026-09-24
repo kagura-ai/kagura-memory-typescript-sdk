@@ -4,8 +4,10 @@ import {
   codexTomlBlock,
   hermesEnvVar,
   hermesYamlBlock,
+  isHttpUrl,
   json5HasServer,
   mcpUrlWithQuery,
+  normalizeUrl,
   openclawBlock,
   pluginServerUrl,
   queryParam,
@@ -94,6 +96,45 @@ describe("withoutQueryParam", () => {
     expect(withoutQueryParam("https://x.test/mcp?guardrails=off", "guardrails")).toBe("https://x.test/mcp");
     expect(withoutQueryParam("https://x.test/mcp", "guardrails")).toBe("https://x.test/mcp");
   });
+
+  it("matches names decoded, as the server reads them", () => {
+    // parse_qsl decodes names: guard%72ails and guard+rails-less spellings.
+    expect(withoutQueryParam(`https://x.test/mcp?guard%72ails=${UUID}&a=1`, "guardrails")).toBe(
+      "https://x.test/mcp?a=1",
+    );
+    expect(withoutQueryParam("https://x.test/mcp?guardrails_x=1", "guardrails")).toBe(
+      "https://x.test/mcp?guardrails_x=1",
+    );
+  });
+
+  it("returns a URL without the key as written, as Python does", () => {
+    expect(withoutQueryParam("https://x.test/mcp?a=1&&b=2&", "guardrails")).toBe("https://x.test/mcp?a=1&&b=2&");
+  });
+});
+
+describe("a URL the query edits rewrite", () => {
+  // Python rebuilds it through urlunsplit(urlsplit(url)), which lower-cases
+  // the scheme and writes no `#` for an empty fragment; the host, the path
+  // and every kept parameter stay as written. Each row is Python's output.
+  it.each([
+    ["HTTP://X.test/mcp", "http://X.test/mcp?guardrails=off", "HTTP://X.test/mcp"],
+    [
+      "HtTpS://X.TEST/Mcp?guardrails=a&tools=a,b#Frag",
+      "https://X.TEST/Mcp?tools=a,b&guardrails=off#Frag",
+      "https://X.TEST/Mcp?tools=a,b#Frag",
+    ],
+    ["https://x.test/mcp?a=1#", "https://x.test/mcp?a=1&guardrails=off", "https://x.test/mcp?a=1#"],
+    ["HTTPS://x.test/mcp#", "https://x.test/mcp?guardrails=off", "HTTPS://x.test/mcp#"],
+    ["HTTPS://x.test/mcp?guardrails=x#", "https://x.test/mcp?guardrails=off", "https://x.test/mcp"],
+    ["HTTPS://x.test/mcp?tools=a", "https://x.test/mcp?tools=a&guardrails=off", "HTTPS://x.test/mcp?tools=a"],
+  ])("%s: set %s, dropped %s", (url, set, dropped) => {
+    expect(mcpUrlWithQuery(url, { guardrails: "off" })).toBe(set);
+    expect(withoutQueryParam(url, "guardrails")).toBe(dropped);
+  });
+
+  it("is left as written when there is nothing to set", () => {
+    expect(mcpUrlWithQuery("HTTPS://x.test/mcp?tools=a#", {})).toBe("HTTPS://x.test/mcp?tools=a#");
+  });
 });
 
 describe("withoutQuery", () => {
@@ -108,6 +149,73 @@ describe("queryParam", () => {
     expect(queryParam("https://x.test/mcp?profile=core&guardrails=off", "guardrails")).toBe("off");
     expect(queryParam("https://x.test/mcp?profile=core", "guardrails")).toBeUndefined();
     expect(queryParam("https://x.test/mcp", "guardrails")).toBeUndefined();
+  });
+
+  it("reads the first value, the one the server reads, by its decoded name", () => {
+    expect(queryParam(`https://x.test/mcp?guard%72ails=${UUID}&guardrails=off`, "guardrails")).toBe(UUID);
+    expect(queryParam("https://x.test/mcp?guardrails", "guardrails")).toBe("");
+    expect(queryParam("https://x.test/mcp?guardrails=a+b%21", "guardrails")).toBe("a b!");
+  });
+});
+
+describe("normalizeUrl", () => {
+  // Python's test__http.py table (python-sdk#279).
+  it.each([
+    ["  https://h.example/mcp\n", "https://h.example/mcp"],
+    ["\x00\x1fhttps://h.example/mcp\u3000", "https://h.example/mcp"],
+    ["ht\ttps://h.exa\nmple/m\rcp", "https://h.example/mcp"],
+    ["\u00a0https://h.example/mcp\u0085", "https://h.example/mcp"],
+    ["HTTPS://H.example/a b", "HTTPS://H.example/a b"],
+  ])("reads %j as %j", (given, expected) => {
+    expect(normalizeUrl(given)).toBe(expected);
+  });
+
+  it("keeps a BOM, which is no whitespace to Python", () => {
+    expect(normalizeUrl("\ufeffhttps://h.example/mcp")).toBe("\ufeffhttps://h.example/mcp");
+  });
+});
+
+describe("isHttpUrl", () => {
+  it.each([
+    "https://memory.kagura-ai.com/mcp/w/ws",
+    "HTTPS://h.example",
+    "http://localhost:8080/mcp",
+    "https://[::1]:8443/mcp",
+    "https://[fe80::1%eth0]/mcp",
+    "https://[v1.x]/mcp",
+    "https://user@[::1]/mcp",
+    "https://@/mcp",
+    "https://h:abc/",
+    "https://\u00e9xample.com/mcp",
+  ])("takes %j, as urlsplit reads a host in it", (url) => {
+    expect(isHttpUrl(url)).toBe(true);
+  });
+
+  it.each([
+    "",
+    "--help",
+    "memory.kagura-ai.com/mcp",
+    "localhost:8080/mcp",
+    "ftp://h.example/mcp",
+    "https:h.example",
+    "https:/h.example",
+    "https://",
+    "https:///mcp",
+    "https://?q",
+    "https://#f",
+    "https+x://h.example",
+    "https://[::1/mcp",
+    "https://]x/mcp",
+    "https://[notipv6]/mcp",
+    "https://[1.2.3.4]/mcp",
+    "https://a[b]c/mcp",
+    "https://[::1]x/mcp",
+    "https://x[::1]/mcp",
+    "https://[vz.x]/mcp",
+    "https://\u2100.example/mcp",
+    "https://h\uff03x/mcp",
+  ])("refuses %j, where urlsplit raises or finds no http(s) host", (url) => {
+    expect(isHttpUrl(url)).toBe(false);
   });
 });
 

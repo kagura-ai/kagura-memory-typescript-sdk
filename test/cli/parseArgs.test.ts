@@ -31,8 +31,16 @@ describe("parseArgs", () => {
     expect(parse(["use", "work"]).positionals).toEqual(["work"]);
   });
 
-  it("returns an empty command when none is given", () => {
-    expect(parse([]).command).toBe("");
+  it("returns no command when none is given", () => {
+    expect(parse([]).command).toBeUndefined();
+    expect(parse(["--yes"]).command).toBeUndefined();
+  });
+
+  it("tells an empty first argument from a missing one", () => {
+    // Click passes '' through; `command` must not read it as absent.
+    const parsed = parse(["", "b"]);
+    expect(parsed.command).toBe("");
+    expect(parsed.positionals).toEqual(["b"]);
   });
 
   it.each([
@@ -203,6 +211,29 @@ describe("parseArgs", () => {
     expect(parsed.flags.has("json")).toBe(true);
   });
 
+  it("lists every problem in argv order, so the first is the one click reports", () => {
+    const parsed = parse(["cmd", "--scope", "-xyz", "--json=1", "--porfile", "--help", "-c"]);
+    expect(parsed.problems).toEqual([
+      { kind: "missingValue", name: "--scope" },
+      { kind: "unknown", name: "-x" },
+      { kind: "noValue", name: "--json" },
+      { kind: "unknown", name: "--porfile" },
+      { kind: "missingValue", name: "-c" },
+    ]);
+    expect(parsed.unknown).toEqual(["-x", "--porfile"]);
+    expect(parsed.noValue).toEqual(["--json"]);
+    expect(parsed.missingValue).toEqual(["--scope", "-c"]);
+    // --help is still read; the caller decides which wins.
+    expect(parsed.flags.has("help")).toBe(true);
+    expect(parse(["cmd", "--json"]).problems).toEqual([]);
+  });
+
+  it("takes a negative number in any decimal digits as a value, as float() reads it", () => {
+    const parsed = parse(["cmd", "--importance", "-\u{661}.\u{665}"]);
+    expect(parsed.values.importance).toBe("-\u{661}.\u{665}");
+    expect(parsed.problems).toEqual([]);
+  });
+
   // --- negative numbers as values ----------------------------------------
 
   it.each([
@@ -245,6 +276,19 @@ describe("parseArgs", () => {
   it("still reports a dashValue flag at the end of argv as missing its value", () => {
     const spec: ParseSpec = { flags: [{ name: "invite", type: "value", dashValue: true }] };
     expect(parseArgs(["login", "--invite"], spec).missingValue).toEqual(["--invite"]);
+  });
+
+  it("gives an optional dashValue flag any next token, and its flagValue only at the end", () => {
+    // The refused `--invite` of the other auth subcommands: a dash-led token
+    // is still its value, and a bare one is present rather than missing.
+    const spec: ParseSpec = { flags: [{ name: "invite", type: "optional", dashValue: true, flagValue: "" }] };
+    const dashed = parseArgs(["status", "--invite", "-AbCd", "--help"], spec);
+    expect(dashed.values.invite).toBe("-AbCd");
+    expect(dashed.problems).toEqual([]);
+    expect(dashed.flags.has("help")).toBe(true);
+    const bare = parseArgs(["status", "--invite"], spec);
+    expect(bare.values.invite).toBe("");
+    expect(bare.problems).toEqual([]);
   });
 
   it("still reports a bare negative number that no option is waiting for", () => {
@@ -378,5 +422,167 @@ describe("parseArgs", () => {
   it("always accepts --help regardless of the spec", () => {
     const narrow: ParseSpec = { flags: [] };
     expect(parseArgs(["list", "--help"], narrow).flags.has("help")).toBe(true);
+  });
+});
+
+/** Every positional, the one lifted into `command` included. */
+function positionalsOf(parsed: ReturnType<typeof parseArgs>): string[] {
+  return parsed.command === undefined ? parsed.positionals : [parsed.command, ...parsed.positionals];
+}
+
+describe("parseArgs: an option whose value may be omitted (click is_flag=False, flag_value)", () => {
+  // Every row was measured on click 8.3.3 with
+  // `@click.option("--agents-md", is_flag=False, flag_value="", metavar="[PATH]")`,
+  // except the one marked as a deliberate difference.
+  const OPTIONAL: ParseSpec = {
+    flags: [
+      { name: "agents-md", type: "optional", metavar: "[PATH]" },
+      { name: "yes", short: "y", type: "switch" },
+      { name: "dry-run", type: "switch" },
+    ],
+  };
+  const parseOptional = (argv: string[]) => parseArgs(argv, OPTIONAL);
+
+  it("is absent when not given", () => {
+    expect(parseOptional([]).values["agents-md"]).toBeUndefined();
+  });
+
+  it.each([
+    [["--agents-md"], ""],
+    [["--agents-md", "p.md"], "p.md"],
+    [["--agents-md", "-"], "-"],
+    [["--agents-md", ""], ""],
+    [["--agents-md="], ""],
+    [["--agents-md=x.md"], "x.md"],
+    [["--agents-md=~/n.md"], "~/n.md"],
+  ])("reads %j as %j", (argv, expected) => {
+    const parsed = parseOptional(argv);
+    expect(parsed.values["agents-md"]).toBe(expected);
+    expect(parsed.missingValue).toEqual([]);
+    expect(positionalsOf(parsed)).toEqual([]);
+  });
+
+  it.each([
+    [["--agents-md", "-y"], "yes"],
+    [["--agents-md", "--dry-run"], "dry-run"],
+  ])("leaves a following option to be parsed as one (%j)", (argv, flag) => {
+    const parsed = parseOptional(argv);
+    expect(parsed.values["agents-md"]).toBe("");
+    expect(parsed.flags.has(flag)).toBe(true);
+  });
+
+  it("does not take even a negative number, as click does not", () => {
+    // click: `--agents-md -5` is the default path, then "No such option: -5".
+    const parsed = parseOptional(["--agents-md", "-5"]);
+    expect(parsed.values["agents-md"]).toBe("");
+    expect(parsed.unknown).toEqual(["-5"]);
+  });
+
+  it("does not take `--`, which still ends the options", () => {
+    const parsed = parseOptional(["--agents-md", "--", "-y"]);
+    expect(parsed.values["agents-md"]).toBe("");
+    expect(parsed.flags.has("yes")).toBe(false);
+    expect(positionalsOf(parsed)).toEqual(["-y"]);
+  });
+
+  it("takes --flag=VALUE literally even when VALUE begins with a dash", () => {
+    // Deliberately not click: click drops `-y` as the value and parses it
+    // as an option, so `--agents-md=-y` would silently answer yes.
+    const parsed = parseOptional(["--agents-md=-y"]);
+    expect(parsed.values["agents-md"]).toBe("-y");
+    expect(parsed.flags.has("yes")).toBe(false);
+  });
+
+  it("reads as its flagValue when one is declared", () => {
+    const spec: ParseSpec = { flags: [{ name: "out", type: "optional", flagValue: "default.md" }] };
+    expect(parseArgs(["--out"], spec).values.out).toBe("default.md");
+    expect(parseArgs(["--out", "x"], spec).values.out).toBe("x");
+  });
+
+  it("works in its short form too", () => {
+    const spec: ParseSpec = {
+      flags: [
+        { name: "agents-md", short: "a", type: "optional" },
+        { name: "yes", short: "y", type: "switch" },
+      ],
+    };
+    expect(parseArgs(["-a"], spec).values["agents-md"]).toBe("");
+    expect(parseArgs(["-a", "p.md"], spec).values["agents-md"]).toBe("p.md");
+    expect(parseArgs(["-ap.md"], spec).values["agents-md"]).toBe("p.md");
+    const cluster = parseArgs(["-ya"], spec);
+    expect(cluster.flags.has("yes")).toBe(true);
+    expect(cluster.values["agents-md"]).toBe("");
+  });
+});
+
+describe("parseArgs: ignoreUnknownOptions (click ignore_unknown_options=True)", () => {
+  // Measured on click 8.3.3 with `--unit` (value), `-y` (switch) and `-u`
+  // (value), both short-only, and ignore_unknown_options=True.
+  const LOOSE: ParseSpec = {
+    flags: [
+      { name: "unit", type: "value" },
+      { name: "y", short: "y", type: "switch", shortOnly: true },
+      { name: "u", short: "u", type: "value", shortOnly: true },
+      { name: "json", type: "switch" },
+    ],
+  };
+  const parseLoose = (argv: string[]) => parseArgs(argv, LOOSE, { ignoreUnknownOptions: true });
+
+  it.each([
+    [["-3.5"], ["-3.5"]],
+    [["C", "pnl", "-120"], ["C", "pnl", "-120"]],
+    [["x", "--weight", "--metric=w"], ["x", "--weight", "--metric=w"]],
+    [["x", "-x=5"], ["x", "-x=5"]],
+    [["--yes"], ["--yes"]],
+    [["-"], ["-"]],
+    [["x", "--", "-h"], ["x", "-h"]],
+  ])("keeps the unknown options of %j whole, in order", (argv, expected) => {
+    const parsed = parseLoose(argv);
+    expect(positionalsOf(parsed)).toEqual(expected);
+    expect(parsed.unknown).toEqual([]);
+  });
+
+  it("still reads the declared options wherever they are", () => {
+    const parsed = parseLoose(["--unit", "USD", "C", "pnl", "-3.5"]);
+    expect(parsed.values.unit).toBe("USD");
+    expect(positionalsOf(parsed)).toEqual(["C", "pnl", "-3.5"]);
+    const late = parseLoose(["x", "--unit=kg", "-5"]);
+    expect(late.values.unit).toBe("kg");
+    expect(positionalsOf(late)).toEqual(["x", "-5"]);
+  });
+
+  it.each([
+    [["x", "-xyz"], "-xz", undefined],
+    [["x", "-yx"], "-x", undefined],
+    [["x", "-xu", "kg"], "-x", "kg"],
+    [["x", "-xukg"], "-x", "kg"],
+  ])("splits a short cluster %j as click does", (argv, kept, u) => {
+    const parsed = parseLoose(argv);
+    expect(positionalsOf(parsed)).toEqual(["x", kept]);
+    expect(parsed.flags.has("y")).toBe(argv[1]!.includes("y"));
+    expect(parsed.values.u).toBe(u);
+  });
+
+  it("keeps -h and --help as help", () => {
+    // `-h` is this bin's alias for --help everywhere; click, which has no
+    // -h, would keep it as an argument.
+    expect(parseLoose(["-h"]).flags.has("help")).toBe(true);
+    expect(parseLoose(["x", "--help"]).flags.has("help")).toBe(true);
+  });
+
+  it("still reports a switch given a value and a value option with none", () => {
+    expect(parseLoose(["--json=1"]).noValue).toEqual(["--json"]);
+    expect(parseLoose(["x", "--unit"]).missingValue).toEqual(["--unit"]);
+  });
+
+  it("is off by default: -3.5 is then an unknown -3", () => {
+    expect(parseArgs(["-3.5"], LOOSE).unknown).toEqual(["-3"]);
+  });
+});
+
+describe("parseArgs: Python's number grammar for dash tokens", () => {
+  it("takes a negative number with underscores as a value", () => {
+    const spec: ParseSpec = { flags: [{ name: "limit", type: "value" }] };
+    expect(parseArgs(["--limit", "-1_000"], spec).values.limit).toBe("-1_000");
   });
 });

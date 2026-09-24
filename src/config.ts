@@ -68,6 +68,23 @@ function readConfigFile(filePath: string, label: string): KaguraConfig {
   return parsed as KaguraConfig;
 }
 
+/** The configs {@link loadConfig} built from the environment, for {@link isEnvFallbackConfig}. */
+const ENV_FALLBACKS = new WeakSet<KaguraConfig>();
+
+/**
+ * True for a config {@link loadConfig} built from the environment because
+ * no `.kagura.json` exists: its `mcp_url` is `KAGURA_MCP_URL` or the
+ * default, not a URL any file chose. The CLI forwards a file's `mcp_url`
+ * to the MCP client, but not this one: as an explicit URL it would
+ * override an OAuth profile's own server and send the profile's token to
+ * the default one.
+ *
+ * @internal Shared with the CLI; not part of the package's API.
+ */
+export function isEnvFallbackConfig(config: KaguraConfig): boolean {
+  return ENV_FALLBACKS.has(config);
+}
+
 /**
  * Load configuration from `.kagura.json` or environment variables.
  *
@@ -91,10 +108,12 @@ export function loadConfig(options: LoadConfigOptions = {}): KaguraConfig {
     return readConfigFile(homeConfig, "~/.kagura.json");
   }
 
-  return {
+  const fallback: KaguraConfig = {
     api_key: env.KAGURA_API_KEY ?? "",
     mcp_url: env.KAGURA_MCP_URL ?? "https://memory.kagura-ai.com/mcp",
     model: env.KAGURA_MODEL ?? "gpt-5.4-nano",
     context_id: env.KAGURA_CONTEXT_ID ?? null,
   };
+  ENV_FALLBACKS.add(fallback);
+  return fallback;
 }

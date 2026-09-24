@@ -9,6 +9,7 @@ import {
   KaguraRateLimitError,
 } from "./errors.js";
 import type { KaguraQuotaErrorOptions } from "./errors.js";
+import { PY_SPACE_CLASS } from "./pyCompat.js";
 
 export { SDK_VERSION } from "./version.js";
 
@@ -207,14 +208,23 @@ export interface GateCodes {
 }
 
 /**
+ * The daily MCP call cap, which every non-read-only tool checks in-band
+ * and answers with an error envelope rather than an HTTP 429. It carries
+ * no `gate` and names its counts `used_today` / `daily_limit`; the cap
+ * counts calls per UTC day.
+ */
+export const MCP_DAILY_CAP_CODE = "rate_limit_exceeded";
+
+/**
  * MCP envelope codes. `feature_not_available` is the analysis tools'
- * twin of `plan_required`, as REST `FEAT-001` is of both, and
+ * twin of `plan_required`, as REST `FEAT-001` is of both,
  * `setup_connector` forwards the connector seat cap's REST code
- * `CONNECTOR-001` as is.
+ * `CONNECTOR-001` as is, and {@link MCP_DAILY_CAP_CODE} names one cap, so
+ * the code alone makes it a quota.
  */
 export const MCP_GATE_CODES: GateCodes = {
   plan: ["plan_required", "feature_not_available"],
-  quota: ["quota_exceeded", "CONNECTOR-001"],
+  quota: ["quota_exceeded", "CONNECTOR-001", MCP_DAILY_CAP_CODE],
 };
 
 /**
@@ -340,12 +350,37 @@ function gateOptions(block: Record<string, unknown>): KaguraQuotaErrorOptions {
   };
 }
 
+/** The next UTC midnight, as Python's `datetime.isoformat()` writes it (`+00:00`). */
+function nextUtcMidnight(now: Date): string {
+  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return new Date(midnight).toISOString().replace(".000Z", "+00:00");
+}
+
+/**
+ * The daily MCP cap's envelope with the canonical quota fields it leaves
+ * implicit filled in: `quota_type` `api_mcp_daily`, `current` from
+ * `used_today`, `limit` from `daily_limit`, and `resets_at` the next UTC
+ * midnight. Whatever the server does send wins, as in Python's
+ * `gate_error`.
+ */
+function withMcpDailyCapFields(block: Record<string, unknown>): Record<string, unknown> {
+  return {
+    quota_type: "api_mcp_daily",
+    current: block.used_today,
+    limit: block.daily_limit,
+    resets_at: nextUtcMidnight(new Date()),
+    ...block,
+  };
+}
+
 /**
  * Build the typed error for a plan or quota refusal, or `null` if it is
  * neither: {@link KaguraFeatureNotAvailableError} or {@link KaguraQuotaError}, as
  * `gateKind` decides, carrying the payload `block` holds. `retryAfter` is
  * the caller's reading of the response's retry hint; with none, a quota
- * error derives it from `resets_at`.
+ * error derives it from `resets_at`. The MCP daily call cap
+ * ({@link MCP_DAILY_CAP_CODE}) is the `api_mcp_daily` quota, resetting at
+ * the next UTC midnight.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -354,6 +389,9 @@ export function gateError(
   message: string,
   retryAfter: number | null = null,
 ): KaguraError | null {
+  if (code === MCP_DAILY_CAP_CODE) {
+    block = withMcpDailyCapFields(block);
+  }
   const kind = gateKind(block, code, codes);
   if (kind === null) {
     return null;
@@ -436,21 +474,55 @@ export function throwForKaguraStatus(
 // external host past the check (#189).
 // Both patterns are case-insensitive: URL parsing lower-cases the scheme
 // and host, so `HTTP://EVIL.TEST` is fetched over plaintext exactly like
-// `http://evil.test`. A case-sensitive guard would wave it through.
-const PLAIN_HTTP_RE = /^http:\/\//i;
+// `http://evil.test`. A case-sensitive guard would wave it through. Without
+// the `u` flag, `/i` never folds a non-ASCII letter to an ASCII one, so no
+// Unicode case fold (`ſ` → `s`) spells `localhost`: Python's `re.ASCII`.
+// Any `http:` scheme counts, slashes or not: WHATWG parsers (fetch among
+// them) read `http:/evil.com`, `http:evil.com` and `http:\\evil.com` as
+// `http://evil.com`, and a loopback URL written that way is refused.
+const PLAIN_HTTP_RE = /^http:/i;
 const LOCALHOST_HTTP_RE = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
+
+/**
+ * What a URL parser drops before it reads the scheme: whitespace and C0
+ * controls around the URL, and (WHATWG: fetch, browsers, the harnesses
+ * `setup` writes for) a tab or newline anywhere in it. The whitespace is
+ * Python's `\s`, so the class is Python's `_URL_IGNORED_RE` exactly; it
+ * strips some Unicode spaces (U+3000) WHATWG keeps, which only makes the
+ * check more conservative.
+ */
+const URL_SPACE = `\\x00-\\x20${PY_SPACE_CLASS}`;
+const URL_IGNORED_RE = new RegExp(`^[${URL_SPACE}]+|[${URL_SPACE}]+$|[\\t\\n\\r]`, "g");
+
+/**
+ * Return `url` as a URL parser reads it, before it reads the scheme: the
+ * port of the Python SDK's `normalize_url`.
+ *
+ * Surrounding whitespace and C0 controls go, and so does any tab or
+ * newline inside it. Nothing else changes: the scheme and host keep their
+ * case.
+ */
+export function normalizeUrl(url: string): string {
+  return url.replace(URL_IGNORED_RE, "");
+}
 
 /**
  * Enforce HTTPS except for localhost development.
  *
+ * The URL is checked as a parser reads it ({@link normalizeUrl}), the
+ * scheme and host in any case: `" HTTP://evil.com"`, `"ht\ttp://evil.com"`
+ * and `"http:evil.com"` all reach the network as plain HTTP to `evil.com`,
+ * and are all refused (python-sdk#274). The message shows the normalized
+ * URL.
+ *
  * @throws Error if the URL uses HTTP and is not a loopback host.
  */
 export function validateHttpsUrl(url: string, label = "URL"): void {
-  // WHATWG URL parsing strips surrounding whitespace, so `" http://x"`
-  // reaches the network as plain HTTP. Both patterns are anchored, so
-  // without trimming first they would never match it and the guard would
-  // pass. Trim here rather than relying on callers to have done it.
-  const candidate = url.trim();
+  // Both patterns are anchored, so without normalizing first they would
+  // never match a URL a parser reads as plain HTTP after dropping what
+  // surrounds it, and the guard would pass. Normalize here rather than
+  // relying on callers to have done it.
+  const candidate = normalizeUrl(url);
   if (PLAIN_HTTP_RE.test(candidate) && !LOCALHOST_HTTP_RE.test(candidate)) {
     throw new Error(
       `${label} must use HTTPS for security (got: ${candidate}). ` +

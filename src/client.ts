@@ -39,6 +39,10 @@ import type {
   ListContextsResponse,
   ListTagsResponse,
   LoadGuardrailsResponse,
+  MeasurementAggregate,
+  MeasurementPeriod,
+  MeasurementResult,
+  MeasurementSeries,
   MemoryListResponse,
   // Referenced only from JSDoc {@link} on the details/recallNearby options.
   MemoryLocation,
@@ -47,6 +51,7 @@ import type {
   RollbackResult,
   RollbackSummary,
   SearchConfig,
+  SeriesBucket,
   ServerInfo,
   SleepReport,
   SleepReportDetail,
@@ -55,6 +60,17 @@ import type {
   ToolTrigger,
   UsageInfo,
 } from "./models.js";
+import { meetsMinimum, requireVersion } from "./versionCheck.js";
+import { pyRepr, pyTypeName } from "./python.js";
+import {
+  ResponseReader,
+  laxFloat,
+  laxInt,
+  laxStr,
+  nullable,
+  type Coercer,
+  type Loc,
+} from "./responseShape.js";
 
 /**
  * The memory-cloud server version this SDK targets and was tested against.
@@ -69,7 +85,8 @@ import type {
  */
 export const MIN_SERVER_VERSION = "0.75.0";
 
-const MIN_SERVER_VERSION_TUPLE = MIN_SERVER_VERSION.split(".").slice(0, 3).map(Number);
+/** Parsed once, so a malformed {@link MIN_SERVER_VERSION} fails at import. */
+const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER_VERSION");
 
 /** Generic parsed-JSON result of an MCP tool call. */
 export type ToolResult = Record<string, unknown>;
@@ -386,9 +403,11 @@ export interface ListTagsOptions {
    * `GET /api/v1/contexts/{id}/tags`, which has had it since server
    * v0.17.2: the MCP `list_tags` tool has no `with_tags` (through v0.76.0)
    * and silently returned the unfiltered vocabulary (#47). The response has
-   * the same shape either way. The REST route sends no `context_name`, so
-   * the client looks it up once per context with a one-tag `list_tags`
-   * call and keeps it; a plain `listTags` call fills the same cache.
+   * the same shape either way. Its `context_name` is the one the REST route
+   * sends from server v0.77.0, which the client keeps. From an older
+   * server, or when the name is empty or null, the client looks it up once
+   * per context with a one-tag `list_tags` call and keeps it; a plain
+   * `listTags` call fills the same cache.
    */
   withTags?: string[];
 }
@@ -409,6 +428,25 @@ export interface ListMemoriesOptions {
   triggerUntil?: string;
   /** "created_at" (default, newest-first) or "trigger_from" (soonest first). */
   orderBy?: "created_at" | "trigger_from";
+  /**
+   * WHERE-axis bounding box: lower latitude bound in degrees (-90..90).
+   *
+   * The four bounds may be given in any combination, one-sided included,
+   * and **any** of them keeps only memories with a complete
+   * `details.location`. Server v0.54.0+ (memory-cloud #1334); an older
+   * server ignores them and returns an unfiltered page.
+   */
+  latMin?: number;
+  /** Upper latitude bound (-90..90); see {@link latMin}. */
+  latMax?: number;
+  /**
+   * Lower longitude bound (-180..180). `lonMin > lonMax` selects the box
+   * that crosses the antimeridian (`lon >= lonMin OR lon <= lonMax`)
+   * rather than an empty one.
+   */
+  lonMin?: number;
+  /** Upper longitude bound (-180..180); see {@link lonMin}. */
+  lonMax?: number;
 }
 
 export interface RegisterAgentOptions {
@@ -515,6 +553,201 @@ export interface UpdateSearchConfigOptions {
   routingMode?: RoutingMode;
 }
 
+export interface RecordMeasurementOptions {
+  /** Target context UUID; the series is scoped to it. */
+  contextId: string;
+  /**
+   * Series name, e.g. `"weight_kg"` (1-64 characters). Reuse the exact
+   * name to extend a series.
+   */
+  metric: string;
+  /** The observed value: a finite number. NaN and infinity are refused. */
+  value: number;
+  /**
+   * Observation time. A string is sent as given (ISO 8601; naive means
+   * **UTC** to the server, not local time), a `Date` as its UTC instant.
+   * Omit for "now"; pass it to backdate an import.
+   */
+  measuredAt?: string | Date;
+  /** Display unit, e.g. `"kg"` (1-32 characters). */
+  unit?: string;
+  /** JSON metadata stored with the observation (device, source, notes). */
+  details?: Record<string, unknown>;
+}
+
+export interface RecallSeriesOptions {
+  contextId: string;
+  /** Series name as recorded (1-64 characters). */
+  metric: string;
+  /** Bucket size. Omit for the server default, `"day"`. */
+  period?: MeasurementPeriod;
+  /**
+   * Per-bucket aggregate; `"last"` is the most recent value in the
+   * bucket. Omit for the server default, `"avg"`.
+   */
+  agg?: MeasurementAggregate;
+  /**
+   * Window start, inclusive: an ISO 8601 string sent as given (naive =
+   * UTC) or a `Date`. Omit for `end` minus 30 days.
+   */
+  start?: string | Date;
+  /**
+   * Window end, exclusive (naive = UTC). Omit for "now". The window may
+   * span at most 365 days: the server refuses a wider one.
+   */
+  end?: string | Date;
+}
+
+/** The series-name cap the server enforces, in characters (code points). */
+const METRIC_MAX_LEN = 64;
+/** The unit cap the server enforces, in characters (code points). */
+const UNIT_MAX_LEN = 32;
+
+/**
+ * Refuse a series name the server would refuse — the Python SDK's
+ * `_validate_metric`, with its messages. Python's `len` counts code
+ * points, so an emoji is one character, not two.
+ */
+function validateMetric(metric: unknown): void {
+  if (typeof metric !== "string" || metric === "") {
+    throw new Error(`metric must be a non-empty string, got ${pyRepr(metric)}`);
+  }
+  const length = [...metric].length;
+  if (length > METRIC_MAX_LEN) {
+    throw new Error(`metric must be at most ${METRIC_MAX_LEN} characters, got ${length}`);
+  }
+}
+
+/**
+ * The measurement value to send, or the Python SDK's
+ * `_validate_measurement_value` error: a string or a boolean is refused
+ * rather than coerced, and NaN or infinity would poison every aggregate
+ * of the series. A bigint is Python's int, a number like any other,
+ * refused only past the float range.
+ */
+function measurementValue(value: unknown): number {
+  const number = typeof value === "bigint" ? Number(value) : value;
+  if (typeof number !== "number") {
+    throw new Error(`value must be a number, got ${pyTypeName(number)}`);
+  }
+  if (!Number.isFinite(number)) {
+    throw new Error("value must be finite (NaN and infinity are rejected)");
+  }
+  return number;
+}
+
+/**
+ * A time argument for a tool that takes ISO 8601 strings — the Python
+ * SDK's `_iso_arg`. A string passes untouched for the server to parse. A
+ * `Date` has no naive form, so it is sent as its UTC instant
+ * (`toISOString()`), which the server reads as the same moment.
+ */
+function isoArg(value: string | Date, label: string): string {
+  if (!(value instanceof Date)) return value;
+  // toISOString() throws a bare RangeError on an Invalid Date.
+  if (Number.isNaN(value.getTime())) throw new Error(`${label} must be a valid Date`);
+  return value.toISOString();
+}
+
+/** Python's `is not None`: the optional arguments it sends, `""` included. */
+function isSet<T>(value: T | null | undefined): value is T {
+  return value !== undefined && value !== null;
+}
+
+/**
+ * A `datetime` field of the measurement models, read as the server sent
+ * it. The server writes these `Z`-tagged; re-rendering them as pydantic
+ * does would reproduce the same text, so the string passes through
+ * unchanged and unparsed. A value that is no string at all is refused, as
+ * pydantic refuses a null, a bool, a list or an object; a number, which
+ * pydantic reads as a Unix time, is refused too, so the field stays the
+ * string its type promises.
+ */
+const datetimeText: Coercer<string> = (value) =>
+  typeof value === "string"
+    ? { ok: true, value }
+    : { ok: false, msg: "Input should be a valid datetime" };
+
+/**
+ * Read a `record_measurement` payload as the Python SDK's
+ * `MeasurementResult` model reads it: the model's keys in its order, the
+ * `status` and `unit` defaults filled, fields it does not name dropped.
+ *
+ * @throws KaguraResponseError in the Python SDK's words.
+ */
+function readMeasurementResult(data: unknown): MeasurementResult {
+  const r = new ResponseReader("record_measurement", "MeasurementResult");
+  const obj = r.object(data);
+  let result: MeasurementResult | undefined;
+  if (obj !== null) {
+    // In the model's field order: pydantic reports problems in that order.
+    result = {
+      status: r.field(obj, "status", laxStr, { default: "success" }),
+      measurement_id: r.field(obj, "measurement_id", laxStr),
+      metric: r.field(obj, "metric", laxStr),
+      measured_at: r.field(obj, "measured_at", datetimeText),
+      value: r.field(obj, "value", laxFloat),
+      unit: r.field(obj, "unit", nullable(laxStr), { default: null }),
+    };
+  }
+  r.check();
+  return result!;
+}
+
+/**
+ * Read a `recall_series` payload as the Python SDK's `MeasurementSeries`
+ * model reads it; a missing `series` is `[]`, but a `null` one is drift.
+ *
+ * @throws KaguraResponseError in the Python SDK's words.
+ */
+function readMeasurementSeries(data: unknown): MeasurementSeries {
+  const r = new ResponseReader("recall_series", "MeasurementSeries");
+  const readBucket = (value: unknown, at: Loc): SeriesBucket | null => {
+    const item = r.object(value, at, "SeriesBucket");
+    if (item === null) return null;
+    return {
+      bucket: r.field(item, "bucket", datetimeText, { at }),
+      value: r.field(item, "value", laxFloat, { at }),
+      count: r.field(item, "count", laxInt, { at }),
+    };
+  };
+  const obj = r.object(data);
+  let series: MeasurementSeries | undefined;
+  if (obj !== null) {
+    series = {
+      status: r.field(obj, "status", laxStr, { default: "success" }),
+      metric: r.field(obj, "metric", laxStr),
+      period: r.field(obj, "period", laxStr),
+      agg: r.field(obj, "agg", laxStr),
+      // Every bucket is an object once check() has passed.
+      series: r.list(obj, "series", readBucket, { default: [] }) as SeriesBucket[],
+      count: r.field(obj, "count", laxInt),
+    };
+  }
+  r.check();
+  return series!;
+}
+
+/**
+ * Refuse one `listMemories` bbox bound the server would only answer with
+ * a 422 — the Python SDK's `validate_coordinate`, with its sentences and
+ * the option's TypeScript name. A string is refused rather than coerced,
+ * as the server refuses it.
+ */
+function validateBound(label: string, value: unknown, limit: number): void {
+  if (typeof value !== "number") {
+    throw new Error(
+      `${label} must be a number, got ${pyTypeName(value)} (${pyRepr(value)}). ` +
+        "The server rejects string-typed coordinates.",
+    );
+  }
+  // Written as a containment: NaN fails it, where `v < -limit || v > limit`
+  // would let NaN through.
+  if (!(value >= -limit && value <= limit)) {
+    throw new Error(`${label} must be between -${limit} and ${limit}, got ${pyRepr(value)}`);
+  }
+}
+
 /**
  * Low-level client for Kagura Memory Cloud MCP tools.
  *
@@ -549,9 +782,11 @@ export class KaguraClient {
   private sessionEpoch = 0;
   private requestIdCounter = 1;
   /**
-   * Context id (lower case) → name, for the `listTags` drill-down, whose
-   * REST route sends no name (#47). Safe to keep: the server has no way to
-   * rename a context (`update_context` cannot change `name`).
+   * Context id (lower case) → name, for the `listTags` drill-down (#47):
+   * the name its REST route sends from server v0.77.0, else the one a
+   * one-tag `list_tags` lookup or a plain `listTags` returned. Safe to
+   * keep: the server has no way to rename a context (`update_context`
+   * cannot change `name`).
    */
   private readonly contextNames = new Map<string, string>();
 
@@ -907,6 +1142,10 @@ export class KaguraClient {
    * then by the code; their message stays the generic one, so matching on
    * it keeps working. A quota's `retry_after_seconds` (the resource
    * events-per-hour quota on `ingest_events`) becomes its `retryAfter`.
+   * The in-band daily MCP call cap, `rate_limit_exceeded`, is a
+   * {@link KaguraQuotaError} too: `quotaType` `api_mcp_daily`, `current` /
+   * `limit` from its `used_today` / `daily_limit`, and `resetsAt` the next
+   * UTC midnight, when the cap resets.
    */
   private static raiseForMcpError(result: ToolResult, operation: string): void {
     if (result.status !== "error") {
@@ -1141,6 +1380,115 @@ export class KaguraClient {
       k: options.k ?? 20,
     });
     return result as unknown as RecallNearbyResponse;
+  }
+
+  /**
+   * Append one numeric observation to a metric's series — the HOW-MUCH
+   * axis (server v0.54.0+, memory-cloud #1333).
+   *
+   * Measurements are a lane **separate from memories**: never embedded,
+   * never returned by {@link recall}, never merged or rewritten by Sleep
+   * consolidation. The lane is append-only: recording the same point
+   * twice stores two rows, and there is no delete. Store raw numbers here
+   * (weight, revenue, reps) and prose such as "hit goal weight" with
+   * {@link remember}; read a series back with {@link recallSeries}.
+   *
+   * An older server does not know the tool and answers `unknown_tool`,
+   * which throws {@link KaguraError}
+   * (`record_measurement failed (unknown_tool): Unknown tool: record_measurement`).
+   * From server v0.55.0 an operator can set
+   * `SLEEP_MEASUREMENT_RETENTION_DAYS` above 0 (default 0, keep forever),
+   * and Sleep then **hard-deletes** older observations, which
+   * {@link rollbackSleepRun} cannot restore.
+   *
+   * The result is read as the Python SDK's `MeasurementResult` model
+   * reads it: its keys in its order, `unit` `null` when absent, other
+   * fields dropped.
+   *
+   * @throws Error before any request when `metric` is empty or over 64
+   *   characters, `value` is not a finite number, `unit` is empty or over
+   *   32 characters, or `measuredAt` is an invalid `Date` — the Python
+   *   SDK's messages.
+   * @throws KaguraNotFoundError if the context is not found (or an agent
+   *   binding forbids writing to it).
+   * @throws KaguraPermissionError for a read-only viewer.
+   * @throws KaguraResponseError if the result is not a `MeasurementResult`
+   *   (`operation` `"record_measurement"`).
+   */
+  async recordMeasurement(options: RecordMeasurementOptions): Promise<MeasurementResult> {
+    validateMetric(options.metric);
+    const value = measurementValue(options.value);
+    const { unit } = options;
+    if (
+      isSet(unit) &&
+      (typeof unit !== "string" || unit === "" || [...unit].length > UNIT_MAX_LEN)
+    ) {
+      throw new Error(
+        `unit must be a non-empty string of at most ${UNIT_MAX_LEN} characters, got ${pyRepr(unit)}`,
+      );
+    }
+
+    const args: Record<string, unknown> = {
+      context_id: options.contextId,
+      metric: options.metric,
+      value,
+    };
+    // `is not None`, as Python checks it: an empty `measuredAt` is sent,
+    // for the server to refuse.
+    if (isSet(options.measuredAt)) {
+      args.measured_at = isoArg(options.measuredAt, "measuredAt");
+    }
+    if (isSet(unit)) {
+      args.unit = unit;
+    }
+    if (isSet(options.details)) {
+      args.details = options.details;
+    }
+    return readMeasurementResult(await this.callToolChecked("record_measurement", args));
+  }
+
+  /**
+   * Read one metric's series, bucketed by period and aggregated per
+   * bucket (server v0.54.0+, memory-cloud #1333).
+   *
+   * A **deterministic query**, not search, over the lane
+   * {@link recordMeasurement} writes. Buckets align to UTC boundaries, so a
+   * local day may span two; empty buckets are omitted, oldest first. The
+   * result's `count` is the number of buckets, not of observations.
+   *
+   * Only `metric` is checked locally. The server is the authority on
+   * `period`, `agg` and the window: it refuses an unknown value, a start
+   * not before the end, and a window over 365 days with a
+   * `validation_error` ({@link KaguraError}). An older server answers
+   * `unknown_tool`, as for {@link recordMeasurement}.
+   *
+   * The result is read as the Python SDK's `MeasurementSeries` model
+   * reads it: its keys in its order, other fields dropped. `period` and
+   * `agg` echo what the server applied, as plain strings.
+   *
+   * @throws Error before any request when `metric` is empty or over 64
+   *   characters, or `start` / `end` is an invalid `Date`.
+   * @throws KaguraNotFoundError if the context is not found.
+   * @throws KaguraResponseError if the result is not a `MeasurementSeries`
+   *   (`operation` `"recall_series"`).
+   */
+  async recallSeries(options: RecallSeriesOptions): Promise<MeasurementSeries> {
+    validateMetric(options.metric);
+
+    const args: Record<string, unknown> = { context_id: options.contextId, metric: options.metric };
+    if (isSet(options.period)) {
+      args.period = options.period;
+    }
+    if (isSet(options.agg)) {
+      args.agg = options.agg;
+    }
+    if (isSet(options.start)) {
+      args.start = isoArg(options.start, "start");
+    }
+    if (isSet(options.end)) {
+      args.end = isoArg(options.end, "end");
+    }
+    return readMeasurementSeries(await this.callToolChecked("recall_series", args));
   }
 
   /**
@@ -1622,7 +1970,8 @@ export class KaguraClient {
   /**
    * The `listTags` drill-down over `GET /api/v1/contexts/{id}/tags`,
    * reshaped to exactly what MCP `list_tags` returns: the route adds a
-   * `sample_summary` (always null) but sends no `status` or `context_name`.
+   * `sample_summary` (always null) but sends no `status`, and sends
+   * `context_name` only from server v0.77.0.
    */
   private async listTagsViaRest(
     contextId: string,
@@ -1661,8 +2010,16 @@ export class KaguraClient {
         last_used_at: typeof tag.last_used_at === "string" ? tag.last_used_at : null,
       };
     });
-    // Only after the REST call, so its error is the one a caller sees.
-    const contextName = await this.contextNameFor(record.context_id);
+    // The name the route sends (server v0.77.0+), else the cache or one
+    // MCP lookup, only after the REST call so its error is the one a
+    // caller sees. An empty name falls back too, as Python's `or` does.
+    let contextName: string;
+    if (typeof record.context_name === "string" && record.context_name !== "") {
+      contextName = record.context_name;
+      this.contextNames.set(record.context_id.toLowerCase(), contextName);
+    } else {
+      contextName = await this.contextNameFor(record.context_id);
+    }
     const result: ToolResult = {
       status: "success",
       context_id: record.context_id,
@@ -2208,32 +2565,21 @@ export class KaguraClient {
   /**
    * Check the connected server's version against the SDK's tested
    * minimum. Advisory only — logs a warning, never throws on mismatch.
+   *
+   * A `v` prefix, build metadata and pre-release suffixes are read, so
+   * `"v0.74.0"` and `"0.75.0-rc1"` (a pre-release of the minimum) both
+   * warn. A version with no `MAJOR.MINOR.PATCH` at its start, such as
+   * `"0.75"` or `"main-abc123"`, or one that is not a string, cannot be
+   * compared and does not warn. The Python SDK reads it the same way.
    */
   async checkServerVersion(): Promise<ServerInfo> {
     const info = await this.getServerInfo();
-    const components = info.version.split(".").slice(0, 3);
-    // Match Python's `int(x)`: a non-integer component (empty string,
-    // "0x1", "1e2") makes the parse fail and we return without warning.
-    // Number("") is 0 and Number("1e2") is 100, so guard with a strict
-    // integer-digit test rather than relying on NaN.
-    if (components.length === 0 || !components.every((c) => /^\d+$/.test(c))) {
-      return info;
-    }
-    const parts = components.map(Number);
-    for (let i = 0; i < MIN_SERVER_VERSION_TUPLE.length; i++) {
-      const server = parts[i] ?? 0;
-      const min = MIN_SERVER_VERSION_TUPLE[i] ?? 0;
-      if (server < min) {
-        console.warn(
-          `Server version ${info.version} is below the SDK's tested minimum ` +
-            `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
-            "may silently ignore unknown parameters.",
-        );
-        break;
-      }
-      if (server > min) {
-        break;
-      }
+    if (meetsMinimum(info.version, MIN_SERVER_VERSION_TRIPLE) === false) {
+      console.warn(
+        `Server version ${info.version} is below the SDK's tested minimum ` +
+          `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
+          "may silently ignore unknown parameters.",
+      );
     }
     return info;
   }
@@ -2284,10 +2630,20 @@ export class KaguraClient {
   }
 
   /**
-   * List memories with optional substring, facet, and time-window
-   * filters. Without `contextId` this returns the caller's own memories
-   * across all contexts. `q` matches summaries only — use recall() for
-   * semantic search.
+   * List memories with optional substring, facet, time-window and
+   * bounding-box filters. Without `contextId` this returns the caller's
+   * own memories across all contexts. `q` matches summaries only — use
+   * recall() for semantic search.
+   *
+   * The bbox (`latMin`, `latMax`, `lonMin`, `lonMax`; server v0.54.0+)
+   * keeps only memories with a location, each item then carrying
+   * `location`; `lonMin > lonMax` is the box across the antimeridian. An
+   * older server ignores it and returns an unfiltered page.
+   *
+   * @throws Error before any request if a bbox bound is not a number or
+   *   is out of range (±90 for a latitude, ±180 for a longitude), which
+   *   the server would only answer with a 422 — the Python SDK's
+   *   messages, with the option's name.
    */
   async listMemories(options: ListMemoriesOptions = {}): Promise<MemoryListResponse> {
     const params: Record<string, unknown> = {
@@ -2316,6 +2672,20 @@ export class KaguraClient {
     }
     if (options.orderBy !== undefined) {
       params.order_by = options.orderBy;
+    }
+    // `is not None`, as Python checks it: 0 (the equator, the prime
+    // meridian) is a bound. Each bound is checked on its own; the pair
+    // order is not, since lonMin > lonMax is the antimeridian box.
+    for (const [label, key, bound, limit] of [
+      ["latMin", "lat_min", options.latMin, 90],
+      ["latMax", "lat_max", options.latMax, 90],
+      ["lonMin", "lon_min", options.lonMin, 180],
+      ["lonMax", "lon_max", options.lonMax, 180],
+    ] as const) {
+      if (isSet(bound)) {
+        validateBound(label, bound, limit);
+        params[key] = bound;
+      }
     }
     return this.restGet<MemoryListResponse>("/api/v1/memory/list", params);
   }
