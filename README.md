@@ -18,6 +18,10 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 A `kagura-memory` command-line tool ships alongside it, mirroring the Python
 CLI's `kagura` command — see [Command line](#command-line).
 
+For Claude Desktop, the [MCPB extension](docs/mcpb.md) provides browser sign-in
+and a refresh-aware connection without Python or a global CLI install. The npm
+package also includes `kagura-memory-mcp`, a transparent stdio/HTTP proxy.
+
 ## Installation
 
 ```bash

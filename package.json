@@ -43,14 +43,18 @@
     }
   },
   "bin": {
-    "kagura-memory": "dist/cli.js"
+    "kagura-memory": "dist/cli.js",
+    "kagura-memory-mcp": "dist-mcp/mcp.cjs"
   },
   "files": [
     "dist",
+    "dist-mcp",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "build:mcpb": "npm run build && node scripts/build-mcpb.mjs",
+    "test:mcpb": "node scripts/smoke-mcpb.mjs",
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -67,8 +71,10 @@
     }
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
     "@types/node": "^22.10.0",
     "age-encryption": "^0.3.0",
+    "fflate": "0.8.3",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

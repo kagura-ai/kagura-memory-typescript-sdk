@@ -2,6 +2,18 @@ import { defineConfig } from "tsup";
 
 export default defineConfig([
   {
+    entry: ["src/mcp.ts"],
+    outDir: "dist-mcp",
+    format: ["cjs"],
+    dts: false,
+    sourcemap: false,
+    clean: true,
+    target: "node18",
+    platform: "node",
+    splitting: false,
+    banner: { js: "#!/usr/bin/env node" },
+  },
+  {
     entry: ["src/index.ts"],
     format: ["esm", "cjs"],
     dts: true,
