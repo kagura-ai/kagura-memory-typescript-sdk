@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kagura-memory",
   "display_name": "Kagura Memory Cloud",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Search and save long-term memories in Kagura Cloud with browser sign-in.",
   "long_description": "Connect Claude Desktop to Kagura Memory Cloud. On first use, approve access in your browser. The extension reuses your Kagura OAuth profile and refreshes it automatically. An account with access to a Kagura workspace is required. Memory and tool data are sent to your configured Kagura server.",
   "author": { "name": "Kagura AI", "url": "https://kagura-ai.com" },
