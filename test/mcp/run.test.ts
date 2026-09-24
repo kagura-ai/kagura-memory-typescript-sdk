@@ -50,6 +50,12 @@ describe("stdio runner", () => {
     for (const args of [
       ["--wat"],
       ["--server"],
+      ["--server", "--no-login"],
+      ["--no-login=false"],
+      ["--help=anything"],
+      ["unexpected"],
+      [""],
+      ["--", "--help"],
       ["--login-timeout", "NaN"],
       ["--login-timeout", "0"],
       ["--login-timeout", "3601"],

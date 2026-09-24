@@ -61,6 +61,8 @@ export interface TransportOptions {
 }
 
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+// The SSE field prefix is framing, not part of the JSON-RPC payload.
+const MAX_SSE_LINE_BYTES = MAX_MESSAGE_BYTES + Buffer.byteLength("data: ");
 
 /** Stream JSON or SSE, including server requests before the final response. */
 async function readMessages(
@@ -88,6 +90,8 @@ async function readMessages(
     return emit(value);
   };
   const line = (text: string): boolean => {
+    if (Buffer.byteLength(text) > MAX_SSE_LINE_BYTES)
+      throw new ProxyError("Upstream SSE line exceeded 16 MiB plus framing.");
     if (text === "") {
       const complete = eventData.length > 0 && parse(eventData.join("\n"));
       eventData = [];
@@ -109,8 +113,6 @@ async function readMessages(
       buffer += done
         ? decoder.decode()
         : decoder.decode(value, { stream: true });
-      if (Buffer.byteLength(buffer) > MAX_MESSAGE_BYTES)
-        throw new ProxyError("Upstream message exceeded 16 MiB.");
       if (sse) {
         let newline: number;
         while ((newline = buffer.search(/[\r\n]/)) >= 0) {
@@ -127,7 +129,14 @@ async function readMessages(
           if (line(buffer.slice(0, newline))) return;
           buffer = buffer.slice(newline + width);
         }
-      }
+        // Drain complete lines/events before bounding the unfinished line.
+        // A network chunk can contain many separately valid messages. A
+        // pending CR belongs to a possibly split CRLF, not the field value.
+        const pendingTerminator = buffer.endsWith("\r") ? 1 : 0;
+        if (Buffer.byteLength(buffer) - pendingTerminator > MAX_SSE_LINE_BYTES)
+          throw new ProxyError("Upstream SSE line exceeded 16 MiB plus framing.");
+      } else if (Buffer.byteLength(buffer) > MAX_MESSAGE_BYTES)
+        throw new ProxyError("Upstream message exceeded 16 MiB.");
       if (done) break;
     }
     if (sse) {
@@ -248,7 +257,15 @@ export class McpTransport {
           authorization = await options.auth.getAuthHeader();
           continue;
         }
-        if (response.status === 404 && session && recover) {
+        // Host responses belong to the server request's original session.
+        // Replaying them would cross sessions (or wait on their own SSE
+        // recovery stream); their 404 is terminal.
+        if (
+          response.status === 404 &&
+          session &&
+          recover &&
+          typeof message.method === "string"
+        ) {
           await response.body?.cancel();
           clearTimeout(timer);
           await this.recover(session, emit);

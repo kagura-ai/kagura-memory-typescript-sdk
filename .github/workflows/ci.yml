@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  minimum-runtime:
+    name: MCPB minimum runtime (Node 18.0.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:mcpb
+      - name: Save test harness runtime
+        id: harness
+        run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.0.0
+      - name: Exercise extracted bundle on the exact runtime floor
+        run: '"${{ steps.harness.outputs.node }}" scripts/smoke-mcpb.mjs "$(command -v node)"'
+
   desktop:
     name: MCPB (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}

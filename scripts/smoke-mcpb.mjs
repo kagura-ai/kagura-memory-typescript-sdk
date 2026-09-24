@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
@@ -18,6 +18,12 @@ import { unzipSync } from "fflate";
 import { VERSIONED_MANIFEST_SCHEMAS } from "@anthropic-ai/mcpb/schemas";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+// Keep build/test dependencies on a current Node while exercising the bundle
+// with the exact minimum supported runtime (optional absolute executable path).
+const nodePath = process.argv[2] ? resolve(process.argv[2]) : process.execPath;
+const nodeVersion = execFileSync(nodePath, ["--version"], {
+  encoding: "utf8", windowsHide: true,
+}).trim();
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const bundleName = `kagura-memory-${pkg.version}.mcpb`;
 const bytes = readFileSync(join(root, "artifacts", bundleName));
@@ -194,13 +200,18 @@ function launch(extra = []) {
       .replaceAll("${user_config.profile}", "desktop")
       .replaceAll("${user_config.server}", `${base}/mcp`),
   );
-  // process.execPath stands in for the host's bundled Node. No PATH/global CLI.
+  // This executable stands in for the host's bundled Node. No PATH/global CLI.
   const child = spawn(
-    process.execPath,
+    nodePath,
     [...args, "--credentials", credentialsPath, "--no-browser", ...extra],
     {
       cwd: temporary,
-      env: { ...process.env, PATH: "", NODE_PATH: "", NODE_OPTIONS: "" },
+      env: {
+        ...process.env, PATH: "", NODE_PATH: "", NODE_OPTIONS: "",
+        // Early Node 18 emits an experimental-fetch warning. Application
+        // diagnostics and the stdout/stderr hygiene assertions still apply.
+        NODE_NO_WARNINGS: "1",
+      },
       stdio: "pipe",
       windowsHide: true,
     },
@@ -360,7 +371,7 @@ try {
   await third.stop();
   if (serverFailure) throw serverFailure;
   console.log(
-    `MCPB smoke passed on ${process.platform}/${process.arch}, Node ${process.version}\n${bundleName} sha256: ${digest}`,
+    `MCPB smoke passed on ${process.platform}/${process.arch}, Node ${nodeVersion}\n${bundleName} sha256: ${digest}`,
   );
 } finally {
   for (const child of children) {

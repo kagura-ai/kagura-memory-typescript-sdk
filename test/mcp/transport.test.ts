@@ -313,6 +313,68 @@ describe("transparent MCP transport", () => {
     }
   });
 
+  it.each([
+    { result: {} },
+    { error: { code: -32601, message: "Unsupported server request" } },
+  ])("does not recover or replay a host response rejected with 404: %j", async (fields) => {
+    const s = setup([
+      response(0, { protocolVersion: "2025-06-18" }, "expired"),
+      new Response(null, { status: 404 }),
+    ]);
+    await s.transport.forward(init, () => {});
+    await expect(s.transport.forward(
+      { jsonrpc: "2.0", id: "server", ...fields }, s.emit,
+    )).rejects.toThrow("Upstream HTTP 404.");
+    expect(s.calls).toHaveLength(2);
+    expect(s.calls[1]!.headers).toHaveProperty("Mcp-Session-Id", "expired");
+    expect(s.output).toEqual([]);
+  });
+
+  it("settles a host response's 404 before the recovery stream finishes", async () => {
+    const encoder = new TextEncoder();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const s = setup([
+      response(0, { protocolVersion: "2025-06-18" }, "old"),
+      new Response(null, { status: 404 }),
+      new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          stream = controller;
+          controller.enqueue(encoder.encode(
+            'data: {"jsonrpc":"2.0","id":"server","method":"ping"}\n\n',
+          ));
+        },
+      }), { headers: { "Content-Type": "text/event-stream", "mcp-session-id": "new" } }),
+      new Response(null, { status: 404 }),
+      new Response(null, { status: 202 }),
+      response("call"),
+    ]);
+    await s.transport.forward(init, () => {});
+    let rejected: Error | undefined;
+    let reply: Promise<void> | undefined;
+    const pending = s.transport.forward(call, (message) => {
+      if (message.method === "ping") {
+        reply = s.transport.forward(
+          { jsonrpc: "2.0", id: message.id, result: {} }, s.emit,
+        ).catch((error: Error) => { rejected = error; });
+      } else s.emit(message);
+    });
+    // Observe rejection while initialize's SSE body is deliberately still open.
+    // Always close it in cleanup so a regression cannot leave a circular wait.
+    try {
+      await expect.poll(() => rejected?.message).toBe("Upstream HTTP 404.");
+    } finally {
+      stream.enqueue(encoder.encode(
+        'data: {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18"}}\n\n',
+      ));
+      stream.close();
+      await Promise.allSettled([pending, reply]);
+    }
+    await pending;
+    expect(s.calls).toHaveLength(6);
+    expect(s.calls[3]!.headers).toHaveProperty("Mcp-Session-Id", "new");
+    expect(s.output).toEqual([{ jsonrpc: "2.0", id: "call", result: {} }]);
+  });
+
   it("rejects a second session 404 without another reinitialization", async () => {
     const s = setup([
       response(0, { protocolVersion: "2025-06-18" }, "old"),
@@ -445,6 +507,49 @@ describe("transparent MCP transport", () => {
       expect(cancel).toHaveBeenCalledTimes(1);
     },
   );
+
+  it.each(["whole", "split CRLF"])(
+    "accepts exactly 16 MiB in one SSE data field with %s chunks",
+    async (chunking) => {
+      const json = JSON.stringify({ jsonrpc: "2.0", id: "call", result: "日本語" });
+      const line = `data: ${json}${" ".repeat(16 * 1024 * 1024 - Buffer.byteLength(json))}\r`;
+      const encoder = new TextEncoder();
+      const chunks = chunking === "whole" ? [line + "\n\r\n"] : [line, "\n\r", "\n"];
+      const s = setup([new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      }), { headers: { "Content-Type": "text/event-stream" } })]);
+      await s.transport.forward(call, s.emit);
+      expect(s.output).toEqual([JSON.parse(json)]);
+    },
+  );
+
+  it("limits individual SSE events, not all complete events in a network chunk", async () => {
+    const notification = { jsonrpc: "2.0", method: "notifications/progress" };
+    const json = JSON.stringify(notification);
+    const event = `data: ${json}${" ".repeat(8 * 1024 * 1024 - Buffer.byteLength(json))}\n\n`;
+    const s = setup([new Response(
+      event + event + 'data: {"jsonrpc":"2.0","id":"call","result":{}}\n\n',
+      { headers: { "Content-Type": "text/event-stream" } },
+    )]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output).toEqual([notification, notification, { jsonrpc: "2.0", id: "call", result: {} }]);
+  });
+
+  it.each(["data: ", ": "])("bounds an unfinished SSE line starting with %j", async (prefix) => {
+    const cancel = vi.fn();
+    const s = setup([new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(prefix + " ".repeat(16 * 1024 * 1024 + 8)));
+      },
+      cancel,
+    }), { headers: { "Content-Type": "text/event-stream" } })]);
+    await expect(s.transport.forward(call, s.emit)).rejects.toThrow("exceeded 16 MiB");
+    expect(s.output).toEqual([]);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
 
   it("requires a correlated response and rejects invalid JSON-RPC", async () => {
     for (const r of [

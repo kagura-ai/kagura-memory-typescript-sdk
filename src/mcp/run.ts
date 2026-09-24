@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
-import { parseArgs } from "node:util";
+import { parseArgs } from "../cli/parseArgs.js";
 import { ProxyAuth } from "./auth.js";
 import { safeError } from "./errors.js";
 import { isMessage, isRequest, McpTransport, rpcError } from "./transport.js";
@@ -28,30 +28,37 @@ Connect a stdio MCP host to Kagura Cloud using an OAuth profile.
 `;
 
 export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
-  let values;
-  try {
-    ({ values } = parseArgs({
-      args: argv,
-      options: {
-        profile: { type: "string" },
-        server: { type: "string" },
-        credentials: { type: "string" },
-        "no-login": { type: "boolean" },
-        "no-browser": { type: "boolean" },
-        "login-timeout": { type: "string" },
-        help: { type: "boolean" },
-        version: { type: "boolean" },
-      },
-    }));
-  } catch {
+  const parsed = parseArgs(
+    argv,
+    {
+      flags: [
+        { name: "profile", type: "value" },
+        { name: "server", type: "value" },
+        { name: "credentials", type: "value" },
+        { name: "no-login" },
+        { name: "no-browser" },
+        { name: "login-timeout", type: "value" },
+        { name: "help" },
+        { name: "version" },
+      ],
+    },
+    { stopAtPositional: true },
+  );
+  if (
+    parsed.rest.length ||
+    parsed.unknown.length ||
+    parsed.noValue.length ||
+    parsed.missingValue.length
+  ) {
     io.error(`Invalid proxy arguments.\n${HELP}`);
     return 2;
   }
-  if (values.help) {
+  const { values, flags } = parsed;
+  if (flags.has("help")) {
     io.output(HELP);
     return 0;
   }
-  if (values.version) {
+  if (flags.has("version")) {
     io.output(`kagura-memory-mcp ${SDK_VERSION}\n`);
     return 0;
   }
@@ -78,8 +85,8 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
       profile: values.profile,
       server: values.server,
       credentialsPath: values.credentials,
-      login: !values["no-login"],
-      openBrowser: !values["no-browser"],
+      login: !flags.has("no-login"),
+      openBrowser: !flags.has("no-browser"),
       loginTimeoutMs: loginTimeout * 1000,
       signal: controller.signal,
       log,
