@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runProxy } from "../../src/mcp/run.js";
 
 let dir: string;
@@ -103,6 +103,39 @@ describe("stdio runner", () => {
     );
     s.controller.abort();
     expect(await done).toBe(0);
+  });
+
+  it("rejects malformed envelopes with -32600 without forwarding them", async () => {
+    const s = io();
+    const fetcher = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not forward"));
+    const malformed = [
+      { jsonrpc: "2.0", result: {} },
+      { jsonrpc: "2.0", error: { code: -32000, message: "failure" } },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", result: {} },
+      { jsonrpc: "2.0", method: "ping", error: { code: -32000, message: "failure" } },
+      { jsonrpc: "2.0", id: 2, result: {}, error: { code: -32000, message: "failure" } },
+      { jsonrpc: "2.0", id: 3, method: "ping", params: null },
+    ];
+    const done = runProxy(
+      ["--credentials", join(dir, "credentials.json"), "--no-login"],
+      s.deps,
+    );
+    try {
+      for (const message of malformed) s.input.write(JSON.stringify(message) + "\n");
+      await expect.poll(() => s.output.length).toBe(malformed.length);
+      expect(s.output.map((line) => JSON.parse(line))).toEqual(
+        malformed.map(() => ({
+          jsonrpc: "2.0", id: null,
+          error: { code: -32600, message: "Invalid request" },
+        })),
+      );
+      expect(s.errors).toEqual([]);
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      s.input.end();
+      await done;
+      fetcher.mockRestore();
+    }
   });
 
   it("returns immediately when already aborted before startup", async () => {

@@ -71,9 +71,13 @@ describe("transparent MCP transport", () => {
     expect(s.output).toEqual([{ jsonrpc: "2.0", id: "call", result: {} }]);
   });
 
-  it("coalesces concurrent session recovery without replaying initialization twice", async () => {
+  it("coalesces recovery and suppresses initialized notifications queued during it", async () => {
     let initialized = 0;
     let notified = 0;
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    let markRecovering!: () => void;
+    const recovering = new Promise<void>((resolve) => { markRecovering = resolve; });
     const transport = new McpTransport({
       url: "https://example.test/mcp",
       signal: new AbortController().signal,
@@ -86,8 +90,10 @@ describe("transparent MCP transport", () => {
         const headers = new Headers(request?.headers);
         if (message.method === "initialize") {
           initialized++;
-          // Yield so both expired requests reach recovery before it completes.
-          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (initialized === 2) {
+            markRecovering();
+            await recoveryGate;
+          }
           return response(
             message.id,
             { protocolVersion: "2025-06-18" },
@@ -107,13 +113,20 @@ describe("transparent MCP transport", () => {
     await transport.forward(init, (r) => {
       output.push(r);
     });
-    await Promise.all(
+    const requests = Promise.all(
       ["first", "second"].map((id) =>
         transport.forward({ ...call, id }, (r) => {
           output.push(r);
         }),
       ),
     );
+    await recovering;
+    const notification = transport.forward(
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      (r) => { output.push(r); },
+    );
+    releaseRecovery();
+    await Promise.all([requests, notification]);
     expect(initialized).toBe(2);
     expect(notified).toBe(1);
     expect(output.map((r) => r.id)).toEqual([0, "first", "second"]);
@@ -268,6 +281,30 @@ describe("transparent MCP transport", () => {
     expect(s.output.map((m) => m.id)).toEqual([0, "call"]);
   });
 
+  it("does not replay an expired initialized notification after recovery sends it", async () => {
+    const s = setup([
+      response(0, { protocolVersion: "2025-06-18" }, "old"),
+      new Response(null, { status: 404 }),
+      response(0, { protocolVersion: "2025-06-18" }, "new"),
+      new Response(null, { status: 202 }),
+    ]);
+    await s.transport.forward(init, s.emit);
+    await s.transport.forward(
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      s.emit,
+    );
+    expect(s.calls.map((request) => ({
+      method: JSON.parse(String(request.body)).method,
+      session: new Headers(request.headers).get("mcp-session-id"),
+    }))).toEqual([
+      { method: "initialize", session: null },
+      { method: "notifications/initialized", session: "old" },
+      { method: "initialize", session: null },
+      { method: "notifications/initialized", session: "new" },
+    ]);
+    expect(s.output.map((message) => message.id)).toEqual([0]);
+  });
+
   it("does not replay writes after 500, network failure or 404 without a session", async () => {
     for (const status of [404, 500, 429]) {
       const s = setup([new Response("failure", { status })]);
@@ -347,6 +384,68 @@ describe("transparent MCP transport", () => {
     expect(s.output).toEqual([]);
   });
 
+  it.each(["application/json", "text/event-stream"])(
+    "rejects malformed upstream envelopes in %s before emitting them",
+    async (contentType) => {
+      for (const fields of [
+        { result: {} },
+        { error: { code: -32000, message: "failure" } },
+        { id: "call", method: "ping", result: {} },
+        { id: "call", result: {}, error: { code: -32000, message: "failure" } },
+        { id: "call", error: { code: "invalid", message: "failure" } },
+      ]) {
+        const json = JSON.stringify({ jsonrpc: "2.0", ...fields });
+        const s = setup([new Response(
+          contentType === "text/event-stream" ? `data: ${json}\n\n` : json,
+          { headers: { "Content-Type": contentType } },
+        )]);
+        await expect(s.transport.forward(call, s.emit)).rejects.toThrow(
+          "invalid JSON-RPC message",
+        );
+        expect(s.output).toEqual([]);
+      }
+    },
+  );
+
+  it.each([8, 9])(
+    "counts %i empty SSE data fields toward the message byte limit",
+    async (emptyFields) => {
+      const limit = 16 * 1024 * 1024;
+      const json = JSON.stringify({ jsonrpc: "2.0", id: "call", result: {} });
+      const encoder = new TextEncoder();
+      const firstLine = encoder.encode(
+        `data: ${json}${" ".repeat(limit - 8 - Buffer.byteLength(json))}\n`,
+      );
+      let offset = 0;
+      const cancel = vi.fn();
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (offset < firstLine.length) {
+            const end = Math.min(offset + 256 * 1024, firstLine.length);
+            controller.enqueue(firstLine.subarray(offset, end));
+            offset = end;
+          } else {
+            controller.enqueue(encoder.encode("data:\n".repeat(emptyFields) + "\n"));
+          }
+        },
+        cancel,
+      });
+      const s = setup([new Response(stream, {
+        headers: { "Content-Type": "text/event-stream" },
+      })]);
+      if (emptyFields === 8) {
+        await s.transport.forward(call, s.emit);
+        expect(s.output).toEqual([JSON.parse(json)]);
+      } else {
+        await expect(s.transport.forward(call, s.emit)).rejects.toThrow(
+          "exceeded 16 MiB",
+        );
+        expect(s.output).toEqual([]);
+      }
+      expect(cancel).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("requires a correlated response and rejects invalid JSON-RPC", async () => {
     for (const r of [
       new Response(null, { status: 202 }),
@@ -388,4 +487,33 @@ it("recognizes message kinds and retains zero/null/string IDs in errors", () => 
   expect(isRequest({ jsonrpc: "2.0", method: "ping" })).toBe(false);
   expect(isMessage({ jsonrpc: "2.0", id: {}, method: "ping" })).toBe(false);
   for (const id of [0, null, "x"]) expect(rpcError(id, "failure").id).toBe(id);
+});
+
+it("validates disjoint JSON-RPC forms while retaining valid IDs and payloads", () => {
+  for (const fields of [
+    { method: "ping" },
+    { method: "ping", params: [] },
+    { method: "ping", params: {} },
+    ...[0, null, "server"].flatMap((id) => [
+      { id, method: "ping" },
+      { id, result: null },
+      { id, result: [false, 0, ""] },
+      { id, error: { code: -32000, message: "failure", data: null } },
+    ]),
+  ]) expect(isMessage({ jsonrpc: "2.0", ...fields })).toBe(true);
+
+  for (const fields of [
+    { result: {} },
+    { error: { code: -32000, message: "failure" } },
+    { id: 1 },
+    { id: 1, result: {}, error: { code: -32000, message: "failure" } },
+    { id: 1, method: "ping", result: {} },
+    { method: "ping", error: { code: -32000, message: "failure" } },
+    { id: 1, method: null, result: {} },
+    ...[null, true, 1, "bad"].map((params) => ({ method: "ping", params })),
+    ...[null, [], "bad", {}, { code: 1 }, { code: 1.5, message: "bad" },
+      { code: "1", message: "bad" }, { code: 1, message: null }]
+      .map((error) => ({ id: 1, error })),
+    ...[NaN, Infinity, true, {}, []].map((id) => ({ id, result: {} })),
+  ]) expect(isMessage({ jsonrpc: "2.0", ...fields })).toBe(false);
 });

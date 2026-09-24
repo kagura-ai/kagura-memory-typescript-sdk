@@ -16,6 +16,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reject malformed JSON-RPC envelopes in the desktop proxy, count separators
+  toward its SSE message size limit, and avoid duplicate initialized
+  notifications after session recovery.
 - Quote Windows browser URLs for Explorer's argument parser so OAuth links
   containing `=` open the browser instead of the Documents folder. Keep URLs
   out of command shells and encode embedded quotes before verbatim passing.

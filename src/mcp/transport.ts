@@ -7,20 +7,41 @@ export type Emit = (message: RpcMessage) => void;
 export function isMessage(value: unknown): value is RpcMessage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const message = value as Record<string, unknown>;
-  return (
-    message.jsonrpc === "2.0" &&
-    (typeof message.method === "string" ||
-      "result" in message ||
-      "error" in message) &&
-    (!("id" in message) ||
-      message.id === null ||
-      typeof message.id === "string" ||
-      typeof message.id === "number")
-  );
+  if (message.jsonrpc !== "2.0") return false;
+  const hasId = "id" in message;
+  if (
+    hasId &&
+    message.id !== null &&
+    typeof message.id !== "string" &&
+    !(typeof message.id === "number" && Number.isFinite(message.id))
+  )
+    return false;
+
+  const hasResult = "result" in message;
+  const hasError = "error" in message;
+  if ("method" in message) {
+    return (
+      typeof message.method === "string" &&
+      !hasResult &&
+      !hasError &&
+      (!("params" in message) ||
+        (message.params !== null && typeof message.params === "object"))
+    );
+  }
+  if (!hasId || hasResult === hasError) return false;
+  if (hasResult) return true;
+  const error = message.error;
+  if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+  const fields = error as Record<string, unknown>;
+  return Number.isInteger(fields.code) && typeof fields.message === "string";
 }
 
 export function isRequest(message: RpcMessage): boolean {
   return typeof message.method === "string" && "id" in message;
+}
+
+function isInitializedNotification(message: RpcMessage): boolean {
+  return message.method === "notifications/initialized" && !isRequest(message);
 }
 
 export function rpcError(
@@ -74,7 +95,8 @@ async function readMessages(
       return complete;
     } else if (text.startsWith("data:")) {
       const data = text.slice(5).replace(/^ /, "");
-      eventBytes += Buffer.byteLength(data);
+      // Joining data fields inserts a newline, including between empty fields.
+      eventBytes += Buffer.byteLength(data) + (eventData.length > 0 ? 1 : 0);
       if (eventBytes > MAX_MESSAGE_BYTES)
         throw new ProxyError("Upstream message exceeded 16 MiB.");
       eventData.push(data);
@@ -134,8 +156,10 @@ export class McpTransport {
       this.recovery &&
       typeof message.method === "string" &&
       message.method !== "notifications/cancelled"
-    )
+    ) {
       await this.recovery;
+      if (isInitializedNotification(message)) return;
+    }
     if (message.method === "initialize") {
       this.session = undefined;
       this.protocol = undefined;
@@ -228,6 +252,8 @@ export class McpTransport {
           await response.body?.cancel();
           clearTimeout(timer);
           await this.recover(session, emit);
+          // Recovery already completed the new session's handshake.
+          if (isInitializedNotification(message)) return;
           return this.send(message, emit, this.session, false);
         }
         if (!isRequest(message)) {
