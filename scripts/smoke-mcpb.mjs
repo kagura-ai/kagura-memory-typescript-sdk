@@ -59,6 +59,7 @@ let initializedCount = 0;
 let rejectToken = false;
 let expireSession = false;
 let pendingLogin = false;
+let omitRefreshToken = false;
 let pendingServerReply;
 let serverFailure;
 const requests = [];
@@ -96,7 +97,7 @@ const server = createServer(async (req, res) => {
         return json({ error: "authorization_pending" }, 400);
       return json({
         access_token: `fake-access-${refreshCount}`,
-        refresh_token: "fake-refresh",
+        ...(omitRefreshToken ? {} : { refresh_token: "fake-refresh" }),
         token_type: "Bearer",
         expires_in: 3600,
         scope: "memory:read memory:write",
@@ -359,6 +360,16 @@ try {
   assert.equal(loginCount, 1);
   assert.equal(second.stderr(), "");
   await second.stop();
+
+  // A valid degraded OAuth response must preserve JSON-only stdout and route
+  // its warning through the proxy's stderr logger.
+  omitRefreshToken = true;
+  const nonRefreshable = launch(["--profile", "no-refresh"]);
+  assert.ok((await nonRefreshable.request(init)).result);
+  assert.match(nonRefreshable.stderr(), /kagura-memory-mcp: Logged in, but the token response carried no refresh_token/);
+  assert.doesNotMatch(nonRefreshable.stderr(), /fake-access|fake-device/);
+  assert.equal(JSON.parse(readFileSync(credentialsPath, "utf8")).profiles["no-refresh"].refresh_token, "");
+  await nonRefreshable.stop();
 
   // A closed host must stop an outstanding first-login poll promptly.
   pendingLogin = true;

@@ -112,6 +112,23 @@ describe("desktop OAuth", () => {
     expect(s.open).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, ""])("routes the missing refresh-token warning to the proxy logger (%j)", async (refreshToken) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = setup([
+        Response.json(authorization),
+        Response.json({ ...token, refresh_token: refreshToken }),
+      ]);
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(s.log).toHaveBeenCalledWith(expect.stringContaining("no refresh_token"));
+      expect(warn).not.toHaveBeenCalled();
+      expect(loadCredentialsFile(credentialsPath).profiles.desktop?.refreshToken).toBe("");
+      expect(JSON.stringify(s.log.mock.calls)).not.toContain("private-");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("refreshes near expiry without opening the browser", async () => {
     await stored({ expiresAt: new Date(0) });
     const s = setup([Response.json(token)]);

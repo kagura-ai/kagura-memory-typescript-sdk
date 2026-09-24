@@ -187,6 +187,7 @@ export class ProxyAuth {
         scope: stored?.scope || undefined,
         env: {},
         fetch: loginFetch,
+        onWarning: options.log,
         sleep: async (ms) => {
           await delay(ms, undefined, { signal: controller.signal });
         },

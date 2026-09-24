@@ -101,6 +101,52 @@ describe("stdio runner", () => {
     ]);
   });
 
+  it.each(["profile", "server", "credentials"])(
+    "rejects explicitly empty --%s values before starting the proxy",
+    async (name) => {
+      for (const args of [
+        [`--${name}=`, "--help"], [`--${name}`, "", "--help"],
+        [`--${name}=  `, "--help"], [`--${name}`, " \t", "--help"],
+      ]) {
+        const s = io();
+        expect(await runProxy(args, s.deps)).toBe(2);
+        expect(s.output).toEqual([]);
+        expect(s.errors.join("")).toContain("Invalid proxy arguments");
+      }
+    },
+  );
+
+  it("rejects an oversized unterminated line before EOF and resumes at the next delimiter", async () => {
+    const s = io();
+    const done = runProxy(
+      ["--credentials", join(dir, "credentials.json"), "--no-login"],
+      s.deps,
+    );
+    try {
+      // No newline or EOF: readline's accumulated-line guard never fires here.
+      const chunk = Buffer.alloc(1024 * 1024, 0x20);
+      for (let i = 0; i < 17; i++) {
+        s.input.write(chunk);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      await expect.poll(() => s.output.length).toBe(1);
+      expect(JSON.parse(s.output[0]!)).toEqual({
+        jsonrpc: "2.0", id: null,
+        error: { code: -32600, message: "Message exceeded 16 MiB." },
+      });
+      // Even an otherwise-valid suffix of the bad line must not be processed.
+      s.input.write('{"jsonrpc":"2.0","id":"discarded","method":"ping"}\r');
+      s.input.write('\n{"jsonrpc":"2.0","id":"next","method":"ping"}\n');
+      await expect.poll(() => s.output.length).toBe(2);
+      expect(JSON.parse(s.output[1]!)).toMatchObject({
+        id: "next", error: { message: expect.stringContaining("Login required") },
+      });
+    } finally {
+      s.input.end();
+      await done;
+    }
+  });
+
   it("shuts down when signalled while stdin is idle", async () => {
     const s = io();
     const done = runProxy(

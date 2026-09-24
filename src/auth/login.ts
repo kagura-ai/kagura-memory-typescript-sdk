@@ -10,7 +10,8 @@
  *
  * Deliberately still no terminal IO and no browser launching: `onUserCode`
  * hands the code and verification URI back to the caller, which owns how it
- * is displayed. The only side effect is the credentials file write.
+ * is displayed. Warnings use `onWarning` (or `console.warn` by default), and
+ * successful login writes the credentials file.
  */
 
 import { baseUrlFromMcp, validateHttpsUrl } from "../http.js";
@@ -75,6 +76,8 @@ export interface LoginOptions {
    * write, so a host app that cannot show the code fails fast.
    */
   onUserCode?: (auth: DeviceAuthorizationResponse) => void | Promise<void>;
+  /** Warning sink for degraded login results (default: `console.warn`). */
+  onWarning?: (message: string) => void;
   /** Injectable fetch (tests / custom agents). */
   fetch?: typeof globalThis.fetch;
   /** Injectable sleep in milliseconds, used between polls. */
@@ -146,7 +149,7 @@ export async function login(options: LoginOptions = {}): Promise<OAuthCredential
   // one considers valid on the file they share. Warn instead: the caller
   // can also branch on the returned `refreshToken`.
   if (!token.refreshToken) {
-    console.warn(
+    (options.onWarning ?? console.warn)(
       "Logged in, but the token response carried no refresh_token: this " +
         "profile cannot auto-refresh and will need another login when the " +
         `access token expires. Verify the '${clientId}' client is allowed ` +

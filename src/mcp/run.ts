@@ -1,8 +1,8 @@
-import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import { parseArgs } from "../cli/parseArgs.js";
 import { ProxyAuth } from "./auth.js";
 import { safeError } from "./errors.js";
+import { readStdioLines } from "./lines.js";
 import { isMessage, isRequest, McpTransport, rpcError } from "./transport.js";
 import type { RpcMessage } from "./transport.js";
 import { SDK_VERSION } from "../version.js";
@@ -48,7 +48,10 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
     parsed.rest.length ||
     parsed.unknown.length ||
     parsed.noValue.length ||
-    parsed.missingValue.length
+    parsed.missingValue.length ||
+    [parsed.values.profile, parsed.values.server, parsed.values.credentials].some(
+      (value) => value?.trim() === "",
+    )
   ) {
     io.error(`Invalid proxy arguments.\n${HELP}`);
     return 2;
@@ -101,26 +104,20 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
     io.signal.removeEventListener("abort", abort);
     return 1;
   }
-  const lines = createInterface({
-    input: io.input,
-    crlfDelay: Infinity,
-    terminal: false,
-  });
+  const lines = readStdioLines(io.input, controller.signal);
   const pending = new Set<Promise<void>>();
   let barrier = Promise.resolve();
   const emit = (message: RpcMessage): void => {
     if (!controller.signal.aborted) io.output(`${JSON.stringify(message)}\n`);
   };
-  const close = (): void => lines.close();
-  controller.signal.addEventListener("abort", close, { once: true });
   try {
     for await (const line of lines) {
       if (controller.signal.aborted) break;
-      if (!line.trim()) continue;
-      if (Buffer.byteLength(line) > 16 * 1024 * 1024) {
+      if (line === null) {
         emit(rpcError(null, "Message exceeded 16 MiB.", -32600));
         continue;
       }
+      if (!line.trim()) continue;
       let message: unknown;
       try {
         message = JSON.parse(line);
@@ -167,9 +164,7 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
     }
   } finally {
     controller.abort();
-    lines.close();
     await Promise.allSettled(pending);
-    controller.signal.removeEventListener("abort", close);
     io.signal.removeEventListener("abort", abort);
   }
   return 0;
