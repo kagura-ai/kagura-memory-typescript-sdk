@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-mcp/
+artifacts/
 coverage/
 *.tgz
 .kagura.json

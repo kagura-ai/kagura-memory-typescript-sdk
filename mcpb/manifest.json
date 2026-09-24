@@ -1,0 +1,52 @@
+{
+  "manifest_version": "0.3",
+  "name": "kagura-memory",
+  "display_name": "Kagura Memory Cloud",
+  "version": "0.11.0",
+  "description": "Search and save long-term memories in Kagura Cloud with browser sign-in.",
+  "long_description": "Connect Claude Desktop to Kagura Memory Cloud. On first use, approve access in your browser. The extension reuses your Kagura OAuth profile and refreshes it automatically. An account with access to a Kagura workspace is required. Memory and tool data are sent to your configured Kagura server.",
+  "author": { "name": "Kagura AI", "url": "https://kagura-ai.com" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kagura-ai/kagura-memory-typescript-sdk"
+  },
+  "documentation": "https://github.com/kagura-ai/kagura-memory-typescript-sdk/blob/main/docs/mcpb.md",
+  "support": "https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues",
+  "license": "MIT",
+  "privacy_policies": ["https://www.kagura-ai.com/privacy"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/mcp.cjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/mcp.cjs",
+        "--profile",
+        "${user_config.profile}",
+        "--server",
+        "${user_config.server}"
+      ]
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["win32", "darwin"],
+    "runtimes": { "node": ">=18" }
+  },
+  "user_config": {
+    "profile": {
+      "type": "string",
+      "title": "OAuth profile",
+      "description": "Named profile shared with the Kagura CLI. Use a separate profile for each server or account.",
+      "default": "desktop",
+      "required": true
+    },
+    "server": {
+      "type": "string",
+      "title": "Kagura MCP server",
+      "description": "Your Kagura MCP endpoint. Keep the default for Kagura Cloud, or enter your self-hosted HTTPS endpoint.",
+      "default": "https://memory.kagura-ai.com/mcp",
+      "required": true
+    }
+  }
+}

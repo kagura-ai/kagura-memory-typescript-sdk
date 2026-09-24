@@ -6,6 +6,55 @@ on:
   pull_request:
 
 jobs:
+  minimum-runtime:
+    name: MCPB minimum runtime (Node 18.0.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:mcpb
+      - name: Save test harness runtime
+        id: harness
+        run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.0.0
+      - name: Exercise extracted bundle on the exact runtime floor
+        run: '"${{ steps.harness.outputs.node }}" scripts/smoke-mcpb.mjs "$(command -v node)"'
+
+  desktop:
+    name: MCPB (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        node: [18, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:no-webcrypto
+      - run: npm run build:mcpb
+      - run: npm run test:mcpb
+      - name: Reproducible bundle
+        run: node scripts/check-mcpb-reproducibility.mjs
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'windows-latest' && matrix.node == 22
+        with:
+          name: MCPB
+          path: artifacts/kagura-memory-*.mcpb*
+          if-no-files-found: error
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -54,6 +103,9 @@ jobs:
           CLI=./node_modules/.bin/kagura-memory
 
           "$CLI" --version | grep -qE '^kagura-memory, version [0-9]+\.[0-9]+\.[0-9]+$'
+          MCP=./node_modules/.bin/kagura-memory-mcp
+          "$MCP" --version | grep -qE '^kagura-memory-mcp [0-9]+\.[0-9]+\.[0-9]+$'
+          "$MCP" --help | grep -q 'stdio MCP host'
           # Every group must be reachable from the root listing.
           for cmd in auth config context contexts doctor edge explore files \
                      forget recall reference remember resource secret setup \

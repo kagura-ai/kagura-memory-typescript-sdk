@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Desktop MCPB extension and `kagura-memory-mcp` stdio proxy**
+  ([#63](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/63)):
+  browser device login, shared OAuth profiles, token refresh, transparent JSON/SSE
+  forwarding, bounded session recovery, deterministic bundles and Windows/macOS
+  artifact validation. See [installation and host validation](docs/mcpb.md).
+
+### Fixed
+
+- Reject malformed JSON-RPC envelopes in the desktop proxy, count separators
+  toward its SSE message size limit, and avoid duplicate initialized
+  notifications after session recovery.
+- Quote Windows browser URLs for Explorer's argument parser so OAuth links
+  containing `=` open the browser instead of the Documents folder. Keep URLs
+  out of command shells and encode embedded quotes before verbatim passing.
+
 ## [0.11.0] - 2026-09-24
 
 ### Added
