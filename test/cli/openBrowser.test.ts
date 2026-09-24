@@ -22,10 +22,10 @@ describe("browserCommand", () => {
     // `cmd /c start "" <url>` lets cmd.exe reinterpret & | < > ^ in the
     // URL. That breaks any verification_uri_complete carrying a query
     // string, and a hostile OAuth server could append `& calc.exe`.
-    // explorer.exe takes the URL as a plain argument — no shell parsing.
+    // Explorer needs literal quotes around its URL, without a command shell.
     const [command, args] = browserCommand("win32", "https://x.test/a?b=1&c=2");
     expect(command).toBe("explorer.exe");
-    expect(args).toEqual(["https://x.test/a?b=1&c=2"]);
+    expect(args).toEqual(['"https://x.test/a?b=1&c=2"']);
     expect(command).not.toMatch(/cmd/i);
   });
 });
@@ -68,6 +68,30 @@ describe("openBrowser: URL vetting", () => {
 });
 
 describe("openBrowser", () => {
+  it("preserves query separators inside Explorer's quoted URL", async () => {
+    const calls: unknown[][] = [];
+    await expect(openBrowser(
+      "https://x.test/device?user_code=ABCD-EFGH&next=a,b",
+      ((...args: unknown[]) => {
+        calls.push(args);
+        return fakeChild("spawn") as never;
+      }) as never,
+      "win32",
+    )).resolves.toBe(true);
+    expect(calls).toEqual([[
+      "explorer.exe",
+      ['"https://x.test/device?user_code=ABCD-EFGH&next=a,b"'],
+      { stdio: "ignore", detached: true, shell: false, windowsVerbatimArguments: true },
+    ]]);
+  });
+
+  it("cannot break out of the quoted Windows URL with embedded quotes", () => {
+    const [, args] = browserCommand("win32", 'https://x.test/?value=" /select,C:/#"');
+    expect(args).toHaveLength(1);
+    expect(args[0]).toBe('"https://x.test/?value=%22%20/select,C:/#%22"');
+    expect(args[0]?.match(/"/g)).toHaveLength(2);
+  });
+
   it("reports success only once the process actually spawned", async () => {
     await expect(
       openBrowser("https://x.test", () => fakeChild("spawn") as never),

@@ -14,6 +14,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   forwarding, bounded session recovery, deterministic bundles and Windows/macOS
   artifact validation. See [installation and host validation](docs/mcpb.md).
 
+### Fixed
+
+- Quote Windows browser URLs for Explorer's argument parser so OAuth links
+  containing `=` open the browser instead of the Documents folder. Keep URLs
+  out of command shells and encode embedded quotes before verbatim passing.
+
 ## [0.11.0] - 2026-09-24
 
 ### Added

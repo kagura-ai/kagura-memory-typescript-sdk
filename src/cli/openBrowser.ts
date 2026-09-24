@@ -20,9 +20,12 @@ export function browserCommand(platform: NodeJS.Platform, url: string): [string,
     // URL to a shell that reinterprets & | < > ^, which breaks any
     // verification_uri_complete carrying a query string and lets a
     // hostile OAuth server smuggle a command into the URL it returns.
-    // explorer.exe receives the URL as a plain argument and opens the
-    // default browser without any shell in between.
-    return ["explorer.exe", [url]];
+    // Explorer parses '=' and ',' itself, so even a URL without spaces
+    // needs literal surrounding quotes. Node's normal argv quoting omits
+    // those quotes and Explorer opens Documents instead of the browser.
+    // Canonicalize/encode embedded quotes before verbatim Windows passing.
+    const target = new URL(url).href.replace(/"/g, "%22");
+    return ["explorer.exe", [`"${target}"`]];
   }
   if (platform === "darwin") {
     return ["open", [url]];
@@ -63,11 +66,15 @@ function isOpenableUrl(url: string): boolean {
  *   opener asynchronously through the `error` event, so this waits for
  *   `spawn`/`error` rather than assuming the call succeeded.
  */
-export async function openBrowser(url: string, spawnImpl: SpawnLike = spawn): Promise<boolean> {
+export async function openBrowser(
+  url: string,
+  spawnImpl: SpawnLike = spawn,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
   if (!isOpenableUrl(url)) {
     return false;
   }
-  const [command, args] = browserCommand(process.platform, url);
+  const [command, args] = browserCommand(platform, url);
 
   return new Promise<boolean>((resolve) => {
     let settled = false;
@@ -79,7 +86,12 @@ export async function openBrowser(url: string, spawnImpl: SpawnLike = spawn): Pr
     };
 
     try {
-      const child = spawnImpl(command, args, { stdio: "ignore", detached: true });
+      const child = spawnImpl(command, args, {
+        stdio: "ignore",
+        detached: true,
+        shell: false,
+        windowsVerbatimArguments: platform === "win32",
+      });
       child.once("spawn", () => settle(true));
       child.once("error", () => settle(false));
       // Don't hold the event loop open waiting for the browser to close.
