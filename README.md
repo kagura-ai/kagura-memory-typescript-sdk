@@ -187,7 +187,7 @@ the server's `setup_resource` has no summary: the context's owner sets it
 afterwards with `kagura-memory context update <context_id> --summary …`.
 As in Python, `resource tokens revoke` prints `Token revoked.`, and
 `resource schema` prints `No schema registered for this resource.` when
-there is none.
+there is none (the route's 404).
 
 **Records print as the Python CLI prints them.** `resource tokens
 list|create|update`, `resource list|stats|indexer-status|events|schema`,
@@ -205,10 +205,13 @@ is the form memory-cloud already sends. A record the model refuses (a
 required field missing, a value of the wrong type) exits 1 with the
 Python SDK's `KaguraResponseError` text, e.g. `ResourceClient.list_tokens:
 unexpected server response for PaginatedResourceTokensResponse
-(tokens.0.created_at: Field required). …`. One limit remains: inside an
-untyped mapping (an event's `payload`, a batch's `errors`) a number is
-read as JavaScript reads it, so `1.0` prints `1` and an integer past 2^53
-loses its last digits.
+(tokens.0.created_at: Field required). …`, and so does a body that is no
+record at all (`null`). An untyped mapping nested past pydantic's limit
+(256 containers) exits 1 with pydantic's `Error serializing to JSON:
+ValueError: Circular reference detected (depth exceeded)`. One limit
+remains: inside an untyped mapping (an event's `payload`, a batch's
+`errors`) a number is read as JavaScript reads it, so `1.0` prints `1`
+and an integer past 2^53 loses its last digits.
 
 **Files and imports.** The `files` commands take their workspace from the
 credential's own source, as the Python CLI does (its #115): `-c` when
@@ -592,7 +595,8 @@ would accept.
   it is `.`, `..` or empty (exit 2, `Invalid value for 'FILE_ID': '..' is
   not a valid file id.`), before anything is read or sent. The Python CLI
   sends it, and URL resolution then drops or climbs the segment: `files
-  download-url ..` asks for `/api/v1/download-url`. Any other id is sent
+  download-url ..` asks for `/api/v1/download-url`. (From 0.41.1 it
+  refuses a `USER_ID` as this bin does.) Any other id is sent
   percent-encoded as one segment, so a `/`, `?` or `#` in it stays in the
   id rather than reaching another route or replacing the query
   (`files delete 'x?workspace_id=…'`).
@@ -636,7 +640,14 @@ The version passes at or above `MIN_SERVER_VERSION` (0.75.0), fails below
 it (`Version: 0.74.0 is below minimum 0.75.0`, a pre-release of 0.75.0
 included) and is `info` when it cannot be compared (`main-abc123`, `0.78`).
 An unreachable server fails with `Server unreachable: …`, and an OAuth
-profile the REST route refuses is `info`, in Python's words. With
+profile the REST route refuses is `info`, in Python's words. The
+`/system/info` body is read through Python's `ServerInfo` model, and one
+it refuses (no `name`, a `version` that is no string) fails as
+unreachable: `Server unreachable: Invalid response format: …`, naming the
+problem in the SDK's words where Python prints pydantic's. A credential
+that does not resolve fails the auth section with Python's
+`Authentication could not be resolved: …` and skips the server check
+(`info`), as in Python. With
 `--profile NAME` the server is checked with that profile, as in Python
 (`KAGURA_API_KEY` still comes first), not with the default. `--json`
 prints Python's shape, with `details` on every check (`{}` when there are
@@ -1248,8 +1259,14 @@ after all, so check before uploading again. A batch reports
 batch answered with `null`; a reserve, a confirm or a 409's existing file
 that the Python SDK's `FileReserveResponse` / `FileObject` model refuses,
 such as a confirm with no `created_at`) ends the stream with that `error`
-and throws a `KaguraResponseError` in the Python SDK's words; such a
-confirm is not `confirmed`. Every `FilesClient` method refuses a
+and throws a `KaguraResponseError` in the Python SDK's words, a reserve
+before the PUT; such a confirm is not `confirmed`. A reserve whose
+`file_id` is `.`, `..` or empty ends it the same way, before the PUT, with
+this SDK's own message (`file_id must be a file id, got "..": …`); the
+Python SDK accepts it and confirms at another route. `list` and
+`downloadUrl` read their body through the Python SDK's model too
+(`FileObject` for each item of a bare list, else `FileListResponse`;
+`FileDownloadUrlResponse`), and throw the same error for one it refuses. Every `FilesClient` method refuses a
 `contextId` that is not a UUID in the Python SDK's words (`context_id must
 be a UUID; got '…'`), and sends a `{braced}`, `urn:uuid:` or dashless one
 in its canonical form.
@@ -1262,7 +1279,8 @@ that is `.`, `..` or empty throws before anything is sent
 (`fileId must be a file id, got "..": as a URL path segment it would
 address a different endpoint`): encoding leaves those as they are, and
 URL resolution would send the request elsewhere. The Python SDK sends
-them as typed
+them as typed, but for a workspace user id, which it refuses too from
+0.41.1
 ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/66)).
 
 ## Zero-knowledge secrets

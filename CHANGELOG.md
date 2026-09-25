@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`ServerInfo.terms_version`** (memory-cloud v0.77.0+): the
+  terms-of-service version, `null` when the deployment does not record
+  acceptance, as the Python SDK 0.41.0 reads it. `doctor` checks it with
+  the rest of the body.
+
 ### Changed
 
 - **The resource and files commands print what the Python CLI prints**
@@ -23,7 +30,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pydantic 2's datetime reading (`2026-06-01T09:00:00.5+00:00` as
   `2026-06-01T09:00:00.500000Z`; memory-cloud already sends that form).
   A record the model refuses exits 1 with the Python SDK's
-  `KaguraResponseError` text, as the Python CLI does. `files upload
+  `KaguraResponseError` text, as the Python CLI does, and so does a
+  `null` body (`files list`, and `resource schema`, which read it as no
+  schema), where one threw a `TypeError` or exited 0. An untyped value
+  (an event's `payload`) nested past pydantic's limit, 256 containers,
+  exits 1 with pydantic's `Error serializing to JSON: …`, where it printed,
+  or overflowed the stack. `files upload
   --remember` prints the file as its model reads it, and `resource import`
   reads each batch's counts through the model, so a count sent as `"2"`
   adds 2. Checked against the Python CLI 0.41.0 on 52 server responses,
@@ -34,15 +46,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file as `FileObject`. A body the model refuses is a `KaguraResponseError`
   that ends the progress stream, before any PUT for a reserve, and never
   reported `confirmed` for a confirm; the confirm used to be checked for
-  its `id` only. The value returned is unchanged.
+  its `id` only. A reserve whose `file_id` no path can carry (`.`, `..` or
+  empty) is refused the same way, before the PUT, by this SDK's own check;
+  the Python SDK accepts it. The value returned is unchanged.
+- **`FilesClient.list` and `downloadUrl` read the body through the Python
+  SDK's model**, as `upload` does: a bare list's items as `FileObject`
+  (anything else whole as `FileListResponse`), and `FileDownloadUrlResponse`.
+  A body the model refuses is a `KaguraResponseError`, where `files
+  download-url` printed `undefined` and exited 0 for a body without its
+  URL. The value returned is unchanged.
+- **`ResourceClient.getResourceSchema` refuses a 2xx body that is no JSON
+  object**, so only the 404 means no schema, as in Python, where a `null`
+  body read as none. An object is returned as it arrives, as every
+  `ResourceClient` reader returns it; `resource schema` reads it through
+  `ResourceSchemaResponse`.
 - **`doctor` reports the server version's verdict**, as Python's `doctor`
   does (python-sdk #280): `Server reachable`, then `Version: X` as pass,
   fail (`Version: X is below minimum 0.75.0`) or info (a version it cannot
   compare), by the shared `meetsMinimum` against `MIN_SERVER_VERSION`. An
   unreachable server fails with `Server unreachable: …`, an API key the
   server refuses with its own message, and an OAuth profile the REST route
-  refuses is Python's info line. With `--profile NAME` the server is
-  checked with that profile, as Python checks it, where it was checked
+  refuses is Python's info line. The `/system/info` body is read through
+  Python's `ServerInfo`, and one it refuses fails as unreachable
+  (`Server unreachable: Invalid response format: …`, the problem in the
+  SDK's words where Python prints pydantic's); a credential that does not
+  resolve fails the auth section with Python's `Authentication could not
+  be resolved: …` and skips the check, as Python's is skipped. With
+  `--profile NAME`
+  the server is checked with that profile, as Python checks it, where it was checked
   with the default one. `doctor --json` gives every check
   `details`, `{}` when it has none, as Python's `to_dict` does.
 
@@ -53,8 +84,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Every id a client puts in a URL path is percent-encoded, so a `/`, `?`,
   `#` or `%` in it can no longer reach another route or replace the query,
   and one that is `.`, `..` or empty, which no encoding neutralizes, throws
-  before anything is sent: `FilesClient.delete` / `downloadUrl`'s file id
-  (and the file id a reserve hands back), every `ResourceClient` resource
+  before anything is sent: `FilesClient.delete` / `downloadUrl`'s file id,
+  every `ResourceClient` resource
   id, `KaguraClient`'s context id for `getMemoryStats`, `findDuplicates`
   and the `listTags` drill-down, `SecretClient.approvePubkey` /
   `revokePubkey`'s pubkey id, and a `WorkspaceClient` user id, which now
@@ -63,7 +94,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--user`, and the resource id of `resource stats`, `indexer-status`,
   `schema`, `events`, `ingest`, `ingest-batch` and `import`. The Python
   SDK sends them as typed (`files download-url ..` asks for
-  `/api/v1/download-url`).
+  `/api/v1/download-url`), but for a user id, which it refuses too from
+  0.41.1, in the same click words.
 - **A profile named like an `Object.prototype` key**
   ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/66)).
   `getProfile`, `setDefaultProfile`, `deleteProfile`, `refresh`, `auth
@@ -81,6 +113,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before its model, where Python fails with an `AttributeError`. A
   `content` item that is `null` reads as `{}`, as one with no text does,
   rather than throwing a `TypeError`.
+- **A number with a long run of whitespace inside**: an int or float field
+  (`"5 … 5"` from the server) or a CLI number took time quadratic in the
+  run to refuse, seconds for 80,000 spaces. The whitespace around a number
+  is now stripped in linear time.
+- **`checkServerVersion` on a `/system/info` body that is no object**
+  threw a `TypeError`; it returns the body without a warning, as for a
+  version it cannot compare.
 
 ## [0.12.0] - 2026-09-25
 
