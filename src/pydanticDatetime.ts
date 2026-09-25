@@ -8,7 +8,7 @@
  * - an RFC 3339 string: `YYYY-MM-DD`, then `T`, `t`, a space or `_`, then
  *   `HH:MM`, optionally `:SS` and a fraction after `.` or `,` (digits past
  *   six are dropped), then optionally `Z` / `z` or an offset `±HH:MM` /
- *   `±HHMM`;
+ *   `±HHMM`, its `-` also written U+2212 MINUS SIGN;
  * - a Unix time, as a number or a string of one (`+5`, `-1.5`, `.5`, and
  *   an exponent after a `.`: `1.5e3`, never `1e3`): seconds, or
  *   milliseconds past ±2e10;
@@ -33,8 +33,8 @@ const MS_THRESHOLD = 20_000_000_000;
 const I64_MAX = 2n ** 63n - 1n;
 /** A float as Rust's standard grammar reads one (lexical's `STANDARD`). */
 const FLOAT = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
-/** Seconds from 0001-01-01 to the epoch, and to the end of 9999. */
-const MIN_SECONDS = -62_135_596_800;
+/** Seconds from 0000-01-01 to the epoch, and to the end of 9999: speedate's range. */
+const MIN_SECONDS = -62_167_219_200;
 const MAX_SECONDS = 253_402_300_799;
 
 interface Parts {
@@ -72,9 +72,23 @@ function digits(text: string, at: number, count: number): number | null {
 
 type DateResult = { ok: true; year: number; month: number; day: number } | { ok: false; msg: string };
 
-/** speedate's `Date::parse_bytes_partial`: the first ten characters, validated. */
+/** The UTF-8 bytes of `text`, which speedate counts where JavaScript counts UTF-16 units. */
+function utf8Length(text: string): number {
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
+/**
+ * speedate's `Date::parse_bytes_partial`: the first ten bytes, validated.
+ * Up to the first character past ASCII, which no rule accepts, a byte is a
+ * UTF-16 unit, so only the length needs counting in bytes.
+ */
 function parseDatePrefix(text: string): DateResult {
-  if (text.length < 10) return { ok: false, msg: "input is too short" };
+  if (text.length < 10 && utf8Length(text) < 10) return { ok: false, msg: "input is too short" };
   const year = digits(text, 0, 4);
   if (year === null) return { ok: false, msg: "invalid character in year" };
   if (text[4] !== "-") return { ok: false, msg: "invalid date separator, expected `-`" };
@@ -120,7 +134,7 @@ function parseDateTime(text: string): Parts | null {
   if (sign === "Z" || sign === "z") {
     offset = 0;
     at += 1;
-  } else if (sign === "+" || sign === "-") {
+  } else if (sign === "+" || sign === "-" || sign === "\u2212") {
     const hh = digits(text, at + 1, 2);
     if (hh === null) return null;
     at += 3;
@@ -128,7 +142,7 @@ function parseDateTime(text: string): Parts | null {
     const mm = digits(text, at, 2);
     if (mm === null || hh > 23 || mm > 59) return null;
     at += 2;
-    offset = (sign === "-" ? -1 : 1) * (hh * 3600 + mm * 60);
+    offset = (sign === "+" ? 1 : -1) * (hh * 3600 + mm * 60);
   }
   if (at !== text.length) return null;
   return { year: date.year, month: date.month, day: date.day, hour, minute, second, micro, offset };

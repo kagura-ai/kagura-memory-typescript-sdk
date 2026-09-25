@@ -367,6 +367,32 @@ export const DATETIME_CASES: ReadonlyArray<[input: unknown, expected: { ok: stri
   [Infinity, { err: "Input should be a valid datetime, dates after 9999 are not supported as unix timestamps" }],
   [-Infinity, { err: "Input should be a valid datetime, dates before 0000 are not supported as unix timestamps" }],
   [NaN, { err: "Input should be a valid datetime, NaN values not permitted" }],
+  // An offset signed with U+2212 MINUS SIGN, which speedate reads as `-`; a
+  // Unix time in year 0, which speedate reaches and Python's datetime
+  // refuses; and a short string of multi-byte characters, whose length
+  // speedate counts in UTF-8 bytes.
+  ["2026-06-01T09:00\u221205:00", { ok: "2026-06-01T09:00:00-05:00" }],
+  ["2026-06-01T09:00:00\u22120530", { ok: "2026-06-01T09:00:00-05:30" }],
+  ["2026-06-01T09:00:00\u221200:00", { ok: "2026-06-01T09:00:00Z" }],
+  ["0000-01-01T00:00\u221205:00", { err: "Input should be a valid datetime, year 0 is out of range" }],
+  ["2026-06-01T09:00\u2212", { err: "Input should be a valid datetime or date, unexpected extra characters at the end of the input" }],
+  ["2026-06-01T09:00\u2212\u221205:00", { err: "Input should be a valid datetime or date, unexpected extra characters at the end of the input" }],
+  ["-62150000000000", { err: "Input should be a valid datetime, year 0 is out of range" }],
+  [-62150000000000, { err: "Input should be a valid datetime, year 0 is out of range" }],
+  ["-62150000000000.5", { ok: "1968-01-12T16:06:40.998496Z" }],
+  [-62167219200000, { err: "Input should be a valid datetime, year 0 is out of range" }],
+  ["-62167219200000", { err: "Input should be a valid datetime, year 0 is out of range" }],
+  [-62167219200001, { err: "Input should be a valid datetime, dates before 0000 are not supported as unix timestamps" }],
+  ["-62167219200", { ok: "1968-01-12T11:19:40.800000Z" }],
+  [-62167219200, { ok: "1968-01-12T11:19:40.800000Z" }],
+  ["-62167219201", { ok: "1968-01-12T11:19:40.799000Z" }],
+  [-62135596801, { ok: "1968-01-12T20:06:43.199000Z" }],
+  ["\u00e9\u00e9\u00e9\u00e9\u00e9", { err: "Input should be a valid datetime or date, invalid character in year" }],
+  ["2026-06-\u00e9", { err: "Input should be a valid datetime or date, invalid character in day" }],
+  ["\u65e5\u672c\u8a9e\u65e5", { err: "Input should be a valid datetime or date, invalid character in year" }],
+  ["\u65e5\u672c\u8a9e", { err: "Input should be a valid datetime or date, input is too short" }],
+  ["\ud83d\ude00\ud83d\ude00\ud83d\ude00", { err: "Input should be a valid datetime or date, invalid character in year" }],
+  ["2026\u00e9", { err: "Input should be a valid datetime or date, input is too short" }],
 ];
 
 export const FLOAT_CASES: ReadonlyArray<[repr: string, json: string]> = [
