@@ -340,6 +340,33 @@ export const DATETIME_CASES: ReadonlyArray<[input: unknown, expected: { ok: stri
   ["9999-12-31t12:34:56,5z", { ok: "9999-12-31T12:34:56.500000Z" }],
   ["9999-12-31t12:34:56.1234567+0000", { ok: "9999-12-31T12:34:56.123456Z" }],
   ["9999-12-31t12:34:56.1234567-05:30", { ok: "9999-12-31T12:34:56.123456-05:30" }],
+  // speedate's number grammar at its edges (PR #68 review): a float too big
+  // for a double, a decimal out of range, i64's wrap, an exponent after a
+  // `.`, a negative time's microseconds, and a non-finite number.
+  [`${"1".repeat(400)}.0`, { err: "Input should be a valid datetime or date, invalid date separator, expected `-`" }],
+  [`-${"1".repeat(400)}.0`, { err: "Input should be a valid datetime or date, invalid character in year" }],
+  ["1.5e400", { err: "Input should be a valid datetime or date, input is too short" }],
+  ["1000000000000000000.0", { err: "Input should be a valid datetime or date, invalid date separator, expected `-`" }],
+  ["-1000000000000000000.5", { err: "Input should be a valid datetime or date, invalid character in year" }],
+  ["9223372036854775807.5", { err: "Input should be a valid datetime or date, invalid date separator, expected `-`" }],
+  ["-9223372036854775807", { err: "Input should be a valid datetime or date, dates before 0000 are not supported as unix timestamps" }],
+  ["-9223372036854775808", { err: "Input should be a valid datetime or date, invalid character in year" }],
+  ["18446744073709551616", { ok: "1970-01-01T00:00:00Z" }],
+  ["20000000000000000000", { err: "Input should be a valid datetime or date, dates after 9999 are not supported as unix timestamps" }],
+  ["20000000000000000000.5", { err: "Input should be a valid datetime or date, invalid date separator, expected `-`" }],
+  ["1.5e3", { ok: "1970-01-01T00:25:00Z" }],
+  ["1.e3", { ok: "1970-01-01T00:16:40Z" }],
+  [".5e1", { ok: "1970-01-01T00:00:05Z" }],
+  ["1.5E3", { ok: "1970-01-01T00:25:00Z" }],
+  ["1.5e-3", { ok: "1970-01-01T00:00:00.001500Z" }],
+  ["1e3", { err: "Input should be a valid datetime or date, input is too short" }],
+  ["1.5e", { err: "Input should be a valid datetime or date, input is too short" }],
+  ["-.9999995", { ok: "1969-12-31T23:59:59Z" }],
+  ["-.2663975", { ok: "1969-12-31T23:59:59.733602Z" }],
+  ["-.0051275", { ok: "1969-12-31T23:59:59.994873Z" }],
+  [Infinity, { err: "Input should be a valid datetime, dates after 9999 are not supported as unix timestamps" }],
+  [-Infinity, { err: "Input should be a valid datetime, dates before 0000 are not supported as unix timestamps" }],
+  [NaN, { err: "Input should be a valid datetime, NaN values not permitted" }],
 ];
 
 export const FLOAT_CASES: ReadonlyArray<[repr: string, json: string]> = [

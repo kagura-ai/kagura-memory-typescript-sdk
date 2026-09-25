@@ -9,8 +9,9 @@
  *   `HH:MM`, optionally `:SS` and a fraction after `.` or `,` (digits past
  *   six are dropped), then optionally `Z` / `z` or an offset `±HH:MM` /
  *   `±HHMM`;
- * - a Unix time, as a number or a string of one (`+5`, `-1.5`, `.5`; no
- *   exponent): seconds, or milliseconds past ±2e10;
+ * - a Unix time, as a number or a string of one (`+5`, `-1.5`, `.5`, and
+ *   an exponent after a `.`: `1.5e3`, never `1e3`): seconds, or
+ *   milliseconds past ±2e10;
  * - failing both, a date alone (`2026-06-01`), read as midnight with no
  *   offset.
  *
@@ -28,8 +29,10 @@ import type { Coerced } from "./responseShape.js";
 
 /** Milliseconds rather than seconds past this magnitude, as speedate reads a Unix time. */
 const MS_THRESHOLD = 20_000_000_000;
-/** i64, which a Unix time must fit, as speedate parses it. */
+/** i64, where speedate's `as i64` saturates. */
 const I64_MAX = 2n ** 63n - 1n;
+/** A float as Rust's standard grammar reads one (lexical's `STANDARD`). */
+const FLOAT = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 /** Seconds from 0001-01-01 to the epoch, and to the end of 9999. */
 const MIN_SECONDS = -62_135_596_800;
 const MAX_SECONDS = 253_402_300_799;
@@ -131,17 +134,24 @@ function parseDateTime(text: string): Parts | null {
   return { year: date.year, month: date.month, day: date.day, hour, minute, second, micro, offset };
 }
 
-/** speedate's `float_parse_bytes`: an int, a float, or `null` for neither. */
+/**
+ * speedate's `float_parse_bytes`: an int, a float, or `null` for neither.
+ *
+ * The int is `+` or `-`, then ASCII digits, summed in i64 arithmetic that
+ * wraps and fails only when the running value turns negative: so 2^64
+ * reads as 0, and -2^63 fails. Only when that stops at a `.` is the text
+ * read as a float, whole.
+ */
 function parseNumber(text: string): bigint | number | null {
-  const match = /^([+-]?)(\d*)(?:(\.)(\d*))?$/.exec(text);
-  if (match === null) return null;
-  const [, sign, whole, dot, fraction] = match;
-  if (whole === "" && (fraction ?? "") === "") return null;
-  if (dot === undefined) {
-    const value = BigInt(`${sign}${whole}`);
-    return value > I64_MAX || value < -I64_MAX - 1n ? null : value;
+  if (text === "") return null;
+  let value = 0n;
+  for (let i = text.length > 1 && (text[0] === "-" || text[0] === "+") ? 1 : 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (!(c >= 0x30 && c <= 0x39)) return text[i] === "." && FLOAT.test(text) ? Number(text) : null;
+    value = BigInt.asIntN(64, value * 10n + BigInt(c - 0x30));
+    if (value < 0n) return null;
   }
-  return Number(`${sign}${whole || "0"}.${fraction || "0"}`);
+  return text[0] === "-" ? -value : value;
 }
 
 /** The calendar parts of a Unix time in UTC, or pydantic's message for one out of range. */
@@ -190,31 +200,29 @@ function fromWatershed(timestamp: bigint, extraMicro: number): Parts | string {
  * in seconds (through {@link fromWatershed}), plus the fraction's magnitude
  * in microseconds, or in milliseconds when the number is past ±2e10. So
  * `-1.25` reads as -2 s + 250 ms, and `20000000000.5` as 20000000000 s +
- * 500 µs: pydantic's arithmetic, kept.
+ * 500 µs: pydantic's arithmetic, kept. ±∞ saturates to i64's end, as
+ * Rust's `as i64` does: out of range.
  */
 function numberTime(value: number): Parts | string {
   if (Number.isSafeInteger(value)) return fromWatershed(BigInt(value), 0);
+  if (!Number.isFinite(value)) return fromWatershed(value > 0 ? I64_MAX : -I64_MAX - 1n, 0);
   const scale = Math.abs(value) > MS_THRESHOLD ? 1000 : 1_000_000;
   return fromWatershed(BigInt(Math.floor(value)), Math.round(Math.abs(value - Math.trunc(value)) * scale));
 }
 
 /**
  * A numeric string as speedate reads it: an integer through
- * {@link fromWatershed}; a decimal divided by 1000 past ±2e10, split into
- * whole seconds and rounded microseconds, then through the watershed
- * again. At an exact half microsecond of a negative time speedate can
- * round the other way.
+ * {@link fromWatershed}; a float divided by 1000 past ±2e10, floored to
+ * whole seconds, the rest rounded to microseconds, then through the
+ * watershed again. A float too big for a double is ±∞, which Rust's
+ * `as i64` saturates to i64's end: out of range, not a crash.
  */
 function stringTime(value: bigint | number): Parts | string {
   if (typeof value === "bigint") return fromWatershed(value, 0);
   const t = Math.abs(value) > MS_THRESHOLD ? value / 1000 : value;
-  let seconds = Math.trunc(t);
-  let micro = Math.round((t - seconds) * 1_000_000);
-  if (micro < 0) {
-    seconds -= 1;
-    micro += 1_000_000;
-  }
-  return fromWatershed(BigInt(seconds), micro);
+  if (!Number.isFinite(t)) return fromWatershed(t > 0 ? I64_MAX : -I64_MAX - 1n, 0);
+  const seconds = Math.floor(t);
+  return fromWatershed(BigInt(seconds), Math.round((t - seconds) * 1_000_000));
 }
 
 function pad(value: number, width = 2): string {
@@ -247,7 +255,7 @@ function checked(p: Parts): Coerced<string> {
  */
 export function pydanticDatetime(value: unknown): Coerced<string> {
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) return { ok: false, msg: "Input should be a finite number" };
+    if (Number.isNaN(value)) return { ok: false, msg: "Input should be a valid datetime, NaN values not permitted" };
     const parts = numberTime(value);
     return typeof parts === "string"
       ? { ok: false, msg: `Input should be a valid datetime, ${parts}` }
@@ -258,17 +266,14 @@ export function pydanticDatetime(value: unknown): Coerced<string> {
   const parts = parseDateTime(value);
   if (parts !== null) return checked(parts);
   const number = parseNumber(value);
-  if (number !== null) {
-    const unix = stringTime(number);
-    if (typeof unix !== "string") return checked(unix);
-  }
+  const unix = number === null ? null : stringTime(number);
+  if (unix !== null && typeof unix !== "string") return checked(unix);
   // pydantic's lax fallback: a date, read as midnight with no offset, and
-  // the date's error when that fails too.
+  // the date's error when that fails too. speedate's date reads an integer
+  // as a Unix time, but never a decimal, so only an integer's error is the
+  // Unix time's.
   const prefix = "Input should be a valid datetime or date";
-  if (number !== null) {
-    const unix = stringTime(number);
-    if (typeof unix === "string") return { ok: false, msg: `${prefix}, ${unix}` };
-  }
+  if (typeof number === "bigint" && typeof unix === "string") return { ok: false, msg: `${prefix}, ${unix}` };
   const date = parseDatePrefix(value);
   if (!date.ok) return { ok: false, msg: `${prefix}, ${date.msg}` };
   if (value.length > 10) return { ok: false, msg: `${prefix}, unexpected extra characters at the end of the input` };
