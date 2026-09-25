@@ -21,8 +21,13 @@ import {
   loadCredentialsFile,
   profileNamed,
 } from "../../auth/credentials.js";
+import { MIN_SERVER_VERSION, type KaguraClientOptions } from "../../client.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
+import { excMessage, KaguraAuthError, KaguraConnectionError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
+import type { ServerInfo } from "../../models.js";
+import { pyRepr } from "../../python.js";
+import { meetsMinimum, requireVersion } from "../../versionCheck.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -47,6 +52,9 @@ interface DoctorCheck {
   message: string;
   details?: Record<string, unknown>;
 }
+
+/** The SDK's minimum as a triple, for `meetsMinimum`. */
+const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER_VERSION");
 
 /** Python's `_STATUS_ORDER`; a section takes its worst check's status. */
 const STATUS_ORDER: Record<Status, number> = { fail: 3, warn: 2, pass: 1, info: 0 };
@@ -406,6 +414,34 @@ function checkKeyCustody(): DoctorCheck[] {
   return checks;
 }
 
+/** Python's message for an OAuth bearer the REST info route refuses. */
+const OAUTH_VERSION_UNVERIFIED =
+  "Could not verify server version over REST with an OAuth profile " +
+  "(expected: REST validates API keys, not OAuth bearers; the MCP connection is unaffected).";
+
+/** Whether `options` resolve to an OAuth profile, as the client built from them does. */
+function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boolean {
+  try {
+    return (
+      deps.resolveAuth({ apiKey: options.apiKey ?? null, mcpUrl: options.mcpUrl ?? null, profile: null })
+        .kind === "oauth"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Python's `_check_server`: `Server reachable`, then `Version: …` as
+ * pass, fail or info by the shared `meetsMinimum` against the SDK's
+ * {@link MIN_SERVER_VERSION} (python-sdk #280). `checkServerVersion`
+ * makes the same comparison, so its advisory on stderr and this verdict
+ * cannot disagree.
+ *
+ * A failure other than an auth or connection error (a body that is no
+ * JSON, a 429) fails the check with its message, where Python's doctor
+ * stops with a traceback.
+ */
 async function checkServer(deps: CommandDeps): Promise<DoctorCheck[]> {
   const clientOptions = mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
 
@@ -416,35 +452,44 @@ async function checkServer(deps: CommandDeps): Promise<DoctorCheck[]> {
   try {
     client = deps.makeClient(clientOptions);
   } catch (e) {
-    return [
-      {
-        section: "server",
-        status: "fail",
-        message: `cannot build a client: ${e instanceof Error ? e.message : String(e)}`,
-      },
-    ];
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
+  let info: ServerInfo;
   try {
-    const info = await client.getServerInfo();
-    return [
-      {
-        section: "server",
-        status: "pass",
-        message: `server reachable (version ${info.version ?? "unknown"})`,
-        details: info as unknown as Record<string, unknown>,
-      },
-    ];
+    info = await client.checkServerVersion();
   } catch (e) {
-    return [
-      {
-        section: "server",
-        status: "fail",
-        message: `cannot reach the server: ${e instanceof Error ? e.message : String(e)}`,
-      },
-    ];
+    if (e instanceof KaguraAuthError) {
+      return [
+        resolvesToOAuth(deps, clientOptions)
+          ? { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED }
+          : { section: "server", status: "fail", message: excMessage(e) },
+      ];
+    }
+    if (e instanceof KaguraConnectionError) {
+      return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
+    }
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
   } finally {
     await client.close();
   }
+
+  const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];
+  const version: unknown = info.version;
+  const shown = typeof version === "string" ? version : pyRepr(version);
+  const meets = meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE);
+  if (meets === null) {
+    checks.push({ section: "server", status: "info", message: `Version: ${shown}`, details: { version } });
+  } else if (!meets) {
+    checks.push({
+      section: "server",
+      status: "fail",
+      message: `Version: ${shown} is below minimum ${MIN_SERVER_VERSION}`,
+      details: { version, minimum: MIN_SERVER_VERSION },
+    });
+  } else {
+    checks.push({ section: "server", status: "pass", message: `Version: ${shown}`, details: { version } });
+  }
+  return checks;
 }
 
 export const DOCTOR: Command = {
@@ -479,7 +524,14 @@ export const DOCTOR: Command = {
       // Python's to_dict() also spreads each section as a TOP-LEVEL key.
       // It reads like a bug, but a script written against the Python CLI
       // reads those keys, so the shape is reproduced rather than tidied.
-      deps.write(formatJson({ sections, checks, exit_code: exitCode, ...sections }));
+      // Every check carries `details`, `{}` when it has none, as there.
+      const rendered = checks.map(({ section, status, message, details }) => ({
+        section,
+        status,
+        message,
+        details: details ?? {},
+      }));
+      deps.write(formatJson({ sections, checks: rendered, exit_code: exitCode, ...sections }));
     } else {
       for (const check of checks) {
         deps.write(`${check.status.toUpperCase()} ${check.message}`);
