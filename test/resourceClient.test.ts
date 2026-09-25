@@ -252,6 +252,37 @@ describe("resource stats", () => {
   });
 });
 
+describe("resource ids in the path (#66)", () => {
+  const calls: Array<[string, (client: ResourceClient, id: string) => Promise<unknown>]> = [
+    ["getResourceImpact", (c, id) => c.getResourceImpact(id)],
+    ["getIndexerStatus", (c, id) => c.getIndexerStatus(id)],
+    ["getResourceSchema", (c, id) => c.getResourceSchema(id)],
+    ["listResourceEvents", (c, id) => c.listResourceEvents(id)],
+    ["ingestEvent", (c, id) => c.ingestEvent(id, "rk", { op: "upsert", docId: "d" })],
+    ["ingestEvents", (c, id) => c.ingestEvents(id, "rk", [{ op: "upsert", docId: "d" }])],
+  ];
+
+  it.each(calls)("%s refuses ., .. and an empty id before sending anything", async (_name, call) => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    for (const id of [".", "..", ""]) {
+      await expect(call(client, id)).rejects.toThrow(
+        `resourceId must be a resource id, got ${JSON.stringify(id)}: as a URL path segment it ` +
+          "would address a different endpoint",
+      );
+    }
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it.each(calls)("%s sends the id as one percent-encoded segment", async (_name, call) => {
+    const server = new FakeRest();
+    server.fallback = { status: 200, body: { events: [], created_count: 0 } };
+    const client = makeClient(server);
+    await call(client, "a/../b?x=1#f %");
+    expect(server.last().url).toMatch(/^https:\/\/x\.test\/api\/v1\/resources\/a%2F\.\.%2Fb%3Fx%3D1%23f%20%25\//);
+  });
+});
+
 describe("error mapping", () => {
   it("maps 429 to KaguraQuotaError with retryAfter", async () => {
     const server = new FakeRest();

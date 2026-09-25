@@ -47,6 +47,7 @@ import {
   parseChoice,
   parseIdArg,
   parseRanged,
+  pathIdParam,
   pyRepr,
   type Param,
 } from "../parse.js";
@@ -265,18 +266,12 @@ function example(command: string): string {
 }
 
 /**
- * A user id, refused as click refuses a bad value (exit 2) when it is `.`
- * or `..`, before anything is read or asked. Percent-encoding leaves both
- * as they are and URL resolution then drops or climbs the segment:
- * `member remove ..` would send `DELETE /api/v1/workspaces/{ws}`, the
- * workspace itself. Python sends them (a PYBUG); the SDK refuses them
- * too, this check only words it as click would.
+ * A user id, refused (exit 2) when it is `.`, `..` or empty: `member
+ * remove ..` would send `DELETE /api/v1/workspaces/{ws}`, the workspace
+ * itself. See {@link pathIdParam}.
  */
 function userIdParam(param: Param, value: string): string {
-  if (value === "." || value === "..") {
-    throw new CliUsageError(`Invalid value for ${paramLabel(param)}: ${pyRepr(value)} is not a valid user id.`);
-  }
-  return value;
+  return pathIdParam(param, value, "user id");
 }
 
 // ---------------------------------------------------------------------------

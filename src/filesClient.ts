@@ -31,6 +31,7 @@ import type {
   FileObject,
   FileReserveResponse,
 } from "./models.js";
+import { pathSegment } from "./pathSegment.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
 import { normalizeUuid, pyRepr } from "./pyCompat.js";
 import { laxStr, ResponseReader } from "./responseShape.js";
@@ -208,7 +209,7 @@ export class FilesClient extends KaguraRestClient {
       confirmStarted = true;
       // workspace_id is required on the confirm query string (memory-cloud
       // v0.41.0); omitting it returns 422 and the upload never finalizes.
-      const confirmResp = await this.request("POST", `/api/v1/files/${reserve.file_id}/confirm`, {
+      const confirmResp = await this.request("POST", `/api/v1/files/${pathSegment(reserve.file_id, "file_id", "a file id")}/confirm`, {
         params: { workspace_id: contextId },
         json: { sha256: sha256Hex },
       });
@@ -249,7 +250,7 @@ export class FilesClient extends KaguraRestClient {
   /** Return a short-lived presigned GET URL for `fileId`. */
   async downloadUrl(fileId: string, options: { contextId: string }): Promise<string> {
     const contextId = normalizeContextId(options.contextId);
-    const response = await this.request("GET", `/api/v1/files/${fileId}/download-url`, {
+    const response = await this.request("GET", `/api/v1/files/${pathSegment(fileId, "fileId", "a file id")}/download-url`, {
       params: { workspace_id: contextId },
     });
     return (this.json(response) as FileDownloadUrlResponse).download_url;
@@ -258,7 +259,7 @@ export class FilesClient extends KaguraRestClient {
   /** Soft-delete a file by id (server hard-deletes after retention). */
   async delete(fileId: string, options: { contextId: string }): Promise<void> {
     const contextId = normalizeContextId(options.contextId);
-    await this.request("DELETE", `/api/v1/files/${fileId}`, {
+    await this.request("DELETE", `/api/v1/files/${pathSegment(fileId, "fileId", "a file id")}`, {
       params: { workspace_id: contextId },
     });
   }

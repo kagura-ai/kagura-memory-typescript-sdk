@@ -119,6 +119,24 @@ export function parseIdArg(param: Param, raw: string): number | bigint {
 }
 
 /**
+ * A string id the command puts in a REST path (`USER_ID`, `FILE_ID`,
+ * `--resource-id`), refused as click refuses a bad value (exit 2) when it
+ * is `.`, `..` or empty, before anything is read, asked or sent (#66).
+ * Percent-encoding leaves all three as they are, and URL resolution then
+ * drops or climbs the segment: `files download-url ..` would GET
+ * `/api/v1/download-url`. The Python CLI sends them (a PYBUG); the SDK
+ * refuses them too (`pathSegment`), and this words it as click would.
+ *
+ * @param what The id's kind in the message, e.g. `file id`.
+ */
+export function pathIdParam(param: Param, value: string, what: string): string {
+  if (value === "" || value === "." || value === "..") {
+    throw new CliUsageError(`Invalid value for ${paramLabel(param)}: ${pyRepr(value)} is not a valid ${what}.`);
+  }
+  return value;
+}
+
+/**
  * Coerce a `click.IntRange` / `click.FloatRange` option.
  *
  * `rangeLabel` is passed rather than derived because click renders the

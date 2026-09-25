@@ -175,6 +175,23 @@ describe("pubkey registry", () => {
     expect(rest.requests.every((r) => r.method === "POST")).toBe(true);
   });
 
+  it("sends a pubkey id as one path segment, and refuses . and .. (#66)", async () => {
+    const rest = new FakeRest();
+    rest.body = JSON.stringify(PUBKEY);
+    const client = makeClient(rest);
+    await client.approvePubkey("../pubkeys/x?y");
+    expect(rest.path(0)).toBe("/api/v1/config/secrets/pubkeys/..%2Fpubkeys%2Fx%3Fy/approve");
+
+    for (const id of [".", "..", ""]) {
+      const refused =
+        `pubkeyId must be a pubkey id, got ${JSON.stringify(id)}: as a URL path segment it ` +
+        "would address a different endpoint";
+      await expect(client.approvePubkey(id)).rejects.toThrow(refused);
+      await expect(client.revokePubkey(id)).rejects.toThrow(refused);
+    }
+    expect(rest.requests).toHaveLength(1);
+  });
+
   it("rejects a non-array body where the contract says list", async () => {
     const rest = new FakeRest();
     rest.body = JSON.stringify({ pubkeys: [] });

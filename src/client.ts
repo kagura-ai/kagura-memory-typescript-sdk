@@ -60,6 +60,7 @@ import type {
   ToolTrigger,
   UsageInfo,
 } from "./models.js";
+import { pathSegment } from "./pathSegment.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
 import { pyRepr, pyTypeName } from "./python.js";
 import {
@@ -88,6 +89,14 @@ export const MIN_SERVER_VERSION = "0.75.0";
 
 /** Parsed once, so a malformed {@link MIN_SERVER_VERSION} fails at import. */
 const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER_VERSION");
+
+/**
+ * A context id as its path segment in a REST route: percent-encoded, and
+ * refused when it is `.`, `..` or empty (#66, see {@link pathSegment}).
+ */
+function contextSegment(contextId: string): string {
+  return pathSegment(contextId, "contextId", "a context id");
+}
 
 /** Generic parsed-JSON result of an MCP tool call. */
 export type ToolResult = Record<string, unknown>;
@@ -1992,9 +2001,9 @@ export class KaguraClient {
     contextId: string,
     params: Record<string, unknown>,
   ): Promise<ListTagsResponse> {
-    // Encoded, so a caller's id cannot add segments to the request path.
+    // One segment, so a caller's id cannot add segments to the request path.
     const body = await this.restGet<unknown>(
-      `/api/v1/contexts/${encodeURIComponent(contextId)}/tags`,
+      `/api/v1/contexts/${contextSegment(contextId)}/tags`,
       params,
       "list_tags",
     );
@@ -2620,7 +2629,7 @@ export class KaguraClient {
     offset?: number;
   }): Promise<MemoryStatsResponse> {
     return this.restGet<MemoryStatsResponse>(
-      `/api/v1/contexts/${options.contextId}/memory-stats`,
+      `/api/v1/contexts/${contextSegment(options.contextId)}/memory-stats`,
       {
         sort_by: options.sortBy ?? "access_count",
         sort_order: options.sortOrder ?? "desc",
@@ -2638,7 +2647,7 @@ export class KaguraClient {
     /** Maximum pairs (1-200, default 50). */
     limit?: number;
   }): Promise<DuplicatesResponse> {
-    return this.restGet<DuplicatesResponse>(`/api/v1/contexts/${options.contextId}/duplicates`, {
+    return this.restGet<DuplicatesResponse>(`/api/v1/contexts/${contextSegment(options.contextId)}/duplicates`, {
       threshold: options.threshold ?? 0.9,
       limit: options.limit ?? 50,
     });

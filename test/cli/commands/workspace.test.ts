@@ -1110,11 +1110,12 @@ describe("auth revoke-key", () => {
 // a user id of . or ..
 // ---------------------------------------------------------------------------
 
-describe("a user id of . or ..", () => {
+describe("a user id of ., .. or nothing", () => {
   // URL resolution drops or climbs such a segment even percent-encoded:
   // `member remove .. --yes` would DELETE /api/v1/workspaces/{ws}, the
-  // workspace itself. Python sends it (a PYBUG); this bin refuses it
-  // before anything is read, asked or sent.
+  // workspace itself, and an empty one addresses `members/`. Python sends
+  // them (a PYBUG); this bin refuses them before anything is read, asked
+  // or sent.
   const USER_ID = (id: string) => `Error: Invalid value for 'USER_ID': ${id} is not a valid user id.`;
   const USER = (id: string) => `Error: Invalid value for '--user' / '-u': ${id} is not a valid user id.`;
 
@@ -1127,6 +1128,9 @@ describe("a user id of . or ..", () => {
     [["auth", "revoke-key", "42", "--user", ".", "--yes"], USER("'.'")],
     [["auth", "list-keys", "-u", "."], USER("'.'")],
     [["auth", "create-key", "-u", "..", "-n", "ci", "--expires-days", "90"], USER("'..'")],
+    [["workspace", "member", "remove", "", "--yes"], USER_ID("''")],
+    [["workspace", "member", "add", "", "--role", "member"], USER_ID("''")],
+    [["auth", "list-keys", "--user="], USER("''")],
   ])("refuses %j in click's words (exit 2), sending nothing", async (argv, line) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
@@ -1142,6 +1146,13 @@ describe("a user id of . or ..", () => {
     expect(await runCli(["workspace", "member", "remove", id, "--yes"], h.deps)).toBe(0);
     expect(lastRequest(h).url).toBe(`https://test.com/api/v1/workspaces/${WS}/members/${id}`);
     expect(h.out).toEqual([`Removed ${id}`]);
+  });
+
+  it("sends a user id with a slash or a query as one segment (#66)", async () => {
+    const h = harness();
+    h.rest.status = 204;
+    expect(await runCli(["workspace", "member", "remove", "a/b?c", "--yes"], h.deps)).toBe(0);
+    expect(lastRequest(h).url).toBe(`https://test.com/api/v1/workspaces/${WS}/members/a%2Fb%3Fc`);
   });
 });
 

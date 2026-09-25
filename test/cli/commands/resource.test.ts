@@ -180,6 +180,52 @@ describe("kagura-memory resource events", () => {
   });
 });
 
+describe("a resource id in the REST path (#66)", () => {
+  // Python puts it in the path as typed: `resource stats -r ..` GETs
+  // /api/v1/impact, and `-r 'x?y'` adds a query.
+  const RESOURCE = (id: string) =>
+    `Error: Invalid value for '--resource-id' / '-r': '${id}' is not a valid resource id.`;
+
+  it.each([
+    [["resource", "stats", "-r", ".."], RESOURCE("..")],
+    [["resource", "indexer-status", "-r", "."], RESOURCE(".")],
+    [["resource", "schema", "--resource-id="], RESOURCE("")],
+    [["resource", "events", ".."], "Error: Invalid value for 'RESOURCE_ID': '..' is not a valid resource id."],
+    [["resource", "ingest", "-r", "..", "-k", "rk", "--doc-id", "d"], RESOURCE("..")],
+    [["resource", "ingest-batch", "-r", "..", "-k", "rk", "-f", "/nonexistent/events.json"], RESOURCE("..")],
+  ])("refuses %j in click's words (exit 2), sending nothing", async (argv, line) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err).toEqual([line]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
+  it("refuses it on import before reading the input", async () => {
+    const h = harness();
+    h.deps.readStdin = () => {
+      throw new Error("stdin must not be read");
+    };
+    expect(await runCli(["resource", "import", "-r", "..", "-k", "rk", "--format", "json"], h.deps)).toBe(2);
+    expect(h.err).toEqual([RESOURCE("..")]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
+  it("sends an id with a slash or a query as one segment", async () => {
+    const h = harness();
+    h.rest.body = { resource_id: "a/b?c", token_count: 0, memory_count: 0 };
+    expect(await runCli(["resource", "stats", "-r", "a/b?c"], h.deps)).toBe(0);
+    expect(new URL(h.rest.last().url).pathname).toBe("/api/v1/resources/a%2Fb%3Fc/impact");
+  });
+
+  it("still takes an empty id where it goes in the body (tokens create)", async () => {
+    const h = harness();
+    h.rest.status = 422;
+    h.rest.body = { detail: "resource_id too short" };
+    expect(await runCli(["resource", "tokens", "create", "-r", ""], h.deps)).toBe(1);
+    expect(h.rest.last().body).toMatchObject({ resource_id: "" });
+  });
+});
+
 describe("kagura-memory resource schema vs ingest: the -v/-V trap", () => {
   it("reads lowercase -v as the schema version on `schema`", async () => {
     const h = harness();

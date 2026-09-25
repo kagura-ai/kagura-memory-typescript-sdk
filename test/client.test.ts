@@ -2011,6 +2011,15 @@ describe("listTags withTags drill-down (#47)", () => {
     await client.listTags({ contextId: "a/b", withTags: ["a"] }).catch(() => undefined);
     expect(new URL(server.requests[0]!.url).pathname).toBe("/api/v1/contexts/a%2Fb/tags");
   });
+
+  it("refuses a context id of . or .., which encoding leaves as they are (#66)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(client.listTags({ contextId: "..", withTags: ["a"] })).rejects.toThrow(
+      'contextId must be a context id, got "..": as a URL path segment it would address a different endpoint',
+    );
+    expect(server.requests).toEqual([]);
+  });
 });
 
 describe("options the server ignores (#47)", () => {
@@ -2372,6 +2381,31 @@ describe("REST endpoints", () => {
     expect(url2.searchParams.get("sort_by")).toBe("reference_count");
     expect(url2.searchParams.get("sort_order")).toBe("asc");
   });
+
+  it("getMemoryStats and findDuplicates send the context id as one path segment (#66)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.getMemoryStats({ contextId: "a/b?c" }).catch(() => undefined);
+    await client.findDuplicates({ contextId: "a/b?c" }).catch(() => undefined);
+    expect(server.requests.map((r) => new URL(r.url).pathname)).toEqual([
+      "/api/v1/contexts/a%2Fb%3Fc/memory-stats",
+      "/api/v1/contexts/a%2Fb%3Fc/duplicates",
+    ]);
+  });
+
+  it.each([".", "..", ""])(
+    "getMemoryStats and findDuplicates refuse a context id of %j (#66)",
+    async (id) => {
+      const server = new FakeServer();
+      const client = makeClient(server);
+      const refused =
+        `contextId must be a context id, got ${JSON.stringify(id)}: as a URL path segment it ` +
+        "would address a different endpoint";
+      await expect(client.getMemoryStats({ contextId: id })).rejects.toThrow(refused);
+      await expect(client.findDuplicates({ contextId: id })).rejects.toThrow(refused);
+      expect(server.requests).toEqual([]);
+    },
+  );
 
   it("maps REST 404 through the standard status mapping", async () => {
     const server = new FakeServer();

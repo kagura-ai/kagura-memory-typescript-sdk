@@ -35,8 +35,17 @@ import type {
   ResourceTokenResponse,
 } from "./models.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
+import { pathSegment } from "./pathSegment.js";
 import { ResponseReader } from "./responseShape.js";
 import { KaguraRestClient, requireInt } from "./restBase.js";
+
+/**
+ * A resource id as its path segment: percent-encoded, and refused when it
+ * is `.`, `..` or empty (#66, see {@link pathSegment}).
+ */
+function resourceSegment(resourceId: string): string {
+  return pathSegment(resourceId, "resourceId", "a resource id");
+}
 
 /**
  * Message surfaced when `setupResource` is called on an OAuth-resolved
@@ -373,7 +382,7 @@ export class ResourceClient extends KaguraRestClient {
    * @returns Resource impact stats (token_count, memory_count, schema version).
    */
   async getResourceImpact(resourceId: string): Promise<ResourceImpactResponse> {
-    const response = await this.request("GET", `/api/v1/resources/${resourceId}/impact`);
+    const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/impact`);
     return this.json(response) as unknown as ResourceImpactResponse;
   }
 
@@ -403,7 +412,7 @@ export class ResourceClient extends KaguraRestClient {
    *   caller's workspace (404; cross-workspace probe protection).
    */
   async getIndexerStatus(resourceId: string): Promise<IndexerStatusResponse> {
-    const response = await this.request("GET", `/api/v1/resources/${resourceId}/indexer-status`);
+    const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/indexer-status`);
     return this.json(response) as unknown as IndexerStatusResponse;
   }
 
@@ -424,7 +433,7 @@ export class ResourceClient extends KaguraRestClient {
       opts.params = { schema_version: schemaVersion };
     }
     try {
-      const response = await this.request("GET", `/api/v1/resources/${resourceId}/schema`, opts);
+      const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/schema`, opts);
       return this.json(response) as unknown as ResourceSchemaResponse;
     } catch (e) {
       if (e instanceof KaguraNotFoundError) {
@@ -475,7 +484,7 @@ export class ResourceClient extends KaguraRestClient {
       params.since = options.since instanceof Date ? options.since.toISOString() : options.since;
     }
 
-    const response = await this.request("GET", `/api/v1/resources/${resourceId}/events`, {
+    const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/events`, {
       params,
     });
     return this.json(response) as unknown as ResourceEventsListResponse;
@@ -497,7 +506,7 @@ export class ResourceClient extends KaguraRestClient {
     resourceApiKey: string,
     event: ResourceEventInput,
   ): Promise<ResourceEventResponse> {
-    const response = await this.request("POST", `/api/v1/resources/${resourceId}/events`, {
+    const response = await this.request("POST", `/api/v1/resources/${resourceSegment(resourceId)}/events`, {
       json: serializeEvent(event),
       extraHeaders: { "X-Resource-API-Key": resourceApiKey },
     });
@@ -532,7 +541,7 @@ export class ResourceClient extends KaguraRestClient {
     });
     let result: ResourceEventBatchResponse;
     try {
-      const response = await this.request("POST", `/api/v1/resources/${resourceId}/events/batch`, {
+      const response = await this.request("POST", `/api/v1/resources/${resourceSegment(resourceId)}/events/batch`, {
         json: { events: events.map(serializeEvent) },
         extraHeaders: { "X-Resource-API-Key": resourceApiKey },
       });

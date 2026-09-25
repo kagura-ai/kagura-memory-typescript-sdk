@@ -299,6 +299,39 @@ describe("downloadUrl / delete / list", () => {
   });
 });
 
+describe("file ids in the path (#66)", () => {
+  it("delete and downloadUrl refuse ., .. and an empty id before sending anything", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    for (const id of [".", "..", ""]) {
+      const refused =
+        `fileId must be a file id, got ${JSON.stringify(id)}: as a URL path segment it ` +
+        "would address a different endpoint";
+      await expect(client.delete(id, { contextId: WS })).rejects.toThrow(refused);
+      await expect(client.downloadUrl(id, { contextId: WS })).rejects.toThrow(refused);
+    }
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("delete and downloadUrl send the id as one percent-encoded segment", async () => {
+    // Python sends `x?workspace_id=…` as typed, and the query it carries
+    // replaces the one the SDK adds.
+    const server = new FakeServer();
+    server.routes["/api/v1/files/x%3Fworkspace_id%3Dother"] = { status: 204 };
+    server.routes["/api/v1/files/a%2Fb/download-url"] = {
+      status: 200,
+      body: { download_url: "https://r2.test/get" },
+    };
+    const client = makeClient(server);
+    await client.delete("x?workspace_id=other", { contextId: WS });
+    await client.downloadUrl("a/b", { contextId: WS });
+    expect(server.requests.map((r) => r.url)).toEqual([
+      `https://x.test/api/v1/files/x%3Fworkspace_id%3Dother?workspace_id=${WS}`,
+      `https://x.test/api/v1/files/a%2Fb/download-url?workspace_id=${WS}`,
+    ]);
+  });
+});
+
 describe("403 workspace hint (#115)", () => {
   it("builds a workspace-mismatch hint naming the requested workspace", async () => {
     const server = new FakeServer();

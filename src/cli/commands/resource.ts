@@ -27,6 +27,7 @@ import {
   parseIdArg,
   parseIntOption,
   parseRanged,
+  pathIdParam,
   quote,
 } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
@@ -78,6 +79,14 @@ function requiredValue(args: ParsedArgs, flag: FlagSpec): string {
     );
   }
   return value;
+}
+
+/**
+ * `-r/--resource-id` of a command that puts it in the REST path: refused
+ * (exit 2) when it is `.`, `..` or empty (see {@link pathIdParam}).
+ */
+function resourceIdInPath(args: ParsedArgs): string {
+  return pathIdParam(RESOURCE_ID, requiredValue(args, RESOURCE_ID), "resource id");
 }
 
 function optionalInt(args: ParsedArgs, flag: FlagSpec): number | undefined {
@@ -231,7 +240,7 @@ const stats: Command = {
   spec: { flags: [RESOURCE_ID] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const resourceId = requiredValue(args, RESOURCE_ID);
+    const resourceId = resourceIdInPath(args);
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
       deps.makeResourceClient().getResourceImpact(resourceId),
@@ -244,7 +253,7 @@ const indexerStatus: Command = {
   spec: { flags: [RESOURCE_ID] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const resourceId = requiredValue(args, RESOURCE_ID);
+    const resourceId = resourceIdInPath(args);
     const { config } = resolveConfig(deps, undefined, false);
     return runAndPrint(deps, () =>
       deps.makeResourceClient().getIndexerStatus(resourceId),
@@ -266,7 +275,7 @@ const schema: Command = {
   spec: { flags: [RESOURCE_ID, SCHEMA_VERSION] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const resourceId = requiredValue(args, RESOURCE_ID);
+    const resourceId = resourceIdInPath(args);
     const version = optionalInt(args, SCHEMA_VERSION);
     const { config } = resolveConfig(deps, undefined, false);
     // getResourceSchema reads the route's 404 as "none registered": Python
@@ -302,7 +311,7 @@ const events: Command = {
     ],
   },
   run: async (deps, args) => {
-    const resourceId = requireArg(args, 0, "RESOURCE_ID");
+    const resourceId = pathIdParam("RESOURCE_ID", requireArg(args, 0, "RESOURCE_ID"), "resource id");
     rejectExtraArgs(args, 1);
     const raw = args.values.limit;
     const limit =
@@ -475,7 +484,7 @@ const ingest: Command = {
   },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const resourceId = requiredValue(args, RESOURCE_ID);
+    const resourceId = resourceIdInPath(args);
     const apiKey = requiredValue(args, API_KEY);
     const docId = requiredValue(args, DOC_ID);
     const rawOp = args.values.op;
@@ -532,7 +541,7 @@ const ingestBatch: Command = {
   spec: { flags: [RESOURCE_ID, API_KEY, { ...FILE, required: true }] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
-    const resourceId = requiredValue(args, RESOURCE_ID);
+    const resourceId = resourceIdInPath(args);
     const apiKey = requiredValue(args, API_KEY);
     const file = requiredValue(args, FILE);
     // `click.File("r")`, opened as `resource import --file` opens it: a
@@ -651,7 +660,7 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
   const format = parseChoice(FORMAT, args.values.format ?? "auto", IMPORT_FORMATS);
   const version = parseImportVersion(args.values.version);
   const progress = parseProgress(args);
-  const resourceId = requiredValue(args, RESOURCE_ID);
+  const resourceId = resourceIdInPath(args);
   const apiKey = requiredValue(args, API_KEY);
   rejectExtraArgs(args);
 

@@ -20,7 +20,7 @@ import { pyRepr } from "../../python.js";
 import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
 import { cliErrorMessage, formatJson } from "../output.js";
-import { CliError, CliUsageError, parseRanged, parseTags, quote } from "../parse.js";
+import { CliError, CliUsageError, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { parseProgress, PROGRESS_FLAG, resolveProgress, VERBOSE_FLAG } from "../progress.js";
 
@@ -347,7 +347,7 @@ const deleteFile: Command = {
   description: `${OWNING_CONTEXT}\n\n  Example:\n    kagura-memory files delete <file_id> -c <context-id>`,
   spec: { flags: [CONTEXT_ID] },
   run: async (deps, args) => {
-    const fileId = requireArg(args, 0, "FILE_ID");
+    const fileId = pathIdParam("FILE_ID", requireArg(args, 0, "FILE_ID"), "file id");
     rejectExtraArgs(args, 1);
     return runFilesCommand(deps, args.values["context-id"], async (files, contextId) => {
       await files.delete(fileId, { contextId });
@@ -364,7 +364,7 @@ const downloadUrl: Command = {
     "    kagura-memory files download-url <file_id> -c <context-id>",
   spec: { flags: [CONTEXT_ID] },
   run: async (deps, args) => {
-    const fileId = requireArg(args, 0, "FILE_ID");
+    const fileId = pathIdParam("FILE_ID", requireArg(args, 0, "FILE_ID"), "file id");
     rejectExtraArgs(args, 1);
     // The bare URL, as Python echoes it: `curl "$(kagura-memory files
     // download-url …)"` must not receive JSON quotes.

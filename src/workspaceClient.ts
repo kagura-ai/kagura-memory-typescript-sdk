@@ -28,6 +28,7 @@ import {
   nullable,
   responseShapeError,
 } from "./responseShape.js";
+import { pathSegment } from "./pathSegment.js";
 import { KaguraRestClient, requireInt } from "./restBase.js";
 import type { RequestContext, RestResponse } from "./restBase.js";
 
@@ -74,27 +75,20 @@ function normalizeWorkspaceId(workspaceId: string): string {
 }
 
 /**
- * Refuse a `userId` of `.` or `..`, which no user id is.
- *
- * Percent-encoding leaves both as they are, and URL resolution then drops
- * the segment or climbs out of it: `removeMember(ws, "..")` would send
+ * `userId` as a path segment, percent-encoded: refused when it is `.`,
+ * `..` or empty, which no user id is (see {@link pathSegment}).
+ * `removeMember(ws, "..")` would otherwise send
  * `DELETE /api/v1/workspaces/{ws}`, the workspace itself. The Python SDK
  * sends them. `addMember`, whose id goes in the body, refuses them too:
  * such a member could never be addressed afterwards.
  */
-function requireUserId(userId: string): string {
-  if (userId === "." || userId === "..") {
-    throw new Error(
-      `userId must be a user id, got ${JSON.stringify(userId)}: as a URL path segment it ` +
-        "would address a different endpoint",
-    );
-  }
-  return userId;
+function userIdSegment(userId: string): string {
+  return pathSegment(userId, "userId", "a user id");
 }
 
 /** `/api/v1/workspaces/{ws}/members/{userId}`, the id checked and percent-encoded. */
 function memberPath(workspaceId: string, userId: string): string {
-  return `/api/v1/workspaces/${workspaceId}/members/${encodeURIComponent(requireUserId(userId))}`;
+  return `/api/v1/workspaces/${workspaceId}/members/${userIdSegment(userId)}`;
 }
 
 /**
@@ -212,8 +206,10 @@ export class WorkspaceClient extends KaguraRestClient {
   async addMember(workspaceId: string, userId: string, role = "member"): Promise<WorkspaceMember> {
     const ws = normalizeWorkspaceId(workspaceId);
     this.validateRole(role);
+    // Checked as the member's path will be, though the id goes in the body.
+    userIdSegment(userId);
     const resp = await this.request("POST", `/api/v1/workspaces/${ws}/members`, {
-      json: { user_id: requireUserId(userId), role },
+      json: { user_id: userId, role },
     });
     return this.json(resp) as unknown as WorkspaceMember;
   }
