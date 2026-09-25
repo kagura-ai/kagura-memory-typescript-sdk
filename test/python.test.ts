@@ -176,6 +176,16 @@ describe("int() grammar", () => {
     },
   );
 
+  it("strips the whitespace around a number in linear time, whatever lies between", () => {
+    // A trailing-space alternative tried at every position was quadratic:
+    // 80k spaces between two digits took seconds.
+    const started = performance.now();
+    expect(pyInt(`5${" ".repeat(300_000)}5`)).toBeUndefined();
+    expect(pyInt(`${" ".repeat(300_000)}5${"\u{3000}".repeat(300_000)}`)).toBe(5);
+    expect(pyFloat(`\u{85}${"\t".repeat(300_000)}x${"\t".repeat(300_000)}`)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it("keeps an int past 2^53 exact as a bigint", () => {
     expect(pyBigInt("9007199254740993")).toBe(9007199254740993n);
     expect(pyBigInt(" 1_000_000_000_000_000_000_000 ")).toBe(10n ** 21n);
