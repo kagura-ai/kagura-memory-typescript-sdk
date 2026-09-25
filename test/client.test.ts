@@ -2325,6 +2325,18 @@ describe("REST endpoints", () => {
     }
   });
 
+  it.each([null, [], "x"])("checkServerVersion neither throws nor warns on a body that is no object (%j)", async (body) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const server = new FakeServer();
+      server.restResults["/api/v1/system/info"] = body;
+      await expect(makeClient(server).checkServerVersion()).resolves.toEqual(body);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it.each([null, 75, { major: 0 }])(
     "checkServerVersion neither throws nor warns on a non-string version %j",
     async (version) => {

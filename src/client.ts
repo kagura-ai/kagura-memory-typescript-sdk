@@ -91,6 +91,24 @@ export const MIN_SERVER_VERSION = "0.75.0";
 const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER_VERSION");
 
 /**
+ * The advisory {@link KaguraClient.checkServerVersion} logs: a warning when
+ * `version` is below {@link MIN_SERVER_VERSION}, and nothing for one that
+ * meets it or cannot be compared. `doctor` gives it after its own read of
+ * the body, as Python's `check_server_version` does after its model's.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function warnBelowMinimum(version: unknown): void {
+  if (meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE) === false) {
+    console.warn(
+      `Server version ${String(version)} is below the SDK's tested minimum ` +
+        `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
+        "may silently ignore unknown parameters.",
+    );
+  }
+}
+
+/**
  * A context id as its path segment in a REST route: percent-encoded, and
  * refused when it is `.`, `..` or empty (#66, see {@link pathSegment}).
  */
@@ -2598,13 +2616,8 @@ export class KaguraClient {
    */
   async checkServerVersion(): Promise<ServerInfo> {
     const info = await this.getServerInfo();
-    if (meetsMinimum(info.version, MIN_SERVER_VERSION_TRIPLE) === false) {
-      console.warn(
-        `Server version ${info.version} is below the SDK's tested minimum ` +
-          `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
-          "may silently ignore unknown parameters.",
-      );
-    }
+    // A body that is no object has no version to compare, not a TypeError.
+    warnBelowMinimum(typeof info === "object" && info !== null ? info.version : undefined);
     return info;
   }
 

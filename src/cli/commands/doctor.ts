@@ -21,11 +21,12 @@ import {
   loadCredentialsFile,
   profileNamed,
 } from "../../auth/credentials.js";
-import { MIN_SERVER_VERSION, type KaguraClientOptions } from "../../client.js";
+import { MIN_SERVER_VERSION, warnBelowMinimum, type KaguraClientOptions } from "../../client.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
-import { excMessage, KaguraAuthError, KaguraConnectionError } from "../../errors.js";
+import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import type { ServerInfo } from "../../models.js";
+import { readModel, SERVER_INFO } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
 import { meetsMinimum, requireVersion } from "../../versionCheck.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
@@ -437,9 +438,15 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
 /**
  * Python's `_check_server`: `Server reachable`, then `Version: …` as
  * pass, fail or info by the shared `meetsMinimum` against the SDK's
- * {@link MIN_SERVER_VERSION} (python-sdk #280). `checkServerVersion`
- * makes the same comparison, so its advisory on stderr and this verdict
- * cannot disagree.
+ * {@link MIN_SERVER_VERSION} (python-sdk #280). The advisory on stderr is
+ * `checkServerVersion`'s, from the same comparison, so the two cannot
+ * disagree.
+ *
+ * The body is read as Python's `get_server_info` reads it, through its
+ * `ServerInfo` model, and one the model refuses is unreachable, as
+ * Python's `KaguraConnectionError` for it is. A credential that does not
+ * resolve fails the auth section, as Python's `_check_auth` reports it,
+ * and skips this check, as Python's doctor has no client to check with.
  *
  * A failure other than an auth or connection error (a body that is no
  * JSON, a 429) fails the check with its message, where Python's doctor
@@ -459,11 +466,17 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
   try {
     client = deps.makeClient(clientOptions);
   } catch (e) {
+    if (e instanceof KaguraAuthError) {
+      return [
+        { section: "auth", status: "fail", message: `Authentication could not be resolved: ${excMessage(e)}` },
+        { section: "server", status: "info", message: "Server connectivity check skipped because auth resolution failed" },
+      ];
+    }
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
-  let info: ServerInfo;
+  let info: unknown;
   try {
-    info = await client.checkServerVersion();
+    info = await client.getServerInfo();
   } catch (e) {
     if (e instanceof KaguraAuthError) {
       return [
@@ -480,8 +493,18 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     await client.close();
   }
 
+  try {
+    readModel(info, SERVER_INFO, "KaguraClient.get_server_info");
+  } catch (e) {
+    if (!(e instanceof KaguraResponseError)) throw e;
+    return [
+      { section: "server", status: "fail", message: `Server unreachable: Invalid response format: ${e.message}` },
+    ];
+  }
+  const version: unknown = (info as ServerInfo).version;
+  warnBelowMinimum(version);
+
   const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];
-  const version: unknown = info.version;
   const shown = typeof version === "string" ? version : pyRepr(version);
   const meets = meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE);
   if (meets === null) {
@@ -504,8 +527,12 @@ export const DOCTOR: Command = {
   spec: { flags: [PROFILE, JSON_FLAG] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
+    // The server check resolves the credential; a failure to is reported
+    // with the auth checks, where Python's `_check_auth` reports it.
+    const server = await checkServer(deps, args.values.profile);
     const checks: DoctorCheck[] = [
       ...checkAuth(deps, args.values.profile),
+      ...server.filter((c) => c.section === "auth"),
       ...checkMcp(deps as CliDeps),
       ...(await checkExtras()),
       ...checkKeyCustody(),
@@ -514,7 +541,7 @@ export const DOCTOR: Command = {
         status: "info",
         message: "this SDK ships no LLM layer; `ingest` lives in the Python package",
       },
-      ...(await checkServer(deps, args.values.profile)),
+      ...server.filter((c) => c.section !== "auth"),
     ];
 
     // Section status is the worst of its checks.

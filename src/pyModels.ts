@@ -392,6 +392,40 @@ export const FILE_LIST_RESPONSE: Model = {
   fields: [required("files", listOf({ model: FILE_OBJECT })), optional("next_cursor", nullable("str"))],
 };
 
+const SERVER_FEATURES: Model = {
+  name: "ServerFeatures",
+  fields: [
+    optional("neural_memory", "bool", false),
+    optional("research_tools", "bool", false),
+    optional("plan_page", "bool", false),
+    optional("byok", "bool", false),
+    optional("cost_display", "bool", false),
+    optional("managed_connectors", "bool", false),
+    optional("managed_llm", "bool", false),
+    optional("referrals", "bool", false),
+    optional("beta_invites", "bool", false),
+    optional("reranking", "bool", false),
+  ],
+};
+
+/**
+ * `/api/v1/system/info`, read here only to check the body as Python's
+ * `get_server_info` does: its `ServerFeatures` keeps flags it does not
+ * know (`extra="allow"`), which {@link readModel} would drop.
+ */
+export const SERVER_INFO: Model = {
+  name: "ServerInfo",
+  fields: [
+    required("name", "str"),
+    required("version", "str"),
+    optional("description", nullable("str")),
+    optional("environment", nullable("str")),
+    optional("search_defaults", nullable("dict")),
+    optional("terms_version", nullable("str")),
+    optional("features", { model: SERVER_FEATURES }, {}),
+  ],
+};
+
 export const FILE_DOWNLOAD_URL_RESPONSE: Model = {
   name: "FileDownloadUrlResponse",
   fields: [required("download_url", "str")],
