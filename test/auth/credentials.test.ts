@@ -370,6 +370,92 @@ describe("profile file operations", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Profile names that are Object.prototype keys (#66)
+// ---------------------------------------------------------------------------
+
+describe("profile names that are Object.prototype keys (#66)", () => {
+  const PROTO_NAMES = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"];
+
+  it.each(PROTO_NAMES)("getProfile(%j) is null when no such profile is stored", (name) => {
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "work", sampleCreds());
+    expect(getProfile(cf, name)).toBeNull();
+  });
+
+  it.each(PROTO_NAMES)("a default of %j that names no profile reads as none", (name) => {
+    const cf = emptyCredentialsFile();
+    cf.defaultProfile = name;
+    expect(getProfile(cf)).toBeNull();
+  });
+
+  it.each(PROTO_NAMES)("setDefaultProfile(%j) refuses a name that is not stored", async (name) => {
+    const p = path.join(dir, "creds.json");
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "work", sampleCreds());
+    saveCredentialsFile(cf, p);
+
+    await expect(setDefaultProfile(name, p)).rejects.toThrow(/not found/);
+    expect(loadCredentialsFile(p).defaultProfile).toBe("work");
+  });
+
+  it.each(PROTO_NAMES)("deleteProfile(%j) is a no-op that rewrites nothing", async (name) => {
+    const p = path.join(dir, "creds.json");
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "work", sampleCreds());
+    saveCredentialsFile(cf, p);
+    const before = fs.readFileSync(p, "utf-8");
+
+    await deleteProfile(name, p);
+    expect(fs.readFileSync(p, "utf-8")).toBe(before);
+    expect(Object.keys(loadCredentialsFile(p).profiles)).toEqual(["work"]);
+  });
+
+  it.each(PROTO_NAMES)("setProfile(%j) stores a real profile that survives a round trip", async (name) => {
+    const p = path.join(dir, "creds.json");
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "work", sampleCreds());
+    setProfile(cf, name, sampleCreds({ accessToken: `atok-${name}` }));
+    expect(Object.keys(cf.profiles)).toEqual(["work", name]);
+    expect(getProfile(cf, name)?.accessToken).toBe(`atok-${name}`);
+    saveCredentialsFile(cf, p);
+
+    const restored = loadCredentialsFile(p);
+    expect(Object.keys(restored.profiles)).toEqual(["work", name]);
+    expect(getProfile(restored, name)?.accessToken).toBe(`atok-${name}`);
+    // No profile changed what an ordinary object is.
+    expect(Object.getPrototypeOf(restored.profiles)).toBe(Object.prototype);
+
+    await setDefaultProfile(name, p);
+    expect(loadCredentialsFile(p).defaultProfile).toBe(name);
+    await deleteProfile(name, p);
+    expect(Object.keys(loadCredentialsFile(p).profiles)).toEqual(["work"]);
+  });
+
+  it("the first profile stored becomes the default even when the default names a prototype key", () => {
+    const cf = emptyCredentialsFile();
+    cf.defaultProfile = "constructor";
+    setProfile(cf, "work", sampleCreds());
+    expect(cf.defaultProfile).toBe("work");
+  });
+
+  it("removeProfile of a prototype key leaves the profiles and the default alone", () => {
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "work", sampleCreds());
+    removeProfile(cf, "toString");
+    expect(Object.keys(cf.profiles)).toEqual(["work"]);
+    expect(cf.defaultProfile).toBe("work");
+  });
+
+  it("getSharedState(profile) is null for a prototype key", () => {
+    const p = path.join(dir, "creds.json");
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "work", sampleCreds());
+    saveCredentialsFile(cf, p);
+    expect(getSharedState(p, "constructor")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared state cache
 // ---------------------------------------------------------------------------
 

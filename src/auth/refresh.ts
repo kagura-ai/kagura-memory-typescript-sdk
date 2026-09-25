@@ -17,6 +17,7 @@ import {
   KaguraOAuth,
   getSharedState,
   loadCredentialsFile,
+  profileNamed,
   updateProfile,
 } from "./credentials.js";
 import { authorizeDevice, pollForToken } from "./deviceFlow.js";
@@ -69,7 +70,7 @@ function isScopeRejection(error: unknown): boolean {
 export async function refresh(options: RefreshOptions = {}): Promise<OAuthCredentials> {
   const cf = loadCredentialsFile(options.credentialsPath);
   const target = options.profile || cf.defaultProfile;
-  const stored = cf.profiles[target];
+  const stored = profileNamed(cf, target);
   if (stored === undefined) {
     throw new Error(`No profile named '${target}'. Run a login first.`);
   }

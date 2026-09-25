@@ -1193,6 +1193,22 @@ describe("cli: status", () => {
     expect(h.err.join("\n")).toMatch(/No profile named 'nope'/);
   });
 
+  // #66: `cf.profiles[name]` read `constructor` as a stored profile.
+  it.each(["constructor", "toString", "__proto__"])(
+    "takes no inherited property %j for a profile",
+    async (name) => {
+      seed({ default: creds() });
+      const h = harness();
+      expect(await runCli(["status", "--profile", name], h.deps)).toBe(1);
+      expect(h.err).toEqual([`No profile named '${name}'.`]);
+
+      const token = harness();
+      expect(await runCli(["auth", "token", "--profile", name], token.deps)).toBe(1);
+      expect(token.out).toEqual([]);
+      expect(token.err).toEqual([`No profile named '${name}'.\n  Run: kagura-memory auth login`]);
+    },
+  );
+
   describe("the Claude Code entry in use here (#55)", () => {
     const STDIO = { type: "stdio", command: "kagura-mcp", args: ["--profile", "default"] };
     const BEARER = { type: "http", url: "https://x/mcp", headers: { Authorization: "Bearer k" } };
@@ -1512,6 +1528,18 @@ describe("cli: logout", () => {
     expect(await runCli(["logout", "--profile", "nope", "--yes"], h.deps)).toBe(1);
     expect(h.out.join("\n")).toMatch(/No profile named 'nope'/);
   });
+
+  // #66: `cf.profiles[name]` read `constructor` as a stored profile.
+  it.each(["constructor", "toString", "__proto__"])(
+    "takes no inherited property %j for a profile to log out",
+    async (name) => {
+      seed({ default: creds() });
+      const h = harness();
+      expect(await runCli(["logout", "--profile", name, "--yes"], h.deps)).toBe(1);
+      expect(h.out.join("\n")).toContain(`No profile named '${name}'`);
+      expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default"]);
+    },
+  );
 
   describe("revoking on the server, best effort, as Python does (#55)", () => {
     /** A fetch that records every request and answers `status`, or fails. */

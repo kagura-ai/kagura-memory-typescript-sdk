@@ -29,6 +29,8 @@ export class FakeServer {
   requests: Recorded[] = [];
   /** Tool name → payload object serialized into content[0].text. */
   toolResults: Record<string, unknown> = {};
+  /** Tool name → content[0].text as sent, beating {@link toolResults}. */
+  toolTexts: Record<string, string> = {};
   /** URL path → REST GET JSON response. */
   restResults: Record<string, unknown> = {};
   /** When set, every request returns this raw response. */
@@ -67,11 +69,12 @@ export class FakeServer {
     if (rpcMethod === "tools/call") {
       const params = body?.params as { name: string };
       const payload = this.toolResults[params.name] ?? { status: "success" };
+      const text = this.toolTexts[params.name] ?? JSON.stringify(payload);
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { content: [{ type: "text", text: JSON.stringify(payload) }] },
+          result: { content: [{ type: "text", text }] },
         }),
         { status: 200 },
       );

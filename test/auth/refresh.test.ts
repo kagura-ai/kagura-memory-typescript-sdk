@@ -286,4 +286,12 @@ describe("refresh (#16)", () => {
     ).rejects.toThrow(/No profile named 'nope'/);
     expect(server.urls).toEqual([]);
   });
+
+  it.each(["constructor", "toString"])("takes no inherited property %j for a profile (#66)", async (name) => {
+    const server = new FakeOAuthServer();
+    await expect(
+      refresh({ credentialsPath, profile: name, fetch: server.fetch }),
+    ).rejects.toThrow(`No profile named '${name}'`);
+    expect(server.urls).toEqual([]);
+  });
 });

@@ -15,7 +15,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { defaultCredentialsPath, loadCredentialsFile, isExpired } from "../../auth/credentials.js";
+import {
+  defaultCredentialsPath,
+  isExpired,
+  loadCredentialsFile,
+  profileNamed,
+} from "../../auth/credentials.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
@@ -77,7 +82,7 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
         checks.push({ section: "auth", status: "warn", message: "credentials file has no profiles" });
       } else {
         const target = profile ?? file.defaultProfile;
-        const creds = file.profiles[target];
+        const creds = profileNamed(file, target);
         if (creds === undefined) {
           checks.push({
             section: "auth",

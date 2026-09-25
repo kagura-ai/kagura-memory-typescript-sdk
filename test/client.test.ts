@@ -11,6 +11,7 @@ import {
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraResponseError,
 } from "../src/errors.js";
 import type { ListContextsResponse, SearchConfig } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
@@ -484,6 +485,54 @@ describe("domain error translation (#180 semantics)", () => {
     expect((error as KaguraError).message).toBe(
       "remember failed (validation_failed): summary too short",
     );
+  });
+
+  // #66: `raiseForMcpError` read `.status` of whatever the text parsed to,
+  // so a reply of `null` threw a TypeError from every tool method.
+  it.each([
+    ["null", "NoneType"],
+    ["[]", "list"],
+    ['"ok"', "str"],
+    ["5", "int"],
+    ["1.5", "float"],
+    ["true", "bool"],
+  ])("refuses a tool reply of %s with KaguraResponseError", async (text, typeName) => {
+    const server = new FakeServer();
+    server.toolTexts.remember = text;
+    const client = makeClient(server);
+    const error = await client
+      .remember({ contextId: "c", summary: "s", content: "x" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as KaguraResponseError).operation).toBe("remember");
+    expect((error as Error).message).toBe(
+      `remember: unexpected server response (tool reply: expected a JSON object, got ${typeName}). ` +
+        "The server may be newer than this SDK; upgrading kagura-memory may help.",
+    );
+  });
+
+  it("refuses a non-object reply from callRawTool too", async () => {
+    const server = new FakeServer();
+    server.toolTexts.secret_list = "null";
+    const client = makeClient(server);
+    await expect(client.callRawTool("secret_list")).rejects.toBeInstanceOf(KaguraResponseError);
+  });
+
+  it("reads a null content item as an empty result, not a TypeError", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [null] } }),
+      { status: 200, headers: { "mcp-session-id": "session-123" } },
+    );
+    const client = makeClient(server);
+    await expect(client.remember({ contextId: "c", summary: "s", content: "x" })).resolves.toEqual({});
+  });
+
+  it("still accepts an empty object", async () => {
+    const server = new FakeServer();
+    server.toolTexts.remember = "{}";
+    const client = makeClient(server);
+    await expect(client.remember({ contextId: "c", summary: "s", content: "x" })).resolves.toEqual({});
   });
 });
 

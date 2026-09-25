@@ -68,6 +68,7 @@ import {
   laxInt,
   laxStr,
   nullable,
+  responseShapeError,
   type Coercer,
   type Loc,
 } from "./responseShape.js";
@@ -1054,6 +1055,11 @@ export class KaguraClient {
 
   /**
    * Call an MCP tool via JSON-RPC and parse `content[0].text` as JSON.
+   *
+   * @throws KaguraResponseError when the text is JSON but not an object
+   *   (`null`, a list, a scalar): no tool replies with one, and every
+   *   caller reads fields of the reply. The Python SDK fails there with an
+   *   `AttributeError` (#66).
    */
   private async callTool(
     toolName: string,
@@ -1066,15 +1072,24 @@ export class KaguraClient {
 
     const content = result.content;
     if (Array.isArray(content) && content.length > 0) {
-      const first = content[0] as Record<string, unknown>;
-      const text = typeof first.text === "string" ? first.text : "{}";
+      // An item with no text reads as `{}`, as one with a non-string text does.
+      const first = content[0] as { text?: unknown } | null;
+      const text = typeof first?.text === "string" ? first.text : "{}";
+      let parsed: unknown;
       try {
-        return JSON.parse(text) as ToolResult;
+        parsed = JSON.parse(text);
       } catch (e) {
         throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, {
           cause: e,
         });
       }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw responseShapeError(
+          toolName,
+          `tool reply: expected a JSON object, got ${pyTypeName(parsed)}`,
+        );
+      }
+      return parsed as ToolResult;
     }
     return {};
   }

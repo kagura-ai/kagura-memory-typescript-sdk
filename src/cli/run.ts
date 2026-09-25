@@ -22,8 +22,10 @@ import { refresh, type RefreshOptions } from "../auth/refresh.js";
 import {
   deleteCredentialsFile,
   deleteProfile,
+  hasProfile,
   isExpired,
   loadCredentialsFile,
+  profileNamed,
   setDefaultProfile,
   type OAuthCredentials,
 } from "../auth/credentials.js";
@@ -539,7 +541,7 @@ function cmdStatus(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
 
   const only = args.values.profile;
   if (only !== undefined) {
-    const creds = cf.profiles[only];
+    const creds = profileNamed(cf, only);
     if (creds === undefined) {
       deps.writeError(`No profile named '${only}'.`);
       return 1;
@@ -559,11 +561,6 @@ function cmdStatus(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
   return 0;
 }
 
-/** Own keys only: `constructor` is no profile, whatever `in` says. */
-function hasProfile(profiles: Record<string, OAuthCredentials>, name: string): boolean {
-  return Object.prototype.hasOwnProperty.call(profiles, name);
-}
-
 /**
  * `kagura auth use NAME` — Python's command, its messages and its checks:
  * an unknown name lists the ones there are, and success names the
@@ -576,7 +573,7 @@ async function cmdUse(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promis
   rejectExtraArgs(args, 1);
 
   const cf = loadCredentialsFile(deps.credentialsPath);
-  const creds = hasProfile(cf.profiles, name) ? cf.profiles[name] : undefined;
+  const creds = profileNamed(cf, name);
   if (creds === undefined) {
     const available = Object.keys(cf.profiles).sort().join(", ") || "(none — run: kagura-memory auth login)";
     throw new CliError(`Profile '${name}' not found. Available: ${available}`);
@@ -586,7 +583,7 @@ async function cmdUse(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promis
     // the file pointing at a profile that no longer exists.
     await setDefaultProfile(name, deps.credentialsPath);
   } catch (e) {
-    if (!hasProfile(loadCredentialsFile(deps.credentialsPath).profiles, name)) {
+    if (!hasProfile(loadCredentialsFile(deps.credentialsPath), name)) {
       throw new CliError(`Profile '${name}' no longer exists.`);
     }
     throw e;
@@ -679,7 +676,7 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
     noteApiKeyEnv(deps);
     return 0;
   }
-  const creds = cf.profiles[name];
+  const creds = profileNamed(cf, name);
   if (creds === undefined) {
     // Nothing to revoke or remove; say so rather than report a removal
     // that did not happen.
@@ -761,7 +758,7 @@ function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
 async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
   const cf = loadCredentialsFile(deps.credentialsPath);
   const name = args.values.profile ?? cf.defaultProfile;
-  const creds = cf.profiles[name];
+  const creds = profileNamed(cf, name);
   if (creds === undefined) {
     deps.writeError(`No profile named '${name}'.\n  Run: kagura-memory auth login`);
     return 1;

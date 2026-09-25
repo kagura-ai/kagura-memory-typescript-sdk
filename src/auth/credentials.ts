@@ -191,25 +191,59 @@ export function emptyCredentialsFile(): CredentialsFile {
   return { version: 1, defaultProfile: "default", profiles: {} };
 }
 
+/**
+ * Whether `name` is a stored profile. Own keys only: `name in profiles`
+ * would call `constructor` or `toString` a profile, since `profiles` is a
+ * plain object (#66).
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function hasProfile(cf: CredentialsFile, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(cf.profiles, name);
+}
+
+/**
+ * The profile stored under `name`, or `undefined`. Own keys only, as
+ * {@link hasProfile}: every lookup by a name a user typed goes through
+ * this or {@link getProfile}.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function profileNamed(cf: CredentialsFile, name: string): OAuthCredentials | undefined {
+  return hasProfile(cf, name) ? cf.profiles[name] : undefined;
+}
+
+/**
+ * `record[key] = value` as an own, enumerable property, whatever the key:
+ * assigning `__proto__` would replace the object's prototype instead of
+ * storing a profile of that name.
+ */
+function defineOwn<T>(record: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(record, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 /** Return the named profile, or the default, or `null` if missing. */
 export function getProfile(
   cf: CredentialsFile,
   name?: string | null,
 ): OAuthCredentials | null {
   const key = name || cf.defaultProfile;
-  return cf.profiles[key] ?? null;
+  return profileNamed(cf, key) ?? null;
 }
 
 /** Insert or replace a profile. The first profile becomes default. */
 export function setProfile(cf: CredentialsFile, name: string, creds: OAuthCredentials): void {
-  cf.profiles[name] = creds;
-  if (!(cf.defaultProfile in cf.profiles)) {
+  defineOwn(cf.profiles, name, creds);
+  if (!hasProfile(cf, cf.defaultProfile)) {
     cf.defaultProfile = name;
   }
 }
 
 /** Remove a profile in memory if present; repoints a deleted default. */
 export function removeProfile(cf: CredentialsFile, name: string): void {
+  if (!hasProfile(cf, name)) {
+    return;
+  }
   delete cf.profiles[name];
   const next = Object.keys(cf.profiles)[0];
   if (cf.defaultProfile === name && next !== undefined) {
@@ -220,7 +254,7 @@ export function removeProfile(cf: CredentialsFile, name: string): void {
 export function credentialsFileToDict(cf: CredentialsFile): Record<string, unknown> {
   const profiles: Record<string, unknown> = {};
   for (const [name, creds] of Object.entries(cf.profiles)) {
-    profiles[name] = credentialsToDict(creds);
+    defineOwn(profiles, name, credentialsToDict(creds));
   }
   return {
     version: cf.version,
@@ -238,7 +272,7 @@ export function credentialsFileFromDict(d: Record<string, unknown>): Credentials
       if (typeof p !== "object" || p === null || Array.isArray(p)) {
         throw new Error(`credentials profile '${name}' is not an object`);
       }
-      profiles[name] = credentialsFromDict(p as Record<string, unknown>);
+      defineOwn(profiles, name, credentialsFromDict(p as Record<string, unknown>));
     }
   }
   return {
@@ -418,7 +452,7 @@ export async function setDefaultProfile(
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
     const cf = loadCredentialsFile(p);
-    if (!(profileName in cf.profiles)) {
+    if (!hasProfile(cf, profileName)) {
       throw new Error(`profile '${profileName}' not found in credentials file`);
     }
     cf.defaultProfile = profileName;
@@ -442,7 +476,7 @@ export async function deleteProfile(
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
     const cf = loadCredentialsFile(p);
-    if (!(profileName in cf.profiles)) {
+    if (!hasProfile(cf, profileName)) {
       return;
     }
     removeProfile(cf, profileName);
