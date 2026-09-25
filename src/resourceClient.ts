@@ -36,8 +36,9 @@ import type {
 } from "./models.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
 import { pathSegment } from "./pathSegment.js";
+import { readModel, RESOURCE_SCHEMA_RESPONSE } from "./pyModels.js";
 import { ResponseReader } from "./responseShape.js";
-import { KaguraRestClient, requireInt } from "./restBase.js";
+import { KaguraRestClient, requireInt, type RestResponse } from "./restBase.js";
 
 /**
  * A resource id as its path segment: percent-encoded, and refused when it
@@ -423,6 +424,8 @@ export class ResourceClient extends KaguraRestClient {
    *   the latest version.
    * @returns Resource schema with field definitions, or `null` if no
    *   schema is registered for the resource.
+   * @throws KaguraResponseError if the 2xx body is no JSON object, where
+   *   only the route's 404 means no schema (#66).
    */
   async getResourceSchema(
     resourceId: string,
@@ -432,15 +435,22 @@ export class ResourceClient extends KaguraRestClient {
     if (schemaVersion !== undefined && schemaVersion !== null) {
       opts.params = { schema_version: schemaVersion };
     }
+    let response: RestResponse;
     try {
-      const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/schema`, opts);
-      return this.json(response) as unknown as ResourceSchemaResponse;
+      response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/schema`, opts);
     } catch (e) {
       if (e instanceof KaguraNotFoundError) {
         return null;
       }
       throw e;
     }
+    // Only the 404 means none: a 2xx body is the schema, and one that is no
+    // object Python's model refuses, where a `null` would read as none.
+    const body = this.json(response);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      readModel(body, RESOURCE_SCHEMA_RESPONSE, "ResourceClient.get_resource_schema");
+    }
+    return body as unknown as ResourceSchemaResponse;
   }
 
   /**

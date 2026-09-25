@@ -57,7 +57,7 @@ class FakeServer {
     }
     route.capture?.(rec);
     const nullBody = route.status === 204 || route.status === 304;
-    return new Response(nullBody ? null : JSON.stringify(route.body ?? {}), {
+    return new Response(nullBody ? null : JSON.stringify(route.body === undefined ? {} : route.body), {
       status: route.status,
     });
   };
@@ -304,19 +304,31 @@ describe("upload error paths", () => {
     expect(events.map((e) => e.kind)).toEqual(["action", "error"]);
   });
 
-  it("refuses a reserved file id that would leave its path segment", async () => {
+  it("refuses a reserved file id that would leave its path segment, as the server's answer, before any PUT", async () => {
     const uploadUrl = "https://r2.test/o?X-Amz-SignedHeaders=host";
-    const server = new FakeServer();
-    server.routes["/api/v1/files/reserve"] = {
-      status: 200,
-      body: { file_id: "..", upload_url: uploadUrl, expires_at: "2026-01-01T00:00:00Z" },
-    };
-    server.routes[uploadUrl] = { status: 200 };
-    const client = makeClient(server);
-    await expect(
-      client.upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" }),
-    ).rejects.toThrow(/^file_id must be a file id, got "\.\."/);
-    expect(server.requests.map((r) => new URL(r.url).pathname)).not.toContain("/api/v1/confirm");
+    for (const fileId of ["..", ".", ""]) {
+      const server = new FakeServer();
+      server.routes["/api/v1/files/reserve"] = {
+        status: 200,
+        body: { file_id: fileId, upload_url: uploadUrl, expires_at: "2026-01-01T00:00:00Z" },
+      };
+      server.routes[uploadUrl] = { status: 200 };
+      const events: ProgressEvent[] = [];
+      const client = makeClient(server);
+      const error = await client
+        .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin", onProgress: (e) => events.push(e) })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraResponseError);
+      expect((error as Error).message).toBe(
+        `FilesClient.upload: unexpected server response (file_id must be a file id, got ${JSON.stringify(fileId)}: ` +
+          `as a URL path segment it would address a different endpoint). ${HINT}`,
+      );
+      expect(server.requests.map((r) => new URL(r.url).pathname)).toEqual(["/api/v1/files/reserve"]);
+      expect(events.at(-1)).toMatchObject({
+        kind: "error",
+        detail: { reserved_file_id: fileId, uploaded: false, confirm_started: false, confirmed: false },
+      });
+    }
   });
 
   it("re-throws a non-dedup reserve error", async () => {
@@ -371,6 +383,43 @@ describe("downloadUrl / delete / list", () => {
     const page = await client.list({ contextId: WS });
     expect(page.files).toHaveLength(1);
     expect(page.next_cursor).toBeNull();
+  });
+
+  // #66: Python's FilesClient reads these bodies through its models.
+  const HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
+
+  it("downloadUrl refuses a body its model refuses", async () => {
+    for (const [body, problem] of [
+      [{}, "(download_url: Field required)"],
+      [{ download_url: 5 }, "(download_url: Input should be a valid string)"],
+      [null, "(Input should be a valid dictionary or instance of FileDownloadUrlResponse)"],
+    ] as const) {
+      const server = new FakeServer();
+      server.routes["/api/v1/files/f1/download-url"] = { status: 200, body };
+      const error = await makeClient(server).downloadUrl("f1", { contextId: WS }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraResponseError);
+      expect((error as Error).message).toBe(
+        `FilesClient.download_url: unexpected server response for FileDownloadUrlResponse ${problem}. ${HINT}`,
+      );
+    }
+  });
+
+  it("list reads a bare array's items as FileObject, and anything else whole as FileListResponse", async () => {
+    for (const [body, problem] of [
+      [[{ id: "f1" }], "for FileObject (workspace_id: Field required; filename: Field required; content_type: Field required (+4 more))"],
+      [
+        { files: [{ id: "f1" }], next_cursor: null },
+        "for FileListResponse (files.0.workspace_id: Field required; files.0.filename: Field required; " +
+          "files.0.content_type: Field required (+4 more))",
+      ],
+      [null, "for FileListResponse (Input should be a valid dictionary or instance of FileListResponse)"],
+    ] as const) {
+      const server = new FakeServer();
+      server.routes["/api/v1/files"] = { status: 200, body };
+      const error = await makeClient(server).list({ contextId: WS }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraResponseError);
+      expect((error as Error).message).toBe(`FilesClient.list: unexpected server response ${problem}. ${HINT}`);
+    }
   });
 
   it("list passes through a {files,next_cursor} envelope", async () => {

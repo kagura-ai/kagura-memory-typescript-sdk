@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { KaguraNotFoundError, KaguraFeatureNotAvailableError, KaguraQuotaError } from "../src/errors.js";
+import {
+  KaguraFeatureNotAvailableError,
+  KaguraNotFoundError,
+  KaguraQuotaError,
+  KaguraResponseError,
+} from "../src/errors.js";
 import { ResourceClient } from "../src/resourceClient.js";
 import { FakeServer } from "./fakeServer.js";
 
@@ -211,6 +216,23 @@ describe("resource stats", () => {
     server.routes["/api/v1/resources/ghost/schema"] = { status: 404, body: { detail: "no" } };
     const client = makeClient(server);
     await expect(client.getResourceSchema("ghost")).resolves.toBeNull();
+  });
+
+  it("getResourceSchema refuses a 2xx body that is no object, which only a 404 may mean as none", async () => {
+    for (const [body, got] of [
+      [null, "Input should be a valid dictionary or instance of ResourceSchemaResponse"],
+      [[], "Input should be a valid dictionary or instance of ResourceSchemaResponse"],
+      ["x", "Input should be a valid dictionary or instance of ResourceSchemaResponse"],
+    ] as const) {
+      const server = new FakeRest();
+      server.routes["/api/v1/resources/r/schema"] = { status: 200, body };
+      const error = await makeClient(server).getResourceSchema("r").catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraResponseError);
+      expect((error as Error).message).toBe(
+        `ResourceClient.get_resource_schema: unexpected server response for ResourceSchemaResponse (${got}). ` +
+          "The server may be newer than this SDK; upgrading kagura-memory may help.",
+      );
+    }
   });
 
   it("getResourceSchema passes schema_version and returns the body", async () => {

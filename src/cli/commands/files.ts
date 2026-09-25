@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import { excMessage, KaguraError } from "../../errors.js";
 import type { FilesClient } from "../../filesClient.js";
 import { realPath } from "../../guardrailExport.js";
-import type { FileListResponse, FileObject } from "../../models.js";
+import type { FileObject } from "../../models.js";
 import { emitProgress, type ProgressEvent } from "../../progress.js";
 import { FILE_LIST_RESPONSE, FILE_OBJECT, readModel } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
@@ -312,21 +312,6 @@ const upload: Command = {
   },
 };
 
-/**
- * `files list`'s page as Python's `FilesClient.list` reads it. The server
- * sends a bare list, which the SDK wraps as `{files, next_cursor: null}`,
- * and Python reads each item as a `FileObject`, so a bad one is named by
- * its own fields. Any other page, an envelope no server sends yet, it
- * reads whole as a `FileListResponse`; one that carries `next_cursor: null`
- * cannot be told from a wrapped list, and reads as one.
- */
-function readFileList(page: FileListResponse): Record<string, unknown> {
-  if (Array.isArray(page.files) && page.next_cursor === null) {
-    const files = page.files.map((file) => readModel(file, FILE_OBJECT, "FilesClient.list"));
-    return { files, next_cursor: null };
-  }
-  return readModel(page, FILE_LIST_RESPONSE, "FilesClient.list");
-}
 
 const LIMIT: FlagSpec = {
   name: "limit",
@@ -354,9 +339,15 @@ const list: Command = {
         : parseRanged(LIMIT, raw, { min: 1, max: 500, rangeLabel: "1<=x<=500", integer: true });
     rejectExtraArgs(args);
     const cursor = args.values.cursor;
+    // FilesClient.list has read the page through Python's models; this
+    // reads it once more, as a whole, for the dump.
     return runFilesCommand(deps, args.values["context-id"], async (files, contextId) =>
       formatModelJson(
-        readFileList(await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) })),
+        readModel(
+          await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) }),
+          FILE_LIST_RESPONSE,
+          "FilesClient.list",
+        ),
       ),
     );
   },

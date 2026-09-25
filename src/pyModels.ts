@@ -391,3 +391,8 @@ export const FILE_LIST_RESPONSE: Model = {
   name: "FileListResponse",
   fields: [required("files", listOf({ model: FILE_OBJECT })), optional("next_cursor", nullable("str"))],
 };
+
+export const FILE_DOWNLOAD_URL_RESPONSE: Model = {
+  name: "FileDownloadUrlResponse",
+  fields: [required("download_url", "str")],
+};
