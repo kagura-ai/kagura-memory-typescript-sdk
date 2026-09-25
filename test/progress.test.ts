@@ -45,7 +45,16 @@ class FakeUpload {
     [UPLOAD_URL]: { status: 200 },
     "/api/v1/files/file-1/confirm": {
       status: 200,
-      body: { id: "file-1", workspace_id: WS, filename: "greeting.txt", size_bytes: 11 },
+      body: {
+        id: "file-1",
+        workspace_id: WS,
+        filename: "greeting.txt",
+        content_type: "text/plain",
+        size_bytes: 11,
+        sha256: "a".repeat(64),
+        status: "uploaded",
+        created_at: "2026-01-01T00:00:00Z",
+      },
     },
   };
 
@@ -227,7 +236,19 @@ describe("FilesClient.upload({ onProgress })", () => {
     const fake = new FakeUpload();
     fake.routes["/api/v1/files/reserve"] = {
       status: 409,
-      body: { detail: "duplicate", existing_file: { id: "file-0", filename: "greeting.txt" } },
+      body: {
+        detail: "duplicate",
+        existing_file: {
+          id: "file-0",
+          workspace_id: WS,
+          filename: "greeting.txt",
+          content_type: "text/plain",
+          size_bytes: 11,
+          sha256: "a".repeat(64),
+          status: "confirmed",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      },
     };
     const { events, onProgress } = recorder();
     const result = await client(fake).upload({
@@ -292,10 +313,13 @@ describe("FilesClient.upload({ onProgress })", () => {
   it.each<[string, string]>([
     ["null", "Input should be a valid dictionary or instance of FileObject"],
     ["[]", "Input should be a valid dictionary or instance of FileObject"],
-    ["{}", "id: Field required"],
+    ["{}", "id: Field required; workspace_id: Field required; filename: Field required (+5 more)"],
+    [
+      '{"id": "file-1", "workspace_id": "w", "filename": "f", "content_type": "t", "size_bytes": 1, "sha256": "s", "status": "uploaded"}',
+      "created_at: Field required",
+    ],
   ])("does not report a confirm answered with %s as confirmed", async (raw, problem) => {
-    // Python parses its FileObject before `confirmed = True`; TS reads the id
-    // the success event names, where Python checks the whole model.
+    // Python parses its FileObject, the whole model, before `confirmed = True`.
     const fake = new FakeUpload();
     fake.routes["/api/v1/files/file-1/confirm"] = { status: 200, raw };
     const { events, onProgress } = recorder();

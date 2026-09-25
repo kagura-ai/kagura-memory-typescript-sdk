@@ -15,9 +15,20 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { defaultCredentialsPath, loadCredentialsFile, isExpired } from "../../auth/credentials.js";
+import {
+  defaultCredentialsPath,
+  isExpired,
+  loadCredentialsFile,
+  profileNamed,
+} from "../../auth/credentials.js";
+import { MIN_SERVER_VERSION, warnBelowMinimum, type KaguraClientOptions } from "../../client.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
+import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
+import type { ServerInfo } from "../../models.js";
+import { readModel, SERVER_INFO } from "../../pyModels.js";
+import { pyRepr } from "../../python.js";
+import { meetsMinimum, requireVersion } from "../../versionCheck.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -42,6 +53,9 @@ interface DoctorCheck {
   message: string;
   details?: Record<string, unknown>;
 }
+
+/** The SDK's minimum as a triple, for `meetsMinimum`. */
+const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER_VERSION");
 
 /** Python's `_STATUS_ORDER`; a section takes its worst check's status. */
 const STATUS_ORDER: Record<Status, number> = { fail: 3, warn: 2, pass: 1, info: 0 };
@@ -77,7 +91,7 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
         checks.push({ section: "auth", status: "warn", message: "credentials file has no profiles" });
       } else {
         const target = profile ?? file.defaultProfile;
-        const creds = file.profiles[target];
+        const creds = profileNamed(file, target);
         if (creds === undefined) {
           checks.push({
             section: "auth",
@@ -401,8 +415,49 @@ function checkKeyCustody(): DoctorCheck[] {
   return checks;
 }
 
-async function checkServer(deps: CommandDeps): Promise<DoctorCheck[]> {
-  const clientOptions = mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
+/** Python's message for an OAuth bearer the REST info route refuses. */
+const OAUTH_VERSION_UNVERIFIED =
+  "Could not verify server version over REST with an OAuth profile " +
+  "(expected: REST validates API keys, not OAuth bearers; the MCP connection is unaffected).";
+
+/** Whether `options` resolve to an OAuth profile, as the client built from them does. */
+function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boolean {
+  try {
+    return (
+      deps.resolveAuth({
+        apiKey: options.apiKey ?? null,
+        mcpUrl: options.mcpUrl ?? null,
+        profile: options.profile ?? null,
+      }).kind === "oauth"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Python's `_check_server`: `Server reachable`, then `Version: …` as
+ * pass, fail or info by the shared `meetsMinimum` against the SDK's
+ * {@link MIN_SERVER_VERSION} (python-sdk #280). The advisory on stderr is
+ * `checkServerVersion`'s, from the same comparison, so the two cannot
+ * disagree.
+ *
+ * The body is read as Python's `get_server_info` reads it, through its
+ * `ServerInfo` model, and one the model refuses is unreachable, as
+ * Python's `KaguraConnectionError` for it is. A credential that does not
+ * resolve fails the auth section, as Python's `_check_auth` reports it,
+ * and skips this check, as Python's doctor has no client to check with.
+ *
+ * A failure other than an auth or connection error (a body that is no
+ * JSON, a 429) fails the check with its message, where Python's doctor
+ * stops with a traceback.
+ */
+async function checkServer(deps: CommandDeps, profile: string | undefined): Promise<DoctorCheck[]> {
+  // With --profile, Python resolves that profile with no key forced over
+  // it (`KAGURA_API_KEY` still first), so the check reaches the profile's
+  // own server rather than the default's.
+  const clientOptions: KaguraClientOptions =
+    profile !== undefined ? { profile } : mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
 
   // Construction is inside the try because it validates the URL and can
   // throw — and a check whose job is to *report* a bad URL must not be the
@@ -411,35 +466,60 @@ async function checkServer(deps: CommandDeps): Promise<DoctorCheck[]> {
   try {
     client = deps.makeClient(clientOptions);
   } catch (e) {
-    return [
-      {
-        section: "server",
-        status: "fail",
-        message: `cannot build a client: ${e instanceof Error ? e.message : String(e)}`,
-      },
-    ];
+    if (e instanceof KaguraAuthError) {
+      return [
+        { section: "auth", status: "fail", message: `Authentication could not be resolved: ${excMessage(e)}` },
+        { section: "server", status: "info", message: "Server connectivity check skipped because auth resolution failed" },
+      ];
+    }
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
+  let info: unknown;
   try {
-    const info = await client.getServerInfo();
-    return [
-      {
-        section: "server",
-        status: "pass",
-        message: `server reachable (version ${info.version ?? "unknown"})`,
-        details: info as unknown as Record<string, unknown>,
-      },
-    ];
+    info = await client.getServerInfo();
   } catch (e) {
-    return [
-      {
-        section: "server",
-        status: "fail",
-        message: `cannot reach the server: ${e instanceof Error ? e.message : String(e)}`,
-      },
-    ];
+    if (e instanceof KaguraAuthError) {
+      return [
+        resolvesToOAuth(deps, clientOptions)
+          ? { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED }
+          : { section: "server", status: "fail", message: excMessage(e) },
+      ];
+    }
+    if (e instanceof KaguraConnectionError) {
+      return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
+    }
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
   } finally {
     await client.close();
   }
+
+  try {
+    readModel(info, SERVER_INFO, "KaguraClient.get_server_info");
+  } catch (e) {
+    if (!(e instanceof KaguraResponseError)) throw e;
+    return [
+      { section: "server", status: "fail", message: `Server unreachable: Invalid response format: ${e.message}` },
+    ];
+  }
+  const version: unknown = (info as ServerInfo).version;
+  warnBelowMinimum(version);
+
+  const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];
+  const shown = typeof version === "string" ? version : pyRepr(version);
+  const meets = meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE);
+  if (meets === null) {
+    checks.push({ section: "server", status: "info", message: `Version: ${shown}`, details: { version } });
+  } else if (!meets) {
+    checks.push({
+      section: "server",
+      status: "fail",
+      message: `Version: ${shown} is below minimum ${MIN_SERVER_VERSION}`,
+      details: { version, minimum: MIN_SERVER_VERSION },
+    });
+  } else {
+    checks.push({ section: "server", status: "pass", message: `Version: ${shown}`, details: { version } });
+  }
+  return checks;
 }
 
 export const DOCTOR: Command = {
@@ -447,8 +527,12 @@ export const DOCTOR: Command = {
   spec: { flags: [PROFILE, JSON_FLAG] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
+    // The server check resolves the credential; a failure to is reported
+    // with the auth checks, where Python's `_check_auth` reports it.
+    const server = await checkServer(deps, args.values.profile);
     const checks: DoctorCheck[] = [
       ...checkAuth(deps, args.values.profile),
+      ...server.filter((c) => c.section === "auth"),
       ...checkMcp(deps as CliDeps),
       ...(await checkExtras()),
       ...checkKeyCustody(),
@@ -457,7 +541,7 @@ export const DOCTOR: Command = {
         status: "info",
         message: "this SDK ships no LLM layer; `ingest` lives in the Python package",
       },
-      ...(await checkServer(deps)),
+      ...server.filter((c) => c.section !== "auth"),
     ];
 
     // Section status is the worst of its checks.
@@ -474,7 +558,14 @@ export const DOCTOR: Command = {
       // Python's to_dict() also spreads each section as a TOP-LEVEL key.
       // It reads like a bug, but a script written against the Python CLI
       // reads those keys, so the shape is reproduced rather than tidied.
-      deps.write(formatJson({ sections, checks, exit_code: exitCode, ...sections }));
+      // Every check carries `details`, `{}` when it has none, as there.
+      const rendered = checks.map(({ section, status, message, details }) => ({
+        section,
+        status,
+        message,
+        details: details ?? {},
+      }));
+      deps.write(formatJson({ sections, checks: rendered, exit_code: exitCode, ...sections }));
     } else {
       for (const check of checks) {
         deps.write(`${check.status.toUpperCase()} ${check.message}`);

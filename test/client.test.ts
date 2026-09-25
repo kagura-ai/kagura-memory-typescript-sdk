@@ -11,6 +11,7 @@ import {
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraResponseError,
 } from "../src/errors.js";
 import type { ListContextsResponse, SearchConfig } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
@@ -484,6 +485,54 @@ describe("domain error translation (#180 semantics)", () => {
     expect((error as KaguraError).message).toBe(
       "remember failed (validation_failed): summary too short",
     );
+  });
+
+  // #66: `raiseForMcpError` read `.status` of whatever the text parsed to,
+  // so a reply of `null` threw a TypeError from every tool method.
+  it.each([
+    ["null", "NoneType"],
+    ["[]", "list"],
+    ['"ok"', "str"],
+    ["5", "int"],
+    ["1.5", "float"],
+    ["true", "bool"],
+  ])("refuses a tool reply of %s with KaguraResponseError", async (text, typeName) => {
+    const server = new FakeServer();
+    server.toolTexts.remember = text;
+    const client = makeClient(server);
+    const error = await client
+      .remember({ contextId: "c", summary: "s", content: "x" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as KaguraResponseError).operation).toBe("remember");
+    expect((error as Error).message).toBe(
+      `remember: unexpected server response (tool reply: expected a JSON object, got ${typeName}). ` +
+        "The server may be newer than this SDK; upgrading kagura-memory may help.",
+    );
+  });
+
+  it("refuses a non-object reply from callRawTool too", async () => {
+    const server = new FakeServer();
+    server.toolTexts.secret_list = "null";
+    const client = makeClient(server);
+    await expect(client.callRawTool("secret_list")).rejects.toBeInstanceOf(KaguraResponseError);
+  });
+
+  it("reads a null content item as an empty result, not a TypeError", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [null] } }),
+      { status: 200, headers: { "mcp-session-id": "session-123" } },
+    );
+    const client = makeClient(server);
+    await expect(client.remember({ contextId: "c", summary: "s", content: "x" })).resolves.toEqual({});
+  });
+
+  it("still accepts an empty object", async () => {
+    const server = new FakeServer();
+    server.toolTexts.remember = "{}";
+    const client = makeClient(server);
+    await expect(client.remember({ contextId: "c", summary: "s", content: "x" })).resolves.toEqual({});
   });
 });
 
@@ -1962,6 +2011,15 @@ describe("listTags withTags drill-down (#47)", () => {
     await client.listTags({ contextId: "a/b", withTags: ["a"] }).catch(() => undefined);
     expect(new URL(server.requests[0]!.url).pathname).toBe("/api/v1/contexts/a%2Fb/tags");
   });
+
+  it("refuses a context id of . or .., which encoding leaves as they are (#66)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await expect(client.listTags({ contextId: "..", withTags: ["a"] })).rejects.toThrow(
+      'contextId must be a context id, got "..": as a URL path segment it would address a different endpoint',
+    );
+    expect(server.requests).toEqual([]);
+  });
 });
 
 describe("options the server ignores (#47)", () => {
@@ -2267,6 +2325,18 @@ describe("REST endpoints", () => {
     }
   });
 
+  it.each([null, [], "x"])("checkServerVersion neither throws nor warns on a body that is no object (%j)", async (body) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const server = new FakeServer();
+      server.restResults["/api/v1/system/info"] = body;
+      await expect(makeClient(server).checkServerVersion()).resolves.toEqual(body);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it.each([null, 75, { major: 0 }])(
     "checkServerVersion neither throws nor warns on a non-string version %j",
     async (version) => {
@@ -2323,6 +2393,31 @@ describe("REST endpoints", () => {
     expect(url2.searchParams.get("sort_by")).toBe("reference_count");
     expect(url2.searchParams.get("sort_order")).toBe("asc");
   });
+
+  it("getMemoryStats and findDuplicates send the context id as one path segment (#66)", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    await client.getMemoryStats({ contextId: "a/b?c" }).catch(() => undefined);
+    await client.findDuplicates({ contextId: "a/b?c" }).catch(() => undefined);
+    expect(server.requests.map((r) => new URL(r.url).pathname)).toEqual([
+      "/api/v1/contexts/a%2Fb%3Fc/memory-stats",
+      "/api/v1/contexts/a%2Fb%3Fc/duplicates",
+    ]);
+  });
+
+  it.each([".", "..", ""])(
+    "getMemoryStats and findDuplicates refuse a context id of %j (#66)",
+    async (id) => {
+      const server = new FakeServer();
+      const client = makeClient(server);
+      const refused =
+        `contextId must be a context id, got ${JSON.stringify(id)}: as a URL path segment it ` +
+        "would address a different endpoint";
+      await expect(client.getMemoryStats({ contextId: id })).rejects.toThrow(refused);
+      await expect(client.findDuplicates({ contextId: id })).rejects.toThrow(refused);
+      expect(server.requests).toEqual([]);
+    },
+  );
 
   it("maps REST 404 through the standard status mapping", async () => {
     const server = new FakeServer();

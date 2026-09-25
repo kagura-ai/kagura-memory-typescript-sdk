@@ -2,9 +2,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_MCP_URL } from "../../../src/auth/resolve.js";
+import { MIN_SERVER_VERSION } from "../../../src/client.js";
+import { KaguraAuthError } from "../../../src/errors.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { classifyMcpEntry, holdsCredential, unsetHeaderVars } from "../../../src/cli/commands/setup.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
@@ -524,6 +526,250 @@ describe("kagura-memory doctor", () => {
       const checks = await mcpChecks();
       expect(checks[0]).toMatchObject({ status: "fail", message: expect.stringMatching(/^\.mcp\.json is not valid JSON/) });
     });
+  });
+
+  // #66: Python's `_check_server` — `Server reachable`, then the version's
+  // verdict against the SDK's minimum by the shared `meetsMinimum`.
+  describe("the server check", () => {
+    const INFO_PATH = "/api/v1/system/info";
+
+    /** The server-section checks of `doctor --json`, with the exit code and stderr. */
+    async function serverChecks(
+      h: Harness,
+    ): Promise<{ code: number; checks: { status: string; message: string; details: unknown }[] }> {
+      const code = await runCli(["doctor", "--json"], h.deps);
+      const report = JSON.parse(h.out.join("\n")) as {
+        checks: { section: string; status: string; message: string; details: unknown }[];
+      };
+      return {
+        code,
+        checks: report.checks
+          .filter((c) => c.section === "server")
+          .map(({ status, message, details }) => ({ status, message, details })),
+      };
+    }
+
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    it.each(["0.78.0", MIN_SERVER_VERSION, "v0.75.0", "0.75.0+build.7", "1.0.0-rc1"])(
+      "passes a version that meets the minimum (%s)",
+      async (version) => {
+        const h = harness();
+        h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version };
+        const { checks } = await serverChecks(h);
+        expect(checks).toEqual([
+          { status: "pass", message: "Server reachable", details: {} },
+          { status: "pass", message: `Version: ${version}`, details: { version } },
+        ]);
+        expect(warn).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["0.74.9", "0.75.0-rc1", "v0.17.1"])("fails a version below the minimum (%s)", async (version) => {
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version };
+      const { code, checks } = await serverChecks(h);
+      expect(checks).toEqual([
+        { status: "pass", message: "Server reachable", details: {} },
+        {
+          status: "fail",
+          message: `Version: ${version} is below minimum ${MIN_SERVER_VERSION}`,
+          details: { version, minimum: MIN_SERVER_VERSION },
+        },
+      ]);
+      expect(code).toBe(1);
+      // checkServerVersion's advisory, which Python's logging prints too.
+      expect(warn).toHaveBeenCalledWith(
+        `Server version ${version} is below the SDK's tested minimum ${MIN_SERVER_VERSION}. ` +
+          "Some features may not work; older servers may silently ignore unknown parameters.",
+      );
+    });
+
+    it.each(["main-abc123", "0.78", ""])("reports a version it cannot compare as info (%j)", async (version) => {
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version };
+      const { checks } = await serverChecks(h);
+      expect(checks).toEqual([
+        { status: "pass", message: "Server reachable", details: {} },
+        { status: "info", message: `Version: ${version}`, details: { version } },
+      ]);
+    });
+
+    it("fails with Python's wording when the server cannot be reached", async () => {
+      const h = harness();
+      h.server.forcedResponse = new Response("oops", { status: 503 });
+      const { code, checks } = await serverChecks(h);
+      expect(code).toBe(1);
+      expect(checks).toHaveLength(1);
+      expect(checks[0]).toMatchObject({ status: "fail", details: {} });
+      expect(checks[0]!.message).toMatch(/^Server unreachable: /);
+    });
+
+    it("fails with the error's own message on a refused API key", async () => {
+      const h = harness();
+      h.server.forcedResponse = new Response('{"detail":"Invalid API key"}', { status: 401 });
+      const { code, checks } = await serverChecks(h);
+      expect(code).toBe(1);
+      expect(checks).toHaveLength(1);
+      expect(checks[0]!.status).toBe("fail");
+      expect(checks[0]!.message).not.toMatch(/^Server unreachable/);
+    });
+
+    it("reports an OAuth profile the REST route refuses as info, in Python's words", async () => {
+      const h = harness({});
+      h.deps.resolveAuth = (() => ({
+        kind: "oauth",
+        oauth: { getAuthHeader: async () => "Bearer t" },
+        mcpUrl: "https://x.test/mcp",
+        workspaceId: null,
+      })) as unknown as CliDeps["resolveAuth"];
+      h.server.forcedResponse = new Response('{"detail":"Invalid API key"}', { status: 401 });
+      const { checks } = await serverChecks(h);
+      expect(checks).toEqual([
+        {
+          status: "info",
+          message:
+            "Could not verify server version over REST with an OAuth profile (expected: REST " +
+            "validates API keys, not OAuth bearers; the MCP connection is unaffected).",
+          details: {},
+        },
+      ]);
+    });
+
+    it("fails with the error's message when no client can be built", async () => {
+      const h = harness();
+      h.deps.makeClient = (() => {
+        throw new Error("MCP URL must use HTTPS");
+      }) as unknown as CliDeps["makeClient"];
+      const { checks } = await serverChecks(h);
+      expect(checks).toEqual([{ status: "fail", message: "MCP URL must use HTTPS", details: {} }]);
+    });
+
+    it("fails the auth section and skips the check when the credential does not resolve, as Python's doctor does", async () => {
+      // Python reports the failure in its auth section, then skips the
+      // server check: no client, but still exit 1.
+      const h = harness();
+      h.deps.makeClient = (() => {
+        throw new KaguraAuthError("Profile 'missing' (from profile argument) not found in credentials.json.");
+      }) as unknown as CliDeps["makeClient"];
+      const code = await runCli(["doctor", "--json"], h.deps);
+      const report = JSON.parse(h.out.join("\n")) as {
+        sections: Record<string, string>;
+        checks: { section: string; status: string; message: string }[];
+      };
+      expect(code).toBe(1);
+      expect(report.sections.auth).toBe("fail");
+      const sections = report.checks.map((c) => c.section);
+      const failed = report.checks.findIndex(
+        (c) =>
+          c.section === "auth" &&
+          c.status === "fail" &&
+          c.message ===
+            "Authentication could not be resolved: Profile 'missing' (from profile argument) not found in credentials.json.",
+      );
+      // In the auth block, before the first check of another section.
+      expect(failed).toBeGreaterThanOrEqual(0);
+      expect(sections.slice(0, failed + 1).every((s) => s === "auth")).toBe(true);
+      expect(report.checks.filter((c) => c.section === "server")).toEqual([
+        { section: "server", status: "info", message: "Server connectivity check skipped because auth resolution failed", details: {} },
+      ]);
+    });
+
+    // Python's get_server_info reads the body through its ServerInfo model,
+    // and a refusal is a KaguraConnectionError: `Server unreachable`.
+    it.each([
+      [{}, "name: Field required; version: Field required"],
+      [[], "Input should be a valid dictionary or instance of ServerInfo"],
+      [null, "Input should be a valid dictionary or instance of ServerInfo"],
+      [{ version: "0.1.0" }, "name: Field required"],
+      [{ name: "n", version: 76 }, "version: Input should be a valid string"],
+      [{ name: "n", version: "0.78.0", features: null }, "features: Input should be a valid dictionary or instance of ServerFeatures"],
+      [{ name: "n", version: "0.78.0", search_defaults: [] }, "search_defaults: Input should be a valid dictionary"],
+      // terms_version: str | None, from the Python SDK 0.41.0 (memory-cloud v0.77.0).
+      [{ name: "n", version: "0.78.0", terms_version: 3 }, "terms_version: Input should be a valid string"],
+    ])("fails a /system/info body Python's ServerInfo refuses (%j), without the advisory", async (body, problem) => {
+      const h = harness();
+      h.server.restResults[INFO_PATH] = body;
+      const { code, checks } = await serverChecks(h);
+      expect(code).toBe(1);
+      expect(checks).toEqual([
+        {
+          status: "fail",
+          message:
+            "Server unreachable: Invalid response format: KaguraClient.get_server_info: unexpected server " +
+            `response for ServerInfo (${problem}). The server may be newer than this SDK; upgrading ` +
+            "kagura-memory may help.",
+          details: {},
+        },
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("passes a body with Python's optional fields and flags, and keys it does not know", async () => {
+      const h = harness();
+      h.server.restResults[INFO_PATH] = {
+        name: "n",
+        version: "0.78.0",
+        description: null,
+        environment: "prod",
+        search_defaults: { use_rerank: true },
+        terms_version: "2026-09-01",
+        features: { neural_memory: true, flag_from_the_future: 1 },
+        extra_key: 3,
+      };
+      const { code, checks } = await serverChecks(h);
+      expect(code).toBe(0);
+      expect(checks.map((c) => c.status)).toEqual(["pass", "pass"]);
+    });
+
+    it("checks the server with --profile's credential, as Python's doctor does", async () => {
+      // Python resolves with profile=PROFILE and no config key over it; a
+      // server check with the default profile would report on another server.
+      const h = harness();
+      const seen: unknown[] = [];
+      const resolved: unknown[] = [];
+      const make = h.deps.makeClient;
+      h.deps.makeClient = ((o: Record<string, unknown>) => {
+        seen.push(o);
+        return make(o);
+      }) as CliDeps["makeClient"];
+      h.deps.resolveAuth = ((o: unknown) => {
+        resolved.push(o);
+        return { kind: "oauth", oauth: { getAuthHeader: async () => "Bearer t" }, mcpUrl: "https://x.test/mcp" };
+      }) as unknown as CliDeps["resolveAuth"];
+      h.server.forcedResponse = new Response('{"detail":"Invalid token"}', { status: 401 });
+      const { checks } = await (async () => {
+        const code = await runCli(["doctor", "--json", "--profile", "other"], h.deps);
+        const report = JSON.parse(h.out.join("\n")) as { checks: { section: string; status: string }[] };
+        return { code, checks: report.checks.filter((c) => c.section === "server") };
+      })();
+      expect(seen).toEqual([{ profile: "other" }]);
+      expect(resolved).toEqual([{ apiKey: null, mcpUrl: null, profile: "other" }]);
+      expect(checks).toMatchObject([{ status: "info" }]);
+    });
+
+    it("prints the two lines as Python does", async () => {
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version: "0.78.0" };
+      await runCli(["doctor"], h.deps);
+      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+    });
+  });
+
+  it("gives every check a details object, as Python's to_dict does", async () => {
+    const h = harness();
+    await runCli(["doctor", "--json"], h.deps);
+    const report = JSON.parse(h.out.join("\n")) as { checks: Record<string, unknown>[] };
+    for (const check of report.checks) {
+      expect(Object.keys(check)).toEqual(["section", "status", "message", "details"]);
+      expect(typeof check.details).toBe("object");
+    }
   });
 });
 

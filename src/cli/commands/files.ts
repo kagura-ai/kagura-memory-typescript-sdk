@@ -16,11 +16,13 @@ import type { FilesClient } from "../../filesClient.js";
 import { realPath } from "../../guardrailExport.js";
 import type { FileObject } from "../../models.js";
 import { emitProgress, type ProgressEvent } from "../../progress.js";
+import { FILE_LIST_RESPONSE, FILE_OBJECT, readModel } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
 import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
+import { formatModelJson } from "../modelDump.js";
 import { cliErrorMessage, formatJson } from "../output.js";
-import { CliError, CliUsageError, parseRanged, parseTags, quote } from "../parse.js";
+import { CliError, CliUsageError, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { parseProgress, PROGRESS_FLAG, resolveProgress, VERBOSE_FLAG } from "../progress.js";
 
@@ -261,14 +263,20 @@ const upload: Command = {
               else onProgress(event);
             }
           : onProgress;
-      const uploaded = await files.upload({
-        contextId,
-        source,
-        ...(contentType !== undefined ? { contentType } : {}),
-        ...(bindingContextId !== undefined ? { bindingContextId } : {}),
-        ...(sink !== undefined ? { onProgress: sink } : {}),
-      });
-      if (!wantsMemory) return formatJson(uploaded);
+      // The FileObject model's fields, as Python's `file_obj` holds them:
+      // `upload` has checked it, so this only projects.
+      const uploaded = readModel(
+        await files.upload({
+          contextId,
+          source,
+          ...(contentType !== undefined ? { contentType } : {}),
+          ...(bindingContextId !== undefined ? { bindingContextId } : {}),
+          ...(sink !== undefined ? { onProgress: sink } : {}),
+        }),
+        FILE_OBJECT,
+        "FilesClient.upload",
+      ) as unknown as FileObject;
+      if (!wantsMemory) return formatModelJson(uploaded);
 
       let memory: unknown;
       try {
@@ -304,6 +312,7 @@ const upload: Command = {
   },
 };
 
+
 const LIMIT: FlagSpec = {
   name: "limit",
   short: "l",
@@ -330,8 +339,16 @@ const list: Command = {
         : parseRanged(LIMIT, raw, { min: 1, max: 500, rangeLabel: "1<=x<=500", integer: true });
     rejectExtraArgs(args);
     const cursor = args.values.cursor;
+    // FilesClient.list has read the page through Python's models; this
+    // reads it once more, as a whole, for the dump.
     return runFilesCommand(deps, args.values["context-id"], async (files, contextId) =>
-      formatJson(await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) })),
+      formatModelJson(
+        readModel(
+          await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) }),
+          FILE_LIST_RESPONSE,
+          "FilesClient.list",
+        ),
+      ),
     );
   },
 };
@@ -347,7 +364,7 @@ const deleteFile: Command = {
   description: `${OWNING_CONTEXT}\n\n  Example:\n    kagura-memory files delete <file_id> -c <context-id>`,
   spec: { flags: [CONTEXT_ID] },
   run: async (deps, args) => {
-    const fileId = requireArg(args, 0, "FILE_ID");
+    const fileId = pathIdParam("FILE_ID", requireArg(args, 0, "FILE_ID"), "file id");
     rejectExtraArgs(args, 1);
     return runFilesCommand(deps, args.values["context-id"], async (files, contextId) => {
       await files.delete(fileId, { contextId });
@@ -364,7 +381,7 @@ const downloadUrl: Command = {
     "    kagura-memory files download-url <file_id> -c <context-id>",
   spec: { flags: [CONTEXT_ID] },
   run: async (deps, args) => {
-    const fileId = requireArg(args, 0, "FILE_ID");
+    const fileId = pathIdParam("FILE_ID", requireArg(args, 0, "FILE_ID"), "file id");
     rejectExtraArgs(args, 1);
     // The bare URL, as Python echoes it: `curl "$(kagura-memory files
     // download-url …)"` must not receive JSON quotes.

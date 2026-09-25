@@ -24,6 +24,7 @@ import type {
   SecretPutResponse,
   SecretValueResponse,
 } from "../models.js";
+import { pathSegment } from "../pathSegment.js";
 import {
   KaguraRestClient,
   type RequestContext,
@@ -32,6 +33,15 @@ import {
 import { encrypt, fingerprint } from "./crypto.js";
 
 const BASE = "/api/v1/config/secrets";
+
+/**
+ * A pubkey id as its path segment: percent-encoded, and refused when it is
+ * `.`, `..` or empty (#66, see {@link pathSegment}). `approvePubkey("..")`
+ * would otherwise POST to `…/secrets/approve`.
+ */
+function pubkeySegment(pubkeyId: string): string {
+  return pathSegment(pubkeyId, "pubkeyId", "a pubkey id");
+}
 
 /**
  * REST client for the secret store's pubkey registry and secret endpoints.
@@ -107,13 +117,13 @@ export class SecretClient extends KaguraRestClient {
 
   /** Approve a pending pubkey (owner only; TOFU attestation). */
   async approvePubkey(pubkeyId: string): Promise<PubkeyResponse> {
-    const response = await this.request("POST", `${BASE}/pubkeys/${pubkeyId}/approve`);
+    const response = await this.request("POST", `${BASE}/pubkeys/${pubkeySegment(pubkeyId)}/approve`);
     return this.json(response) as PubkeyResponse;
   }
 
   /** Revoke a pubkey (owner only). */
   async revokePubkey(pubkeyId: string): Promise<PubkeyResponse> {
-    const response = await this.request("POST", `${BASE}/pubkeys/${pubkeyId}/revoke`);
+    const response = await this.request("POST", `${BASE}/pubkeys/${pubkeySegment(pubkeyId)}/revoke`);
     return this.json(response) as PubkeyResponse;
   }
 

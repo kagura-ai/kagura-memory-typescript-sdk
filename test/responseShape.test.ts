@@ -12,6 +12,7 @@ import {
   UPGRADE_HINT,
   formatResponseIssues,
   laxBool,
+  laxExactInt,
   laxFloat,
   laxInt,
   laxStr,
@@ -256,6 +257,27 @@ describe("lax coercion, as pydantic 2 applies it", () => {
   it("lets null through a nullable field and checks anything else", () => {
     expect(coerce(nullable(laxStr), null)).toBeNull();
     expect(coerce(nullable(laxStr), 5)).toBe("ERR Input should be a valid string");
+  });
+});
+
+describe("laxExactInt (#66)", () => {
+  it("reads a string of digits past 2^53 as the bigint Python's int holds", () => {
+    // memory-cloud sends a resource event's BigInt id as such a string.
+    expect(laxExactInt("123456789012345678901")).toEqual({ ok: true, value: 123456789012345678901n });
+    expect(laxExactInt("-9007199254740993")).toEqual({ ok: true, value: -9007199254740993n });
+    expect(laxExactInt(" 1_000_000_000_000_000_000.00 ")).toEqual({ ok: true, value: 10n ** 18n });
+  });
+
+  it("reads a safe one as a number, as laxInt does", () => {
+    expect(laxExactInt("9007199254740991")).toEqual({ ok: true, value: 9007199254740991 });
+    expect(laxExactInt("-0")).toEqual({ ok: true, value: 0 });
+    expect(laxExactInt(" 12 ")).toEqual({ ok: true, value: 12 });
+  });
+
+  it("is laxInt for everything else", () => {
+    for (const value of [5, 5.0, true, 1.5, "1e3", "x", null, [], {}]) {
+      expect(laxExactInt(value)).toEqual(laxInt(value));
+    }
   });
 });
 

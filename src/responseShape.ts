@@ -110,6 +110,26 @@ export const laxInt: Coercer<number> = (value) => {
   return fail("Input should be a valid integer");
 };
 
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
+ * {@link laxInt}, exact past 2^53: a string of digits beyond
+ * `Number.MAX_SAFE_INTEGER` reads as the `bigint` Python's `int` holds,
+ * rather than as a rounded neighbour. memory-cloud sends a resource
+ * event's BigInt id as such a string, and the Python model's `int` prints
+ * it as a number.
+ */
+export const laxExactInt: Coercer<number | bigint> = (value) => {
+  if (typeof value === "string") {
+    const text = stripNumberSpace(value);
+    if (LAX_INT_TEXT.test(text)) {
+      const exact = BigInt(text.replace(/_/g, "").replace(/\.0+$/, ""));
+      return ok(exact >= -MAX_SAFE && exact <= MAX_SAFE ? Number(exact) : exact);
+    }
+  }
+  return laxInt(value);
+};
+
 /** A `float` field: a number, a bool, or a string `float()` would read in ASCII digits. */
 export const laxFloat: Coercer<number> = (value) => {
   if (typeof value === "boolean") return ok(value ? 1 : 0);

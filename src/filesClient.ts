@@ -31,9 +31,17 @@ import type {
   FileObject,
   FileReserveResponse,
 } from "./models.js";
+import { pathSegment } from "./pathSegment.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
 import { normalizeUuid, pyRepr } from "./pyCompat.js";
-import { laxStr, ResponseReader } from "./responseShape.js";
+import {
+  FILE_DOWNLOAD_URL_RESPONSE,
+  FILE_LIST_RESPONSE,
+  FILE_OBJECT,
+  FILE_RESERVE_RESPONSE,
+  readModel,
+} from "./pyModels.js";
+import { responseShapeError } from "./responseShape.js";
 import {
   KaguraRestClient,
   type KaguraRestClientOptions,
@@ -136,8 +144,10 @@ export class FilesClient extends KaguraRestClient {
    * @throws Error if `contextId` is not a UUID, or `source` is bytes and
    *   `filename` is not provided.
    * @throws KaguraIntegrityError if R2 rejected the body sha256 binding.
-   * @throws KaguraResponseError if the confirm's 2xx body is not an object
-   *   with a string `id`.
+   * @throws KaguraResponseError if the reserve's or the confirm's 2xx body,
+   *   or a 409's existing file, is not what the Python SDK's
+   *   `FileReserveResponse` / `FileObject` model reads (#66), or the
+   *   reserve's `file_id` is `.`, `..` or empty, which no path can carry.
    */
   async upload(options: UploadOptions): Promise<FileObject> {
     const emit = (event: ProgressEvent) => emitProgress(options.onProgress, event);
@@ -187,6 +197,9 @@ export class FilesClient extends KaguraRestClient {
         // case duplicates.
         const existing = extractExistingFile(e);
         if (existing !== null) {
+          // Read as Python reads it: an existing file the model refuses is
+          // a KaguraResponseError, and the stream ends with it.
+          readModel(existing, FILE_OBJECT, "FilesClient.upload");
           emit({
             stage: "complete",
             kind: "success",
@@ -198,8 +211,18 @@ export class FilesClient extends KaguraRestClient {
         throw e;
       }
 
-      const reserve = this.json(reserveResp) as FileReserveResponse;
-      reservedFileId = reserve.file_id ?? null;
+      const reservePayload = this.json(reserveResp);
+      readModel(reservePayload, FILE_RESERVE_RESPONSE, "FilesClient.upload");
+      const reserve = reservePayload as FileReserveResponse;
+      reservedFileId = reserve.file_id;
+      // The server's id, so one no path can carry is its answer refused,
+      // and before the PUT, which would leave a blob nothing confirms.
+      let confirmPath: string;
+      try {
+        confirmPath = `/api/v1/files/${pathSegment(reserve.file_id, "file_id", "a file id")}/confirm`;
+      } catch (e) {
+        throw responseShapeError("FilesClient.upload", excMessage(e));
+      }
       emit({ stage: "upload", kind: "action", msg: "Uploading to object store" });
       await this.putToObjectStore(reserve.upload_url, body, sha256Base64, contentType);
       uploaded = true;
@@ -208,18 +231,16 @@ export class FilesClient extends KaguraRestClient {
       confirmStarted = true;
       // workspace_id is required on the confirm query string (memory-cloud
       // v0.41.0); omitting it returns 422 and the upload never finalizes.
-      const confirmResp = await this.request("POST", `/api/v1/files/${reserve.file_id}/confirm`, {
+      const confirmResp = await this.request("POST", confirmPath, {
         params: { workspace_id: contextId },
         json: { sha256: sha256Hex },
       });
       // Read before `confirmed`, as Python parses its FileObject first: a
-      // body with no file id is no confirmation, and the terminal error
+      // body the model refuses is no confirmation, and the terminal error
       // must not say it was.
-      const reader = new ResponseReader("FilesClient.upload", "FileObject");
-      const confirmedBody = reader.object(this.json(confirmResp));
-      if (confirmedBody !== null) reader.field(confirmedBody, "id", laxStr);
-      reader.check();
-      const result = confirmedBody as unknown as FileObject;
+      const confirmedBody = this.json(confirmResp);
+      readModel(confirmedBody, FILE_OBJECT, "FilesClient.upload");
+      const result = confirmedBody as FileObject;
       confirmed = true;
       emit({
         stage: "complete",
@@ -246,24 +267,37 @@ export class FilesClient extends KaguraRestClient {
     }
   }
 
-  /** Return a short-lived presigned GET URL for `fileId`. */
+  /**
+   * Return a short-lived presigned GET URL for `fileId`.
+   *
+   * @throws KaguraResponseError if the 2xx body is not what the Python
+   *   SDK's `FileDownloadUrlResponse` model reads (#66).
+   */
   async downloadUrl(fileId: string, options: { contextId: string }): Promise<string> {
     const contextId = normalizeContextId(options.contextId);
-    const response = await this.request("GET", `/api/v1/files/${fileId}/download-url`, {
+    const response = await this.request("GET", `/api/v1/files/${pathSegment(fileId, "fileId", "a file id")}/download-url`, {
       params: { workspace_id: contextId },
     });
-    return (this.json(response) as FileDownloadUrlResponse).download_url;
+    const body = this.json(response);
+    readModel(body, FILE_DOWNLOAD_URL_RESPONSE, "FilesClient.download_url");
+    return (body as FileDownloadUrlResponse).download_url;
   }
 
   /** Soft-delete a file by id (server hard-deletes after retention). */
   async delete(fileId: string, options: { contextId: string }): Promise<void> {
     const contextId = normalizeContextId(options.contextId);
-    await this.request("DELETE", `/api/v1/files/${fileId}`, {
+    await this.request("DELETE", `/api/v1/files/${pathSegment(fileId, "fileId", "a file id")}`, {
       params: { workspace_id: contextId },
     });
   }
 
-  /** List uploaded files in a workspace, newest first. */
+  /**
+   * List uploaded files in a workspace, newest first.
+   *
+   * @throws KaguraResponseError if the 2xx body is not what the Python SDK
+   *   reads: each item of a bare list as a `FileObject`, anything else as
+   *   a `FileListResponse` (#66).
+   */
   async list(options: {
     contextId: string;
     /** Maximum files to return (1-500, default 50). */
@@ -281,10 +315,13 @@ export class FilesClient extends KaguraRestClient {
     const response = await this.request("GET", "/api/v1/files", { params });
     const raw = this.json(response);
     // Current server returns a bare `list[FileObject]`; future versions may
-    // return `{files, next_cursor}`.
+    // return `{files, next_cursor}`. Read as Python reads them: a bare
+    // list's items as `FileObject`s, anything else whole.
     if (Array.isArray(raw)) {
+      for (const item of raw) readModel(item, FILE_OBJECT, "FilesClient.list");
       return { files: raw as FileObject[], next_cursor: null };
     }
+    readModel(raw, FILE_LIST_RESPONSE, "FilesClient.list");
     return raw as FileListResponse;
   }
 

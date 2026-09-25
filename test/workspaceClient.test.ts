@@ -357,14 +357,15 @@ describe("invitations", () => {
     ]);
   });
 
-  it("refuses a user id of . or .., which would address a different endpoint", async () => {
+  it("refuses a user id of ., .. or nothing, which would address a different endpoint", async () => {
     // Percent-encoding leaves both as they are and URL resolution drops or
     // climbs the segment: removeMember(ws, "..") would DELETE the
-    // workspace's own URL. The Python SDK sends them.
+    // workspace's own URL. An empty one makes `members/`. The Python SDK
+    // sends all three.
     const server = new FakeRest();
     const client = makeClient(server);
 
-    for (const id of [".", ".."]) {
+    for (const id of [".", "..", ""]) {
       const refused = `userId must be a user id, got "${id}": as a URL path segment it would address a different endpoint`;
       await expect(client.removeMember(WS, id)).rejects.toThrow(refused);
       await expect(client.updateMemberRole(WS, id, "admin")).rejects.toThrow(refused);
@@ -374,6 +375,17 @@ describe("invitations", () => {
       await expect(client.revokeMemberKey(WS, id, 42)).rejects.toThrow(refused);
     }
     expect(server.requests).toHaveLength(0);
+  });
+
+  it("percent-encodes a user id as one path segment (#66)", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({ api_keys: [] });
+    const client = makeClient(server);
+
+    await client.listMemberKeys(WS, "a/../b?x=1#f");
+    expect(server.requests[0]!.url).toBe(
+      `https://x.test/api/v1/workspaces/${WS}/members/a%2F..%2Fb%3Fx%3D1%23f/credentials`,
+    );
   });
 });
 

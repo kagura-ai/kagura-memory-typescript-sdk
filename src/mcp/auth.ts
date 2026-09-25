@@ -4,6 +4,7 @@ import {
   getSharedState,
   KaguraOAuth,
   loadCredentialsFile,
+  profileNamed,
 } from "../auth/credentials.js";
 import { login } from "../auth/login.js";
 import { DEFAULT_MCP_URL } from "../auth/resolve.js";
@@ -53,7 +54,7 @@ export class ProxyAuth {
   constructor(private readonly options: ProxyAuthOptions) {
     const file = loadCredentialsFile(options.credentialsPath);
     this.profile = options.profile || file.defaultProfile;
-    const stored = file.profiles[this.profile];
+    const stored = profileNamed(file, this.profile);
     this.mcpUrl = checkedUrl(
       options.server || stored?.mcpUrl || DEFAULT_MCP_URL,
     ).href;
@@ -176,9 +177,7 @@ export class ProxyAuth {
       return this.authFetch(input, { ...init, signal: controller.signal });
     };
     try {
-      const stored = loadCredentialsFile(options.credentialsPath).profiles[
-        this.profile
-      ];
+      const stored = profileNamed(loadCredentialsFile(options.credentialsPath), this.profile);
       await login({
         mcpUrl: this.mcpUrl,
         profile: this.profile,

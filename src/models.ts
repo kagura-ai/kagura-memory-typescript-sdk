@@ -88,6 +88,12 @@ export interface ServerInfo {
   environment?: string | null;
   /** Server v0.69.0+. */
   search_defaults?: SearchDefaults;
+  /**
+   * The terms-of-service version (server v0.77.0+); `null` when the
+   * deployment does not record acceptance. Accepting the terms is a web
+   * sign-in step and never gates API or MCP calls.
+   */
+  terms_version?: string | null;
   features?: ServerFeatures;
 }
 

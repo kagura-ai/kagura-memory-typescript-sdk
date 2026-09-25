@@ -44,11 +44,21 @@ export const PY_FLOAT = new RegExp(
  * same set around a number (Rust's `trim()`).
  */
 const NUMBER_SPACE = "\\t\\n\\v\\f\\r \\x85\\xa0\\u{1680}\\u{2000}-\\u{200a}\\u{2028}\\u{2029}\\u{202f}\\u{205f}\\u{3000}";
-const NUMBER_STRIP_RE = new RegExp(`^[${NUMBER_SPACE}]+|[${NUMBER_SPACE}]+$`, "gu");
+/** One such character; each is one UTF-16 unit. */
+const NUMBER_SPACE_RE = new RegExp(`^[${NUMBER_SPACE}]$`, "u");
 
-/** `text` without the whitespace `int()` and `float()` skip around a number. */
+/**
+ * `text` without the whitespace `int()` and `float()` skip around a number.
+ * Scanned in from both ends, in linear time: a regex's trailing-run
+ * alternative is retried at every position, which is quadratic in a run of
+ * spaces between two characters.
+ */
 export function stripNumberSpace(text: string): string {
-  return text.replace(NUMBER_STRIP_RE, "");
+  let start = 0;
+  let end = text.length;
+  while (start < end && NUMBER_SPACE_RE.test(text[start]!)) start++;
+  while (end > start && NUMBER_SPACE_RE.test(text[end - 1]!)) end--;
+  return text.slice(start, end);
 }
 
 const DECIMAL_DIGIT_RE = /\p{Nd}/gu;

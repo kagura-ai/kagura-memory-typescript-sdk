@@ -68,6 +68,7 @@ class FakeFiles {
         size_bytes: 18,
         sha256: "a".repeat(64),
         status: "uploaded",
+        created_at: "2026-01-01T00:00:00Z",
       },
     },
     "GET /api/v1/files": { status: 200, body: [] },
@@ -595,6 +596,29 @@ describe("files delete / download-url / list", () => {
     const h = harness();
     expect(await runCli(["files", command], h.deps)).toBe(2);
     expect(h.err[0]).toBe("Error: Missing argument 'FILE_ID'.");
+  });
+
+  // #66: Python puts FILE_ID in the path as typed, so `download-url ..`
+  // GETs /api/v1/download-url and `delete 'x?workspace_id=…'` replaces the
+  // query the SDK adds.
+  it.each([
+    ["delete", ".."],
+    ["delete", "."],
+    ["download-url", ".."],
+    ["download-url", ""],
+  ])("%s refuses a FILE_ID of %j in click's words (exit 2), sending nothing", async (command, id) => {
+    const h = harness();
+    expect(await runCli(["files", command, id, "-c", WS], h.deps)).toBe(2);
+    expect(h.err).toEqual([`Error: Invalid value for 'FILE_ID': '${id}' is not a valid file id.`]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
+  it("delete sends a FILE_ID with a query in it as one segment", async () => {
+    const h = harness();
+    expect(await runCli(["files", "delete", "x?workspace_id=other", "-c", WS], h.deps)).toBe(1);
+    const url = new URL(h.rest.requests[0]!.url);
+    expect(url.pathname).toBe("/api/v1/files/x%3Fworkspace_id%3Dother");
+    expect(url.searchParams.getAll("workspace_id")).toEqual([WS]);
   });
 });
 

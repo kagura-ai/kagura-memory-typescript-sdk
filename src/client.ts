@@ -60,6 +60,7 @@ import type {
   ToolTrigger,
   UsageInfo,
 } from "./models.js";
+import { pathSegment } from "./pathSegment.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
 import { pyRepr, pyTypeName } from "./python.js";
 import {
@@ -68,6 +69,7 @@ import {
   laxInt,
   laxStr,
   nullable,
+  responseShapeError,
   type Coercer,
   type Loc,
 } from "./responseShape.js";
@@ -87,6 +89,32 @@ export const MIN_SERVER_VERSION = "0.75.0";
 
 /** Parsed once, so a malformed {@link MIN_SERVER_VERSION} fails at import. */
 const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER_VERSION");
+
+/**
+ * The advisory {@link KaguraClient.checkServerVersion} logs: a warning when
+ * `version` is below {@link MIN_SERVER_VERSION}, and nothing for one that
+ * meets it or cannot be compared. `doctor` gives it after its own read of
+ * the body, as Python's `check_server_version` does after its model's.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function warnBelowMinimum(version: unknown): void {
+  if (meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE) === false) {
+    console.warn(
+      `Server version ${String(version)} is below the SDK's tested minimum ` +
+        `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
+        "may silently ignore unknown parameters.",
+    );
+  }
+}
+
+/**
+ * A context id as its path segment in a REST route: percent-encoded, and
+ * refused when it is `.`, `..` or empty (#66, see {@link pathSegment}).
+ */
+function contextSegment(contextId: string): string {
+  return pathSegment(contextId, "contextId", "a context id");
+}
 
 /** Generic parsed-JSON result of an MCP tool call. */
 export type ToolResult = Record<string, unknown>;
@@ -1054,6 +1082,11 @@ export class KaguraClient {
 
   /**
    * Call an MCP tool via JSON-RPC and parse `content[0].text` as JSON.
+   *
+   * @throws KaguraResponseError when the text is JSON but not an object
+   *   (`null`, a list, a scalar): no tool replies with one, and every
+   *   caller reads fields of the reply. The Python SDK fails there with an
+   *   `AttributeError` (#66).
    */
   private async callTool(
     toolName: string,
@@ -1066,15 +1099,24 @@ export class KaguraClient {
 
     const content = result.content;
     if (Array.isArray(content) && content.length > 0) {
-      const first = content[0] as Record<string, unknown>;
-      const text = typeof first.text === "string" ? first.text : "{}";
+      // An item with no text reads as `{}`, as one with a non-string text does.
+      const first = content[0] as { text?: unknown } | null;
+      const text = typeof first?.text === "string" ? first.text : "{}";
+      let parsed: unknown;
       try {
-        return JSON.parse(text) as ToolResult;
+        parsed = JSON.parse(text);
       } catch (e) {
         throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, {
           cause: e,
         });
       }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw responseShapeError(
+          toolName,
+          `tool reply: expected a JSON object, got ${pyTypeName(parsed)}`,
+        );
+      }
+      return parsed as ToolResult;
     }
     return {};
   }
@@ -1977,9 +2019,9 @@ export class KaguraClient {
     contextId: string,
     params: Record<string, unknown>,
   ): Promise<ListTagsResponse> {
-    // Encoded, so a caller's id cannot add segments to the request path.
+    // One segment, so a caller's id cannot add segments to the request path.
     const body = await this.restGet<unknown>(
-      `/api/v1/contexts/${encodeURIComponent(contextId)}/tags`,
+      `/api/v1/contexts/${contextSegment(contextId)}/tags`,
       params,
       "list_tags",
     );
@@ -2574,13 +2616,8 @@ export class KaguraClient {
    */
   async checkServerVersion(): Promise<ServerInfo> {
     const info = await this.getServerInfo();
-    if (meetsMinimum(info.version, MIN_SERVER_VERSION_TRIPLE) === false) {
-      console.warn(
-        `Server version ${info.version} is below the SDK's tested minimum ` +
-          `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
-          "may silently ignore unknown parameters.",
-      );
-    }
+    // A body that is no object has no version to compare, not a TypeError.
+    warnBelowMinimum(typeof info === "object" && info !== null ? info.version : undefined);
     return info;
   }
 
@@ -2605,7 +2642,7 @@ export class KaguraClient {
     offset?: number;
   }): Promise<MemoryStatsResponse> {
     return this.restGet<MemoryStatsResponse>(
-      `/api/v1/contexts/${options.contextId}/memory-stats`,
+      `/api/v1/contexts/${contextSegment(options.contextId)}/memory-stats`,
       {
         sort_by: options.sortBy ?? "access_count",
         sort_order: options.sortOrder ?? "desc",
@@ -2623,7 +2660,7 @@ export class KaguraClient {
     /** Maximum pairs (1-200, default 50). */
     limit?: number;
   }): Promise<DuplicatesResponse> {
-    return this.restGet<DuplicatesResponse>(`/api/v1/contexts/${options.contextId}/duplicates`, {
+    return this.restGet<DuplicatesResponse>(`/api/v1/contexts/${contextSegment(options.contextId)}/duplicates`, {
       threshold: options.threshold ?? 0.9,
       limit: options.limit ?? 50,
     });

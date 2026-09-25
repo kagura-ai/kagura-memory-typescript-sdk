@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { KaguraNotFoundError, KaguraFeatureNotAvailableError, KaguraQuotaError } from "../src/errors.js";
+import {
+  KaguraFeatureNotAvailableError,
+  KaguraNotFoundError,
+  KaguraQuotaError,
+  KaguraResponseError,
+} from "../src/errors.js";
 import { ResourceClient } from "../src/resourceClient.js";
 import { FakeServer } from "./fakeServer.js";
 
@@ -213,6 +218,23 @@ describe("resource stats", () => {
     await expect(client.getResourceSchema("ghost")).resolves.toBeNull();
   });
 
+  it("getResourceSchema refuses a 2xx body that is no object, which only a 404 may mean as none", async () => {
+    for (const [body, got] of [
+      [null, "Input should be a valid dictionary or instance of ResourceSchemaResponse"],
+      [[], "Input should be a valid dictionary or instance of ResourceSchemaResponse"],
+      ["x", "Input should be a valid dictionary or instance of ResourceSchemaResponse"],
+    ] as const) {
+      const server = new FakeRest();
+      server.routes["/api/v1/resources/r/schema"] = { status: 200, body };
+      const error = await makeClient(server).getResourceSchema("r").catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraResponseError);
+      expect((error as Error).message).toBe(
+        `ResourceClient.get_resource_schema: unexpected server response for ResourceSchemaResponse (${got}). ` +
+          "The server may be newer than this SDK; upgrading kagura-memory may help.",
+      );
+    }
+  });
+
   it("getResourceSchema passes schema_version and returns the body", async () => {
     const server = new FakeRest();
     server.routes["/api/v1/resources/r/schema"] = {
@@ -249,6 +271,37 @@ describe("resource stats", () => {
     const url = new URL(server.last().url);
     expect(url.searchParams.get("op")).toBe("upsert");
     expect(url.searchParams.get("since")).toBe("2026-01-02T03:04:05.000Z");
+  });
+});
+
+describe("resource ids in the path (#66)", () => {
+  const calls: Array<[string, (client: ResourceClient, id: string) => Promise<unknown>]> = [
+    ["getResourceImpact", (c, id) => c.getResourceImpact(id)],
+    ["getIndexerStatus", (c, id) => c.getIndexerStatus(id)],
+    ["getResourceSchema", (c, id) => c.getResourceSchema(id)],
+    ["listResourceEvents", (c, id) => c.listResourceEvents(id)],
+    ["ingestEvent", (c, id) => c.ingestEvent(id, "rk", { op: "upsert", docId: "d" })],
+    ["ingestEvents", (c, id) => c.ingestEvents(id, "rk", [{ op: "upsert", docId: "d" }])],
+  ];
+
+  it.each(calls)("%s refuses ., .. and an empty id before sending anything", async (_name, call) => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    for (const id of [".", "..", ""]) {
+      await expect(call(client, id)).rejects.toThrow(
+        `resourceId must be a resource id, got ${JSON.stringify(id)}: as a URL path segment it ` +
+          "would address a different endpoint",
+      );
+    }
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it.each(calls)("%s sends the id as one percent-encoded segment", async (_name, call) => {
+    const server = new FakeRest();
+    server.fallback = { status: 200, body: { events: [], created_count: 0 } };
+    const client = makeClient(server);
+    await call(client, "a/../b?x=1#f %");
+    expect(server.last().url).toMatch(/^https:\/\/x\.test\/api\/v1\/resources\/a%2F\.\.%2Fb%3Fx%3D1%23f%20%25\//);
   });
 });
 

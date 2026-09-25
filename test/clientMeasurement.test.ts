@@ -333,12 +333,15 @@ describe("recordMeasurement (#57)", () => {
   });
 
   it("refuses a payload that is no object", async () => {
+    // Before the model reads it, where Python's `_raise_for_mcp_error`
+    // fails on it with an AttributeError (#66).
     const server = new FakeServer();
     server.toolResults.record_measurement = ["not", "an", "object"];
     const err = await failure(makeClient(server).recordMeasurement({ contextId: "c", metric: "m", value: 1 }));
+    expect(err).toBeInstanceOf(KaguraResponseError);
     expect((err as Error).message).toBe(
-      "record_measurement: unexpected server response for MeasurementResult " +
-        `(Input should be a valid dictionary or instance of MeasurementResult). ${HINT}`,
+      "record_measurement: unexpected server response " +
+        `(tool reply: expected a JSON object, got list). ${HINT}`,
     );
   });
 });
