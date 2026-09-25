@@ -1,15 +1,14 @@
 /**
- * `kagura-memory auth …` — the subcommands, with every side effect
- * injected so they can be exercised without a terminal or a network.
+ * The `kagura-memory` router, and the `auth …` subcommands, with every
+ * side effect injected so they can be exercised without a terminal or a
+ * network.
  *
- * Deliberately only `auth`. Memory operations stay library-only: the
- * credentials file is the artifact both SDKs share, so converging there is
- * the point, whereas duplicating the whole Python CLI surface would just
- * multiply the parity drift this repo has already spent several PRs
- * fixing.
+ * The other groups live in `commands/`; this file registers them, finds
+ * the command argv names, parses its options, and is the one place a
+ * failure becomes `Error: …` and an exit code.
  *
- * Flag names match `kagura auth …` exactly so documentation and muscle
- * memory transfer.
+ * Command and flag names match the Python CLI's `kagura …` exactly so
+ * documentation and muscle memory transfer.
  */
 
 import {
@@ -42,6 +41,7 @@ import { baseUrlFromMcp } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 import {
   isGroup,
+  rejectExtraArgs,
   renderGroupHelp,
   renderHelp,
   type Command,
@@ -56,14 +56,18 @@ import {
 import { DOCTOR } from "./commands/doctor.js";
 import { FILES_GROUP } from "./commands/files.js";
 import { EDGE_GROUP, SLEEP_GROUP } from "./commands/graph.js";
+import { GUARDRAILS_GROUP } from "./commands/guardrails.js";
+import { MEASURE_GROUP } from "./commands/measure.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
 import { SETUP_GROUP, classifyMcpEntry, findClaudeEntries } from "./commands/setup.js";
+import { AUTH_KEY_COMMANDS, WORKSPACE_GROUP } from "./commands/workspace.js";
+import { getCloseMatches } from "./closeMatches.js";
 import type { ExecOptions, ExecResult } from "./exec.js";
 import { checkInviteSupport, type InviteSupport } from "./invite.js";
-import { formatJsonAscii } from "./output.js";
-import { CliError, CliUsageError } from "./parse.js";
+import { cliErrorMessage, formatJsonAscii } from "./output.js";
+import { CliError, CliUsageError, missingParam } from "./parse.js";
 import { parseArgs, type FlagSpec, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
 /**
@@ -95,11 +99,27 @@ const INVITE: FlagSpec = {
 };
 
 /**
- * `--invite` where it is not read: declared, so its value — a sign-up
- * credential — is consumed rather than read as options when it begins
- * with `-`, and hidden from `--help`; {@link refuseInvite} then refuses it.
+ * `--invite` on an `auth` subcommand that does not read it.
+ *
+ * Every other flag a subcommand does not read is an unknown option. This
+ * one is declared, hidden from `--help`, so its value, a sign-up
+ * credential, is consumed: a token that begins with `-` would otherwise be
+ * read as short options, a letter at a time, and its first letter that is
+ * no option named in the error. Ignored, it would read as though the
+ * invite had been used, plausibly so on `refresh`, which can re-run the
+ * device flow. It is then refused ({@link FlagSpec.refusal}), naming the
+ * flag, never its value. Click, whose subcommands do not declare it, says
+ * "No such option: --invite" with the same exit 2; this wording also says
+ * where the flag belongs. Its value is optional so that a bare `--invite`
+ * gets the same refusal, not "requires an argument", which click never
+ * says of an option the command does not have.
  */
-const INVITE_REFUSED: FlagSpec = { ...INVITE, hidden: true };
+const INVITE_REFUSED: FlagSpec = {
+  ...INVITE,
+  type: "optional",
+  hidden: true,
+  refusal: "--invite applies only to 'auth login'.",
+};
 
 const LOGIN_SPEC: ParseSpec = {
   flags: [
@@ -539,16 +559,47 @@ function cmdStatus(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
   return 0;
 }
 
+/** Own keys only: `constructor` is no profile, whatever `in` says. */
+function hasProfile(profiles: Record<string, OAuthCredentials>, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(profiles, name);
+}
+
+/**
+ * `kagura auth use NAME` — Python's command, its messages and its checks:
+ * an unknown name lists the ones there are, and success names the
+ * workspace the default now points at, and `KAGURA_PROFILE` when that
+ * still overrides it.
+ */
 async function cmdUse(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
   const name = args.positionals[0];
-  if (name === undefined) {
-    deps.writeError("Usage: kagura-memory auth use <profile>");
-    return 2;
+  if (name === undefined) throw missingParam("NAME");
+  rejectExtraArgs(args, 1);
+
+  const cf = loadCredentialsFile(deps.credentialsPath);
+  const creds = hasProfile(cf.profiles, name) ? cf.profiles[name] : undefined;
+  if (creds === undefined) {
+    const available = Object.keys(cf.profiles).sort().join(", ") || "(none — run: kagura-memory auth login)";
+    throw new CliError(`Profile '${name}' not found. Available: ${available}`);
   }
-  // setDefaultProfile rejects an unknown name under the lock, so a typo
-  // cannot leave the file pointing at a profile that does not exist.
-  await setDefaultProfile(name, deps.credentialsPath);
-  deps.write(`Default profile is now '${name}'.`);
+  try {
+    // Checked again under the lock, so a logout racing this cannot leave
+    // the file pointing at a profile that no longer exists.
+    await setDefaultProfile(name, deps.credentialsPath);
+  } catch (e) {
+    if (!hasProfile(loadCredentialsFile(deps.credentialsPath).profiles, name)) {
+      throw new CliError(`Profile '${name}' no longer exists.`);
+    }
+    throw e;
+  }
+  const workspace = creds.workspaceName || creds.workspaceId || "unknown workspace";
+  deps.write(`Default profile set to '${name}' (workspace '${workspace}').`);
+  const envProfile = process.env.KAGURA_PROFILE;
+  if (envProfile) {
+    deps.write(
+      `  Note: KAGURA_PROFILE='${envProfile}' is set and overrides this default for commands ` +
+        "run in this environment.",
+    );
+  }
   return 0;
 }
 
@@ -732,27 +783,11 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
 }
 
 /**
- * Refuse `--invite` on an `auth` subcommand that does not read it.
- *
- * Every other flag a subcommand does not read is an unknown option. This
- * one is declared, hidden, on each of them ({@link INVITE_REFUSED}) so its
- * value, a sign-up credential, is consumed: a token that begins with `-`
- * would otherwise be read as short options, a letter at a time, and its
- * first letter that is no option named in the error. Ignored, it would
- * read as though the invite had been used, plausibly so on `refresh`,
- * which can re-run the device flow.
- * The message names the flag, never its value. Click, whose subcommands do
- * not declare it, says "No such option: --invite" with the same exit 2;
- * this wording also says where the flag belongs.
+ * An `auth` subcommand defined elsewhere, declaring `--invite` only to
+ * refuse it, as every one but `login` does.
  */
-function refuseInvite(run: Command["run"]): Command["run"] {
-  return async (deps, args) => {
-    if (args.values.invite !== undefined) {
-      deps.writeError("--invite applies only to 'auth login'.");
-      return 2;
-    }
-    return run(deps, args);
-  };
+function refusingInvite(command: Command): Command {
+  return { ...command, spec: { flags: [...command.spec.flags, INVITE_REFUSED] } };
 }
 
 /** The `auth` subcommands, as registry entries. */
@@ -772,7 +807,7 @@ const AUTH_GROUP: CommandGroup = {
     refresh: {
       summary: "Rotate access_token (optionally requesting a new scope).",
       spec: REFRESH_SPEC,
-      run: refuseInvite((deps, args) => cmdRefresh(deps as CliDeps, args)),
+      run: (deps, args) => cmdRefresh(deps as CliDeps, args),
     },
     status: {
       summary: "Show the current profile, server, scope, expiry, and workspace.",
@@ -780,13 +815,16 @@ const AUTH_GROUP: CommandGroup = {
         "  Then the kagura-memory entry Claude Code uses in the current directory,\n" +
         "  and each one it hides, when a scope defines one.",
       spec: STATUS_SPEC,
-      run: refuseInvite(async (deps, args) => cmdStatus(deps as CliDeps, args)),
+      run: async (deps, args) => cmdStatus(deps as CliDeps, args),
     },
     use: {
-      summary: "Set the default profile used when none is selected.",
-      args: "PROFILE",
+      summary: "Set the default profile used when no --profile / KAGURA_PROFILE is given.",
+      args: "NAME",
+      description:
+        "  Like 'kubectl config use-context' / 'gcloud config set account': makes the\n" +
+        '  active account a deliberate choice instead of "whoever logged in first".',
       spec: USE_SPEC,
-      run: refuseInvite((deps, args) => cmdUse(deps as CliDeps, args)),
+      run: (deps, args) => cmdUse(deps as CliDeps, args),
     },
     logout: {
       summary: "Revoke server-side and delete the local profile (or all of them).",
@@ -795,18 +833,23 @@ const AUTH_GROUP: CommandGroup = {
         "  it fails. Asks first unless --yes; with nothing stored, a logout that\n" +
         "  names no profile succeeds. --all does not take --profile.",
       spec: LOGOUT_SPEC,
-      run: refuseInvite((deps, args) => cmdLogout(deps as CliDeps, args)),
+      run: (deps, args) => cmdLogout(deps as CliDeps, args),
     },
     list: {
       summary: "List every stored profile; the default is marked with `*`.",
       spec: LIST_SPEC,
-      run: refuseInvite(async (deps, args) => cmdList(deps as CliDeps, args)),
+      run: async (deps, args) => cmdList(deps as CliDeps, args),
     },
     token: {
       summary: "Emit the raw access_token to stdout (for CI / scripts).",
       spec: TOKEN_SPEC,
-      run: refuseInvite((deps, args) => cmdToken(deps as CliDeps, args)),
+      run: (deps, args) => cmdToken(deps as CliDeps, args),
     },
+    // Owner-provisioned member keys, which ride the workspace commands'
+    // plumbing: Python defines them in `cli.py` and attaches them here.
+    "create-key": refusingInvite(AUTH_KEY_COMMANDS["create-key"]),
+    "list-keys": refusingInvite(AUTH_KEY_COMMANDS["list-keys"]),
+    "revoke-key": refusingInvite(AUTH_KEY_COMMANDS["revoke-key"]),
   },
 };
 
@@ -819,10 +862,13 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
   contexts: CONTEXTS_ALIAS,
   edge: EDGE_GROUP,
   files: FILES_GROUP,
+  guardrails: GUARDRAILS_GROUP,
+  measure: MEASURE_GROUP,
   resource: RESOURCE_GROUP,
   secret: SECRET_GROUP,
   setup: SETUP_GROUP,
   sleep: SLEEP_GROUP,
+  workspace: WORKSPACE_GROUP,
   ...MEMORY_COMMANDS,
 };
 
@@ -830,8 +876,20 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
  * `kagura-memory login` — accepted because v0.7.0 shipped the bin with
  * only `auth`, and both spellings worked. Not listed in the root help;
  * `auth login` is canonical and matches the Python CLI.
+ *
+ * The seven subcommands v0.7.0 had, named rather than read from
+ * `AUTH_GROUP`: a compatibility shim must not grow, and `auth create-key`
+ * and its siblings have no bare spelling, in Python or here.
  */
-const BARE_AUTH_ALIASES = new Set(Object.keys(AUTH_GROUP.commands));
+const BARE_AUTH_ALIASES: ReadonlySet<string> = new Set([
+  "login",
+  "refresh",
+  "status",
+  "use",
+  "logout",
+  "list",
+  "token",
+]);
 
 interface Resolved {
   command: Command;
@@ -842,24 +900,53 @@ interface Resolved {
 }
 
 /**
- * Click's errors for options a command or group does not take, in the
- * words of click 8.3, which the Python CLI's lockfile pins: `No such
- * option: --x`, naming the option without any value written into the
- * token, and `Option '--json' does not take a value.` Click 8.4 and later
- * word the first `No such option '--x'.`. Click also suggests a close
- * match (`Did you mean --json?`), which this bin does not.
- *
- * Only one is reported, as click stops at the first error. Naming every
- * unknown would also name the `-Z` of a pasted `--invite -Z…` token.
+ * `No such option: --x`, in the words of click 8.3, which the Python CLI's
+ * lockfile pins, naming the option without any value written into the
+ * token. For a long option click adds its close matches among the ones
+ * the command takes (`difflib.get_close_matches`): ` Did you mean
+ * --json?` for one, ` (Possible options: --end, --period)` for more. A
+ * short option gets no suggestion, as in click.
  */
-function reportBadOptions(deps: CliDeps, parsed: Pick<ParsedArgs, "unknown" | "noValue">): void {
-  const [unknown] = parsed.unknown;
-  if (unknown !== undefined) {
-    deps.writeError(`Error: No such option: ${unknown}`);
-    return;
-  }
-  const [noValue] = parsed.noValue;
-  if (noValue !== undefined) deps.writeError(`Error: Option '${noValue}' does not take a value.`);
+function noSuchOption(name: string, spec: ParseSpec): string {
+  const message = `No such option: ${name}`;
+  if (!name.startsWith("--")) return message;
+  // Every long option the command's parser knows, --help included; not a
+  // flag declared only to be refused (`--invite` on the other `auth`
+  // subcommands), which click's parser would not know.
+  const longOptions = [
+    "--help",
+    ...spec.flags
+      .filter((flag) => flag.shortOnly !== true && flag.hidden !== true)
+      .map((flag) => `--${flag.name}`),
+  ];
+  const possibilities = getCloseMatches(name, longOptions).sort();
+  if (possibilities.length === 0) return message;
+  return possibilities.length === 1
+    ? `${message} Did you mean ${possibilities[0]}?`
+    : `${message} (Possible options: ${possibilities.join(", ")})`;
+}
+
+/**
+ * Click's parser errors for the options of a command or group: `No such
+ * option: --x` (with its suggestion), `Option '--json' does not take a
+ * value.` and `Option '-w' requires an argument.`
+ *
+ * Only the first in argv order is reported, as click stops at the first
+ * error. Naming every one would also name the `-Z` of a pasted
+ * `--invite -Z…` token, and `--name -bad` would read as two mistakes: a
+ * missing value and then `No such option: -b`.
+ */
+function reportBadOptions(deps: CliDeps, parsed: Pick<ParsedArgs, "problems">, spec: ParseSpec): void {
+  const [problem] = parsed.problems;
+  if (problem === undefined) return;
+  const { kind, name } = problem;
+  deps.writeError(
+    kind === "unknown"
+      ? `Error: ${noSuchOption(name, spec)}`
+      : kind === "noValue"
+        ? `Error: Option '${name}' does not take a value.`
+        : `Error: Option '${name}' requires an argument.`,
+  );
 }
 
 /** The options the root takes, beside `--help`; `--version` is answered before a command is looked up. */
@@ -868,14 +955,19 @@ const ROOT_SPEC: ParseSpec = { flags: [{ name: "version", type: "switch" }] };
 const GROUP_SPEC: ParseSpec = { flags: [] };
 
 /**
- * An option given to the root or a group, where a command name was due:
- * `--help` / `-h` asks for the help (exit 0); anything else is click's
- * error, then the help (exit 2).
+ * Options given to the root or a group, where a command name was due:
+ * click's error for the first bad one, then the help (exit 2), else the
+ * help for `--help` / `-h` (exit 0). Click parses a group's options up to
+ * its subcommand before its eager `--help` acts, so `--help --bogus` is
+ * the error, not the help.
  */
-function groupOption(deps: CliDeps, token: string, spec: ParseSpec, help: string): { help: string; code: number } {
-  if (token === "--help" || token === "-h") return { help, code: 0 };
-  reportBadOptions(deps, parseArgs([token], spec));
-  return { help, code: 2 };
+function groupOption(deps: CliDeps, argv: string[], spec: ParseSpec, help: string): { help: string; code: number } {
+  const parsed = parseArgs(argv, spec, { stopAtPositional: true });
+  if (parsed.problems.length > 0) {
+    reportBadOptions(deps, parsed, spec);
+    return { help, code: 2 };
+  }
+  return { help, code: parsed.flags.has("help") ? 0 : 2 };
 }
 
 /**
@@ -889,7 +981,7 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
   const head = argv[0];
   // No command: a bare invocation is a mistake.
   if (head === undefined) return { help: renderRootHelp(), code: 2 };
-  if (head.startsWith("-")) return groupOption(deps, head, ROOT_SPEC, renderRootHelp());
+  if (head.startsWith("-")) return groupOption(deps, argv, ROOT_SPEC, renderRootHelp());
   if (head === "help") {
     return { help: renderRootHelp(), code: 0 };
   }
@@ -910,14 +1002,15 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
   while (isGroup(entry)) {
     const groupPath = `kagura-memory ${path.join(" ")}`;
     const next = argv[index];
-    if (next === undefined) return { help: renderGroupHelp(groupPath, entry.summary, entry.commands), code: 2 };
+    const groupHelp = renderGroupHelp(groupPath, entry.summary, entry.commands, entry.description);
+    if (next === undefined) return { help: groupHelp, code: 2 };
     if (next.startsWith("-")) {
-      return groupOption(deps, next, GROUP_SPEC, renderGroupHelp(groupPath, entry.summary, entry.commands));
+      return groupOption(deps, argv.slice(index), GROUP_SPEC, groupHelp);
     }
     const child: Command | CommandGroup | undefined = entry.commands[next];
     if (child === undefined) {
       deps.writeError(`Error: No such command '${next}'.`);
-      return { help: renderGroupHelp(groupPath, entry.summary, entry.commands), code: 2 };
+      return { help: groupHelp, code: 2 };
     }
     entry = child;
     path.push(next);
@@ -939,7 +1032,9 @@ function renderRootHelp(): string {
  *   it intact rather than as a stack trace.
  */
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
-  if (argv[0] === "--version") {
+  // Eager, as click's version option is, but only once the root's options
+  // parse: `--version --bogus` is the option error.
+  if (argv[0] === "--version" && parseArgs(argv, ROOT_SPEC, { stopAtPositional: true }).problems.length === 0) {
     deps.write(`kagura-memory, version ${SDK_VERSION}`);
     return 0;
   }
@@ -955,12 +1050,48 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const parsed = parseArgs(
     rest,
     command.spec,
-    command.passthrough === true ? { stopAtPositional: true } : {},
+    command.passthrough === true
+      ? { stopAtPositional: true }
+      : command.ignoreUnknownOptions === true
+        ? { ignoreUnknownOptions: true }
+        : {},
   );
+
+  // Click parses the whole argv before its eager `--help` acts, so an
+  // option error anywhere wins over `--help`, before it or after it: one
+  // error, then the help, exit 2. Except an unknown option of a
+  // passthrough command: click's `ignore_unknown_options` keeps it as an
+  // argument instead of raising, so `secret exec --help --bogus` is the
+  // help. A missing value or a value given to a switch still wins there.
+  const blocking =
+    command.passthrough === true ? parsed.problems.filter((p) => p.kind !== "unknown") : parsed.problems;
+  if (blocking.length > 0) {
+    reportBadOptions(deps, { problems: blocking }, command.spec);
+    deps.writeError(renderHelp(path, command));
+    return 2;
+  }
+
+  // A flag declared only to be refused stands in for click's "No such
+  // option", so it wins over `--help` as that error does.
+  const refused = command.spec.flags.find(
+    (flag) => flag.refusal !== undefined && parsed.values[flag.name] !== undefined,
+  );
+  if (refused?.refusal !== undefined) {
+    deps.writeError(refused.refusal);
+    return 2;
+  }
 
   if (parsed.flags.has("help")) {
     deps.write(renderHelp(path, command));
     return 0;
+  }
+
+  // Without `--help`, a passthrough command's unknown option before the
+  // child's name is still refused: Python would run it as the COMMAND.
+  if (parsed.problems.length > 0) {
+    reportBadOptions(deps, parsed, command.spec);
+    deps.writeError(renderHelp(path, command));
+    return 2;
   }
 
   // Only the flags that declare `rejectEmpty`. Python accepts an empty
@@ -978,11 +1109,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     })
     .map((flag) => `--${flag.name}`);
 
-  if (parsed.unknown.length > 0 || parsed.noValue.length > 0 || parsed.missingValue.length > 0 || empty.length > 0) {
-    reportBadOptions(deps, parsed);
-    for (const flag of parsed.missingValue) {
-      deps.writeError(`Option ${flag} needs a value.`);
-    }
+  if (empty.length > 0) {
     for (const flag of empty) {
       deps.writeError(`Option ${flag} needs a non-empty value.`);
     }
@@ -991,11 +1118,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   }
 
   // The parser lifts the first positional into `command`; commands read
-  // their arguments positionally, so put it back.
+  // their arguments positionally, so put it back — an empty one included,
+  // or every later argument would shift into its place.
   const args: ParsedArgs = {
     ...parsed,
     positionals: [
-      ...(parsed.command === "" ? [] : [parsed.command]),
+      ...(parsed.command === undefined ? [] : [parsed.command]),
       ...parsed.positionals,
       // For a passthrough command the remainder was never parsed; it is
       // the child's argv and must arrive byte-for-byte.
@@ -1008,7 +1136,9 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   } catch (e) {
     // Click prefixes both UsageError (exit 2) and ClickException (exit 1)
     // with "Error: "; the exit code is what tells a script which it was.
-    deps.writeError(`Error: ${excMessage(e)}`);
+    // A quota or plan refusal gains Python's `Resets at:` / `Required
+    // plan:` lines, whichever command it came from.
+    deps.writeError(`Error: ${cliErrorMessage(e)}`);
     return e instanceof CliUsageError ? 2 : 1;
   }
 }

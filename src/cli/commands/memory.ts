@@ -16,13 +16,12 @@ import type { SourceType } from "../../client.js";
 import { requireArg, requireOption, rejectExtraArgs, type Command } from "../command.js";
 import {
   CliError,
-  CliUsageError,
   buildDetails,
   pairedFlag,
+  parseChoice,
   parseFloatOption,
   parseIntOption,
   parseTags,
-  quote,
 } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
@@ -69,19 +68,21 @@ const kFlag = (help: string, defaultLabel: string): FlagSpec => ({
 
 const SOURCE_TYPES: readonly SourceType[] = ["file", "url", "vault", "api", "manual"];
 
+const SOURCE_TYPE: FlagSpec = {
+  name: "source-type",
+  type: "value",
+  metavar: "[file|url|vault|api|manual]",
+  help: "Origin classification. Opt-in: omitted means no provenance is stamped.",
+};
+
 /**
- * `click.Choice(..., case_sensitive=False)` — match case-insensitively but
- * send the canonical lowercase value.
+ * `click.Choice(..., case_sensitive=False)`: matched as click matches it,
+ * casefolded (`FILE`, and the `ﬁ` ligature of `ﬁle`), sending the
+ * canonical lowercase value.
  */
 function parseSourceType(raw: string | undefined): SourceType | undefined {
   if (raw === undefined) return undefined;
-  const match = SOURCE_TYPES.find((t) => t === raw.toLowerCase());
-  if (match === undefined) {
-    throw new CliUsageError(
-      `Invalid value for '--source-type': ${quote(raw)} is not one of ${SOURCE_TYPES.map(quote).join(", ")}.`,
-    );
-  }
-  return match;
+  return parseChoice(SOURCE_TYPE, raw, SOURCE_TYPES, { caseInsensitive: true });
 }
 
 /** Read a `type=float` option, or undefined when it was not passed. */
@@ -111,12 +112,7 @@ const remember: Command = {
         type: "value",
         help: "Origin URI (e.g., file:///path/to/note.md, vault://my-vault/note)",
       },
-      {
-        name: "source-type",
-        type: "value",
-        metavar: "[file|url|vault|api|manual]",
-        help: "Origin classification. Opt-in: omitted means no provenance is stamped.",
-      },
+      SOURCE_TYPE,
       {
         name: "linked-memory-ids",
         type: "value",

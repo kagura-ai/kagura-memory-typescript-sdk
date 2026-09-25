@@ -5,7 +5,7 @@
  * render help generically instead of carrying a switch with 61 arms.
  */
 
-import { CliUsageError, flagLabel } from "./parse.js";
+import { CliUsageError, missingParam, parseChoice, type ChoiceOptions } from "./parse.js";
 import type { FlagSpec, ParseSpec, ParsedArgs } from "./parseArgs.js";
 import type { ClientCommandContext } from "./runClientCommand.js";
 
@@ -29,11 +29,21 @@ export interface Command {
    * own flags reach the child instead of being rejected as ours.
    */
   passthrough?: boolean;
+  /**
+   * Keep options the spec does not declare as positionals, whole, instead
+   * of refusing them — click's `ignore_unknown_options` alone, with
+   * options still read wherever they appear. `measure record` needs it so
+   * a negative VALUE such as `-3.5` needs no `--`. See
+   * `ParseOptions.ignoreUnknownOptions`.
+   */
+  ignoreUnknownOptions?: boolean;
   run: (deps: CommandDeps, args: ParsedArgs) => Promise<number>;
 }
 
 export interface CommandGroup {
   summary: string;
+  /** Extra paragraphs for the group's `--help`, after the summary. */
+  description?: string;
   /** Nestable: `resource tokens list` is a group inside a group. */
   commands: Record<string, Command | CommandGroup>;
 }
@@ -50,16 +60,34 @@ export function isGroup(entry: Command | CommandGroup): entry is CommandGroup {
 export function requireOption(args: ParsedArgs, flag: FlagSpec): string {
   const value = args.values[flag.name];
   if (value === undefined) {
-    throw new CliUsageError(`Missing option ${flagLabel(flag)}.`);
+    throw missingParam(flag);
   }
   return value;
+}
+
+/**
+ * Read a required `click.Choice` option, or raise click's message for its
+ * absence, which lists the choices (`Missing option '--role'. Choose
+ * from:` and one per line), or for a value that is none of them.
+ */
+export function requireChoice<T extends string>(
+  args: ParsedArgs,
+  flag: FlagSpec,
+  choices: readonly T[],
+  options: ChoiceOptions = {},
+): T {
+  const value = args.values[flag.name];
+  if (value === undefined) {
+    throw missingParam(flag, choices, options);
+  }
+  return parseChoice(flag, value, choices, options);
 }
 
 /** Read a required positional, or raise click's `Missing argument` message. */
 export function requireArg(args: ParsedArgs, index: number, name: string): string {
   const value = args.positionals[index];
   if (value === undefined) {
-    throw new CliUsageError(`Missing argument '${name}'.`);
+    throw missingParam(name);
   }
   return value;
 }
@@ -90,7 +118,9 @@ function renderFlag(flag: FlagSpec): string {
       : flag.short === undefined
         ? `    --${flag.name}`
         : `-${flag.short}, --${flag.name}`;
-  if (flag.type !== "value" && flag.type !== "multiple") return forms;
+  if (flag.type !== "value" && flag.type !== "multiple" && flag.type !== "optional") return forms;
+  // Click shows an optional value's metavar as declared, brackets and all
+  // (`--agents-md [PATH]`), and `TEXT` when none is.
   return `${forms} ${flag.metavar ?? "TEXT"}`;
 }
 
@@ -113,15 +143,21 @@ export function renderHelp(path: string, command: Command): string {
   return lines.join("\n");
 }
 
-/** Render the listing for a group (or the root), click-style. */
+/**
+ * Render the listing for a group (or the root), click-style: the summary,
+ * the group's `description` paragraphs when it has any, then the commands.
+ */
 export function renderGroupHelp(
   path: string,
   summary: string,
   entries: Record<string, Command | CommandGroup>,
+  description?: string,
 ): string {
   const names = Object.keys(entries).sort();
   const width = Math.max(10, ...names.map((n) => n.length + 2));
-  const lines = [`Usage: ${path} [OPTIONS] COMMAND [ARGS]...`, "", `  ${summary}`, "", "Commands:"];
+  const lines = [`Usage: ${path} [OPTIONS] COMMAND [ARGS]...`, "", `  ${summary}`, ""];
+  if (description) lines.push(description, "");
+  lines.push("Commands:");
   for (const name of names) {
     lines.push(`${INDENT}${name.padEnd(width)}${entries[name]!.summary}`);
   }

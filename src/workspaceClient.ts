@@ -16,10 +16,19 @@
  */
 
 import { SOURCE_LABEL } from "./auth/types.js";
-import { KaguraConnectionError, KaguraError, KaguraQuotaError } from "./errors.js";
+import { KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseError } from "./errors.js";
 import { extractDetail, responseRetryAfter, sanitizeServerDetail } from "./http.js";
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "./models.js";
-import { KaguraRestClient } from "./restBase.js";
+import { pyTypeName } from "./python.js";
+import {
+  ResponseReader,
+  laxBool,
+  laxInt,
+  laxStr,
+  nullable,
+  responseShapeError,
+} from "./responseShape.js";
+import { KaguraRestClient, requireInt } from "./restBase.js";
 import type { RequestContext, RestResponse } from "./restBase.js";
 
 export const VALID_ASSIGNABLE_ROLES = ["member", "admin", "viewer"] as const;
@@ -65,17 +74,67 @@ function normalizeWorkspaceId(workspaceId: string): string {
 }
 
 /**
- * Strictly require an integer — no float truncation, no string parse.
+ * Refuse a `userId` of `.` or `..`, which no user id is.
  *
- * Truncating `7.9` would silently target a DIFFERENT resource id on a
- * destructive endpoint (the TS signature says `number`, which admits
- * floats), so fail loudly instead.
+ * Percent-encoding leaves both as they are, and URL resolution then drops
+ * the segment or climbs out of it: `removeMember(ws, "..")` would send
+ * `DELETE /api/v1/workspaces/{ws}`, the workspace itself. The Python SDK
+ * sends them. `addMember`, whose id goes in the body, refuses them too:
+ * such a member could never be addressed afterwards.
  */
-function requireInt(value: number, label: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new Error(`${label} must be an integer, got ${JSON.stringify(value)}`);
+function requireUserId(userId: string): string {
+  if (userId === "." || userId === "..") {
+    throw new Error(
+      `userId must be a user id, got ${JSON.stringify(userId)}: as a URL path segment it ` +
+        "would address a different endpoint",
+    );
   }
-  return value;
+  return userId;
+}
+
+/** `/api/v1/workspaces/{ws}/members/{userId}`, the id checked and percent-encoded. */
+function memberPath(workspaceId: string, userId: string): string {
+  return `/api/v1/workspaces/${workspaceId}/members/${encodeURIComponent(requireUserId(userId))}`;
+}
+
+/**
+ * A timestamp field as the server wrote it, `null` when it sent none —
+ * pydantic's round trip leaves every form the server writes unchanged.
+ */
+function passThrough(obj: Record<string, unknown>, key: string): string | null {
+  const value = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+  return value === undefined ? null : (value as string | null);
+}
+
+/**
+ * Read a key row as the Python SDK's `MemberAPIKey` model reads it: its
+ * fields in its order, defaults filled, unknown keys dropped, the scalars
+ * coerced as pydantic's lax mode does (`"42"` is id 42, a numeric
+ * `plaintext_key` is refused). A row that fails throws
+ * `KaguraResponseError` in Python's words, naming fields, never values.
+ *
+ * @internal Shared with the CLI; not part of the package's API.
+ */
+export function readMemberKey(raw: unknown, operation: string): MemberAPIKey {
+  const r = new ResponseReader(operation, "MemberAPIKey");
+  const obj = r.object(raw);
+  if (obj === null) r.check();
+  const row = obj ?? {};
+  const key: MemberAPIKey = {
+    id: r.field(row, "id", laxInt),
+    name: r.field(row, "name", laxStr),
+    key_prefix: r.field(row, "key_prefix", laxStr),
+    plaintext_key: r.field(row, "plaintext_key", nullable(laxStr), { default: null }),
+    is_visible: r.field(row, "is_visible", laxBool, { default: false }),
+    visibility_expires_at: passThrough(row, "visibility_expires_at"),
+    created_at: passThrough(row, "created_at"),
+    last_used_at: passThrough(row, "last_used_at"),
+    revoked_at: passThrough(row, "revoked_at"),
+    expires_at: passThrough(row, "expires_at"),
+    bound_context_id: r.field(row, "bound_context_id", nullable(laxStr), { default: null }),
+  };
+  r.check();
+  return key;
 }
 
 /** Options for {@link WorkspaceClient.createInvitation}. */
@@ -138,7 +197,7 @@ export class WorkspaceClient extends KaguraRestClient {
   async listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
     const ws = normalizeWorkspaceId(workspaceId);
     const resp = await this.request("GET", `/api/v1/workspaces/${ws}/members`);
-    return this.expectList(resp) as unknown as WorkspaceMember[];
+    return this.expectRows(resp, "list_members") as unknown as WorkspaceMember[];
   }
 
   /**
@@ -154,7 +213,7 @@ export class WorkspaceClient extends KaguraRestClient {
     const ws = normalizeWorkspaceId(workspaceId);
     this.validateRole(role);
     const resp = await this.request("POST", `/api/v1/workspaces/${ws}/members`, {
-      json: { user_id: userId, role },
+      json: { user_id: requireUserId(userId), role },
     });
     return this.json(resp) as unknown as WorkspaceMember;
   }
@@ -167,18 +226,14 @@ export class WorkspaceClient extends KaguraRestClient {
   ): Promise<WorkspaceMember> {
     const ws = normalizeWorkspaceId(workspaceId);
     this.validateRole(role);
-    const resp = await this.request(
-      "PUT",
-      `/api/v1/workspaces/${ws}/members/${encodeURIComponent(userId)}`,
-      { json: { role } },
-    );
+    const resp = await this.request("PUT", memberPath(ws, userId), { json: { role } });
     return this.json(resp) as unknown as WorkspaceMember;
   }
 
   /** Remove a member from the workspace (server returns 204). */
   async removeMember(workspaceId: string, userId: string): Promise<void> {
     const ws = normalizeWorkspaceId(workspaceId);
-    await this.request("DELETE", `/api/v1/workspaces/${ws}/members/${encodeURIComponent(userId)}`);
+    await this.request("DELETE", memberPath(ws, userId));
   }
 
   // -------------------------------------------------------------------
@@ -250,11 +305,17 @@ export class WorkspaceClient extends KaguraRestClient {
       `/api/v1/workspaces/${ws}/invitations`,
       options.includeAccepted ? { params: { include_accepted: "true" } } : {},
     );
-    return this.expectList(resp) as unknown as WorkspaceInvitation[];
+    return this.expectRows(resp, "list_invitations") as unknown as WorkspaceInvitation[];
   }
 
-  /** Revoke a pending invitation (server returns 200 `{"success": true}`). */
-  async revokeInvitation(workspaceId: string, invitationId: number): Promise<void> {
+  /**
+   * Revoke a pending invitation (server returns 200 `{"success": true}`).
+   *
+   * @param invitationId The integer id. Pass a `bigint` for one past
+   *   `Number.MAX_SAFE_INTEGER`: a `number` that large may already be
+   *   rounded to a different id, and is refused.
+   */
+  async revokeInvitation(workspaceId: string, invitationId: number | bigint): Promise<void> {
     const ws = normalizeWorkspaceId(workspaceId);
     await this.request(
       "DELETE",
@@ -276,6 +337,11 @@ export class WorkspaceClient extends KaguraRestClient {
    * CI keys are not allowed). The returned `plaintext_key` is shown
    * exactly once — owner-provisioned keys are force-hidden at creation,
    * so no later call returns it.
+   *
+   * The response is read as the Python SDK's `MemberAPIKey` model reads
+   * it, leniently as pydantic does: the key comes back with the model's
+   * fields only, `"42"` read as id 42. A response that model refuses
+   * throws a `KaguraError` carrying the plaintext when there is one.
    */
   async mintMemberKey(
     workspaceId: string,
@@ -288,29 +354,34 @@ export class WorkspaceClient extends KaguraRestClient {
     if (days < 1 || days > 3650) {
       throw new Error(`expiresDays must be 1-3650, got ${JSON.stringify(days)}`);
     }
-    const resp = await this.request(
-      "POST",
-      `/api/v1/workspaces/${ws}/members/${encodeURIComponent(userId)}/credentials/api-keys`,
-      { json: { name, expires_days: days } },
-    );
+    const resp = await this.request("POST", `${memberPath(ws, userId)}/credentials/api-keys`, {
+      json: { name, expires_days: days },
+    });
     const payload = this.json(resp);
-    if (isMintShape(payload)) {
-      return payload as unknown as MemberAPIKey;
+    const operation = "WorkspaceClient.mint_member_key";
+    try {
+      // As `MemberAPIKey.model_validate` reads it: lax, so `"42"` is id 42,
+      // and whole, so a `plaintext_key` that is no string is refused.
+      return readMemberKey(payload, operation);
+    } catch (e) {
+      if (!(e instanceof KaguraResponseError)) throw e;
     }
     // The key already exists server-side and is force-hidden — a shape
-    // mismatch must not swallow the ONE chance to see the plaintext.
+    // mismatch must not swallow the ONE chance to see the plaintext. The
+    // Python SDK's words, which the CLI prints; the class stays the one
+    // this method has always thrown.
     const plaintext =
       typeof payload === "object" && payload !== null && !Array.isArray(payload)
         ? (payload as Record<string, unknown>).plaintext_key
         : undefined;
     if (typeof plaintext === "string" && plaintext) {
       throw new KaguraError(
-        "Server returned an unexpected mint response shape, but the " +
+        `${operation}: server returned an unexpected mint response shape, but the ` +
           `key WAS created. Save the plaintext now: ${plaintext}`,
       );
     }
     throw new KaguraError(
-      "Server returned an unexpected mint response shape; the key may " +
+      `${operation}: server returned an unexpected mint response shape; the key may ` +
         "have been created without displaying its plaintext — check " +
         "`kagura auth list-keys` and revoke/re-mint if present.",
     );
@@ -325,10 +396,7 @@ export class WorkspaceClient extends KaguraRestClient {
    */
   async listMemberKeys(workspaceId: string, userId: string): Promise<MemberAPIKey[]> {
     const ws = normalizeWorkspaceId(workspaceId);
-    const resp = await this.request(
-      "GET",
-      `/api/v1/workspaces/${ws}/members/${encodeURIComponent(userId)}/credentials`,
-    );
+    const resp = await this.request("GET", `${memberPath(ws, userId)}/credentials`);
     const payload = this.json(resp);
     const rows =
       typeof payload === "object" && payload !== null && !Array.isArray(payload)
@@ -338,9 +406,9 @@ export class WorkspaceClient extends KaguraRestClient {
       // Guard the FIELD, not just the envelope: api_keys=null would
       // produce garbage rows and api_keys={} is not iterable as rows
       // (Copilot review, PR #228 on the Python port).
-      throw new KaguraConnectionError(
-        "Unexpected response shape from the member-credentials endpoint " +
-          "(expected an object carrying an 'api_keys' array).",
+      throw this.shapeError(
+        "list_member_keys",
+        `${resp.method} ${resp.path}: expected an object carrying a 'api_keys' array`,
       );
     }
     return rows as unknown as MemberAPIKey[];
@@ -352,19 +420,49 @@ export class WorkspaceClient extends KaguraRestClient {
    * Owner-provisioned revocations are SOFT server-side (`revoked_at`
    * set, row retained for forensics); success is 200 with a status body,
    * and an already-revoked key surfaces as a uniform 404.
+   *
+   * @param keyId The integer id. Pass a `bigint` for one past
+   *   `Number.MAX_SAFE_INTEGER`: a `number` that large may already be
+   *   rounded to a different id, and is refused.
    */
-  async revokeMemberKey(workspaceId: string, userId: string, keyId: number): Promise<void> {
+  async revokeMemberKey(
+    workspaceId: string,
+    userId: string,
+    keyId: number | bigint,
+  ): Promise<void> {
     const ws = normalizeWorkspaceId(workspaceId);
     await this.request(
       "DELETE",
-      `/api/v1/workspaces/${ws}/members/${encodeURIComponent(userId)}` +
-        `/credentials/api-keys/${requireInt(keyId, "keyId")}`,
+      `${memberPath(ws, userId)}/credentials/api-keys/${requireInt(keyId, "keyId")}`,
     );
   }
 
   // -------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------
+
+  /**
+   * A mis-shaped envelope, in the Python SDK's words, which the CLI prints
+   * (`WorkspaceClient.list_members: unexpected server response (GET …:
+   * expected a JSON array, got dict). …`). A `KaguraConnectionError`
+   * still, the class these methods have always thrown; Python's is a
+   * `KaguraResponseError`.
+   */
+  private shapeError(method: string, problem: string): KaguraConnectionError {
+    return new KaguraConnectionError(responseShapeError(`WorkspaceClient.${method}`, problem).message);
+  }
+
+  /** `expectList`, failing in {@link shapeError}'s words (Python's `_expect_list`). */
+  private expectRows(response: RestResponse, method: string): unknown[] {
+    const payload = this.json(response);
+    if (!Array.isArray(payload)) {
+      throw this.shapeError(
+        method,
+        `${response.method} ${response.path}: expected a JSON array, got ${pyTypeName(payload)}`,
+      );
+    }
+    return payload;
+  }
 
   private validateRole(role: string): void {
     if (!(VALID_ASSIGNABLE_ROLES as readonly string[]).includes(role)) {
@@ -435,21 +533,4 @@ export class WorkspaceClient extends KaguraRestClient {
       responseRetryAfter(response.headers, response.text),
     );
   }
-}
-
-/**
- * Minimal structural check standing in for pydantic's required-field
- * validation on the mint response — the fields `MemberAPIKey` requires.
- * Everything else is trusted per the SDK's no-runtime-validation policy;
- * this one endpoint gets a guard because a mis-shaped 201 would otherwise
- * silently discard the only copy of the plaintext key.
- */
-function isMintShape(payload: unknown): payload is Record<string, unknown> {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    return false;
-  }
-  const rec = payload as Record<string, unknown>;
-  return (
-    typeof rec.id === "number" && typeof rec.name === "string" && typeof rec.key_prefix === "string"
-  );
 }

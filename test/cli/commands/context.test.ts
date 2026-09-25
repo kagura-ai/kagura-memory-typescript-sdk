@@ -190,6 +190,15 @@ describe("kagura-memory context search-config", () => {
     );
   });
 
+  it("matches --reranker case-sensitively, as Python's click.Choice declares it", async () => {
+    const { code, h } = await wire(["context", "search-config", "ctx-1", "--reranker", "Voyage"]);
+    expect(code).toBe(2);
+    expect(h.err.join("\n")).toContain(
+      "Invalid value for '--reranker': 'Voyage' is not one of 'voyage', 'cohere', 'self_hosted'.",
+    );
+    expect(h.server.requests).toEqual([]);
+  });
+
   it("accepts --reranker self_hosted, which the server takes since v0.42.0", async () => {
     const { code, args } = await wire([
       "context",

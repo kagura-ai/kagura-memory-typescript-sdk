@@ -10,6 +10,7 @@
  */
 
 import { SDK_VERSION } from "../version.js";
+import { meetsMinimum, requireVersion } from "../versionCheck.js";
 
 /**
  * The first memory-cloud release whose `/join/<token>` honours `return_to`.
@@ -29,8 +30,6 @@ export const MIN_INVITE_HANDOFF_VERSION = "0.76.0";
  */
 export const INVITE_PROBE_TIMEOUT_MS = 5_000;
 
-const SEMVER_PREFIX_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
-
 /**
  * How the invite is presented.
  *
@@ -40,26 +39,10 @@ const SEMVER_PREFIX_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
  */
 export type InviteSupport = "hand_off" | "two_step" | "disabled";
 
-/**
- * `[major, minor, patch]` from a `v?MAJOR.MINOR.PATCH` prefix, so a `v`
- * and any suffix (`-rc.1`, `+build.7`) are accepted; `null` otherwise
- * (`"0.76"`, `"nightly"`).
- */
-export function parseVersionPrefix(version: string): [number, number, number] | null {
-  const m = SEMVER_PREFIX_RE.exec(version);
-  return m === null ? null : [Number(m[1]), Number(m[2]), Number(m[3])];
-}
-
-const MIN_INVITE_HANDOFF_TUPLE = parseVersionPrefix(MIN_INVITE_HANDOFF_VERSION)!;
-
-function atLeast(version: readonly number[], min: readonly number[]): boolean {
-  for (let i = 0; i < min.length; i++) {
-    const have = version[i] ?? 0;
-    const want = min[i] ?? 0;
-    if (have !== want) return have > want;
-  }
-  return true;
-}
+const MIN_INVITE_HANDOFF_TRIPLE = requireVersion(
+  MIN_INVITE_HANDOFF_VERSION,
+  "MIN_INVITE_HANDOFF_VERSION",
+);
 
 /**
  * GET the public `{server}/api/v1/system/info` and return the raw JSON
@@ -101,10 +84,15 @@ export async function fetchSystemInfo(
  * `features` object the body says nothing about invites, so the version
  * decides.
  *
+ * The version is read as `versionCheck.ts` reads every server version, so
+ * `v0.76.0` and `0.76.0+build.7` hand off, and a pre-release of 0.76.0
+ * (`0.76.0-rc.1`, `0.76.0rc1`) comes before it and does not.
+ *
  * @returns `disabled` when `features` is an object whose `beta_invites` is
  *   not `true`; `hand_off` when the version is at least
  *   {@link MIN_INVITE_HANDOFF_VERSION}; otherwise `two_step` (no info, or
- *   an older or unparseable version), because it works on every server.
+ *   an older, pre-release-of-0.76.0 or unparseable version), because it
+ *   works on every server.
  */
 export function inviteSupport(info: Record<string, unknown> | null): InviteSupport {
   if (info === null) {
@@ -119,8 +107,7 @@ export function inviteSupport(info: Record<string, unknown> | null): InviteSuppo
   ) {
     return "disabled";
   }
-  const version = typeof info.version === "string" ? parseVersionPrefix(info.version) : null;
-  return version !== null && atLeast(version, MIN_INVITE_HANDOFF_TUPLE) ? "hand_off" : "two_step";
+  return meetsMinimum(info.version, MIN_INVITE_HANDOFF_TRIPLE) === true ? "hand_off" : "two_step";
 }
 
 /** {@link inviteSupport} of what {@link fetchSystemInfo} finds on `server`. */

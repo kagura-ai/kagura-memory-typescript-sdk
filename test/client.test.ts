@@ -585,6 +585,62 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     expect(err.current).toBe(100);
   });
 
+  it("maps the in-band daily MCP call cap to the api_mcp_daily quota (python #268)", async () => {
+    // `rate_limit_exceeded` carries no gate and names its counts
+    // used_today / daily_limit; the cap resets at the next UTC midnight.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T18:30:00.250Z"));
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "rate_limit_exceeded",
+      message: "Daily MCP call limit reached (100/100). Resets at midnight UTC.",
+      used_today: 100,
+      daily_limit: 100,
+      help: "Use get_usage() to check your current quota.",
+    };
+    const err = await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    );
+
+    expect(err).toBeInstanceOf(KaguraQuotaError);
+    const quota = err as KaguraQuotaError;
+    expect(quota.message).toBe(
+      "remember failed (rate_limit_exceeded): Daily MCP call limit reached (100/100). " +
+        "Resets at midnight UTC.",
+    );
+    expect(quota.quotaType).toBe("api_mcp_daily");
+    expect([quota.current, quota.usedToday, quota.limit]).toEqual([100, 100, 100]);
+    // Python's `datetime.isoformat()` form, which the CLI's `Resets at:` prints.
+    expect(quota.resetsAt).toBe("2026-09-26T00:00:00+00:00");
+    expect(quota.retryAfter).toBe(5 * 3600 + 30 * 60);
+    expect(quota.gate).toBeNull();
+  });
+
+  it("lets the daily MCP cap's own fields win over the ones filled in", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error",
+      error: "rate_limit_exceeded",
+      message: "Daily MCP call limit reached.",
+      gate: "quota",
+      quota_type: "api_mcp_daily",
+      current: 7,
+      limit: 5,
+      used_today: 100,
+      daily_limit: 100,
+      resets_at: "2099-01-02T00:00:00+00:00",
+    };
+    const quota = (await failure(server, (c) =>
+      c.remember({ contextId: "c", summary: "s", content: "x" }),
+    )) as KaguraQuotaError;
+
+    expect(quota).toBeInstanceOf(KaguraQuotaError);
+    expect(quota.gate).toBe("quota");
+    expect([quota.current, quota.limit]).toEqual([7, 5]);
+    expect(quota.resetsAt).toBe("2099-01-02T00:00:00+00:00");
+  });
+
   it("maps a v0.75 plan_required envelope by its gate, with the payload", async () => {
     const server = new FakeServer();
     server.toolResults.setup_resource = {
@@ -1694,8 +1750,9 @@ describe("listTags withTags drill-down (#47)", () => {
       tags: [{ tag: "when:2026-09", count: 2, last_used_at: "2026-09-01T00:00:00Z" }],
       total: 1,
     });
-    // The REST route has no context_name. The lookup is list_tags itself:
-    // the same access check as the REST route, and one tag of payload.
+    // The route sends no context_name before server v0.77.0. The lookup is
+    // list_tags itself: the same access check as the REST route, and one
+    // tag of payload.
     expect(toolCalls(server)).toEqual([
       { name: "list_tags", arguments: { context_id: "c1", limit: 1 } },
     ]);
@@ -1709,6 +1766,38 @@ describe("listTags withTags drill-down (#47)", () => {
     const client = makeClient(server);
     const result = await client.listTags({ contextId: "c1", withTags: ["b"] });
     expect(result.tags).toEqual([{ tag: "a", count: 1, last_used_at: null }]);
+  });
+
+  it("takes the name the route sends (server v0.77.0+), with no MCP call, and caches it", async () => {
+    const server = drillServer();
+    server.restResults[TAGS_PATH] = { ...REST_BODY, context_name: "from-rest" };
+    const client = makeClient(server);
+    const result = await client.listTags({ contextId: "c1", withTags: ["client:acme"] });
+
+    expect(result.context_name).toBe("from-rest");
+    expect(toolCalls(server)).toEqual([]);
+
+    // Cached: a later drill-down on an older server needs no lookup either.
+    server.restResults[TAGS_PATH] = REST_BODY;
+    const again = await client.listTags({ contextId: "c1", withTags: ["a"] });
+    expect(again.context_name).toBe("from-rest");
+    expect(toolCalls(server)).toEqual([]);
+  });
+
+  it.each([
+    ["an empty", ""],
+    ["a null", null],
+  ])("looks the name up when the route sends %s context_name", async (_label, contextName) => {
+    // Python's `body.context_name or …`: an empty name is no name.
+    const server = drillServer();
+    server.restResults[TAGS_PATH] = { ...REST_BODY, context_name: contextName };
+    const client = makeClient(server);
+    const result = await client.listTags({ contextId: "c1", withTags: ["a"] });
+
+    expect(result.context_name).toBe("demo");
+    expect(toolCalls(server)).toEqual([
+      { name: "list_tags", arguments: { context_id: "c1", limit: 1 } },
+    ]);
   });
 
   it("reuses the name a plain listTags returned, with no extra call", async () => {
@@ -2133,6 +2222,22 @@ describe("REST endpoints", () => {
         ["0.74.9", true],
         ["0.75.0", false],
         ["0.76.0", false],
+        // Read as the Python SDK reads it (#280, test/versionCheck.test.ts):
+        // a `v` prefix is the same version, and a pre-release of the
+        // minimum comes before it.
+        ["v0.74.0", true],
+        ["0.74.0-rc1", true],
+        ["0.75.0-rc1", true],
+        ["0.75.0rc1", true],
+        ["0.75.0.dev1", true],
+        ["v0.75.0", false],
+        ["0.75.0+build.7", false],
+        ["0.75.0.post1", false],
+        ["0.75.1-rc1", false],
+        // Unparseable: nothing to compare, so no warning.
+        ["0.74", false],
+        ["main-abc123", false],
+        ["", false],
       ] as const) {
         warn.mockClear();
         const server = new FakeServer();
@@ -2144,6 +2249,41 @@ describe("REST endpoints", () => {
       warn.mockRestore();
     }
   });
+
+  it("checkServerVersion prints the version it warns about, and the minimum", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const server = new FakeServer();
+      server.restResults["/api/v1/system/info"] = { name: "mc", version: "0.75.0-rc1" };
+      await makeClient(server).checkServerVersion();
+      expect(warn.mock.calls).toEqual([
+        [
+          "Server version 0.75.0-rc1 is below the SDK's tested minimum 0.75.0. " +
+            "Some features may not work; older servers may silently ignore unknown parameters.",
+        ],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([null, 75, { major: 0 }])(
+    "checkServerVersion neither throws nor warns on a non-string version %j",
+    async (version) => {
+      // It used to call version.split and throw a TypeError, against its
+      // "never throws" contract.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const server = new FakeServer();
+        server.restResults["/api/v1/system/info"] = { name: "mc", version };
+        const info = await makeClient(server).checkServerVersion();
+        expect(info.version).toEqual(version);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
 
   it("listMemories normalizes q and builds query params", async () => {
     const server = new FakeServer();

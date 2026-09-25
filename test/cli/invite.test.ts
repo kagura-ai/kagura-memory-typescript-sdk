@@ -7,7 +7,6 @@ import {
   checkInviteSupport,
   fetchSystemInfo,
   inviteSupport,
-  parseVersionPrefix,
 } from "../../src/cli/invite.js";
 
 const SERVER = "https://api.test";
@@ -27,39 +26,41 @@ function systemInfo(
   return { name: "Kagura Memory Cloud", version, features: { neural_memory: false, ...flag } };
 }
 
-describe("parseVersionPrefix (#44)", () => {
-  it.each([
-    ["0.76.0", [0, 76, 0]],
-    ["v0.76.0", [0, 76, 0]],
-    ["0.75.12", [0, 75, 12]],
-    ["0.76.0+build.7", [0, 76, 0]],
-    ["0.76.0-rc.1", [0, 76, 0]],
-    ["0.76", null],
-    ["main-abc123", null],
-    ["", null],
-  ])("reads %j as %j", (version, parsed) => {
-    expect(parseVersionPrefix(version)).toEqual(parsed);
-  });
-});
-
 describe("inviteSupport (#44)", () => {
   it("pins the first memory-cloud release that ships the /join return_to hand-off", () => {
     expect(MIN_INVITE_HANDOFF_VERSION).toBe("0.76.0");
   });
 
-  it.each(["0.76.0", "v0.76.0", "0.76.1", "0.77.3", "v1.0.0", "0.76.0+build.7"])(
-    "hands off from 0.76.0 (%s)",
-    (version) => {
-      expect(inviteSupport(systemInfo(version))).toBe("hand_off");
-    },
-  );
+  // The parsing rules themselves are tabled in test/versionCheck.test.ts.
+  it.each([
+    "0.76.0",
+    "v0.76.0",
+    "0.76.1",
+    "0.77.3",
+    "v1.0.0",
+    "0.76.0+build.7",
+    // A pre-release of a later triple is past 0.76.0.
+    "0.76.1-rc1",
+    "0.77.0-rc1",
+  ])("hands off from 0.76.0 (%s)", (version) => {
+    expect(inviteSupport(systemInfo(version))).toBe("hand_off");
+  });
 
-  it.each(["0.75.0", "0.75.9", "v0.75.1", "0.70.0", "0.9.99"])(
-    "takes two steps before 0.76.0 (%s)",
-    (version) => {
-      expect(inviteSupport(systemInfo(version))).toBe("two_step");
-    },
-  );
+  it.each([
+    "0.75.0",
+    "0.75.9",
+    "v0.75.1",
+    "0.70.0",
+    "0.9.99",
+    // A pre-release of 0.76.0 comes before it (SemVer §11, PEP 440), as in
+    // Python since its #280.
+    "0.76.0-rc.1",
+    "0.76.0-rc1",
+    "0.76.0rc1",
+    "0.76.0.dev1",
+  ])("takes two steps before 0.76.0 (%s)", (version) => {
+    expect(inviteSupport(systemInfo(version))).toBe("two_step");
+  });
 
   it.each([[""], ["dev"], ["0.76"], ["latest"], [null], [76], [undefined]])(
     "takes two steps on an unparseable version (%j)",

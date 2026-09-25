@@ -99,7 +99,15 @@ describe("kagura-memory remember", () => {
   it("rejects an unknown --source-type with exit 2", async () => {
     const { code, h } = await wire(["remember", "-s", "S", "--content", "C", "--source-type", "ftp"]);
     expect(code).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Invalid value for '--source-type'/);
+    expect(h.err[0]).toBe(
+      "Error: Invalid value for '--source-type': 'ftp' is not one of 'file', 'url', 'vault', 'api', 'manual'.",
+    );
+  });
+
+  it("matches --source-type casefolded, as click's case-insensitive Choice does", async () => {
+    // `ﬁle` (the fi ligature) casefolds to `file`; Python 0.40.1 takes it.
+    const { args } = await wire(["remember", "-s", "S", "--content", "C", "--source-type", "\u{fb01}le"]);
+    expect(args).toMatchObject({ source_type: "file" });
   });
 
   it("merges --location into details", async () => {
@@ -252,11 +260,35 @@ describe("kagura-memory recall", () => {
     }
   });
 
+  it("prints a quota refusal with Python's Resets at / Required plan lines", async () => {
+    // What `kagura remember` prints for the same envelope (_cli_error_message).
+    const h = harness();
+    h.server.toolResults.remember = {
+      status: "error",
+      error: "quota_exceeded",
+      message: "Daily memory limit reached (100/day).",
+      gate: "quota",
+      quota_type: "memories_per_day",
+      current: 100,
+      limit: 100,
+      required_plan: "basic",
+      required_plan_display: "M",
+      resets_at: "2026-09-24T00:00:00Z",
+    };
+    expect(await runCli(["remember", "-s", "S", "--content", "C"], h.deps)).toBe(1);
+    expect(h.err).toEqual([
+      "Error: remember failed (quota_exceeded): Daily memory limit reached (100/day).\n" +
+        "  Resets at: 2026-09-24T00:00:00+00:00\n" +
+        "  Required plan: M (basic)",
+    ]);
+    expect(h.out).toEqual([]);
+  });
+
   it("exits 1 when no context resolves, with the Python message", async () => {
     const { code, h } = await wire(["recall", "q"], {});
     expect(code).toBe(1);
     expect(h.err.join("\n")).toBe(
-      "Error: context_id required. Use --context-id or set in .kagura.json",
+      "Error: context_id required. Pass the context ID or set context_id in .kagura.json",
     );
   });
 });

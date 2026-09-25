@@ -13,14 +13,19 @@ import {
   type OAuthCredentials,
 } from "../../src/auth/credentials.js";
 import { DEFAULT_SCOPE, READ_ONLY_SCOPE, login } from "../../src/auth/login.js";
-import type { CommandGroup } from "../../src/cli/command.js";
+import type { Command, CommandGroup } from "../../src/cli/command.js";
 import { ROOT_COMMANDS, runCli, type CliDeps } from "../../src/cli/run.js";
-import { KaguraAuthExpiredError } from "../../src/errors.js";
+import {
+  KaguraAuthExpiredError,
+  KaguraFeatureNotAvailableError,
+  KaguraQuotaError,
+} from "../../src/errors.js";
 
 let dir: string;
 let credentialsPath: string;
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_CWD = process.cwd();
+const CTX_UUID = "00000000-0000-0000-0000-0000000000cc";
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-cli-"));
@@ -39,8 +44,9 @@ beforeEach(() => {
   process.env.USERPROFILE = process.env.HOME;
   fs.mkdirSync(process.env.HOME);
   process.chdir(dir);
-  // `auth logout` notes it when set.
+  // `auth logout` notes it when set, and `auth use` KAGURA_PROFILE.
   delete process.env.KAGURA_API_KEY;
+  delete process.env.KAGURA_PROFILE;
 });
 
 afterEach(() => {
@@ -203,8 +209,101 @@ describe("cli: usage and dispatch", () => {
 
     const b = harness();
     expect(await runCli(["login", "--porfile", "x"], b.deps)).toBe(2);
-    // Click's too.
-    expect(b.err[0]).toBe("Error: No such option: --porfile");
+    // Click's too, its close-match suggestion included.
+    expect(b.err[0]).toBe("Error: No such option: --porfile Did you mean --profile?");
+  });
+
+  // Each line is what the Python CLI (click 8.3.3) prints for the argv:
+  // `difflib.get_close_matches` over the command's long options.
+  it.each([
+    [["files", "upload", "f.txt", "--profile", "x"], "No such option: --profile Did you mean --progress?"],
+    [
+      ["resource", "import", "-r", "r", "-k", "k", "--profile", "x"],
+      "No such option: --profile (Possible options: --file, --progress)",
+    ],
+    [["measure", "series", CTX_UUID, "m", "--per", "week"], "No such option: --per (Possible options: --end, --period)"],
+    [["guardrails", "digest", CTX_UUID, "--tar", "instructions"], "No such option: --tar (Possible options: --out, --target)"],
+    [["workspace", "member", "list", "--js"], "No such option: --js Did you mean --json?"],
+    [["workspace", "member", "list", "--js=1"], "No such option: --js Did you mean --json?"],
+    [["workspace", "--hel"], "No such option: --hel Did you mean --help?"],
+    [["--verison"], "No such option: --verison Did you mean --version?"],
+    // Nothing close, and never for a short option, as in click.
+    [["recall", "--prof"], "No such option: --prof"],
+    [["workspace", "member", "list", "-j"], "No such option: -j"],
+  ])("suggests a close option as click does: %j", async (argv, message) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(`Error: ${message}`);
+    expect(h.out).toEqual([]);
+  });
+
+  it("never suggests a flag declared only to be refused", async () => {
+    // `--invite` is declared, hidden, on `auth status` only to refuse it.
+    const h = harness();
+    expect(await runCli(["auth", "status", "--invit"], h.deps)).toBe(2);
+    expect(h.err[0]).toBe("Error: No such option: --invit");
+  });
+
+  it.each([
+    [["workspace", "member", "list", "-w"], "-w"],
+    [["workspace", "member", "add", "u1", "--role"], "--role"],
+    [["guardrails", "load", CTX_UUID, "--cap"], "--cap"],
+    [["recall", "q", "-k"], "-k"],
+  ])("refuses an option missing its value in click's words: %j", async (argv, flag) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(`Error: Option '${flag}' requires an argument.`);
+    // One error, then the help, as for the other option errors.
+    expect(h.err[1]).toMatch(/^Usage: kagura-memory /);
+    expect(h.err).toHaveLength(2);
+    expect(h.out).toEqual([]);
+  });
+
+  it("reports only the missing value when a dash-led token was refused as the value", async () => {
+    // `-bad` is not taken as --name's value (a deliberate divergence), and
+    // is not then reported a second time as `No such option: -b`.
+    const h = harness();
+    const argv = ["setup", "codex", "--url-form", "--mcp-url", "https://127.0.0.1:9/mcp", "--dry-run", "--name", "-bad"];
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe("Error: Option '--name' requires an argument.");
+    expect(h.err.filter((line) => line.startsWith("Error:"))).toHaveLength(1);
+  });
+
+  it.each([
+    [["workspace", "member", "list", "--bogus", "--help"], "No such option: --bogus"],
+    [["workspace", "member", "list", "--help", "--bogus"], "No such option: --bogus"],
+    [["recall", "q", "-h", "--bogus"], "No such option: --bogus"],
+    [["recall", "q", "--help", "-k"], "Option '-k' requires an argument."],
+    [["recall", "q", "--json=1", "--help"], "No such option: --json"],
+  ])("lets an option error win over --help, as click parses all of argv first: %j", async (argv, message) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(`Error: ${message}`);
+    expect(h.out).toEqual([]);
+  });
+
+  it.each([
+    [["workspace", "--help", "--bogus"], "No such option: --bogus"],
+    [["workspace", "--bogus", "--help"], "No such option: --bogus"],
+    [["resource", "tokens", "--help", "-x"], "No such option: -x"],
+    [["--help", "--bogus"], "No such option: --bogus"],
+    [["--version", "--bogus"], "No such option: --bogus"],
+  ])("does the same for the options of a group or the root: %j", async (argv, message) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err[0]).toBe(`Error: ${message}`);
+    expect(h.out).toEqual([]);
+  });
+
+  it("still answers --help or --version before a subcommand name, as click's eager options do", async () => {
+    for (const argv of [["workspace", "--help", "member"], ["--help", "auth"]]) {
+      const h = harness();
+      expect(await runCli(argv, h.deps)).toBe(0);
+      expect(h.out.join("\n")).toMatch(/^Usage: kagura-memory/);
+    }
+    const h = harness();
+    expect(await runCli(["--version", "auth"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toMatch(/^kagura-memory, version /);
   });
 
   it("rejects an unknown subcommand of a real group", async () => {
@@ -899,17 +998,30 @@ describe("cli: login --invite (#44)", () => {
 
   it("covers every other auth subcommand", () => {
     // Derived from the registry, so a new subcommand is checked too.
-    expect(others.sort()).toEqual(["list", "logout", "refresh", "status", "token", "use"]);
+    expect(others.sort()).toEqual([
+      "create-key",
+      "list",
+      "list-keys",
+      "logout",
+      "refresh",
+      "revoke-key",
+      "status",
+      "token",
+      "use",
+    ]);
   });
 
-  it.each(others.flatMap((name) => [
+  /** The subcommands v0.7.0 shipped, the only ones with a bare alias. */
+  const LEGACY = new Set(["refresh", "status", "use", "logout", "list", "token"]);
+
+  it.each(others.flatMap((name): [string[]][] => [
     [["auth", name, "--invite", INVITE]],
     [["auth", name, `--invite=${INVITE}`]],
     // A token that begins with a dash is still taken as the value, so it
     // is never reported, and quoted, as an unknown option.
     [["auth", name, "--invite", `-${INVITE.slice(1)}`]],
-    // The bare alias takes the same flag.
-    [[name, "--invite", INVITE]],
+    // The bare alias, where there is one, takes the same flag.
+    ...(LEGACY.has(name) ? [[[name, "--invite", INVITE]] as [string[]]] : []),
   ]))("rejects %j with exit 2, without echoing the token", async (argv) => {
     seed({ default: creds() });
     const h = harness();
@@ -922,6 +1034,21 @@ describe("cli: login --invite (#44)", () => {
     expect(h.refreshCalls).toEqual([]);
     // Nothing acted: logout --yes would otherwise have removed this.
     expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default"]);
+  });
+
+  it.each(others.flatMap((name): [string[]][] => [
+    // Without a value: click, which does not declare the option there,
+    // says "No such option: --invite", never that it requires an argument.
+    [["auth", name, "--invite"]],
+    // Before or after --help, as click's option error wins over --help.
+    [["auth", name, "--help", "--invite"]],
+    [["auth", name, "--help", "--invite", INVITE]],
+    [["auth", name, `--invite=${INVITE}`, "--help"]],
+  ]))("refuses %j in the same words, and before --help", async (argv) => {
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.err).toEqual(["--invite applies only to 'auth login'."]);
+    expect(h.out).toEqual([]);
   });
 
   it.each(others)("does not list --invite in auth %s --help", async (name) => {
@@ -943,9 +1070,39 @@ describe("cli: each auth subcommand takes only the flags it reads", () => {
     logout: ["--profile", "--all", "--yes"],
     list: ["--json"],
     token: ["--profile"],
+    // The owner-provisioned key commands take none of the others'.
+    "create-key": ["--user", "--name", "--expires-days", "--workspace"],
+    "list-keys": ["--user", "--json", "--workspace"],
+    "revoke-key": ["--user", "--yes", "--workspace"],
   };
-  const EVERY = ["--profile", "--server", "--scope", "--read-only", "--no-browser", "--all", "--yes", "--json"];
-  const VALUE_FLAGS = new Set(["--profile", "--server", "--scope"]);
+  const EVERY = [
+    "--profile",
+    "--server",
+    "--scope",
+    "--read-only",
+    "--no-browser",
+    "--all",
+    "--yes",
+    "--json",
+    "--user",
+    "--workspace",
+  ];
+  const VALUE_FLAGS = new Set(["--profile", "--server", "--scope", "--user", "--workspace"]);
+  // Click's close-match suggestions, as the Python CLI prints them for
+  // these; every other pair gets the bare message.
+  const SUGGESTED: Record<string, string> = {
+    "login --json": " Did you mean --scope?",
+    "login --user": " (Possible options: --scope, --server)",
+    "refresh --json": " Did you mean --scope?",
+    "refresh --user": " Did you mean --scope?",
+    "list --scope": " Did you mean --json?",
+    "create-key --server": " Did you mean --user?",
+    "create-key --scope": " Did you mean --user?",
+    "list-keys --server": " Did you mean --user?",
+    "list-keys --scope": " (Possible options: --json, --user)",
+    "revoke-key --server": " Did you mean --user?",
+    "revoke-key --scope": " Did you mean --user?",
+  };
 
   it("covers every auth subcommand", () => {
     expect(Object.keys((ROOT_COMMANDS.auth as CommandGroup).commands).sort()).toEqual(Object.keys(OWN).sort());
@@ -958,7 +1115,7 @@ describe("cli: each auth subcommand takes only the flags it reads", () => {
     const h = harness();
     const argv = ["auth", name, ...(name === "use" ? ["default"] : []), flag, ...(VALUE_FLAGS.has(flag) ? ["x"] : [])];
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Error: No such option: ${flag}`);
+    expect(h.err[0]).toBe(`Error: No such option: ${flag}${SUGGESTED[`${name} ${flag}`] ?? ""}`);
     expect(h.out).toEqual([]);
     expect(h.loginCalls).toEqual([]);
     expect(h.refreshCalls).toEqual([]);
@@ -1206,23 +1363,86 @@ describe("cli: list", () => {
 });
 
 describe("cli: use", () => {
-  it("switches the default profile", async () => {
-    seed({ default: creds(), work: creds() });
+  // Python's `auth use` (auth/cli.py): its argument, its lines, its exits.
+  it("switches the default profile and names its workspace", async () => {
+    seed({ default: creds(), work: creds({ workspaceName: "Work WS" }) });
     const h = harness();
-    expect(await runCli(["use", "work"], h.deps)).toBe(0);
+    expect(await runCli(["auth", "use", "work"], h.deps)).toBe(0);
     expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("work");
+    expect(h.out).toEqual(["Default profile set to 'work' (workspace 'Work WS')."]);
+    expect(h.err).toEqual([]);
   });
 
-  it("refuses an unknown profile rather than pointing the file at nothing", async () => {
-    seed({ default: creds() });
+  it.each([
+    [{ workspaceName: "", workspaceId: "ws-9" }, "ws-9"],
+    [{ workspaceName: "", workspaceId: "" }, "unknown workspace"],
+  ])("falls back from the workspace name (%j)", async (over, shown) => {
+    seed({ default: creds(), work: creds(over) });
     const h = harness();
-    expect(await runCli(["use", "nope"], h.deps)).toBe(1);
+    expect(await runCli(["use", "work"], h.deps)).toBe(0);
+    expect(h.out).toEqual([`Default profile set to 'work' (workspace '${shown}').`]);
+  });
+
+  it("notes a KAGURA_PROFILE that still overrides the default", async () => {
+    seed({ default: creds(), work: creds() });
+    process.env.KAGURA_PROFILE = "default";
+    const h = harness();
+    expect(await runCli(["auth", "use", "work"], h.deps)).toBe(0);
+    expect(h.out).toEqual([
+      "Default profile set to 'work' (workspace 'Acme').",
+      "  Note: KAGURA_PROFILE='default' is set and overrides this default for commands run in " +
+        "this environment.",
+    ]);
+  });
+
+  it("refuses an unknown profile, listing the ones there are, sorted (exit 1)", async () => {
+    seed({ work: creds(), default: creds(), alpha: creds() }, "default");
+    const h = harness();
+    expect(await runCli(["auth", "use", "nope"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: Profile 'nope' not found. Available: alpha, default, work"]);
+    expect(h.out).toEqual([]);
     expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
   });
 
-  it("requires the profile argument", async () => {
+  it("says how to log in when there is no profile at all", async () => {
     const h = harness();
-    expect(await runCli(["use"], h.deps)).toBe(2);
+    expect(await runCli(["auth", "use", "work"], h.deps)).toBe(1);
+    expect(h.err).toEqual([
+      "Error: Profile 'work' not found. Available: (none — run: kagura-memory auth login)",
+    ]);
+  });
+
+  it("takes no inherited property for a profile", async () => {
+    seed({ default: creds() });
+    const h = harness();
+    expect(await runCli(["auth", "use", "constructor"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: Profile 'constructor' not found. Available: default"]);
+    expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
+  });
+
+  it("requires NAME, in click's words (exit 2)", async () => {
+    const h = harness();
+    expect(await runCli(["auth", "use"], h.deps)).toBe(2);
+    expect(h.err).toEqual(["Error: Missing argument 'NAME'."]);
+  });
+
+  it.each([
+    [["work", "x"], "Error: Got unexpected extra argument (x)"],
+    [["work", "x", "y"], "Error: Got unexpected extra arguments (x y)"],
+  ])("refuses extra arguments %j (exit 2), changing nothing", async (extra, line) => {
+    seed({ default: creds(), work: creds() });
+    const h = harness();
+    expect(await runCli(["auth", "use", ...extra], h.deps)).toBe(2);
+    expect(h.err).toEqual([line]);
+    expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
+  });
+
+  it("names its argument NAME in --help", async () => {
+    const h = harness();
+    expect(await runCli(["auth", "use", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    expect(text).toMatch(/^Usage: kagura-memory auth use \[OPTIONS\] NAME$/m);
+    expect(text).toContain("Set the default profile used when no --profile / KAGURA_PROFILE is given.");
   });
 });
 
@@ -1417,5 +1637,166 @@ describe("cli: refresh", () => {
     const h = harness();
     await runCli(["refresh", "--scope", "memory:read memory:write profile:read"], h.deps);
     expect(h.refreshCalls[0]).toHaveProperty("onUserCode");
+  });
+});
+
+describe("cli: the router's plumbing for commands that use it", () => {
+  // Probe commands registered for one test each and removed after it, so
+  // the router is exercised without depending on any real command.
+  const registered: string[] = [];
+  function register(name: string, entry: Command | CommandGroup): void {
+    ROOT_COMMANDS[name] = entry;
+    registered.push(name);
+  }
+  afterEach(() => {
+    for (const name of registered.splice(0)) delete ROOT_COMMANDS[name];
+  });
+
+  function throwing(e: unknown): Command {
+    return {
+      summary: "Probe.",
+      spec: { flags: [] },
+      run: async () => {
+        throw e;
+      },
+    };
+  }
+
+  it("adds Python's Resets at / Required plan lines to a quota refusal (exit 1)", async () => {
+    register(
+      "probe",
+      throwing(
+        new KaguraQuotaError("Daily memory limit reached (100/day).", null, {
+          resetsAt: "2026-09-26T00:00:00.5Z",
+          requiredPlan: "basic",
+          requiredPlanDisplay: "M",
+        }),
+      ),
+    );
+    const h = harness();
+    expect(await runCli(["probe"], h.deps)).toBe(1);
+    expect(h.err).toEqual([
+      "Error: Daily memory limit reached (100/day).\n" +
+        "  Resets at: 2026-09-26T00:00:00.500000+00:00\n" +
+        "  Required plan: M (basic)",
+    ]);
+  });
+
+  it("adds the plan to a feature refusal", async () => {
+    register(
+      "probe",
+      throwing(new KaguraFeatureNotAvailableError("Feature 'resources' not available.", { requiredPlan: "promax" })),
+    );
+    const h = harness();
+    expect(await runCli(["probe"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: Feature 'resources' not available.\n  Required plan: promax"]);
+  });
+
+  it("keeps an ordinary error to its message", async () => {
+    register("probe", throwing(new KaguraQuotaError("Memory limit reached.")));
+    const h = harness();
+    expect(await runCli(["probe"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: Memory limit reached."]);
+  });
+
+  it("hands unknown options to an ignoreUnknownOptions command as arguments", async () => {
+    let seen: string[] = [];
+    let unit: string | undefined;
+    register("probe", {
+      summary: "Probe.",
+      args: "CONTEXT_ID METRIC VALUE",
+      ignoreUnknownOptions: true,
+      spec: { flags: [{ name: "unit", type: "value" }] },
+      run: async (_deps, args) => {
+        seen = args.positionals;
+        unit = args.values.unit;
+        return 0;
+      },
+    });
+    const h = harness();
+    expect(await runCli(["probe", "C", "pnl", "-3.5", "--unit", "USD", "--weight"], h.deps)).toBe(0);
+    expect(seen).toEqual(["C", "pnl", "-3.5", "--weight"]);
+    expect(unit).toBe("USD");
+    expect(h.err).toEqual([]);
+  });
+
+  it.each([
+    [["probe", "", "cpu", "1.5"], ["", "cpu", "1.5"]],
+    [["probe", "", ""], ["", ""]],
+    [["probe", "--", "", "-3.5"], ["", "-3.5"]],
+    [["probe", "C", "", "1"], ["C", "", "1"]],
+  ])("keeps an empty argument in its place, as click does: %j", async (argv, expected) => {
+    // Click passes '' through as an argument's value; dropping the first
+    // one would shift every later argument left (CONTEXT_ID read from
+    // METRIC's place).
+    let seen: string[] = [];
+    register("probe", {
+      summary: "Probe.",
+      args: "CONTEXT_ID METRIC VALUE",
+      ignoreUnknownOptions: true,
+      spec: { flags: [] },
+      run: async (_deps, args) => {
+        seen = args.positionals;
+        return 0;
+      },
+    });
+    const h = harness();
+    expect(await runCli(argv, h.deps)).toBe(0);
+    expect(seen).toEqual(expected);
+  });
+
+  it("keeps an empty first argument on an ordinary command too", async () => {
+    let seen: string[] = [];
+    register("probe", {
+      summary: "Probe.",
+      spec: { flags: [{ name: "yes", short: "y", type: "switch" }] },
+      run: async (_deps, args) => {
+        seen = args.positionals;
+        return 0;
+      },
+    });
+    const h = harness();
+    expect(await runCli(["probe", "-y", "", "b"], h.deps)).toBe(0);
+    expect(seen).toEqual(["", "b"]);
+  });
+
+  it("still refuses an unknown option on any other command", async () => {
+    register("probe", { summary: "Probe.", spec: { flags: [] }, run: async () => 0 });
+    const h = harness();
+    expect(await runCli(["probe", "C", "-3.5"], h.deps)).toBe(2);
+    expect(h.err[0]).toBe("Error: No such option: -3");
+  });
+
+  it("shows an optional value's metavar as declared", async () => {
+    register("probe", {
+      summary: "Probe.",
+      spec: { flags: [{ name: "agents-md", type: "optional", metavar: "[PATH]", help: "Export." }] },
+      run: async () => 0,
+    });
+    const h = harness();
+    expect(await runCli(["probe", "--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toContain("--agents-md [PATH]  Export.");
+  });
+
+  it("renders a group's description between its summary and its commands", async () => {
+    register("grp", {
+      summary: "Manage members.",
+      description: "  Requires the workspace OWNER's static API key.",
+      commands: { list: { summary: "List members.", spec: { flags: [] }, run: async () => 0 } },
+    });
+    const h = harness();
+    expect(await runCli(["grp", "--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(
+      [
+        "Usage: kagura-memory grp [OPTIONS] COMMAND [ARGS]...",
+        "",
+        "  Manage members.",
+        "",
+        "  Requires the workspace OWNER's static API key.",
+        "",
+        "Commands:",
+        "  list      List members.",
+      ].join("\n"),
+    );
   });
 });

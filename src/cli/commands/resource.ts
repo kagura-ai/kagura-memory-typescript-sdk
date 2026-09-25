@@ -12,22 +12,37 @@
  *     group takes `-r/--resource-id`.
  */
 
-import * as fs from "node:fs";
-
-import { requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
+import { excMessage } from "../../errors.js";
+import { emitProgress } from "../../progress.js";
+import { pyBigInt, pyRepr } from "../../python.js";
+import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
+import { resolveCliAuth } from "../credentialSource.js";
+import { cliErrorMessage, formatJson } from "../output.js";
 import {
   CliError,
   CliUsageError,
+  paramLabel,
   parseChoice,
   parseFloatOption,
+  parseIdArg,
   parseIntOption,
   parseRanged,
   quote,
 } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
+import { parseProgress, PROGRESS_FLAG, resolveProgress, VERBOSE_FLAG } from "../progress.js";
 import type { ResourceEventInput } from "../../resourceClient.js";
+import { laxInt, laxStr, nullable, ResponseReader } from "../../responseShape.js";
 import { resolveConfig, runAndPrint } from "../runClientCommand.js";
-import { parseRecords } from "./importFormats.js";
+import {
+  detectFormat,
+  EXTRA_CELLS,
+  openImportInput,
+  parseImportRows,
+  pyStrAt,
+  refuseNonFinite,
+  type ImportInput,
+} from "./importFormats.js";
 
 const RESOURCE_ID: FlagSpec = {
   name: "resource-id",
@@ -68,6 +83,22 @@ function requiredValue(args: ParsedArgs, flag: FlagSpec): string {
 function optionalInt(args: ParsedArgs, flag: FlagSpec): number | undefined {
   const raw = args.values[flag.name];
   return raw === undefined ? undefined : parseIntOption(flag, raw);
+}
+
+/**
+ * {@link runAndPrint} for a command whose Python counterpart echoes a line
+ * of text rather than a JSON document (`Token revoked.`), with the same
+ * failure mapping.
+ */
+async function runAndEcho(deps: CommandDeps, operation: () => Promise<string>): Promise<number> {
+  let text: string;
+  try {
+    text = await operation();
+  } catch (e) {
+    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));
+  }
+  deps.write(text);
+  return 0;
 }
 
 // ---------------------------------------------------------------------
@@ -139,7 +170,7 @@ const tokensUpdate: Command = {
   args: "TOKEN_ID",
   spec: { flags: [DESCRIPTION, QUOTA] },
   run: async (deps, args) => {
-    const tokenId = parseTokenId(requireArg(args, 0, "TOKEN_ID"));
+    const tokenId = parseIdArg("TOKEN_ID", requireArg(args, 0, "TOKEN_ID"));
     rejectExtraArgs(args, 1);
     const description = args.values.description;
     const quotaEventsPerHour = optionalInt(args, QUOTA);
@@ -163,23 +194,18 @@ const tokensRevoke: Command = {
   args: "TOKEN_ID",
   spec: { flags: [] },
   run: async (deps, args) => {
-    const tokenId = parseTokenId(requireArg(args, 0, "TOKEN_ID"));
+    // `@click.argument("token_id", type=int)`: a usage error, not a 422,
+    // and the id typed, however large, never a rounded neighbour.
+    const tokenId = parseIdArg("TOKEN_ID", requireArg(args, 0, "TOKEN_ID"));
     rejectExtraArgs(args, 1);
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, async () => {
+    // Python's line; revokeToken returns nothing to print.
+    return runAndEcho(deps, async () => {
       await deps.makeResourceClient().revokeToken(tokenId);
-      return { status: "success", token_id: tokenId };
+      return "Token revoked.";
     });
   },
 };
-
-/** `@click.argument("token_id", type=int)` — a usage error, not a 422. */
-function parseTokenId(raw: string): number {
-  if (!/^[+-]?\d+$/.test(raw.trim())) {
-    throw new CliUsageError(`Invalid value for 'TOKEN_ID': ${quote(raw)} is not a valid integer.`);
-  }
-  return Number(raw.trim());
-}
 
 const TOKENS_GROUP: CommandGroup = {
   summary: "Manage resource tokens (CRUD).",
@@ -243,9 +269,12 @@ const schema: Command = {
     const resourceId = requiredValue(args, RESOURCE_ID);
     const version = optionalInt(args, SCHEMA_VERSION);
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
-      deps.makeResourceClient().getResourceSchema(resourceId, version),
-    );
+    // getResourceSchema reads the route's 404 as "none registered": Python
+    // prints this line for it, not `null`.
+    return runAndEcho(deps, async () => {
+      const result = await deps.makeResourceClient().getResourceSchema(resourceId, version);
+      return result === null ? "No schema registered for this resource." : formatJson(result);
+    });
   },
 };
 
@@ -326,22 +355,38 @@ function parseSince(raw: string | undefined): Date | undefined {
  * Printed to stderr when `resource setup` is given `--summary`. The flag is
  * still accepted so existing scripts keep working, but the server's
  * `setup_resource` has no summary and never had one, so it is not sent
- * (#47).
+ * (#47). Only the context's owner can set it afterwards.
  */
 export const SETUP_SUMMARY_IGNORED_NOTE =
   "Note: --summary is ignored, since the server's setup_resource has no summary. " +
-  "Set it after setup with `kagura-memory context update <context_id> --summary ...`.";
+  "Set it after setup with `kagura-memory context update <context_id> --summary ...` " +
+  "(context owner only).";
+
+const SETUP_NAME: FlagSpec = {
+  name: "name",
+  short: "n",
+  type: "value",
+  help:
+    "Context name (default: the resource id; lowercase letters, digits, hyphens, " +
+    "underscores; max 100). Needed when a context of that name already exists",
+};
 
 const setup: Command = {
-  summary: "One-shot resource setup: create context + token.",
+  summary: "One-shot resource setup: create context + set resource_id + create token.",
+  description:
+    "  Examples:\n" +
+    "    kagura-memory resource setup -r products\n" +
+    "    kagura-memory resource setup -r products -n product-catalog\n" +
+    '    kagura-memory resource setup -r slack-messages -d "Slack sync" -q 5000',
   spec: {
     flags: [
-      { ...RESOURCE_ID, help: "Resource identifier (also the context name)" },
+      { ...RESOURCE_ID, help: "Resource identifier" },
+      SETUP_NAME,
       {
         name: "summary",
         short: "s",
         type: "value",
-        help: "Deprecated and ignored by the server; use `context update` after setup",
+        help: "Deprecated and ignored by the server; use `kagura-memory context update` after setup",
       },
       { ...DESCRIPTION, help: "Token description" },
       { ...QUOTA, help: "Events/hour (1-10000)", defaultLabel: "1000" },
@@ -350,6 +395,9 @@ const setup: Command = {
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const resourceId = requiredValue(args, RESOURCE_ID);
+    // Sent as given, "" included, which the server refuses as it does in
+    // Python; absent, setupResource names the context after the resource.
+    const name = args.values.name;
     const description = args.values.description;
     const raw = args.values.quota;
     // Unlike `tokens create`, this one IS range-checked locally in Python.
@@ -357,19 +405,50 @@ const setup: Command = {
       raw === undefined
         ? 1000
         : parseRanged(QUOTA, raw, { min: 1, max: 10000, rangeLabel: "1<=x<=10000", integer: true });
-    const { config } = resolveConfig(deps, undefined, false);
+    // Once every option has been read, as click reads them before the
+    // command runs, and before any config or client work, as in Python:
+    // the note is printed even when that work then fails.
     if (args.values.summary !== undefined) {
       deps.writeError(SETUP_SUMMARY_IGNORED_NOTE);
     }
-    return runAndPrint(deps, () =>
-      deps.makeResourceClient().setupResource({
-        resourceId,
-        ...(description !== undefined ? { description } : {}),
-        quotaEventsPerHour,
-      }),
+    const { config } = resolveConfig(deps, undefined, false);
+    return runAndPrint(deps, async () =>
+      setupResponse(
+        await deps.makeResourceClient().setupResource({
+          resourceId,
+          ...(name !== undefined ? { contextName: name } : {}),
+          ...(description !== undefined ? { description } : {}),
+          quotaEventsPerHour,
+        }),
+      ),
     );
   },
 };
+
+/**
+ * What `resource setup` prints: the Python CLI's `ResourceSetupResponse`
+ * dump. Its six fields in its order, `warning` null when the server leaves
+ * it out, and the tool result's `status` and `message` dropped. A result
+ * the model would reject is Python's `KaguraResponseError`, naming the
+ * fields and never their values (the token is plaintext).
+ */
+function setupResponse(raw: unknown): Record<string, unknown> {
+  const r = new ResponseReader("ResourceClient.setup_resource", "ResourceSetupResponse");
+  const obj = r.object(raw);
+  let response: Record<string, unknown> | undefined;
+  if (obj !== null) {
+    response = {
+      context_id: r.field(obj, "context_id", laxStr),
+      context_name: r.field(obj, "context_name", laxStr),
+      resource_id: r.field(obj, "resource_id", laxStr),
+      token: r.field(obj, "token", laxStr),
+      token_id: r.field(obj, "token_id", laxInt),
+      warning: r.field(obj, "warning", nullable(laxStr), { default: null }),
+    };
+  }
+  r.check();
+  return response!;
+}
 
 const DOC_ID: FlagSpec = { name: "doc-id", type: "value", required: true, help: "Document ID" };
 const PAYLOAD: FlagSpec = { name: "payload", short: "p", type: "value", help: "JSON payload object" };
@@ -456,7 +535,15 @@ const ingestBatch: Command = {
     const resourceId = requiredValue(args, RESOURCE_ID);
     const apiKey = requiredValue(args, API_KEY);
     const file = requiredValue(args, FILE);
-    const text = readInput(file);
+    // `click.File("r")`, opened as `resource import --file` opens it: a
+    // path that cannot be opened is click's `'<path>': <strerror>`.
+    const input = openImportInput(file, deps.readStdin);
+    let text: string;
+    try {
+      text = input.read();
+    } finally {
+      input.close();
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -495,110 +582,182 @@ function toEventInput(row: Record<string, unknown>): ResourceEventInput {
 /** The server's per-request event cap; Python chunks at the same size. */
 const BATCH_SIZE = 100;
 
-const FORMAT: FlagSpec = {
-  name: "format",
-  type: "value",
-  metavar: "[auto|csv|json|jsonl]",
-  help: "Input format",
-  defaultLabel: "auto",
-};
+const IMPORT_FORMATS = ["auto", "csv", "json", "jsonl"] as const;
+
+/** Python declares `--file` and `--format` with no help, and shows no defaults. */
+const IMPORT_FILE: FlagSpec = { name: "file", short: "f", type: "value", metavar: "FILENAME" };
+const FORMAT: FlagSpec = { name: "format", type: "value", metavar: "[auto|csv|json|jsonl]" };
+const IMPORT_VERSION: FlagSpec = { ...VERSION, help: "Version (>=1)" };
 
 const importCmd: Command = {
   summary: "Import data from CSV, JSON, or JSONL file.",
+  description:
+    "  Auto-detects format from file extension, or specify --format.\n" +
+    "  Each row/object becomes a resource event with op=upsert.\n\n" +
+    "  Examples:\n" +
+    "    kagura-memory resource import -r products -k TOKEN -f products.csv\n" +
+    "    kagura-memory resource import -r products -k TOKEN -f data.jsonl\n" +
+    "    cat items.json | kagura-memory resource import -r products -k TOKEN --format json",
   spec: {
     flags: [
       RESOURCE_ID,
       API_KEY,
-      { ...FILE, help: "Input file, or - for stdin", defaultLabel: "-" },
+      IMPORT_FILE,
       FORMAT,
-      { name: "id-column", type: "value", help: "Column whose value becomes doc_id" },
-      { ...VERSION, help: "Document version (>=1)", defaultLabel: "1" },
+      { name: "id-column", type: "value", help: "Column name to use as doc_id (default: row number)" },
+      IMPORT_VERSION,
+      VERBOSE_FLAG,
+      PROGRESS_FLAG,
     ],
   },
   run: async (deps, args) => {
-    rejectExtraArgs(args);
-    const resourceId = requiredValue(args, RESOURCE_ID);
-    const apiKey = requiredValue(args, API_KEY);
-    const file = args.values.file ?? "-";
-    const rawFormat = args.values.format ?? "auto";
-    // click.Choice here is case-SENSITIVE, unlike --progress elsewhere.
-    if (!["auto", "csv", "json", "jsonl"].includes(rawFormat)) {
-      throw new CliUsageError(
-        `Invalid value for '--format': ${quote(rawFormat)} is not one of 'auto', 'csv', 'json', 'jsonl'.`,
-      );
+    // Click converts the options given first, then reports a required one
+    // that is missing. `--file` is a `click.File("r")`, opened as it is
+    // converted: a path that cannot be opened is a usage error even
+    // before the format is looked at.
+    const input = openImportInput(args.values.file ?? "-", deps.readStdin);
+    try {
+      return await importRows(deps, args, input);
+    } finally {
+      input.close();
     }
-    const idColumn = args.values["id-column"];
-    const rawVersion = args.values.version;
-    const version =
-      rawVersion === undefined
-        ? 1
-        : parseRanged(VERSION, rawVersion, {
-            min: 1,
-            max: Number.MAX_SAFE_INTEGER,
-            rangeLabel: "x>=1",
-            integer: true,
-          });
-
-    const text = readInput(file);
-    const rows = parseRecords(text, rawFormat as "auto" | "csv" | "json" | "jsonl", file);
-    const events_ = rows.map((row, index) => {
-      if (idColumn !== undefined && (row[idColumn] === undefined || row[idColumn] === "")) {
-        // Falling back to the row number here would look like a successful
-        // import while every doc_id was wrong — and on a re-run with the
-        // column spelled right, the same rows would be inserted a second
-        // time under different ids.
-        throw new CliUsageError(
-          `--id-column ${quote(idColumn)} is missing on row ${index + 1} of ${file}.`,
-        );
-      }
-      return {
-        // Python falls back to the 1-based row number as a string.
-        docId: idColumn === undefined ? String(index + 1) : String(row[idColumn]),
-        op: "upsert" as const,
-        version,
-        payload: row,
-      };
-    });
-
-    const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, async () => {
-      // The endpoint takes 1-100 events; Python chunks at 100 and this must
-      // too, or any import over 100 rows is rejected wholesale.
-      const client = deps.makeResourceClient();
-      let created = 0;
-      let failed = 0;
-      const errors: unknown[] = [];
-      for (let i = 0; i < events_.length; i += BATCH_SIZE) {
-        const result = await client.ingestEvents(
-          resourceId,
-          apiKey,
-          events_.slice(i, i + BATCH_SIZE),
-        );
-        created += result.created_count ?? 0;
-        failed += result.failed_count ?? 0;
-        // Python keeps the first five errors per batch and prints ten in
-        // total; a full dump of a bad 10k-row file is unreadable.
-        if (Array.isArray(result.errors)) errors.push(...result.errors.slice(0, 5));
-      }
-      // One aggregate for the whole import, matching Python's shape — a
-      // per-batch array would make a script parse a different result for
-      // 99 rows than for 101.
-      const output: Record<string, unknown> = { created, failed, total: events_.length };
-      if (errors.length > 0) output.errors = errors.slice(0, 10);
-      return output;
-    });
   },
 };
 
-/** Read a `click.File("r")` argument, where `-` means stdin. */
-function readInput(file: string): string {
-  try {
-    return fs.readFileSync(file === "-" ? 0 : file, "utf-8");
-  } catch (e) {
+/**
+ * `-V`, click's `IntRange(min=1)`, which has no upper bound. A version past
+ * 2^53 cannot be sent as the number it is (a JS number would round it), so
+ * it is refused as too large, rather than as outside a range it is in.
+ */
+function parseImportVersion(raw: string | undefined): number {
+  if (raw === undefined) return 1;
+  const version = parseRanged(IMPORT_VERSION, raw, {
+    min: 1,
+    max: Number.POSITIVE_INFINITY,
+    rangeLabel: "x>=1",
+    integer: true,
+  });
+  if (version > Number.MAX_SAFE_INTEGER) {
+    const digits = String(pyBigInt(raw));
     throw new CliUsageError(
-      `Invalid value for '--file' / '-f': ${quote(file)}: ${e instanceof Error ? e.message : String(e)}`,
+      `Invalid value for ${paramLabel(IMPORT_VERSION)}: ${digits} is too large for this CLI ` +
+        `to send exactly (at most ${Number.MAX_SAFE_INTEGER}).`,
     );
   }
+  return version;
+}
+
+async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInput): Promise<number> {
+  const format = parseChoice(FORMAT, args.values.format ?? "auto", IMPORT_FORMATS);
+  const version = parseImportVersion(args.values.version);
+  const progress = parseProgress(args);
+  const resourceId = requiredValue(args, RESOURCE_ID);
+  const apiKey = requiredValue(args, API_KEY);
+  rejectExtraArgs(args);
+
+  // From here on every failure is Python's ClickException (exit 1). The
+  // format first: stdin is not read when it cannot be detected.
+  const resolved = format === "auto" ? detectFormat(input.name) : format;
+  const rows = parseImportRows(input.read(), resolved);
+  if (rows.length === 0) throw new CliError("No data found in input");
+
+  // Python tests `if id_column:`, so `--id-column=` numbers the rows, as an
+  // unset shell variable should.
+  const idColumn = args.values["id-column"];
+  const events_ = rows.map((row, index) => {
+    // A CSV row's cells past the header, under Python's `None` key, which
+    // a Keys listing shows.
+    const extra = row[EXTRA_CELLS];
+    let docId = String(index + 1);
+    if (idColumn) {
+      if (!Object.prototype.hasOwnProperty.call(row, idColumn)) {
+        // In the order read: the rows list their keys as Python's dict does.
+        const keys = [...Object.keys(row), ...(extra === undefined ? [] : [null])];
+        throw new CliError(`Row ${index + 1}: column '${idColumn}' not found. Keys: ${pyRepr(keys)}`);
+      }
+      // Python's str() of the value, a number's from the digits read: two
+      // ids past 2^53 would otherwise round to one doc_id and upsert one
+      // row over the other.
+      docId = pyStrAt(row, idColumn);
+    }
+    // The event model's bounds, which Python's pydantic enforces with a
+    // traceback: refused here, before anything is sent.
+    const length = Array.from(docId).length;
+    if (length < 1 || length > 255) {
+      throw new CliError(
+        `Row ${index + 1}: doc_id from column '${idColumn}' must be 1-255 characters, got ${length}.`,
+      );
+    }
+    if (extra !== undefined) {
+      throw new CliError(`Row ${index + 1}: more fields than the header has columns.`);
+    }
+    return { docId, op: "upsert" as const, version, payload: row };
+  });
+
+  // The config is read before the first progress event, so a malformed
+  // .kagura.json emits none. From the start event on, the stream ends
+  // with exactly one success or error — the credential and the client
+  // included, which Python builds outside its guard (and so can end the
+  // stream with no terminal event).
+  const { config } = resolveConfig(deps, undefined, false);
+  const onProgress = resolveProgress(args.counts.verbose ?? 0, progress, deps.writeError);
+  emitProgress(onProgress, {
+    stage: "import_start",
+    kind: "action",
+    msg: "Importing events",
+    detail: { desc: `${events_.length} event(s)` },
+  });
+
+  let created = 0;
+  let failed = 0;
+  const errors: unknown[] = [];
+  try {
+    const client = deps.makeResourceClient(resolveCliAuth(deps, config));
+    // The endpoint takes 1-100 events; Python chunks at 100 and this must
+    // too, or any import over 100 rows is rejected wholesale.
+    const batchCount = Math.ceil(events_.length / BATCH_SIZE);
+    for (let i = 0, n = 1; i < events_.length; i += BATCH_SIZE, n++) {
+      const batch = events_.slice(i, i + BATCH_SIZE);
+      emitProgress(onProgress, {
+        stage: "import_batch",
+        kind: "action",
+        msg: "Ingesting batch",
+        detail: { desc: `${n}/${batchCount} (${batch.length} event(s))` },
+      });
+      // Where Python's request encoding fails: after this batch's event,
+      // and after the batches before it were sent.
+      refuseNonFinite(batch.map((event) => event.payload));
+      // No onProgress here: each call would end the stream with its own
+      // terminal event, and the import is one operation with one.
+      const result = await client.ingestEvents(resourceId, apiKey, batch);
+      created += result.created_count ?? 0;
+      failed += result.failed_count ?? 0;
+      // Python keeps the first five errors per batch and prints ten in
+      // total; a full dump of a bad 10k-row file is unreadable.
+      if (Array.isArray(result.errors)) errors.push(...result.errors.slice(0, 5));
+    }
+  } catch (e) {
+    emitProgress(onProgress, {
+      stage: "complete",
+      kind: "error",
+      msg: `Import failed: ${excMessage(e)}`,
+      detail: { created_so_far: created, failed_so_far: failed, total_events: events_.length },
+    });
+    throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));
+  }
+  emitProgress(onProgress, {
+    stage: "complete",
+    kind: "success",
+    msg: "Import complete",
+    detail: { created, failed, total: events_.length },
+  });
+  // One aggregate for the whole import, matching Python's shape — a
+  // per-batch array would make a script parse a different result for 99
+  // rows than for 101.
+  const output: Record<string, unknown> = { created, failed, total: events_.length };
+  if (errors.length > 0) output.errors = errors.slice(0, 10);
+  deps.write(formatJson(output));
+  return 0;
 }
 
 export const RESOURCE_GROUP: CommandGroup = {

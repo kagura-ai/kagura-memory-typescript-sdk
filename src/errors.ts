@@ -119,6 +119,29 @@ export class KaguraConnectionError extends KaguraError {}
 export class KaguraNotFoundError extends KaguraError {}
 
 /**
+ * A successful server response did not match what the SDK expects of it
+ * (the Python SDK's class of the same name, from its #250).
+ *
+ * Usually the server is newer than this SDK and returns a value or a
+ * shape the SDK does not know yet; upgrading `kagura-memory` is the likely
+ * fix, and the message says so. `operation` names the call whose response
+ * failed — the MCP tool name, or `<Client>.<method>` on the REST clients —
+ * and prefixes the message, which names the failing fields or the
+ * envelope's shape, never payload values.
+ *
+ * Not a {@link KaguraConnectionError}: the call reached the server and
+ * succeeded, so a retry will fail the same way.
+ */
+export class KaguraResponseError extends KaguraError {
+  readonly operation?: string;
+
+  constructor(message: string, operation?: string, options?: KaguraErrorOptions) {
+    super(message, options);
+    this.operation = operation;
+  }
+}
+
+/**
  * Rate limit exceeded: an HTTP 429 on `KaguraClient`'s own transport.
  *
  * That covers the per-minute rate limit and the daily call quotas alike,

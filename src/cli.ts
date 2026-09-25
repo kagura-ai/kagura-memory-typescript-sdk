@@ -13,14 +13,39 @@ import * as readline from "node:readline/promises";
 
 import { login } from "./auth/login.js";
 import { refresh } from "./auth/refresh.js";
+import { resolveAuth } from "./auth/resolve.js";
+import type { ResolvedAuth } from "./auth/types.js";
 import { execFile, which } from "./cli/exec.js";
 import { openBrowser } from "./cli/openBrowser.js";
 import { runCli } from "./cli/run.js";
 import { KaguraClient } from "./client.js";
 import { loadConfig } from "./config.js";
 import { FilesClient } from "./filesClient.js";
+import { MemoryClient } from "./memoryClient.js";
 import { ResourceClient } from "./resourceClient.js";
+import { type KaguraRestClient, restClientFromAuth } from "./restBase.js";
 import { SecretClient } from "./secrets/client.js";
+import { WorkspaceClient } from "./workspaceClient.js";
+
+/**
+ * A REST client from the credential a command resolved, or, given none,
+ * from the chain run afresh.
+ *
+ * `fromMcpUrl`, not bare construction: it runs the credential chain (env >
+ * OAuth profile > .kagura.json) and stamps the MCP URL the chosen branch
+ * belongs to. Passing nothing lets each branch pair its credential with its
+ * own URL, which is what Python does and why an OAuth profile bound to a
+ * non-default server still reaches the right host.
+ */
+function restClient<T extends typeof KaguraRestClient>(
+  Client: T,
+  auth: ResolvedAuth | undefined,
+  workspaceIdHint: string | null = null,
+): InstanceType<T> {
+  return auth === undefined
+    ? Client.fromMcpUrl({})
+    : restClientFromAuth(Client, auth, { workspaceIdHint });
+}
 
 async function confirm(question: string): Promise<boolean> {
   // A non-interactive stdin (CI, a pipe) must not hang waiting for input
@@ -39,6 +64,15 @@ async function confirm(question: string): Promise<boolean> {
   }
 }
 
+// A reader that closes stderr early (`… --progress json 2>&1 | head -1`)
+// turns the next write into an asynchronous EPIPE 'error' event, and an
+// unhandled one kills the process — mid-upload, over a progress line. The
+// Python CLI swallows the same failure; any other stderr error still
+// surfaces.
+process.stderr.on("error", (e: NodeJS.ErrnoException) => {
+  if (e.code !== "EPIPE") throw e;
+});
+
 const code = await runCli(process.argv.slice(2), {
   write: (line) => {
     process.stdout.write(`${line}\n`);
@@ -54,22 +88,22 @@ const code = await runCli(process.argv.slice(2), {
   refresh,
   loadConfig,
   makeClient: (options) => new KaguraClient(options),
-  // `fromMcpUrl`, not bare construction: it runs the credential chain
-  // (env > OAuth profile > .kagura.json) and stamps the MCP URL the chosen
-  // branch belongs to. Passing nothing lets each branch pair its credential
-  // with its own URL, which is what Python does and why an OAuth profile
-  // bound to a non-default server still reaches the right host.
-  makeFilesClient: () => FilesClient.fromMcpUrl({}),
-  makeResourceClient: () => ResourceClient.fromMcpUrl({}),
+  resolveAuth,
+  makeFilesClient: (auth, workspaceIdHint) => restClient(FilesClient, auth, workspaceIdHint),
+  makeResourceClient: (auth) => restClient(ResourceClient, auth),
   makeSecretClient: () => SecretClient.fromMcpUrl({}),
+  makeMemoryClient: (auth) => restClient(MemoryClient, auth),
+  makeWorkspaceClient: (auth, workspaceIdHint) =>
+    restClient(WorkspaceClient, auth, workspaceIdHint),
   isTty: () => Boolean(process.stdout.isTTY),
-  readStdin: () => {
+  readStdin: (options) => {
     // A terminal stdin would block forever waiting for input that is not
     // coming; treat it as "nothing piped in".
     if (process.stdin.isTTY) return null;
     try {
       return readFileSync(0, "utf-8");
-    } catch {
+    } catch (e) {
+      if (options?.throwOnError === true) throw e;
       return null;
     }
   },

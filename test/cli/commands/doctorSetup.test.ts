@@ -167,6 +167,32 @@ describe("kagura-memory doctor", () => {
     expect(h.out.join("\n")).not.toMatch(/not HTTPS/);
   });
 
+  // The clients' own HTTPS check decides, so doctor and the client agree
+  // on every spelling: the scheme in any case, and what a URL parser drops.
+  it.each([
+    "HTTPS://memory.example.com/mcp",
+    "hTtPs://memory.example.com/mcp",
+    "HTTP://LOCALHOST:8000/mcp",
+  ])("passes %j, which the client accepts", async (url) => {
+    const h = harness({ api_key: "k", mcp_url: url });
+    await runCli(["doctor"], h.deps);
+    expect(h.out).toContain(`PASS mcp_url is ${url}`);
+    expect(h.out.join("\n")).not.toMatch(/not HTTPS/);
+  });
+
+  it.each([
+    "HTTP://memory.example.com/mcp",
+    "http:memory.example.com/mcp",
+    " http://memory.example.com/mcp",
+    "ht\ttp://memory.example.com/mcp",
+    // Not http(s) at all: no credential goes anywhere, but it is no HTTPS URL.
+    "ftp://memory.example.com/mcp",
+  ])("fails %j", async (url) => {
+    const h = harness({ api_key: "k", mcp_url: url });
+    expect(await runCli(["doctor"], h.deps)).toBe(1);
+    expect(h.out).toContain(`FAIL mcp_url is not HTTPS: ${url} — credentials would be sent in the clear`);
+  });
+
   it("warns that KAGURA_API_KEY outranks any OAuth profile", async () => {
     process.env.KAGURA_API_KEY = "kagura_env";
     const h = harness();
@@ -600,6 +626,69 @@ describe("kagura-memory setup claude", () => {
     expect(h.out.join("\n")).not.toContain("kagura_secret");
   });
 
+  describe("refuses a plain-HTTP URL to a remote host, which would carry the key in the clear", () => {
+    // Python's setup claude refuses these in its connection test, before it
+    // writes anything: `Error: Connection failed: MCP URL must use HTTPS …`
+    // (exit 1), whichever source the URL came from.
+    const refused = (url: string) =>
+      `Error: Connection failed: MCP URL must use HTTPS for security (got: ${url}). ` +
+      "HTTP is only allowed for localhost development.";
+
+    it.each([
+      ["http://evil.example/mcp", "http://evil.example/mcp"],
+      ["HTTP://evil.example/mcp", "HTTP://evil.example/mcp"],
+      ["http:evil.example/mcp", "http:evil.example/mcp"],
+      [" http://evil.example/mcp", "http://evil.example/mcp"],
+    ])("from --mcp-url %j", async (url, shown) => {
+      const h = harness({}, { onPath: { claude: "/usr/bin/claude" } });
+      expect(await runCli(claude("--mcp-url", url, "--scope", "user"), h.deps)).toBe(1);
+      expect(h.err).toEqual([refused(shown)]);
+      expect(h.out).toEqual([]);
+      expect(h.runs).toEqual([]);
+      expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
+    });
+
+    it("from the project's .kagura.json", async () => {
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ mcp_url: "http://evil.example/mcp" }));
+      const h = harness({});
+      expect(await runCli(claude(), h.deps)).toBe(1);
+      expect(h.err).toEqual([refused("http://evil.example/mcp")]);
+      expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
+      expect(readJson(path.join(sandbox, ".kagura.json"))).toEqual({ mcp_url: "http://evil.example/mcp" });
+    });
+
+    it("from KAGURA_MCP_URL, with the key from KAGURA_API_KEY", async () => {
+      process.env.KAGURA_API_KEY = "kg_env_secret";
+      process.env.KAGURA_MCP_URL = "http://evil.example/mcp";
+      const h = harness({});
+      expect(await runCli(["setup", "claude", "--project-dir", sandbox], h.deps)).toBe(1);
+      expect(h.err).toEqual([refused("http://evil.example/mcp")]);
+      expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
+    });
+
+    it("from the project's .kagura.json behind an empty --mcp-url, as Python's `or` falls back", async () => {
+      // Python 0.40.1: `kagura setup claude -y --mcp-url=` exits 1 with the
+      // connection error for the file's URL.
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ mcp_url: "http://evil.example/mcp" }));
+      const h = harness({});
+      expect(await runCli(claude("--mcp-url="), h.deps)).toBe(1);
+      expect(h.err).toEqual([refused("http://evil.example/mcp")]);
+      expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
+      expect(readJson(path.join(sandbox, ".kagura.json"))).toEqual({ mcp_url: "http://evil.example/mcp" });
+    });
+
+    it.each([["http://localhost:8080/mcp"], ["http://127.0.0.1:8080/mcp"], ["http://[::1]:8080/mcp"]])(
+      "but takes plain HTTP to %s, for local development",
+      async (url) => {
+        const h = harness({});
+        expect(await runCli(claude("--mcp-url", url), h.deps)).toBe(0);
+        expect(readJson(path.join(sandbox, ".mcp.json")).mcpServers["kagura-memory"].url).toBe(url);
+      },
+    );
+  });
+
   describe("no setup subcommand prints the key, on either stream", () => {
     const everywhere: Programs = {
       onPath: { claude: "/usr/bin/claude", codex: "/usr/bin/codex", openclaw: "/usr/bin/openclaw" },
@@ -830,6 +919,21 @@ describe("kagura-memory setup claude", () => {
       expect(text).not.toContain("kagura_HOME_hhhh");
     });
 
+    it.each([[["--mcp-url", ""]], [["--mcp-url="]]])(
+      "and behind an empty --mcp-url, its URL, never a blank one: %j",
+      async (flag) => {
+        // Python resolves `mcp_url or existing_config.get("mcp_url")`: an
+        // empty flag is no URL. Taking it as one wrote `"url": ""` into the
+        // entry and blanked the project's mcp_url, then exited 0.
+        fs.writeFileSync(path.join(projB, ".kagura.json"), JSON.stringify(B));
+        const h = harness(A);
+        expect(await runCli(["setup", "claude", "-y", "--project-dir", projB, ...flag], h.deps)).toBe(0);
+        expect(readJson(path.join(projB, ".kagura.json"))).toEqual(B);
+        expect(readJson(path.join(projB, ".mcp.json")).mcpServers["kagura-memory"].url).toBe(B.mcp_url);
+        expect(JSON.parse(h.out.join("\n"))).toMatchObject({ mcp_url: B.mcp_url });
+      },
+    );
+
     it("or else nothing: no key is an error, and nothing is written", async () => {
       const h = harness(A);
       expect(await runCli(["setup", "claude", "--project-dir", projB], h.deps)).toBe(1);
@@ -844,6 +948,15 @@ describe("kagura-memory setup claude", () => {
     const h = harness({});
     expect(await runCli(claude("--scope", "local"), h.deps)).toBe(2);
     expect(h.err.join("\n")).toMatch(/Invalid value for '--scope'/);
+    expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
+  });
+
+  it("matches --scope case-sensitively, as Python's click.Choice declares it", async () => {
+    const h = harness({});
+    expect(await runCli(claude("--scope", "Project"), h.deps)).toBe(2);
+    expect(h.err.join("\n")).toContain(
+      "Error: Invalid value for '--scope': 'Project' is not one of 'project', 'user'.",
+    );
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 

@@ -14,8 +14,12 @@ import { describe, expect, it } from "vitest";
 import * as sdk from "../src/index.js";
 import type {
   ContextGuardrails,
+  GetGuardrailDigestOptions,
+  GuardrailDigest,
   GuardrailItem,
+  GuardrailSet,
   LoadGuardrailsResponse,
+  MemoryLoadGuardrailsOptions,
   ToolTrigger,
 } from "../src/index.js";
 
@@ -106,6 +110,39 @@ describe("public surface: tool guardrails (#41)", () => {
     };
     expect([trigger.tool, block.truncated, lanes.pinned]).toEqual(["Bash", false, []]);
   });
+
+  it("exports the REST guardrail client and its types", () => {
+    expect(sdk.MemoryClient.prototype instanceof sdk.KaguraRestClient).toBe(true);
+    expect(typeof sdk.MemoryClient.prototype.getGuardrailDigest).toBe("function");
+    expect(typeof sdk.MemoryClient.prototype.loadGuardrails).toBe("function");
+    expect(typeof sdk.MemoryClient.fromMcpUrl).toBe("function");
+    expect(sdk.GUARDRAIL_VERSION_HEADER).toBe("X-Kagura-Guardrails-Tool-Triggered-Version");
+
+    const options: GetGuardrailDigestOptions = { target: "instructions", profile: "core" };
+    const load: MemoryLoadGuardrailsOptions = { cap: 10 };
+    const digest: GuardrailDigest = {
+      context_id: "c",
+      target: "export",
+      text: "",
+      tool_triggered_version: null,
+      content_type: null,
+    };
+    // The MCP response is a GuardrailSet with the context block added.
+    const set: GuardrailSet = {} as LoadGuardrailsResponse;
+    expect([options.target, load.cap, digest.text, typeof set]).toEqual([
+      "instructions",
+      10,
+      "",
+      "object",
+    ]);
+  });
+
+  it("keeps the export module and the CLI's REST helper internal", () => {
+    const names = Object.keys(sdk);
+    for (const name of ["writeGuardrailBlock", "spliceGuardrailBlock", "restClientFromAuth", "normalizeUuid"]) {
+      expect(names).not.toContain(name);
+    }
+  });
 });
 
 describe("public surface: secret store (#28)", () => {
@@ -165,5 +202,14 @@ describe("public surface: typed gate errors (#40)", () => {
     // Existing `catch (e) { if (e instanceof KaguraError) ... }` code must
     // keep catching every one of them.
     expect(cls!.prototype instanceof sdk.KaguraError).toBe(true);
+  });
+});
+
+describe("public surface: response drift (#57)", () => {
+  it("exports KaguraResponseError as a KaguraError, as the Python SDK does", () => {
+    expect(typeof sdk.KaguraResponseError).toBe("function");
+    expect(sdk.KaguraResponseError.prototype instanceof sdk.KaguraError).toBe(true);
+    // Not a transport failure: the call succeeded, and a retry fails alike.
+    expect(sdk.KaguraResponseError.prototype instanceof sdk.KaguraConnectionError).toBe(false);
   });
 });

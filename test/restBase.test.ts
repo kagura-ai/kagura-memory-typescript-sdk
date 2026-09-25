@@ -13,7 +13,9 @@ import {
   KaguraQuotaError,
 } from "../src/errors.js";
 import { SDK_VERSION } from "../src/http.js";
-import { DEFAULT_REST_BASE_URL, KaguraRestClient } from "../src/restBase.js";
+import { DEFAULT_REST_BASE_URL, KaguraRestClient, restClientFromAuth } from "../src/restBase.js";
+import { ResourceClient } from "../src/resourceClient.js";
+import { WorkspaceClient } from "../src/workspaceClient.js";
 import type {
   HttpMethod,
   KaguraRestClientOptions,
@@ -756,6 +758,34 @@ describe("response-body helpers", () => {
   });
 });
 
+describe("the path a response names", () => {
+  // Python's diagnostics print httpx's `resp.request.url.path`: the whole
+  // path, the base URL's own prefix included, `urllib.parse.unquote`d.
+  it.each([
+    ["/api/v1/members/a%40b/credentials", "/kagura/api/v1/members/a@b/credentials"],
+    // Every escape, `%2F` too; a byte that is no UTF-8 is U+FFFD; `%zz` stays.
+    ["/api/v1/w/%E3%81%82%zz%ff/a%2Fb", "/kagura/api/v1/w/あ%zz�/a/b"],
+    ["/api/v1/w/%EF%BB%BFx", "/kagura/api/v1/w/﻿x"],
+    // Dot segments as they were resolved on the wire.
+    ["/api/v1/members/../items", "/kagura/api/v1/items"],
+  ])("names %j as %j", async (requested, named) => {
+    const server = new FakeRest();
+    const probe = makeProbe(server, { baseUrl: "https://x.test/kagura" });
+    const response = await probe.requestPublic("GET", requested, { params: { q: "x" } });
+    expect(response.path).toBe(named);
+  });
+
+  it("names it in the non-JSON body error, as Python's _json does", async () => {
+    const server = new FakeRest();
+    server.body = "<html>maintenance</html>";
+    const probe = makeProbe(server, { baseUrl: "https://x.test/kagura" });
+    const response = await probe.requestPublic("GET", "/api/v1/members/a%40b");
+    expect(() => probe.jsonPublic(response)).toThrow(
+      "Server returned a non-JSON body (HTTP 200) for GET /kagura/api/v1/members/a@b.",
+    );
+  });
+});
+
 describe("fromMcpUrl", () => {
   it("resolves an explicit apiKey and derives the base URL from a workspace MCP URL", async () => {
     const server = new FakeRest();
@@ -840,5 +870,70 @@ describe("lifecycle", () => {
     await client.close();
     await client.close();
     expect(closed).toBe(2);
+  });
+});
+
+describe("restClientFromAuth (the CLI's build from a resolved credential, #115)", () => {
+  const WS = "11111111-2222-3333-4444-555555555555";
+
+  it("builds the subclass from a static key, with the base URL from its MCP URL", async () => {
+    const server = new FakeRest();
+    const client = restClientFromAuth(
+      ProbeClient,
+      { kind: "static", apiKey: "cfg-key", mcpUrl: "https://x.test/mcp/w/abc/", source: "config" },
+      { fetch: server.fetch },
+    );
+
+    expect(client).toBeInstanceOf(ProbeClient);
+    expect(client.baseUrl).toBe("https://x.test");
+    await client.requestPublic("GET", "/api/v1/things");
+    expect(server.requests[0]!.headers.authorization).toBe("Bearer cfg-key");
+  });
+
+  it("goes through a subclass's own override: ResourceClient stamps its MCP URL", () => {
+    const client = restClientFromAuth(ResourceClient, {
+      kind: "static",
+      apiKey: "k",
+      mcpUrl: "https://x.test/mcp/",
+      source: "env",
+    });
+    expect(client).toBeInstanceOf(ResourceClient);
+    expect(client.mcpUrl).toBe("https://x.test/mcp");
+  });
+
+  it("threads the source and the workspace hint into the 403 text", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({ detail: "Insufficient permissions" });
+    const client = restClientFromAuth(
+      WorkspaceClient,
+      { kind: "static", apiKey: "k", mcpUrl: "https://x.test/mcp", source: "config" },
+      { workspaceIdHint: WS, fetch: server.fetch },
+    );
+
+    await expect(client.listMembers(WS)).rejects.toThrow(
+      "credential source: .kagura.json (workspace=11111111…) — is this key the workspace owner's?",
+    );
+  });
+
+  it("takes an OAuth profile's own workspace as the hint, whatever is passed", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({ detail: "Insufficient permissions" });
+    const client = restClientFromAuth(
+      WorkspaceClient,
+      {
+        kind: "oauth",
+        oauth: { getAuthHeader: async () => "Bearer oauth-token" },
+        mcpUrl: "https://x.test/mcp",
+        workspaceId: "aaaaaaaa-0000-0000-0000-000000000000",
+      },
+      { workspaceIdHint: WS, fetch: server.fetch },
+    );
+
+    await expect(client.listMembers(WS)).rejects.toThrow(
+      "credential source: OAuth profile (~/.kagura/credentials.json) (workspace=aaaaaaaa…)",
+    );
+    expect(server.requests[0]!.headers.authorization).toBe("Bearer oauth-token");
   });
 });

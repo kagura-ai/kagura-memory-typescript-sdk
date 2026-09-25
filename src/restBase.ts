@@ -45,6 +45,35 @@ import {
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+/**
+ * Strictly require an integer — no float truncation, no string parse.
+ *
+ * Truncating `7.9` would silently target a DIFFERENT resource id on a
+ * destructive endpoint (the TS signature says `number`, which admits
+ * floats), so fail loudly instead. The same goes for a whole number past
+ * `Number.MAX_SAFE_INTEGER`: `9007199254740993` is already
+ * `9007199254740992` by the time it gets here, a different id than the
+ * one meant. Such an id is passed as a `bigint`, which is exact, as
+ * Python's `int` is.
+ *
+ * Internal: the REST clients' id arguments; not exported from the package.
+ */
+export function requireInt<T extends number | bigint>(value: T, label: string): T {
+  if (typeof value === "bigint") {
+    return value;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label} must be an integer, got ${JSON.stringify(value)}`);
+  }
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      `${label} must be a safe integer or a bigint, got ${String(value)}: a number past ` +
+        "Number.MAX_SAFE_INTEGER may already be rounded to a different id",
+    );
+  }
+  return value;
+}
+
 /** Default REST API origin when no MCP URL or base URL is supplied. */
 export const DEFAULT_REST_BASE_URL = "https://memory.kagura-ai.com";
 
@@ -112,13 +141,94 @@ export interface RestResponse {
   headers: Headers;
   text: string;
   method: HttpMethod;
+  /**
+   * The request URL's path as the Python SDK names it (httpx's
+   * `url.path`): the whole path, a base URL's own prefix included, with
+   * `%XX` escapes decoded — `/kagura/api/v1/…/members/a@b/credentials`.
+   */
   path: string;
+}
+
+/**
+ * Python's `urllib.parse.unquote`, which httpx's `URL.path` applies: each
+ * run of `%XX` escapes decoded as UTF-8, a byte that is no UTF-8 as
+ * U+FFFD, and anything else (`%zz`, a lone `%`) kept as it is.
+ */
+function pyUnquote(text: string): string {
+  return text.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    const bytes = Uint8Array.from(run.slice(1).split("%"), (hex) => parseInt(hex, 16));
+    // ignoreBOM keeps a leading U+FEFF, which Python does not strip either.
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+  });
+}
+
+/**
+ * The path a request went to, for diagnostics: {@link RestResponse.path}.
+ * Parsed as fetch parses it, so dot segments are resolved as they were on
+ * the wire; `fallback` (the path as the client wrote it) for a URL that
+ * does not parse, which fetch would have refused already.
+ */
+function requestPath(url: string, fallback: string): string {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return fallback;
+  }
+  return pyUnquote(pathname);
+}
+
+/**
+ * Options for {@link restClientFromAuth} — the ones the protected
+ * {@link KaguraRestClient.fromResolvedAuth} takes.
+ *
+ * @internal Shared with the CLI; not part of the package's API.
+ */
+export interface FromResolvedAuthOptions {
+  timeoutMs?: number;
+  /** Workspace bound to a static key's source, for 403 hints only (#115). */
+  workspaceIdHint?: string | null;
+  fetch?: typeof globalThis.fetch;
 }
 
 /** Request payload context threaded to the 403 hook (subclass hints only). */
 export interface RequestContext {
   requestJson: Record<string, unknown> | undefined;
   requestParams: Record<string, unknown> | undefined;
+}
+
+/**
+ * Build `Client` from a credential the caller already resolved — the CLI's
+ * one door to the protected {@link KaguraRestClient.fromResolvedAuth}.
+ *
+ * A command runner resolves the credential once so it can take the
+ * workspace from the same source (#115), and must then build its client
+ * from exactly that credential rather than resolve a second time. This
+ * calls `Client.fromResolvedAuth` instead of re-implementing it, so a
+ * subclass override stays in the path: `ResourceClient` stamps the MCP URL
+ * `setupResource` needs there.
+ *
+ * @internal Shared with the CLI; not part of the package's API. The entry
+ * point does not export it, and the factory it reaches stays `protected`
+ * so the published declarations are unchanged.
+ */
+export function restClientFromAuth<T extends typeof KaguraRestClient>(
+  Client: T,
+  resolved: ResolvedAuth,
+  options: FromResolvedAuthOptions = {},
+): InstanceType<T> {
+  // The cast only lifts `protected` for this call; the method is invoked
+  // on `Client` itself so the polymorphic `this` still picks the subclass.
+  const factory = (
+    Client as unknown as {
+      fromResolvedAuth: (
+        this: T,
+        resolved: ResolvedAuth,
+        options: FromResolvedAuthOptions,
+      ) => InstanceType<T>;
+    }
+  ).fromResolvedAuth;
+  return factory.call(Client, resolved, options);
 }
 
 /** `typeof`-style name for shape-mismatch diagnostics (`null` → "null"). */
@@ -347,7 +457,7 @@ export class KaguraRestClient {
       headers: response.headers,
       text: await this.safeText(response),
       method,
-      path,
+      path: requestPath(url, path),
     };
     if (response.status < 200 || response.status >= 300) {
       throw this.mapStatusError(envelope, {

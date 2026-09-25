@@ -10,6 +10,7 @@ import {
   extractDetail,
   mcpSessionExpired,
   mcpSessionHeader,
+  normalizeUrl,
   retryAfterSeconds,
   sanitizeServerDetail,
   throwForKaguraStatus,
@@ -362,5 +363,93 @@ describe("validateHttpsUrl", () => {
     expect(() => validateHttpsUrl("  http://example.com/mcp  ", "MCP URL")).toThrow(
       /got: http:\/\/example\.com\/mcp\)/,
     );
+  });
+
+  // Python's test__http.py tables for python-sdk#274, verbatim.
+  it.each([
+    // Every URL parser reads the scheme without regard to case.
+    "HTTP://evil.com",
+    "Http://evil.com/mcp",
+    "hTtP://evil.com",
+    // A URL parser drops surrounding whitespace before reading the scheme.
+    " http://evil.com/mcp",
+    "http://evil.com/mcp\n",
+    "\thttp://evil.com",
+    "\u3000http://evil.com",
+    // WHATWG parsers also drop C0 controls around the URL and a tab or
+    // newline anywhere in it ...
+    "\x00http://evil.com",
+    "\x1fhttp://evil.com",
+    "ht\ttp://evil.com",
+    "http\n://evil.com",
+    // ... and read a special scheme without its slashes as http://host.
+    "http:/evil.com",
+    "http:evil.com",
+    "http:\\\\evil.com",
+    // The loopback exception, whatever the case, still needs a loopback host.
+    "HTTP://LOCALHOST.evil.com",
+    "HTTP://localhost@evil.com",
+    " http://127.0.0.1.evil.com",
+    // ASCII-only: no Unicode case fold spells "localhost" ("ſ" folds to "s").
+    "http://localho\u017ft",
+  ])("rejects plain HTTP in the spelling %j", (url) => {
+    expect(() => validateHttpsUrl(url)).toThrow(/must use HTTPS/);
+  });
+
+  // Each of these passed the check before, and fetch sent the bearer to
+  // evil.com over plain HTTP: WHATWG parsing reads every one as http://.
+  it.each([
+    "\x01http://evil.com",
+    "http:evil.com",
+    "http:/evil.com",
+    "ht\ttp://evil.com",
+    "h\nttp://evil.com",
+    "http:\\\\evil.com",
+  ])("rejects %j, which fetch would send to http://evil.com", (url) => {
+    expect(new URL(`${url}/mcp`).href).toBe("http://evil.com/mcp");
+    expect(() => validateHttpsUrl(`${url}/mcp`, "MCP URL")).toThrow(/MCP URL must use HTTPS/);
+  });
+
+  it("refuses a loopback URL written without its slashes", () => {
+    // WHATWG reads it as http://localhost, but it is not the spelling the
+    // loopback exception names, and Python refuses it too.
+    expect(() => validateHttpsUrl("http:localhost:8080/mcp")).toThrow(/must use HTTPS/);
+  });
+
+  it.each([
+    "HTTPS://api.example.com",
+    "hTtPs://api.example.com/mcp",
+    " https://api.example.com/mcp\n",
+    "HTTP://LOCALHOST:8080/mcp",
+    " http://127.0.0.1:5000/path",
+    "Http://[::1]:9000/mcp",
+  ])("accepts %j: HTTPS in any case, and loopback HTTP in any case", (url) => {
+    expect(() => validateHttpsUrl(url)).not.toThrow();
+  });
+
+  it("shows the URL as a parser reads it in the message", () => {
+    expect(() => validateHttpsUrl("  HTTP://evil.com/mcp\n", "MCP URL")).toThrow(
+      "MCP URL must use HTTPS for security (got: HTTP://evil.com/mcp). " +
+        "HTTP is only allowed for localhost development.",
+    );
+  });
+});
+
+describe("normalizeUrl", () => {
+  it.each([
+    ["  https://h.example/mcp\n", "https://h.example/mcp"],
+    ["\x00\x1fhttps://h.example/mcp\u3000", "https://h.example/mcp"],
+    ["ht\ttps://h.exa\nmple/m\rcp", "https://h.example/mcp"],
+    // Only what a parser drops: case and inner spaces stay.
+    ["HTTPS://H.example/a b", "HTTPS://H.example/a b"],
+  ])("reads %j as %j", (url, expected) => {
+    expect(normalizeUrl(url)).toBe(expected);
+  });
+
+  it("strips Python's whitespace at the ends, and keeps a BOM, which it is not", () => {
+    // Python's `\s` (str.isspace) plus C0: NEL and NBSP go; U+FEFF is no
+    // space to Python, though JavaScript's trim() removes it.
+    expect(normalizeUrl("\x85\xa0https://h.example\u2029")).toBe("https://h.example");
+    expect(normalizeUrl("\ufeffhttps://h.example")).toBe("\ufeffhttps://h.example");
   });
 });

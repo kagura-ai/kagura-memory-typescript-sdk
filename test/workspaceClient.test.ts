@@ -2,7 +2,8 @@
  * Tests for WorkspaceClient (#225) — wire shapes, client-side guards,
  * error hints. Port of test_workspace_client.py (client-relevant parts;
  * the pydantic model-shape tests have no TS analogue because responses
- * are cast, not validated).
+ * are cast, not validated — the mint response alone is read as the
+ * model reads it).
  *
  * Wire shapes assert the memory-cloud v0.42.0 contract verified against
  * the server source (issues #1164/#1165): canonical error envelope
@@ -327,6 +328,53 @@ describe("invitations", () => {
     );
     expect(server.requests).toHaveLength(0);
   });
+
+  it("refuses a destructive id past Number.MAX_SAFE_INTEGER as a number, which may be another id", async () => {
+    // 9007199254740993 arrives here as 9007199254740992: a different key.
+    const server = new FakeRest();
+    const client = makeClient(server);
+
+    await expect(client.revokeMemberKey(WS, "u2", 9007199254740993)).rejects.toThrow(
+      "keyId must be a safe integer or a bigint, got 9007199254740992: a number past " +
+        "Number.MAX_SAFE_INTEGER may already be rounded to a different id",
+    );
+    await expect(client.revokeInvitation(WS, 1e21)).rejects.toThrow(
+      /invitationId must be a safe integer or a bigint, got 1e\+21/,
+    );
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("sends a bigint id exactly, as Python sends its int", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({ success: true });
+    const client = makeClient(server);
+
+    await client.revokeInvitation(WS, 9007199254740993n);
+    await client.revokeMemberKey(WS, "u2", 10n ** 21n);
+    expect(server.requests.map((r) => r.url)).toEqual([
+      `https://x.test/api/v1/workspaces/${WS}/invitations/9007199254740993`,
+      `https://x.test/api/v1/workspaces/${WS}/members/u2/credentials/api-keys/1000000000000000000000`,
+    ]);
+  });
+
+  it("refuses a user id of . or .., which would address a different endpoint", async () => {
+    // Percent-encoding leaves both as they are and URL resolution drops or
+    // climbs the segment: removeMember(ws, "..") would DELETE the
+    // workspace's own URL. The Python SDK sends them.
+    const server = new FakeRest();
+    const client = makeClient(server);
+
+    for (const id of [".", ".."]) {
+      const refused = `userId must be a user id, got "${id}": as a URL path segment it would address a different endpoint`;
+      await expect(client.removeMember(WS, id)).rejects.toThrow(refused);
+      await expect(client.updateMemberRole(WS, id, "admin")).rejects.toThrow(refused);
+      await expect(client.addMember(WS, id, "member")).rejects.toThrow(refused);
+      await expect(client.mintMemberKey(WS, id, "ci", 30)).rejects.toThrow(refused);
+      await expect(client.listMemberKeys(WS, id)).rejects.toThrow(refused);
+      await expect(client.revokeMemberKey(WS, id, 42)).rejects.toThrow(refused);
+    }
+    expect(server.requests).toHaveLength(0);
+  });
 });
 
 describe("member API keys", () => {
@@ -379,7 +427,54 @@ describe("member API keys", () => {
 
     const err = await caught(client.mintMemberKey(WS, "u2", "ci-bot", 30));
     expect(err).toBeInstanceOf(KaguraError);
-    expect((err as KaguraError).message).toContain("kagura_salvaged_secret");
+    // The Python SDK's words, which the CLI prints; still a plain KaguraError.
+    expect((err as KaguraError).message).toBe(
+      "WorkspaceClient.mint_member_key: server returned an unexpected mint response shape, " +
+        "but the key WAS created. Save the plaintext now: kagura_salvaged_secret",
+    );
+  });
+
+  it("reads the mint response as pydantic's lax MemberAPIKey: coerced, defaults filled, extras dropped", async () => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify({
+      id: "42",
+      name: "n",
+      key_prefix: "p",
+      plaintext_key: "kp",
+      is_visible: "false",
+      agent_id: "extra",
+    });
+    const client = makeClient(server);
+
+    expect(await client.mintMemberKey(WS, "u2", "n", 30)).toEqual({
+      id: 42,
+      name: "n",
+      key_prefix: "p",
+      plaintext_key: "kp",
+      is_visible: false,
+      visibility_expires_at: null,
+      created_at: null,
+      last_used_at: null,
+      revoked_at: null,
+      expires_at: null,
+      bound_context_id: null,
+    });
+  });
+
+  it("refuses a mint response whose plaintext_key is no string, as the model does", async () => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify({ id: 42, name: "n", key_prefix: "p", plaintext_key: 5 });
+    const client = makeClient(server);
+
+    const err = await caught(client.mintMemberKey(WS, "u2", "n", 30));
+    expect(err).toBeInstanceOf(KaguraError);
+    expect((err as KaguraError).message).toBe(
+      "WorkspaceClient.mint_member_key: server returned an unexpected mint response shape; " +
+        "the key may have been created without displaying its plaintext — check " +
+        "`kagura auth list-keys` and revoke/re-mint if present.",
+    );
   });
 
   it("points at recovery when the mint shape mismatch has no plaintext", async () => {
@@ -390,7 +485,11 @@ describe("member API keys", () => {
 
     const err = await caught(client.mintMemberKey(WS, "u2", "ci-bot", 30));
     expect(err).toBeInstanceOf(KaguraError);
-    expect((err as KaguraError).message).toMatch(/list-keys/);
+    expect((err as KaguraError).message).toBe(
+      "WorkspaceClient.mint_member_key: server returned an unexpected mint response shape; " +
+        "the key may have been created without displaying its plaintext — check " +
+        "`kagura auth list-keys` and revoke/re-mint if present.",
+    );
   });
 
   it("listMemberKeys parses the MemberCredentialsResponse envelope", async () => {
@@ -426,8 +525,35 @@ describe("member API keys", () => {
       const server = new FakeRest();
       server.body = body;
       const client = makeClient(server);
-      await expect(client.listMemberKeys(WS, "u2")).rejects.toThrow(/api_keys/);
+      const err = await caught(client.listMemberKeys(WS, "u2"));
+      // Python's `_expect_wrapped_list` words; the class this has always thrown.
+      expect(err).toBeInstanceOf(KaguraConnectionError);
+      expect((err as Error).message).toBe(
+        "WorkspaceClient.list_member_keys: unexpected server response " +
+          `(GET /api/v1/workspaces/${WS}/members/u2/credentials: expected an object carrying a ` +
+          "'api_keys' array). The server may be newer than this SDK; upgrading kagura-memory may help.",
+      );
     }
+  });
+
+  it("names the request's whole path, decoded, in a shape error, as httpx's url.path gives it", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({ api_keys: null });
+    const client = new WorkspaceClient({
+      apiKey: "kagura_test",
+      baseUrl: "https://x.test/kagura",
+      fetch: server.fetch,
+    });
+
+    const err = await caught(client.listMemberKeys(WS, "a@b"));
+    expect(server.requests[0]!.url).toBe(
+      `https://x.test/kagura/api/v1/workspaces/${WS}/members/a%40b/credentials`,
+    );
+    expect((err as Error).message).toBe(
+      "WorkspaceClient.list_member_keys: unexpected server response " +
+        `(GET /kagura/api/v1/workspaces/${WS}/members/a@b/credentials: expected an object carrying a ` +
+        "'api_keys' array). The server may be newer than this SDK; upgrading kagura-memory may help.",
+    );
   });
 
   it("revokeMemberKey DELETEs the key path and accepts a 200 status body", async () => {
@@ -749,12 +875,32 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     await expect(client.listMembers(WS)).rejects.toThrow(/non-JSON body/);
   });
 
-  it("rejects a non-array body on list endpoints", async () => {
-    const server = new FakeRest();
-    server.body = JSON.stringify({ oops: true });
-    const client = makeClient(server);
+  it("rejects a non-array body on list endpoints, in the Python SDK's words", async () => {
+    for (const [body, type] of [
+      [{ oops: true }, "dict"],
+      ["x", "str"],
+      [null, "NoneType"],
+      [1.5, "float"],
+    ] as const) {
+      const server = new FakeRest();
+      server.body = JSON.stringify(body);
+      const client = makeClient(server);
 
-    await expect(client.listInvitations(WS)).rejects.toThrow(/expected a JSON array/);
+      const err = await caught(client.listInvitations(WS, { includeAccepted: true }));
+      // The class these methods have always thrown; the query is no part of the path.
+      expect(err).toBeInstanceOf(KaguraConnectionError);
+      expect((err as Error).message).toBe(
+        "WorkspaceClient.list_invitations: unexpected server response " +
+          `(GET /api/v1/workspaces/${WS}/invitations: expected a JSON array, got ${type}). ` +
+          "The server may be newer than this SDK; upgrading kagura-memory may help.",
+      );
+    }
+    const server = new FakeRest();
+    server.body = "{}";
+    await expect(makeClient(server).listMembers(WS)).rejects.toThrow(
+      `WorkspaceClient.list_members: unexpected server response (GET /api/v1/workspaces/${WS}/members: ` +
+        "expected a JSON array, got dict).",
+    );
   });
 
   it("maps other statuses to the generic connection error", async () => {

@@ -338,14 +338,94 @@ export interface MemoryListItem {
    * The memory's `details.location` coordinates, without `label` or
    * `text` (server v0.54.0+); `null` when it has none.
    */
-  location?: Pick<MemoryLocation, "lat" | "lon"> | null;
+  location?: MemoryListItemLocation | null;
 }
+
+/**
+ * WHERE-axis coordinates of a {@link MemoryListItem} (server v0.54.0+,
+ * memory-cloud #1334), from the memory's `details.location`. The list
+ * carries no `label`: read it from `details` with `reference()`.
+ */
+export type MemoryListItemLocation = Pick<MemoryLocation, "lat" | "lon">;
 
 /** Paginated response from `list_memories` (`GET /api/v1/memory/list`). */
 export interface MemoryListResponse {
   memories?: MemoryListItem[];
   total: number;
   has_more: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Measurement lane — the HOW-MUCH axis (server v0.54.0+, memory-cloud #1333)
+// ---------------------------------------------------------------------------
+
+/**
+ * `recallSeries` bucket sizes (request side only): the response echoes
+ * the period as a plain string, so a server that grows the set still
+ * parses.
+ */
+export type MeasurementPeriod = "day" | "week" | "month";
+
+/**
+ * `recallSeries` per-bucket aggregates (request side only). `"last"` is
+ * the most recent value in the bucket by `measured_at`.
+ */
+export type MeasurementAggregate = "avg" | "min" | "max" | "sum" | "count" | "last";
+
+/**
+ * One observation as `recordMeasurement` stored it.
+ *
+ * Measurements are a lane separate from memories: never embedded, never
+ * returned by `recall()`, never merged or rewritten by Sleep
+ * consolidation. Keys come in the Python model's order; fields the model
+ * does not name are dropped.
+ */
+export interface MeasurementResult {
+  /** `"success"`, also when the server leaves it out. */
+  status: string;
+  measurement_id: string;
+  metric: string;
+  /**
+   * The observation time stored, as the server sent it: ISO 8601,
+   * `Z`-tagged UTC, "now" when the call left it out.
+   */
+  measured_at: string;
+  /** Exact `NUMERIC` at rest, a float on the wire. */
+  value: number;
+  /** `null` when the observation has no unit. */
+  unit: string | null;
+}
+
+/** One non-empty time bucket of a {@link MeasurementSeries}. */
+export interface SeriesBucket {
+  /** The UTC start of the period, ISO 8601 as the server sent it. */
+  bucket: string;
+  /** The aggregate over the bucket (a float, even for `agg: "count"`). */
+  value: number;
+  /** Observations in the bucket. */
+  count: number;
+}
+
+/**
+ * A metric's series, bucketed by `period` and aggregated by `agg`.
+ * Keys come in the Python model's order; fields it does not name are
+ * dropped.
+ */
+export interface MeasurementSeries {
+  /** `"success"`, also when the server leaves it out. */
+  status: string;
+  metric: string;
+  /** The period the server applied, its default included. */
+  period: string;
+  /** The aggregate the server applied, its default included. */
+  agg: string;
+  /** Non-empty buckets, oldest first; `[]` for an empty window. */
+  series: SeriesBucket[];
+  /**
+   * The number of buckets, not of observations: sum `series[].count`
+   * for those.
+   */
+  count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,8 +1470,14 @@ export interface ToolTrigger {
   tool: string;
   /** `"pre"` (before the call) | `"result"` (on its output). @default "pre" */
   on?: string;
-  /** Subject regex, searched (max 200 chars); omit to fire on every `tool` call. */
-  match?: string;
+  /**
+   * Subject regex, searched (max 200 chars); omit to fire on every `tool`
+   * call. A trigger read by `MemoryClient.loadGuardrails` has `null` here
+   * when it has none, as the Python SDK's model reads it: test for a
+   * string, not for `undefined`. Leave it out when writing one — the
+   * server refuses `"match": null`.
+   */
+  match?: string | null;
   /** `"inform"` | `"block"`. @default "inform" */
   action?: string;
 }
@@ -1403,31 +1489,37 @@ export interface ToolTrigger {
  * `details` beyond the normalized `tool_trigger`. `authored_by_caller` and
  * `source_type` are provenance, so a hook can label a guardrail someone
  * else wrote.
+ *
+ * Every field but `memory_id`, `summary` and `importance` is optional in
+ * the Python SDK's model: `MemoryClient.loadGuardrails` reads one the
+ * server left out as `null` (unknown), so they are typed nullable.
  */
 export interface GuardrailItem {
   memory_id: string;
   summary: string;
   /** Pinned items only; `null` on tool-triggered ones. */
   context_summary?: string | null;
-  type: string;
+  type: string | null;
   importance: number;
-  delivery_mode: string;
+  delivery_mode: string | null;
   /**
    * Always `null` on pinned items. On a tool-triggered item, `null` means a
    * legacy non-object value that is not a usable trigger — skip it.
    */
   tool_trigger?: ToolTrigger | null;
-  source_type: string;
-  authored_by_caller: boolean;
+  source_type: string | null;
+  /** `null` when unknown. */
+  authored_by_caller: boolean | null;
   /** ISO 8601 datetime string. */
-  created_at: string;
+  created_at: string | null;
   /** ISO 8601 datetime string (falls back to `created_at`). */
-  updated_at: string;
+  updated_at: string | null;
 }
 
 /**
- * Response from `load_guardrails`: a context's guardrail set for a
- * client-side hook, in two independently capped lanes.
+ * A context's guardrail set for a client-side hook, in two independently
+ * capped lanes — the shape both `load_guardrails` surfaces share (MCP
+ * `KaguraClient.loadGuardrails`, REST `MemoryClient.loadGuardrails`).
  *
  * `pinned` is the `delivery_mode: "always"` set, bounded by `pinned_cap`;
  * `tool_triggered` is every memory carrying `details.tool_trigger`, bounded
@@ -1438,13 +1530,15 @@ export interface GuardrailItem {
  * The top-level `total_available` / `truncated` / `cap` are the sum /
  * either lane / the tool-triggered cap; the per-lane fields say which half
  * is incomplete. A truncated lane is incomplete protection, never the whole
- * set.
+ * set. `MemoryClient.loadGuardrails` refuses a set without these fields
+ * (`KaguraResponseError`) rather than read it as complete; the MCP
+ * `KaguraClient.loadGuardrails` returns the server's result unchecked.
  *
  * `format` is the shared cache/payload format version (additive fields
  * never bump it). `version` is an opaque per-credential hash of the served
  * entries — compare it, don't parse it.
  */
-export interface LoadGuardrailsResponse {
+export interface GuardrailSet {
   /** @default "success" */
   status?: string;
   format: number;
@@ -1460,6 +1554,16 @@ export interface LoadGuardrailsResponse {
   pinned_truncated: boolean;
   tool_triggered_total_available: number;
   tool_triggered_truncated: boolean;
+  /** The MCP tool's context block; the REST route sends none. */
+  context_id?: string | null;
+  context_name?: string | null;
+}
+
+/**
+ * Response from the MCP `load_guardrails` tool: the {@link GuardrailSet}
+ * plus the context block the MCP surface always adds.
+ */
+export interface LoadGuardrailsResponse extends GuardrailSet {
   context_id: string;
   context_name: string;
   context_display_name?: string | null;
@@ -1487,4 +1591,33 @@ export interface ContextGuardrails {
   total_available: number;
   truncated: boolean;
   tool_triggered_version: string;
+}
+
+/** Valid `target` values for `GET /api/v1/memory/guardrails/digest`. */
+export type GuardrailDigestTarget = "export" | "instructions";
+
+/**
+ * A rendered guardrail digest (`MemoryClient.getGuardrailDigest`, server
+ * v0.74.0+).
+ *
+ * `target: "export"`: `text` is the `AGENTS.md` block — a
+ * `<!-- kagura-memory:guardrails begin context=<uuid>
+ * tool_triggered_version=<hash> -->` line, one `- (<id8>) <summary>` line
+ * per guardrail, and an end marker line — or `""` when the context has no
+ * tool guardrails (nothing to write; remove an earlier block).
+ * `target: "instructions"`: `text` is the exact MCP server `instructions`
+ * string this credential would receive.
+ *
+ * `tool_triggered_version` is the `X-Kagura-Guardrails-Tool-Triggered-Version`
+ * response header (`null` when the server sent none): compare it with a
+ * stored value to detect a change without parsing `text`.
+ */
+export interface GuardrailDigest {
+  /** The canonical context UUID the digest was requested for. */
+  context_id: string;
+  /** The `target` requested. */
+  target: string;
+  text: string;
+  tool_triggered_version: string | null;
+  content_type: string | null;
 }

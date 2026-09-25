@@ -12,6 +12,17 @@ import { FakeServer } from "../../fakeServer.js";
 
 const CONTEXT_UUID = "11111111-2222-4333-8444-555555555555";
 
+/** The MCP `setup_resource` success result, envelope keys included. */
+const SETUP_RESULT = {
+  status: "success",
+  message: "Resource 'res-1' set up successfully.",
+  context_id: CONTEXT_UUID,
+  context_name: "res-1",
+  resource_id: "res-1",
+  token: "kagura_rt_x",
+  token_id: 1,
+};
+
 interface Recorded {
   url: string;
   method: string;
@@ -145,6 +156,13 @@ describe("kagura-memory resource events", () => {
     expect(h.rest.requests).toEqual([]);
   });
 
+  it("matches --op case-sensitively, as Python's click.Choice declares it", async () => {
+    const h = harness();
+    expect(await runCli(["resource", "events", "res-1", "--op", "UPSERT"], h.deps)).toBe(2);
+    expect(h.err[0]).toBe("Error: Invalid value for '--op': 'UPSERT' is not one of 'upsert', 'delete'.");
+    expect(h.rest.requests).toEqual([]);
+  });
+
   it("rejects a malformed --since before any request", async () => {
     // `new Date("garbage")` is an Invalid Date that serializes to null and
     // would silently drop the filter, returning everything.
@@ -246,82 +264,42 @@ describe("kagura-memory resource ingest --payload", () => {
   });
 });
 
-describe("kagura-memory files", () => {
-  it("reports a path that does not exist as a usage error", async () => {
-    const h = harness();
-    expect(await runCli(["files", "upload", "./definitely-not-here.bin"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/Invalid value for 'PATH'.*does not exist/);
-    expect(h.rest.requests).toEqual([]);
+describe("kagura-memory resource ingest-batch --file", () => {
+  /** A temp directory holding `events.json` with `text`, removed afterwards. */
+  function withFile(text: string, run: (dir: string, file: string) => Promise<void>): Promise<void> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-batch-"));
+    const file = path.join(dir, "events.json");
+    fs.writeFileSync(file, text);
+    return run(dir, file).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
+  }
+
+  it("words a file it cannot open as click.File does, and as `resource import --file` does", async () => {
+    await withFile("[]", async (dir) => {
+      const missing = path.join(dir, "missing.json");
+      for (const command of ["ingest-batch", "import"]) {
+        const h = harness();
+        expect(await runCli(["resource", command, "-r", "p", "-k", "k", "-f", missing], h.deps)).toBe(2);
+        // Python's `'<path>': <strerror>`, not Node's `ENOENT: …, open '…'`.
+        expect(h.err[0]).toBe(`Error: Invalid value for '--file' / '-f': '${missing}': No such file or directory`);
+        expect(h.rest.requests).toEqual([]);
+      }
+      const h = harness();
+      expect(await runCli(["resource", "ingest-batch", "-r", "p", "-k", "k", "-f", dir], h.deps)).toBe(2);
+      expect(h.err[0]).toBe(`Error: Invalid value for '--file' / '-f': '${dir}': Is a directory`);
+    });
   });
 
-  it("reports a directory as a usage error", async () => {
-    const h = harness();
-    expect(await runCli(["files", "upload", "."], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toMatch(/is a directory/);
-  });
-
-  it("range-checks --limit on list", async () => {
-    const h = harness();
-    expect(await runCli(["files", "list", "--limit", "501"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toContain("is not in the range 1<=x<=500.");
-  });
-
-  it("sends the workspace id and default limit on list", async () => {
-    const h = harness();
-    h.rest.body = [];
-    expect(await runCli(["files", "list"], h.deps)).toBe(0);
-    expect(h.rest.query().get("workspace_id")).toBe(CONTEXT_UUID);
-    expect(h.rest.query().get("limit")).toBe("50");
-  });
-
-  it("confirms a delete rather than printing nothing for a 204", async () => {
-    const h = harness();
-    h.rest.status = 204;
-    expect(await runCli(["files", "delete", "file-1", "-c", CONTEXT_UUID], h.deps)).toBe(0);
-    expect(JSON.parse(h.out.join("\n"))).toEqual({ status: "success", file_id: "file-1" });
+  it("sends the file's events", async () => {
+    await withFile('[{"doc_id": "d1", "payload": {"a": 1}}]', async (_dir, file) => {
+      const h = harness();
+      h.rest.body = { created_count: 1, failed_count: 0, errors: [] };
+      expect(await runCli(["resource", "ingest-batch", "-r", "p", "-k", "k", "-f", file], h.deps)).toBe(0);
+      expect(h.rest.last().body).toMatchObject({ events: [{ doc_id: "d1", op: "upsert", payload: { a: 1 } }] });
+    });
   });
 });
 
 describe("kagura-memory resource: review fixes", () => {
-  it("chunks import at 100 events, as Python does", async () => {
-    const h = harness();
-    h.rest.body = { accepted: 100 };
-    const rows = Array.from({ length: 150 }, (_, i) => `${i + 1}`).join("\n");
-    const file = path.join(os.tmpdir(), `kagura-import-${Date.now()}.csv`);
-    fs.writeFileSync(file, `n\n${rows}\n`);
-    try {
-      const code = await runCli(["resource", "import", "-r", "res", "-k", "rk", "-f", file], h.deps);
-      expect(code).toBe(0);
-      // 150 rows must be two requests; one body of 150 is rejected wholesale
-      // by an endpoint that accepts 1-100.
-      const posts = h.rest.requests.filter((r) => r.method === "POST");
-      expect(posts).toHaveLength(2);
-      expect((posts[0]!.body!.events as unknown[]).length).toBe(100);
-      expect((posts[1]!.body!.events as unknown[]).length).toBe(50);
-    } finally {
-      fs.rmSync(file, { force: true });
-    }
-  });
-
-  it("refuses a missing --id-column instead of numbering the rows", async () => {
-    const h = harness();
-    const file = path.join(os.tmpdir(), `kagura-idcol-${Date.now()}.csv`);
-    fs.writeFileSync(file, "sku,qty\nA-1,3\n");
-    try {
-      // A typo here would otherwise import every row under doc_id "1","2",…
-      // and a corrected re-run would insert them all a second time.
-      const code = await runCli(
-        ["resource", "import", "-r", "res", "-k", "rk", "-f", file, "--id-column", "skus"],
-        h.deps,
-      );
-      expect(code).toBe(2);
-      expect(h.err.join("\n")).toContain("--id-column 'skus' is missing on row 1");
-      expect(h.rest.requests).toEqual([]);
-    } finally {
-      fs.rmSync(file, { force: true });
-    }
-  });
-
   it("refuses an empty tokens update instead of sending a no-op PATCH", async () => {
     const h = harness();
     const code = await runCli(["resource", "tokens", "update", "42"], h.deps);
@@ -381,6 +359,7 @@ describe("REST clients are built through the credential chain", () => {
 
   it("`resource setup --summary` says the server ignores it, and does not send it (#47)", async () => {
     const server = new FakeServer();
+    server.toolResults.setup_resource = SETUP_RESULT;
     const h = harness(server.fetch);
     const code = await runCli(["resource", "setup", "-r", "res-1", "-s", "About res-1"], h.deps);
 
@@ -390,19 +369,210 @@ describe("REST clients are built through the credential chain", () => {
     expect(SETUP_SUMMARY_IGNORED_NOTE).toMatch(/--summary.*ignored.*context update <context_id> --summary/);
     expect(server.toolCallArgs()).not.toHaveProperty("summary");
   });
+});
 
-  it("aggregates an import the way Python does", async () => {
+describe("kagura-memory resource tokens / schema: Python's lines", () => {
+  it("prints `Token revoked.` for a revoke, as Python does, not a JSON document", async () => {
     const h = harness();
-    h.rest.body = { created_count: 2, failed_count: 0, errors: [] };
-    const file = path.join(os.tmpdir(), `kagura-agg-${Date.now()}.csv`);
-    fs.writeFileSync(file, "n\n1\n2\n");
-    try {
-      expect(await runCli(["resource", "import", "-r", "r", "-k", "k", "-f", file], h.deps)).toBe(0);
-      // One aggregate, not a per-batch array: a script must not parse a
-      // different shape for 99 rows than for 101.
-      expect(JSON.parse(h.out.join("\n"))).toEqual({ created: 2, failed: 0, total: 2 });
-    } finally {
-      fs.rmSync(file, { force: true });
-    }
+    h.rest.status = 204;
+    expect(await runCli(["resource", "tokens", "revoke", "42"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["Token revoked."]);
+    expect(h.err).toEqual([]);
+    expect(h.rest.last().method).toBe("DELETE");
+    expect(new URL(h.rest.last().url).pathname).toBe("/api/v1/resource-tokens/42");
+  });
+
+  it.each([
+    ["revoke", []],
+    ["update", ["-d", "x"]],
+  ])("reads TOKEN_ID as Python's int() does on %s: 1_000 is 1000", async (command, extra) => {
+    const h = harness();
+    h.rest.status = command === "revoke" ? 204 : 200;
+    h.rest.body = { id: 1000 };
+    expect(await runCli(["resource", "tokens", command, "1_000", ...extra], h.deps)).toBe(0);
+    expect(new URL(h.rest.last().url).pathname).toBe("/api/v1/resource-tokens/1000");
+  });
+
+  it.each([
+    ["revoke", [], "DELETE"],
+    ["update", ["-d", "x"], "PATCH"],
+  ])(
+    "%s sends TOKEN_ID exactly past 2^53, as Python's int() holds it, never a rounded neighbour",
+    async (command, extra, method) => {
+      for (const id of ["9007199254740993", "1000000000000000000000"]) {
+        const h = harness();
+        h.rest.status = command === "revoke" ? 204 : 200;
+        h.rest.body = { id: 1 };
+        expect(await runCli(["resource", "tokens", command, id, ...extra], h.deps)).toBe(0);
+        expect(h.rest.last().method).toBe(method);
+        // Not .../9007199254740992, not .../1e+21.
+        expect(new URL(h.rest.last().url).pathname).toBe(`/api/v1/resource-tokens/${id}`);
+      }
+    },
+  );
+
+  it("reports a revoke the server refuses on stderr, and prints nothing", async () => {
+    const h = harness();
+    h.rest.status = 404;
+    h.rest.body = { detail: "Token not found" };
+    expect(await runCli(["resource", "tokens", "revoke", "42"], h.deps)).toBe(1);
+    expect(h.out).toEqual([]);
+    expect(h.err[0]).toMatch(/^Error: .*Token not found/);
+  });
+
+  it("prints Python's line when no schema is registered, not `null`", async () => {
+    const h = harness();
+    h.rest.status = 404;
+    h.rest.body = { detail: "Not Found" };
+    expect(await runCli(["resource", "schema", "-r", "res-1"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["No schema registered for this resource."]);
+    expect(h.err).toEqual([]);
+  });
+
+  it("prints a registered schema as JSON", async () => {
+    const h = harness();
+    h.rest.body = { resource_id: "res-1", version: 2, fields: [{ name: "sku" }] };
+    expect(await runCli(["resource", "schema", "-r", "res-1"], h.deps)).toBe(0);
+    expect(JSON.parse(h.out.join("\n"))).toEqual(h.rest.body);
+  });
+});
+
+describe("kagura-memory resource setup (python-sdk#275)", () => {
+  /** Run `resource setup` against an MCP fake answering `result`. */
+  async function setup(argv: string[], result: unknown = SETUP_RESULT) {
+    const server = new FakeServer();
+    server.toolResults.setup_resource = result;
+    const h = harness(server.fetch);
+    const code = await runCli(["resource", "setup", ...argv], h.deps);
+    return { ...h, server, code };
+  }
+
+  const MODEL_KEYS = ["context_id", "context_name", "resource_id", "token", "token_id", "warning"];
+
+  it("prints Python's ResourceSetupResponse: six keys in its order, without status or message", async () => {
+    const r = await setup(["-r", "res-1"]);
+    expect(r.code).toBe(0);
+    expect(r.err).toEqual([]);
+    const printed = JSON.parse(r.out.join("\n")) as Record<string, unknown>;
+    expect(Object.keys(printed)).toEqual(MODEL_KEYS);
+    // The server may leave the warning out; the model's default is null.
+    expect(printed).toEqual({
+      context_id: CONTEXT_UUID,
+      context_name: "res-1",
+      resource_id: "res-1",
+      token: "kagura_rt_x",
+      token_id: 1,
+      warning: null,
+    });
+    // Indented as model_dump_json(indent=2).
+    expect(r.out.join("\n")).toContain('{\n  "context_id": ');
+  });
+
+  it("keeps the server's warning, in the model's order, and reads token_id as pydantic does", async () => {
+    const warning = "Save this token — it will not be shown again.";
+    const r = await setup(["-r", "res-1"], { warning, ...SETUP_RESULT, token_id: "7" });
+    expect(r.code).toBe(0);
+    const text = r.out.join("\n");
+    expect(Object.keys(JSON.parse(text))).toEqual(MODEL_KEYS);
+    // pydantic reads "7" as the int 7, and the dump leaves the dash unescaped.
+    expect(JSON.parse(text)).toMatchObject({ token_id: 7, warning });
+    expect(text).toContain("—");
+  });
+
+  it("names the context after the resource unless --name is given", async () => {
+    const r = await setup(["-r", "products"]);
+    expect(r.server.toolCallArgs()).toEqual({
+      resource_id: "products",
+      name: "products",
+      quota_events_per_hour: 1000,
+    });
+  });
+
+  it.each([
+    [["-n", "product-catalog", "-q", "50"], "product-catalog", 50],
+    [["--name", "product-catalog"], "product-catalog", 1000],
+    // Sent as given, as Python sends it; the server refuses it itself.
+    [["--name="], "", 1000],
+  ])("passes %j through as the context name", async (extra, name, quota) => {
+    const r = await setup(["-r", "products", ...extra]);
+    expect(r.code).toBe(0);
+    expect(r.server.toolCallArgs()).toEqual({
+      resource_id: "products",
+      name,
+      quota_events_per_hour: quota,
+    });
+  });
+
+  it("says --summary is ignored in Python's words, on stderr only", async () => {
+    const r = await setup(["-r", "products", "-s", "catalog"]);
+    expect(r.code).toBe(0);
+    expect(r.err).toEqual([
+      "Note: --summary is ignored, since the server's setup_resource has no summary. " +
+        "Set it after setup with `kagura-memory context update <context_id> --summary ...` " +
+        "(context owner only).",
+    ]);
+    expect(r.server.toolCallArgs()).not.toHaveProperty("summary");
+    expect(JSON.parse(r.out.join("\n"))).toMatchObject({ token: "kagura_rt_x" });
+  });
+
+  it("prints the note before any config work, so a config failure follows it", async () => {
+    const h = harness();
+    (h.deps as unknown as { loadConfig: () => never }).loadConfig = () => {
+      throw new Error(".kagura.json is not valid JSON");
+    };
+    expect(await runCli(["resource", "setup", "-r", "products", "-s", ""], h.deps)).toBe(1);
+    expect(h.err).toEqual([SETUP_SUMMARY_IGNORED_NOTE, "Error: .kagura.json is not valid JSON"]);
+    expect(h.out).toEqual([]);
+  });
+
+  it("refuses an out-of-range --quota before the note, as click does", async () => {
+    const r = await setup(["-r", "products", "-s", "catalog", "-q", "0"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toEqual([
+      "Error: Invalid value for '--quota' / '-q': 0 is not in the range 1<=x<=10000.",
+    ]);
+    expect(r.server.requests).toEqual([]);
+  });
+
+  it("names every field of a result the model rejects, never a value", async () => {
+    const r = await setup(["-r", "res-1"], {
+      status: "success",
+      context_id: CONTEXT_UUID,
+      context_name: "res-1",
+      resource_id: "res-1",
+      token_id: "twelve",
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toEqual([]);
+    expect(r.err).toEqual([
+      "Error: ResourceClient.setup_resource: unexpected server response for ResourceSetupResponse " +
+        "(token: Field required; token_id: Input should be a valid integer, unable to parse string " +
+        "as an integer). The server may be newer than this SDK; upgrading kagura-memory may help.",
+    ]);
+  });
+
+  it("documents --name, the help texts and the examples", async () => {
+    const h = harness();
+    expect(await runCli(["resource", "setup", "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n");
+    expect(text).toContain("One-shot resource setup: create context + set resource_id + create token.");
+    expect(text).toMatch(/-r, --resource-id TEXT +Resource identifier$/m);
+    expect(text).toMatch(
+      /-n, --name TEXT +Context name \(default: the resource id; lowercase letters, digits, hyphens, underscores; max 100\)\. Needed when a context of that name already exists$/m,
+    );
+    expect(text).toMatch(
+      /-s, --summary TEXT +Deprecated and ignored by the server; use `kagura-memory context update` after setup$/m,
+    );
+    expect(text).toContain(
+      "  Examples:\n" +
+        "    kagura-memory resource setup -r products\n" +
+        "    kagura-memory resource setup -r products -n product-catalog\n" +
+        '    kagura-memory resource setup -r slack-messages -d "Slack sync" -q 5000',
+    );
+    // The options in Python's order.
+    const order = ["--resource-id", "--name", "--summary", "--description", "--quota"].map((f) =>
+      text.indexOf(f),
+    );
+    expect(order).toEqual([...order].sort((a, b) => a - b));
   });
 });
