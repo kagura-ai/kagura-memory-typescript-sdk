@@ -68,6 +68,7 @@ class FakeFiles {
         size_bytes: 18,
         sha256: "a".repeat(64),
         status: "uploaded",
+        created_at: "2026-01-01T00:00:00Z",
       },
     },
     "GET /api/v1/files": { status: 200, body: [] },

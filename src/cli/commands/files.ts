@@ -14,11 +14,13 @@ import * as fs from "node:fs";
 import { excMessage, KaguraError } from "../../errors.js";
 import type { FilesClient } from "../../filesClient.js";
 import { realPath } from "../../guardrailExport.js";
-import type { FileObject } from "../../models.js";
+import type { FileListResponse, FileObject } from "../../models.js";
 import { emitProgress, type ProgressEvent } from "../../progress.js";
+import { FILE_LIST_RESPONSE, FILE_OBJECT, readModel } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
 import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
+import { formatModelJson } from "../modelDump.js";
 import { cliErrorMessage, formatJson } from "../output.js";
 import { CliError, CliUsageError, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -261,14 +263,20 @@ const upload: Command = {
               else onProgress(event);
             }
           : onProgress;
-      const uploaded = await files.upload({
-        contextId,
-        source,
-        ...(contentType !== undefined ? { contentType } : {}),
-        ...(bindingContextId !== undefined ? { bindingContextId } : {}),
-        ...(sink !== undefined ? { onProgress: sink } : {}),
-      });
-      if (!wantsMemory) return formatJson(uploaded);
+      // The FileObject model's fields, as Python's `file_obj` holds them:
+      // `upload` has checked it, so this only projects.
+      const uploaded = readModel(
+        await files.upload({
+          contextId,
+          source,
+          ...(contentType !== undefined ? { contentType } : {}),
+          ...(bindingContextId !== undefined ? { bindingContextId } : {}),
+          ...(sink !== undefined ? { onProgress: sink } : {}),
+        }),
+        FILE_OBJECT,
+        "FilesClient.upload",
+      ) as unknown as FileObject;
+      if (!wantsMemory) return formatModelJson(uploaded);
 
       let memory: unknown;
       try {
@@ -304,6 +312,22 @@ const upload: Command = {
   },
 };
 
+/**
+ * `files list`'s page as Python's `FilesClient.list` reads it. The server
+ * sends a bare list, which the SDK wraps as `{files, next_cursor: null}`,
+ * and Python reads each item as a `FileObject`, so a bad one is named by
+ * its own fields. Any other page, an envelope no server sends yet, it
+ * reads whole as a `FileListResponse`; one that carries `next_cursor: null`
+ * cannot be told from a wrapped list, and reads as one.
+ */
+function readFileList(page: FileListResponse): Record<string, unknown> {
+  if (Array.isArray(page.files) && page.next_cursor === null) {
+    const files = page.files.map((file) => readModel(file, FILE_OBJECT, "FilesClient.list"));
+    return { files, next_cursor: null };
+  }
+  return readModel(page, FILE_LIST_RESPONSE, "FilesClient.list");
+}
+
 const LIMIT: FlagSpec = {
   name: "limit",
   short: "l",
@@ -331,7 +355,9 @@ const list: Command = {
     rejectExtraArgs(args);
     const cursor = args.values.cursor;
     return runFilesCommand(deps, args.values["context-id"], async (files, contextId) =>
-      formatJson(await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) })),
+      formatModelJson(
+        readFileList(await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) })),
+      ),
     );
   },
 };

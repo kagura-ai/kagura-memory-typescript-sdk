@@ -23,6 +23,27 @@ const SETUP_RESULT = {
   token_id: 1,
 };
 
+/** A token as memory-cloud sends it: every field of the Python model. */
+const TOKEN = {
+  id: 1,
+  resource_id: "res-1",
+  description: null,
+  quota_events_per_hour: 1000,
+  created_by: "google_1",
+  created_at: "2026-06-01T00:00:00Z",
+  last_used_at: null,
+  is_active: true,
+  status: "active",
+};
+
+/** A schema as memory-cloud sends it. */
+const SCHEMA = {
+  resource_id: "res-1",
+  schema_version: 2,
+  field_definitions: [{ name: "sku", type: "text", description: "Stock keeping unit" }],
+  created_at: "2026-06-01T00:00:00.123456Z",
+};
+
 interface Recorded {
   url: string;
   method: string;
@@ -104,7 +125,7 @@ function harness(resourceFetch?: typeof globalThis.fetch): Harness {
 describe("nested groups", () => {
   it("routes the three-level `resource tokens list`", async () => {
     const h = harness();
-    h.rest.body = { tokens: [], total: 0 };
+    h.rest.body = { tokens: [], total: 0, limit: 50, offset: 0 };
     expect(await runCli(["resource", "tokens", "list"], h.deps)).toBe(0);
     expect(h.rest.last().url).toContain("/api/v1/resource-tokens");
   });
@@ -229,14 +250,14 @@ describe("a resource id in the REST path (#66)", () => {
 describe("kagura-memory resource schema vs ingest: the -v/-V trap", () => {
   it("reads lowercase -v as the schema version on `schema`", async () => {
     const h = harness();
-    h.rest.body = { fields: [] };
+    h.rest.body = SCHEMA;
     expect(await runCli(["resource", "schema", "-r", "res-1", "-v", "2"], h.deps)).toBe(0);
     expect(h.rest.query().get("schema_version")).toBe("2");
   });
 
   it("reads capital -V as the document version on `ingest`", async () => {
     const h = harness();
-    h.rest.body = { status: "accepted" };
+    h.rest.body = { status: "accepted", event_id: 7 };
     expect(
       await runCli(
         ["resource", "ingest", "-r", "res-1", "-k", "rk", "--doc-id", "d1", "-V", "4"],
@@ -267,7 +288,7 @@ describe("kagura-memory resource quota range checks", () => {
     // Python declares plain `type=int` there; the bound is pydantic's, on
     // the server. A local check would reject input the Python CLI sends.
     const h = harness();
-    h.rest.body = { id: 1, token: "t" };
+    h.rest.body = { ...TOKEN, quota_events_per_hour: 20000, token: "t" };
     expect(await runCli(["resource", "tokens", "create", "-r", "res-1", "-q", "20000"], h.deps)).toBe(0);
     expect(h.rest.last().body).toMatchObject({ quota_events_per_hour: 20000 });
   });
@@ -434,7 +455,7 @@ describe("kagura-memory resource tokens / schema: Python's lines", () => {
   ])("reads TOKEN_ID as Python's int() does on %s: 1_000 is 1000", async (command, extra) => {
     const h = harness();
     h.rest.status = command === "revoke" ? 204 : 200;
-    h.rest.body = { id: 1000 };
+    h.rest.body = { ...TOKEN, id: 1000 };
     expect(await runCli(["resource", "tokens", command, "1_000", ...extra], h.deps)).toBe(0);
     expect(new URL(h.rest.last().url).pathname).toBe("/api/v1/resource-tokens/1000");
   });
@@ -448,7 +469,7 @@ describe("kagura-memory resource tokens / schema: Python's lines", () => {
       for (const id of ["9007199254740993", "1000000000000000000000"]) {
         const h = harness();
         h.rest.status = command === "revoke" ? 204 : 200;
-        h.rest.body = { id: 1 };
+        h.rest.body = TOKEN;
         expect(await runCli(["resource", "tokens", command, id, ...extra], h.deps)).toBe(0);
         expect(h.rest.last().method).toBe(method);
         // Not .../9007199254740992, not .../1e+21.
@@ -475,11 +496,26 @@ describe("kagura-memory resource tokens / schema: Python's lines", () => {
     expect(h.err).toEqual([]);
   });
 
-  it("prints a registered schema as JSON", async () => {
+  it("prints a registered schema as the Python model's dump", async () => {
     const h = harness();
-    h.rest.body = { resource_id: "res-1", version: 2, fields: [{ name: "sku" }] };
+    h.rest.body = SCHEMA;
     expect(await runCli(["resource", "schema", "-r", "res-1"], h.deps)).toBe(0);
-    expect(JSON.parse(h.out.join("\n"))).toEqual(h.rest.body);
+    expect(JSON.parse(h.out.join("\n"))).toEqual({
+      ...SCHEMA,
+      field_definitions: [
+        {
+          name: "sku",
+          type: "text",
+          description: "Stock keeping unit",
+          classification: "public",
+          index_hint: "",
+          unit: null,
+          enum_values: null,
+          example: null,
+          required: false,
+        },
+      ],
+    });
   });
 });
 

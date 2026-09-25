@@ -7,8 +7,10 @@ import {
   KaguraIntegrityError,
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
+  KaguraResponseError,
 } from "../src/errors.js";
 import { FilesClient } from "../src/filesClient.js";
+import type { ProgressEvent } from "../src/progress.js";
 
 interface Recorded {
   url: string;
@@ -230,6 +232,91 @@ describe("upload error paths", () => {
     expect(server.requests.map((r) => new URL(r.url).pathname)).toEqual([
       "/api/v1/files/reserve",
     ]);
+  });
+
+  // #66: Python reads each leg through its model, inside the upload's
+  // try, so a refused body ends the progress stream with an error.
+  const HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
+
+  it("refuses a reserve its model refuses, before any PUT, and ends the stream with it", async () => {
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = { status: 200, body: { file_id: "f9", expires_at: 5 } };
+    const events: ProgressEvent[] = [];
+    const client = makeClient(server);
+    const error = await client
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin", onProgress: (e) => events.push(e) })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toBe(
+      `FilesClient.upload: unexpected server response for FileReserveResponse (upload_url: Field required). ${HINT}`,
+    );
+    expect(server.requests.map((r) => new URL(r.url).pathname)).toEqual(["/api/v1/files/reserve"]);
+    expect(events.at(-1)).toMatchObject({
+      kind: "error",
+      detail: { reserved_file_id: null, uploaded: false, confirm_started: false, confirmed: false },
+    });
+  });
+
+  it("refuses a confirm its model refuses, and never reports it confirmed", async () => {
+    const uploadUrl = "https://r2.test/o?X-Amz-SignedHeaders=host";
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = {
+      status: 200,
+      body: { file_id: "f9", upload_url: uploadUrl, expires_at: "2026-01-01T00:00:00Z" },
+    };
+    server.routes[uploadUrl] = { status: 200 };
+    server.routes["/api/v1/files/f9/confirm"] = {
+      status: 200,
+      body: { id: "f9", workspace_id: WS, filename: "a.bin", size_bytes: "x", sha256: "s", status: "uploaded" },
+    };
+    const events: ProgressEvent[] = [];
+    const client = makeClient(server);
+    const error = await client
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin", onProgress: (e) => events.push(e) })
+      .catch((e: unknown) => e);
+    expect((error as Error).message).toBe(
+      "FilesClient.upload: unexpected server response for FileObject (content_type: Field required; " +
+        "size_bytes: Input should be a valid integer, unable to parse string as an integer; " +
+        `created_at: Field required). ${HINT}`,
+    );
+    expect(events.map((e) => e.kind)).not.toContain("success");
+    expect(events.at(-1)).toMatchObject({
+      kind: "error",
+      detail: { reserved_file_id: "f9", uploaded: true, confirm_started: true, confirmed: false },
+    });
+  });
+
+  it("refuses a 409's existing file its model refuses", async () => {
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = {
+      status: 409,
+      body: { detail: "duplicate", existing_file: { id: "dup-1", workspace_id: WS } },
+    };
+    const events: ProgressEvent[] = [];
+    const client = makeClient(server);
+    const error = await client
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin", onProgress: (e) => events.push(e) })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toMatch(
+      /^FilesClient\.upload: unexpected server response for FileObject \(filename: Field required; content_type: Field required; size_bytes: Field required \(\+3 more\)\)\./,
+    );
+    expect(events.map((e) => e.kind)).toEqual(["action", "error"]);
+  });
+
+  it("refuses a reserved file id that would leave its path segment", async () => {
+    const uploadUrl = "https://r2.test/o?X-Amz-SignedHeaders=host";
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = {
+      status: 200,
+      body: { file_id: "..", upload_url: uploadUrl, expires_at: "2026-01-01T00:00:00Z" },
+    };
+    server.routes[uploadUrl] = { status: 200 };
+    const client = makeClient(server);
+    await expect(
+      client.upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" }),
+    ).rejects.toThrow(/^file_id must be a file id, got "\.\."/);
+    expect(server.requests.map((r) => new URL(r.url).pathname)).not.toContain("/api/v1/confirm");
   });
 
   it("re-throws a non-dedup reserve error", async () => {

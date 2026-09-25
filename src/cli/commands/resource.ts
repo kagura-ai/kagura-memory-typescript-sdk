@@ -33,8 +33,23 @@ import {
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { parseProgress, PROGRESS_FLAG, resolveProgress, VERBOSE_FLAG } from "../progress.js";
 import type { ResourceEventInput } from "../../resourceClient.js";
-import { laxInt, laxStr, nullable, ResponseReader } from "../../responseShape.js";
-import { resolveConfig, runAndPrint } from "../runClientCommand.js";
+import {
+  INDEXER_STATUS_RESPONSE,
+  PAGINATED_RESOURCE_TOKENS_RESPONSE,
+  readModel,
+  RESOURCE_EVENT_BATCH_RESPONSE,
+  RESOURCE_EVENT_RESPONSE,
+  RESOURCE_EVENTS_LIST_RESPONSE,
+  RESOURCE_IMPACT_RESPONSE,
+  RESOURCE_LIST_RESPONSE,
+  RESOURCE_SCHEMA_RESPONSE,
+  RESOURCE_SETUP_RESPONSE,
+  RESOURCE_TOKEN_CREATE_RESPONSE,
+  RESOURCE_TOKEN_RESPONSE,
+  type Model,
+} from "../../pyModels.js";
+import { formatModelJson } from "../modelDump.js";
+import { resolveConfig } from "../runClientCommand.js";
 import {
   detectFormat,
   EXTRA_CELLS,
@@ -110,6 +125,21 @@ async function runAndEcho(deps: CommandDeps, operation: () => Promise<string>): 
   return 0;
 }
 
+/**
+ * Run a `ResourceClient` call and print its result as the Python CLI
+ * prints it, `result.model_dump_json(indent=2)`: read through `model`,
+ * whose refusal is Python's `KaguraResponseError` labelled `operation`
+ * (`ResourceClient.list_tokens`), exit 1.
+ */
+async function runAndDump(
+  deps: CommandDeps,
+  model: Model,
+  operation: string,
+  call: () => Promise<unknown>,
+): Promise<number> {
+  return runAndEcho(deps, async () => formatModelJson(readModel(await call(), model, operation)));
+}
+
 // ---------------------------------------------------------------------
 // tokens
 // ---------------------------------------------------------------------
@@ -139,7 +169,7 @@ const tokensList: Command = {
     const resourceId = args.values["resource-id"];
     const limit = optionalInt(args, LIMIT) ?? 50;
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, PAGINATED_RESOURCE_TOKENS_RESPONSE, "ResourceClient.list_tokens", () =>
       deps
         .makeResourceClient()
         .listTokens({ ...(resourceId !== undefined ? { resourceId } : {}), limit }),
@@ -164,7 +194,7 @@ const tokensCreate: Command = {
     // server side, so an out-of-range value must still be sent.
     const quotaEventsPerHour = optionalInt(args, QUOTA) ?? 1000;
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, RESOURCE_TOKEN_CREATE_RESPONSE, "ResourceClient.create_token", () =>
       deps.makeResourceClient().createToken({
         resourceId,
         ...(description !== undefined ? { description } : {}),
@@ -189,7 +219,7 @@ const tokensUpdate: Command = {
       throw new CliError("At least --description or --quota is required");
     }
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, RESOURCE_TOKEN_RESPONSE, "ResourceClient.update_token", () =>
       deps.makeResourceClient().updateToken(tokenId, {
         ...(description !== undefined ? { description } : {}),
         ...(quotaEventsPerHour !== undefined ? { quotaEventsPerHour } : {}),
@@ -231,7 +261,9 @@ const resourceList: Command = {
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () => deps.makeResourceClient().listResources());
+    return runAndDump(deps, RESOURCE_LIST_RESPONSE, "ResourceClient.list_resources", () =>
+      deps.makeResourceClient().listResources(),
+    );
   },
 };
 
@@ -242,7 +274,7 @@ const stats: Command = {
     rejectExtraArgs(args);
     const resourceId = resourceIdInPath(args);
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, RESOURCE_IMPACT_RESPONSE, "ResourceClient.get_resource_impact", () =>
       deps.makeResourceClient().getResourceImpact(resourceId),
     );
   },
@@ -255,7 +287,7 @@ const indexerStatus: Command = {
     rejectExtraArgs(args);
     const resourceId = resourceIdInPath(args);
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, INDEXER_STATUS_RESPONSE, "ResourceClient.get_indexer_status", () =>
       deps.makeResourceClient().getIndexerStatus(resourceId),
     );
   },
@@ -282,7 +314,8 @@ const schema: Command = {
     // prints this line for it, not `null`.
     return runAndEcho(deps, async () => {
       const result = await deps.makeResourceClient().getResourceSchema(resourceId, version);
-      return result === null ? "No schema registered for this resource." : formatJson(result);
+      if (result === null) return "No schema registered for this resource.";
+      return formatModelJson(readModel(result, RESOURCE_SCHEMA_RESPONSE, "ResourceClient.get_resource_schema"));
     });
   },
 };
@@ -326,7 +359,7 @@ const events: Command = {
     const since = parseSince(args.values.since);
 
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, RESOURCE_EVENTS_LIST_RESPONSE, "ResourceClient.list_resource_events", () =>
       deps.makeResourceClient().listResourceEvents(resourceId, {
         limit,
         ...(cursor !== undefined ? { cursor } : {}),
@@ -421,43 +454,19 @@ const setup: Command = {
       deps.writeError(SETUP_SUMMARY_IGNORED_NOTE);
     }
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, async () =>
-      setupResponse(
-        await deps.makeResourceClient().setupResource({
-          resourceId,
-          ...(name !== undefined ? { contextName: name } : {}),
-          ...(description !== undefined ? { description } : {}),
-          quotaEventsPerHour,
-        }),
-      ),
+    // Python's `ResourceSetupResponse` dump: its six fields, `warning` null
+    // when the server leaves it out, and the tool result's `status` and
+    // `message` dropped.
+    return runAndDump(deps, RESOURCE_SETUP_RESPONSE, "ResourceClient.setup_resource", () =>
+      deps.makeResourceClient().setupResource({
+        resourceId,
+        ...(name !== undefined ? { contextName: name } : {}),
+        ...(description !== undefined ? { description } : {}),
+        quotaEventsPerHour,
+      }),
     );
   },
 };
-
-/**
- * What `resource setup` prints: the Python CLI's `ResourceSetupResponse`
- * dump. Its six fields in its order, `warning` null when the server leaves
- * it out, and the tool result's `status` and `message` dropped. A result
- * the model would reject is Python's `KaguraResponseError`, naming the
- * fields and never their values (the token is plaintext).
- */
-function setupResponse(raw: unknown): Record<string, unknown> {
-  const r = new ResponseReader("ResourceClient.setup_resource", "ResourceSetupResponse");
-  const obj = r.object(raw);
-  let response: Record<string, unknown> | undefined;
-  if (obj !== null) {
-    response = {
-      context_id: r.field(obj, "context_id", laxStr),
-      context_name: r.field(obj, "context_name", laxStr),
-      resource_id: r.field(obj, "resource_id", laxStr),
-      token: r.field(obj, "token", laxStr),
-      token_id: r.field(obj, "token_id", laxInt),
-      warning: r.field(obj, "warning", nullable(laxStr), { default: null }),
-    };
-  }
-  r.check();
-  return response!;
-}
 
 const DOC_ID: FlagSpec = { name: "doc-id", type: "value", required: true, help: "Document ID" };
 const PAYLOAD: FlagSpec = { name: "payload", short: "p", type: "value", help: "JSON payload object" };
@@ -499,7 +508,7 @@ const ingest: Command = {
       rawImportance === undefined ? undefined : parseFloatOption(IMPORTANCE, rawImportance);
 
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, RESOURCE_EVENT_RESPONSE, "ResourceClient.ingest_event", () =>
       deps.makeResourceClient().ingestEvent(resourceId, apiKey, {
         docId,
         op,
@@ -564,7 +573,7 @@ const ingestBatch: Command = {
     }
     const events_ = parsed as Record<string, unknown>[];
     const { config } = resolveConfig(deps, undefined, false);
-    return runAndPrint(deps, () =>
+    return runAndDump(deps, RESOURCE_EVENT_BATCH_RESPONSE, "ResourceClient.ingest_events", () =>
       deps
         .makeResourceClient()
         .ingestEvents(resourceId, apiKey, events_.map(toEventInput)),
@@ -738,12 +747,18 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
       refuseNonFinite(batch.map((event) => event.payload));
       // No onProgress here: each call would end the stream with its own
       // terminal event, and the import is one operation with one.
-      const result = await client.ingestEvents(resourceId, apiKey, batch);
-      created += result.created_count ?? 0;
-      failed += result.failed_count ?? 0;
+      // Read as the Python SDK's model reads it: `failed_count` and `errors`
+      // default, and a count sent as `"3"` adds 3, not the text "3".
+      const result = readModel(
+        await client.ingestEvents(resourceId, apiKey, batch),
+        RESOURCE_EVENT_BATCH_RESPONSE,
+        "ResourceClient.ingest_events",
+      );
+      created += Number(result.created_count);
+      failed += Number(result.failed_count);
       // Python keeps the first five errors per batch and prints ten in
       // total; a full dump of a bad 10k-row file is unreadable.
-      if (Array.isArray(result.errors)) errors.push(...result.errors.slice(0, 5));
+      errors.push(...(result.errors as unknown[]).slice(0, 5));
     }
   } catch (e) {
     emitProgress(onProgress, {

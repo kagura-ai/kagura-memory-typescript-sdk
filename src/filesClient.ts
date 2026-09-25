@@ -34,7 +34,7 @@ import type {
 import { pathSegment } from "./pathSegment.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
 import { normalizeUuid, pyRepr } from "./pyCompat.js";
-import { laxStr, ResponseReader } from "./responseShape.js";
+import { FILE_OBJECT, FILE_RESERVE_RESPONSE, readModel } from "./pyModels.js";
 import {
   KaguraRestClient,
   type KaguraRestClientOptions,
@@ -137,8 +137,9 @@ export class FilesClient extends KaguraRestClient {
    * @throws Error if `contextId` is not a UUID, or `source` is bytes and
    *   `filename` is not provided.
    * @throws KaguraIntegrityError if R2 rejected the body sha256 binding.
-   * @throws KaguraResponseError if the confirm's 2xx body is not an object
-   *   with a string `id`.
+   * @throws KaguraResponseError if the reserve's or the confirm's 2xx body,
+   *   or a 409's existing file, is not what the Python SDK's
+   *   `FileReserveResponse` / `FileObject` model reads (#66).
    */
   async upload(options: UploadOptions): Promise<FileObject> {
     const emit = (event: ProgressEvent) => emitProgress(options.onProgress, event);
@@ -188,6 +189,9 @@ export class FilesClient extends KaguraRestClient {
         // case duplicates.
         const existing = extractExistingFile(e);
         if (existing !== null) {
+          // Read as Python reads it: an existing file the model refuses is
+          // a KaguraResponseError, and the stream ends with it.
+          readModel(existing, FILE_OBJECT, "FilesClient.upload");
           emit({
             stage: "complete",
             kind: "success",
@@ -199,8 +203,10 @@ export class FilesClient extends KaguraRestClient {
         throw e;
       }
 
-      const reserve = this.json(reserveResp) as FileReserveResponse;
-      reservedFileId = reserve.file_id ?? null;
+      const reservePayload = this.json(reserveResp);
+      readModel(reservePayload, FILE_RESERVE_RESPONSE, "FilesClient.upload");
+      const reserve = reservePayload as FileReserveResponse;
+      reservedFileId = reserve.file_id;
       emit({ stage: "upload", kind: "action", msg: "Uploading to object store" });
       await this.putToObjectStore(reserve.upload_url, body, sha256Base64, contentType);
       uploaded = true;
@@ -214,13 +220,11 @@ export class FilesClient extends KaguraRestClient {
         json: { sha256: sha256Hex },
       });
       // Read before `confirmed`, as Python parses its FileObject first: a
-      // body with no file id is no confirmation, and the terminal error
+      // body the model refuses is no confirmation, and the terminal error
       // must not say it was.
-      const reader = new ResponseReader("FilesClient.upload", "FileObject");
-      const confirmedBody = reader.object(this.json(confirmResp));
-      if (confirmedBody !== null) reader.field(confirmedBody, "id", laxStr);
-      reader.check();
-      const result = confirmedBody as unknown as FileObject;
+      const confirmedBody = this.json(confirmResp);
+      readModel(confirmedBody, FILE_OBJECT, "FilesClient.upload");
+      const result = confirmedBody as FileObject;
       confirmed = true;
       emit({
         stage: "complete",
