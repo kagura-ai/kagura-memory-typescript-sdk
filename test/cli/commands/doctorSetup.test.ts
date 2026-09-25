@@ -650,6 +650,32 @@ describe("kagura-memory doctor", () => {
       expect(checks).toEqual([{ status: "fail", message: "MCP URL must use HTTPS", details: {} }]);
     });
 
+    it("checks the server with --profile's credential, as Python's doctor does", async () => {
+      // Python resolves with profile=PROFILE and no config key over it; a
+      // server check with the default profile would report on another server.
+      const h = harness();
+      const seen: unknown[] = [];
+      const resolved: unknown[] = [];
+      const make = h.deps.makeClient;
+      h.deps.makeClient = ((o: Record<string, unknown>) => {
+        seen.push(o);
+        return make(o);
+      }) as CliDeps["makeClient"];
+      h.deps.resolveAuth = ((o: unknown) => {
+        resolved.push(o);
+        return { kind: "oauth", oauth: { getAuthHeader: async () => "Bearer t" }, mcpUrl: "https://x.test/mcp" };
+      }) as unknown as CliDeps["resolveAuth"];
+      h.server.forcedResponse = new Response('{"detail":"Invalid token"}', { status: 401 });
+      const { checks } = await (async () => {
+        const code = await runCli(["doctor", "--json", "--profile", "other"], h.deps);
+        const report = JSON.parse(h.out.join("\n")) as { checks: { section: string; status: string }[] };
+        return { code, checks: report.checks.filter((c) => c.section === "server") };
+      })();
+      expect(seen).toEqual([{ profile: "other" }]);
+      expect(resolved).toEqual([{ apiKey: null, mcpUrl: null, profile: "other" }]);
+      expect(checks).toMatchObject([{ status: "info" }]);
+    });
+
     it("prints the two lines as Python does", async () => {
       const h = harness();
       h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version: "0.78.0" };

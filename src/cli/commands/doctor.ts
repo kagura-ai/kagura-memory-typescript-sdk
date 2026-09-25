@@ -423,8 +423,11 @@ const OAUTH_VERSION_UNVERIFIED =
 function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boolean {
   try {
     return (
-      deps.resolveAuth({ apiKey: options.apiKey ?? null, mcpUrl: options.mcpUrl ?? null, profile: null })
-        .kind === "oauth"
+      deps.resolveAuth({
+        apiKey: options.apiKey ?? null,
+        mcpUrl: options.mcpUrl ?? null,
+        profile: options.profile ?? null,
+      }).kind === "oauth"
     );
   } catch {
     return false;
@@ -442,8 +445,12 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
  * JSON, a 429) fails the check with its message, where Python's doctor
  * stops with a traceback.
  */
-async function checkServer(deps: CommandDeps): Promise<DoctorCheck[]> {
-  const clientOptions = mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
+async function checkServer(deps: CommandDeps, profile: string | undefined): Promise<DoctorCheck[]> {
+  // With --profile, Python resolves that profile with no key forced over
+  // it (`KAGURA_API_KEY` still first), so the check reaches the profile's
+  // own server rather than the default's.
+  const clientOptions: KaguraClientOptions =
+    profile !== undefined ? { profile } : mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
 
   // Construction is inside the try because it validates the URL and can
   // throw — and a check whose job is to *report* a bad URL must not be the
@@ -507,7 +514,7 @@ export const DOCTOR: Command = {
         status: "info",
         message: "this SDK ships no LLM layer; `ingest` lives in the Python package",
       },
-      ...(await checkServer(deps)),
+      ...(await checkServer(deps, args.values.profile)),
     ];
 
     // Section status is the worst of its checks.

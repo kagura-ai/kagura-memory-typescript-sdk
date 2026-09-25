@@ -636,7 +636,9 @@ The version passes at or above `MIN_SERVER_VERSION` (0.75.0), fails below
 it (`Version: 0.74.0 is below minimum 0.75.0`, a pre-release of 0.75.0
 included) and is `info` when it cannot be compared (`main-abc123`, `0.78`).
 An unreachable server fails with `Server unreachable: …`, and an OAuth
-profile the REST route refuses is `info`, in Python's words. `--json`
+profile the REST route refuses is `info`, in Python's words. With
+`--profile NAME` the server is checked with that profile, as in Python
+(`KAGURA_API_KEY` still comes first), not with the default. `--json`
 prints Python's shape, with `details` on every check (`{}` when there are
 none). Any failed check exits 1.
 

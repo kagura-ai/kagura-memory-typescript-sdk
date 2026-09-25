@@ -41,7 +41,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compare), by the shared `meetsMinimum` against `MIN_SERVER_VERSION`. An
   unreachable server fails with `Server unreachable: …`, an API key the
   server refuses with its own message, and an OAuth profile the REST route
-  refuses is Python's info line. `doctor --json` gives every check
+  refuses is Python's info line. With `--profile NAME` the server is
+  checked with that profile, as Python checks it, where it was checked
+  with the default one. `doctor --json` gives every check
   `details`, `{}` when it has none, as Python's `to_dict` does.
 
 ### Fixed
