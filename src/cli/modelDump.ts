@@ -8,7 +8,16 @@
  * pydantic's JSON does, a float field as a float (`1.0`).
  */
 
-import { PyFloat } from "../pyModels.js";
+import { PyFloat, UNTYPED } from "../pyModels.js";
+import { CliError } from "./parse.js";
+
+/**
+ * The most non-empty containers pydantic nests in an untyped value, the
+ * value itself the first; one more fails the dump with {@link DEPTH_EXCEEDED}.
+ * Measured on pydantic 2.13.4: typed levels and empty containers do not count.
+ */
+const MAX_UNTYPED_DEPTH = 255;
+const DEPTH_EXCEEDED = "Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)";
 
 
 /**
@@ -46,12 +55,23 @@ function anyNumber(value: number): string {
  * `JSON.stringify` escapes them, which is what pydantic escapes (the
  * control characters, `"` and `\`; nothing past ASCII). A {@link PyFloat}
  * prints as a float, a `bigint` as its digits.
+ *
+ * @throws CliError with pydantic's message when an untyped value nests
+ *   deeper than pydantic writes (see {@link MAX_UNTYPED_DEPTH}).
  */
 export function formatModelJson(value: unknown): string {
-  return write(value, "");
+  return write(value, "", null);
 }
 
-function write(value: unknown, indent: string): string {
+/** One level further into an untyped value, or `null` outside one. */
+function enter(depth: number | null): number | null {
+  if (depth === null) return null;
+  if (depth >= MAX_UNTYPED_DEPTH) throw new CliError(DEPTH_EXCEEDED);
+  return depth + 1;
+}
+
+/** `depth`: the non-empty containers entered inside an untyped value, or `null` outside one. */
+function write(value: unknown, indent: string, depth: number | null): string {
   if (value === null || value === undefined) return "null";
   if (value instanceof PyFloat) return pydanticFloat(value.value);
   switch (typeof value) {
@@ -69,13 +89,16 @@ function write(value: unknown, indent: string): string {
       return "null";
   }
   const inner = `${indent}  `;
+  const outer = depth === null && UNTYPED.has(value) ? 0 : depth;
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";
-    return `[\n${value.map((item) => inner + write(item, inner)).join(",\n")}\n${indent}]`;
+    const next = enter(outer);
+    return `[\n${value.map((item) => inner + write(item, inner, next)).join(",\n")}\n${indent}]`;
   }
   const entries = Object.entries(value as Record<string, unknown>);
   if (entries.length === 0) return "{}";
-  const lines = entries.map(([key, item]) => `${inner}${JSON.stringify(key)}: ${write(item, inner)}`);
+  const next = enter(outer);
+  const lines = entries.map(([key, item]) => `${inner}${JSON.stringify(key)}: ${write(item, inner, next)}`);
   return `{\n${lines.join(",\n")}\n${indent}}`;
 }
 

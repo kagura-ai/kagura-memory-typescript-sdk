@@ -204,6 +204,14 @@ const CASES: Case[] = [
     stderr: "Error: FilesClient.download_url: unexpected server response for FileDownloadUrlResponse (Input should be a valid dictionary or instance of FileDownloadUrlResponse). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
   },
   {
+    name: "events payload nested past pydantic's serializer depth",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":`{"events": [{"id": 1, "op": "upsert", "doc_id": "d", "payload": {"x": ${"[".repeat(255)}1${"]".repeat(255)}}}]}`}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)\n",
+  },
+  {
     name: "schema null",
     argv: ["resource","schema","-r","products"],
     routes: {"GET /api/v1/resources/products/schema":{"status":200,"raw":"null"}},

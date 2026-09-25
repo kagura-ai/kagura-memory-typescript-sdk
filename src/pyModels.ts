@@ -35,6 +35,12 @@ import {
 } from "./responseShape.js";
 
 /**
+ * The `dict[str, Any]` values {@link readModel} has read: pydantic writes
+ * them by inference, under a nesting limit `formatModelJson` keeps.
+ */
+export const UNTYPED = new WeakSet<object>();
+
+/**
  * A value read from a `float` field, so it prints as one: `1.0`, where a
  * JavaScript number that happens to be whole would print `1`. `toJSON`
  * keeps it a plain number for any other serializer.
@@ -121,7 +127,10 @@ function readValue(r: ResponseReader, kind: Kind, value: unknown, at: Loc): unkn
     case "datetime":
       return coerced(r, at, pydanticDatetime(value));
     case "dict":
-      if (isObject(value)) return value;
+      if (isObject(value)) {
+        UNTYPED.add(value);
+        return value;
+      }
       r.issue(at, "Input should be a valid dictionary");
       return undefined;
   }

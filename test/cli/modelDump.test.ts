@@ -7,6 +7,7 @@ import {
   PAGINATED_RESOURCE_TOKENS_RESPONSE,
   PyFloat,
   readModel,
+  RESOURCE_EVENT_BATCH_RESPONSE,
   RESOURCE_EVENTS_LIST_RESPONSE,
   RESOURCE_SCHEMA_RESPONSE,
 } from "../../src/pyModels.js";
@@ -149,5 +150,41 @@ describe("readModel: a payload as the Python model reads it", () => {
       "ResourceClient.get_indexer_status: unexpected server response for IndexerStatusResponse " +
         `(Input should be a valid dictionary or instance of IndexerStatusResponse). ${HINT}`,
     );
+  });
+});
+
+describe("formatModelJson: pydantic's serializer depth in an untyped value", () => {
+  // pydantic refuses to serialize a dict[str, Any] value once 256 non-empty
+  // containers nest inside it, the value itself the first; an empty one and
+  // the typed levels around it do not count (measured on pydantic 2.13.4).
+  const DEPTH = "Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)";
+  const wrap = (n: number, inner: unknown, box: (v: unknown) => unknown): unknown => {
+    let value = inner;
+    for (let i = 0; i < n; i++) value = box(value);
+    return value;
+  };
+  const lists = (n: number, inner: unknown) => wrap(n, inner, (v) => [v]);
+  const dicts = (n: number, inner: unknown) => wrap(n, inner, (v) => ({ k: v }));
+  const events = (payload: unknown) =>
+    readModel({ events: [{ id: 1, op: "upsert", doc_id: "d", payload }] }, RESOURCE_EVENTS_LIST_RESPONSE, "op");
+  const errors = (item: unknown) =>
+    readModel({ created_count: 0, errors: [item] }, RESOURCE_EVENT_BATCH_RESPONSE, "op");
+
+  it.each([
+    ["payload {x: n lists around 1}", (n: number) => events({ x: lists(n, 1) }), 255],
+    ["payload {x: n lists around []}", (n: number) => events({ x: lists(n, []) }), 255],
+    ["payload {x: n lists around [1]}", (n: number) => events({ x: lists(n, [1]) }), 254],
+    ["payload {x: n dicts around {}}", (n: number) => events({ x: dicts(n, {}) }), 255],
+    ["payload as n dicts", (n: number) => events(dicts(n, 1)), 256],
+    ["an errors item as n dicts", (n: number) => errors(dicts(n, 1)), 256],
+    ["payload {x, y: n lists each}", (n: number) => events({ x: lists(n, 1), y: lists(n, 1) }), 255],
+  ] as const)("%s: fails at pydantic's limit, not one before", (_name, make, failsAt) => {
+    expect(() => formatModelJson(make(failsAt - 1))).not.toThrow();
+    const error = failure(() => formatModelJson(make(failsAt)));
+    expect(error.message).toBe(DEPTH);
+  });
+
+  it("refuses a payload far deeper than the stack, rather than overflowing it", () => {
+    expect(failure(() => formatModelJson(events({ x: lists(100_000, 1) }))).message).toBe(DEPTH);
   });
 });
