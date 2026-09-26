@@ -1383,8 +1383,8 @@ them as typed, but for a workspace user id, which it refuses too from
 ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/66)).
 `createInvitation` refuses an `allowedContextIds` entry that is not a
 UUID before sending anything (`allowedContextIds must be a UUID, got
-"ctx-1"`), and sends each in canonical form, as the Python SDK does from
-0.41.1.
+'ctx-1'`), and sends each in canonical form, as the Python SDK does from
+0.41.1; it and every workspace id take the spellings `uuid.UUID` takes.
 
 ## Zero-knowledge secrets
 

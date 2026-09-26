@@ -71,8 +71,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anything is read, for an admin invitation too, where it was exit 1 after
   the credential; `WorkspaceClient.createInvitation` refuses such an
   `allowedContextIds` entry before any request and sends each one in
-  canonical form. `member remove` and `revoke-key` ask about the workspace
-  in canonical form, as the Python CLI 0.41.1 does.
+  canonical form; it and every `WorkspaceClient` workspace id now take
+  the spellings Python's `uuid.UUID` takes (`0x…`, `urn:`/`uuid:`
+  anywhere, padding and underscores in the hex), and the message quotes
+  the value as Python's `repr` does (`got 'ctx-1'`). `member remove` and
+  `revoke-key` ask about the workspace in canonical form, as the Python
+  CLI 0.41.1 does.
 - **`guardrails digest --out`** refuses an empty or whitespace-only path
   in the Python CLI 0.41.1's words (`Invalid value for '--out': the path
   is blank; name a file`, exit 2), where `' '` was taken as a file name.

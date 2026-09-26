@@ -271,10 +271,10 @@ describe("invitations", () => {
     const client = makeClient(server);
     await expect(
       client.createInvitation(WS, "new@x.com", { allowedContextIds: ["22222222-3333-4444-5555-666666666666", "ctx-1"] }),
-    ).rejects.toThrow('allowedContextIds must be a UUID, got "ctx-1"');
+    ).rejects.toThrow("allowedContextIds must be a UUID, got 'ctx-1'");
     await expect(
       client.createInvitation(WS, "adm@x.com", { role: "admin", allowedContextIds: ["nope"] }),
-    ).rejects.toThrow('allowedContextIds must be a UUID, got "nope"');
+    ).rejects.toThrow("allowedContextIds must be a UUID, got 'nope'");
     expect(server.requests).toHaveLength(0);
   });
 
@@ -291,6 +291,33 @@ describe("invitations", () => {
       "22222222-3333-4444-5555-66666666666a",
       "99999999-8888-7777-6666-555555555555",
     ]);
+  });
+
+  // Recorded from the Python SDK 0.42.0's `normalize_uuid` (`uuid.UUID`):
+  // `urn:` and `uuid:` go anywhere, and `int(hex, 16)` takes a `0x`, padding
+  // and single underscores once the string is 32 characters long.
+  it.each([
+    ["0x111111111111111111111111111111", "00111111-1111-1111-1111-111111111111"],
+    ["1111urn:1111-2222-3333-4444-555555555555", "11111111-2222-3333-4444-555555555555"],
+    ["uuid:urn:11111111222233334444555555555555", "11111111-2222-3333-4444-555555555555"],
+    [" 1111111122223333444455555555555", "01111111-1222-2333-3444-455555555555"],
+    ["1111_111122223333444455555555555", "01111111-1222-2333-3444-455555555555"],
+  ])("createInvitation takes %j as the Python SDK does", async (spelling, canonical) => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify({ id: 3, email: "v@x.com", role: "viewer" });
+    const client = makeClient(server);
+    await client.createInvitation(WS, "v@x.com", { role: "viewer", allowedContextIds: [spelling] });
+    expect(JSON.parse(server.requests[0]!.body!).allowed_context_ids).toEqual([canonical]);
+  });
+
+  it("createInvitation refuses a padded canonical UUID, as uuid.UUID does", async () => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    await expect(
+      client.createInvitation(WS, "v@x.com", { role: "viewer", allowedContextIds: [` ${WS}`] }),
+    ).rejects.toThrow(`allowedContextIds must be a UUID, got ' ${WS}'`);
+    expect(server.requests).toHaveLength(0);
   });
 
   it("createInvitation for admin sends only email and role", async () => {
