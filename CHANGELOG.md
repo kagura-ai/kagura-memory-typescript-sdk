@@ -25,6 +25,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without writing and asks for the complete object with `--details`, in
   the Python CLI's words.
 
+### Changed
+
+- **`doctor`** reports a `/api/v1/system/info` body the SDK cannot read as
+  the Python CLI 0.42.0 does (python-sdk #277): `Server answered, but the
+  SDK could not read /api/v1/system/info: …`, with the failing fields,
+  where it said `Server unreachable: Invalid response format: …`.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

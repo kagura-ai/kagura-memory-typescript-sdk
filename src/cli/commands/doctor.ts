@@ -443,15 +443,28 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
  * disagree.
  *
  * The body is read as Python's `get_server_info` reads it, through its
- * `ServerInfo` model, and one the model refuses is unreachable, as
- * Python's `KaguraConnectionError` for it is. A credential that does not
+ * `ServerInfo` model. One the model refuses fails as Python 0.42.0's
+ * doctor fails it (python-sdk #277): the server answered, so it is "could
+ * not read", not "unreachable". A credential that does not
  * resolve fails the auth section, as Python's `_check_auth` reports it,
  * and skips this check, as Python's doctor has no client to check with.
  *
- * A failure other than an auth or connection error (a body that is no
- * JSON, a 429) fails the check with its message, where Python's doctor
- * stops with a traceback.
+ * Any other failure (a 429) fails the check with its message, as Python's
+ * doctor has done since 0.42.0.
  */
+/**
+ * Python 0.42.0's check for a 2xx `/system/info` body its `ServerInfo`
+ * model refuses (python-sdk #277): the server answered, so not
+ * "unreachable". The message names the fields and suggests the upgrade.
+ */
+function serverUnreadable(e: KaguraResponseError): DoctorCheck {
+  return {
+    section: "server",
+    status: "fail",
+    message: `Server answered, but the SDK could not read /api/v1/system/info: ${e.message}`,
+  };
+}
+
 async function checkServer(deps: CommandDeps, profile: string | undefined): Promise<DoctorCheck[]> {
   // With --profile, Python resolves that profile with no key forced over
   // it (`KAGURA_API_KEY` still first), so the check reaches the profile's
@@ -488,6 +501,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     if (e instanceof KaguraConnectionError) {
       return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
     }
+    if (e instanceof KaguraResponseError) return [serverUnreadable(e)];
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   } finally {
     await client.close();
@@ -497,9 +511,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     readModel(info, SERVER_INFO, "KaguraClient.get_server_info");
   } catch (e) {
     if (!(e instanceof KaguraResponseError)) throw e;
-    return [
-      { section: "server", status: "fail", message: `Server unreachable: Invalid response format: ${e.message}` },
-    ];
+    return [serverUnreadable(e)];
   }
   const version: unknown = (info as ServerInfo).version;
   warnBelowMinimum(version);

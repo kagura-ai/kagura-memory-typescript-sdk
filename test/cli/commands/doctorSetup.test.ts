@@ -681,8 +681,8 @@ describe("kagura-memory doctor", () => {
       ]);
     });
 
-    // Python's get_server_info reads the body through its ServerInfo model,
-    // and a refusal is a KaguraConnectionError: `Server unreachable`.
+    // Python 0.42.0's _check_server (python-sdk #277): the server answered,
+    // so a body its ServerInfo model refuses is not "unreachable".
     it.each([
       [{}, "name: Field required; version: Field required"],
       [[], "Input should be a valid dictionary or instance of ServerInfo"],
@@ -702,13 +702,48 @@ describe("kagura-memory doctor", () => {
         {
           status: "fail",
           message:
-            "Server unreachable: Invalid response format: KaguraClient.get_server_info: unexpected server " +
+            "Server answered, but the SDK could not read /api/v1/system/info: " +
+            "KaguraClient.get_server_info: unexpected server " +
             `response for ServerInfo (${problem}). The server may be newer than this SDK; upgrading ` +
             "kagura-memory may help.",
           details: {},
         },
       ]);
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("prints Python 0.42.0's drift line, recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4)", async () => {
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { version: 1, features: { reranking: "maybe" } };
+      expect(await runCli(["doctor"], h.deps)).toBe(1);
+      expect(h.out.join("\n")).toContain(
+        "FAIL Server answered, but the SDK could not read /api/v1/system/info: KaguraClient.get_server_info: " +
+          "unexpected server response for ServerInfo (name: Field required; version: Input should be a valid " +
+          "string; features.reranking: Input should be a valid boolean, unable to interpret input). The server " +
+          "may be newer than this SDK; upgrading kagura-memory may help.",
+      );
+    });
+
+    it("fails a rate-limited probe with the error's message, as Python 0.42.0 does", async () => {
+      // Recorded from the Python CLI 0.42.0: {"detail": "Too many requests"} with HTTP 429.
+      const h = harness();
+      h.server.forcedResponse = new Response('{"detail": "Too many requests"}', { status: 429 });
+      const { code, checks } = await serverChecks(h);
+      expect(code).toBe(1);
+      expect(checks).toEqual([
+        { status: "fail", message: "Rate limit exceeded (HTTP 429): Too many requests", details: {} },
+      ]);
+    });
+
+    it("still calls a 2xx body that is not JSON unreachable", async () => {
+      // Python 0.42.0: "Server unreachable: Invalid response format: Expecting value: line 1
+      // column 1 (char 0)" — the parser's words differ, the prefix does not.
+      const h = harness();
+      h.server.forcedResponse = new Response("not json", { status: 200 });
+      const { code, checks } = await serverChecks(h);
+      expect(code).toBe(1);
+      expect(checks).toHaveLength(1);
+      expect(checks[0]!.message).toMatch(/^Server unreachable: Invalid response format: /);
     });
 
     it("passes a body with Python's optional fields and flags, and keys it does not know", async () => {

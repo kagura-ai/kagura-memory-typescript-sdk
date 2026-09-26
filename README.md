@@ -642,9 +642,15 @@ included) and is `info` when it cannot be compared (`main-abc123`, `0.78`).
 An unreachable server fails with `Server unreachable: …`, and an OAuth
 profile the REST route refuses is `info`, in Python's words. The
 `/system/info` body is read through Python's `ServerInfo` model, and one
-it refuses (no `name`, a `version` that is no string) fails as
-unreachable: `Server unreachable: Invalid response format: …`, naming the
-problem in the SDK's words where Python prints pydantic's. A credential
+it refuses (no `name`, a `version` that is no string) fails as the Python
+CLI 0.42.0 fails it: `Server answered, but the SDK could not read
+/api/v1/system/info: KaguraClient.get_server_info: unexpected server
+response for ServerInfo (…). The server may be newer than this SDK;
+upgrading kagura-memory may help.` Any other error from the probe, such
+as a 429, fails the check with its own message (`Rate limit exceeded (HTTP
+429): …`). A body that is not JSON is still `Server unreachable: Invalid
+response format: …`, with JavaScript's parser message where Python prints
+its `json` module's. A credential
 that does not resolve fails the auth section with Python's
 `Authentication could not be resolved: …` and skips the server check
 (`info`), as in Python. With
