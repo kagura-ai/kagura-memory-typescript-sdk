@@ -33,9 +33,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing `KAGURA_PROFILE` fail the auth section and skip the check. An
   insecure resolved MCP URL is Python's warning, and the check is skipped
   (`Server connectivity check skipped because the MCP URL is insecure`),
-  where it failed; `KAGURA_MCP_URL` with no `.kagura.json` is that
-  resolved URL, not a configured `mcp_url`, so it gets the warning alone
-  (exit 0), where the `mcp` section also failed it. `--profile missing`
+  where it failed, from every source: `KAGURA_MCP_URL` with no
+  `.kagura.json`, and the `mcp_url` of the `.kagura.json` the credential
+  resolved from, get the warning alone (exit 0), where the `mcp` section
+  also failed them (`mcp_url is not HTTPS: …`, exit 1). A plain-HTTP
+  `.kagura.json` `mcp_url` that `KAGURA_API_KEY` or an OAuth profile
+  shadows still fails, as `setup claude` refuses it (README, `doctor`).
+  `--profile missing`
   no longer fails when `KAGURA_API_KEY` is set, and `--profile ''` means
   the default profile. A `.kagura.json` that does not parse fails the
   check with the message naming it, never as `No credentials found`.

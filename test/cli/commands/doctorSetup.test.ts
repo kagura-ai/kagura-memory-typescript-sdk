@@ -193,11 +193,80 @@ describe("kagura-memory doctor", () => {
     }
   });
 
-  it("fails on a plaintext mcp_url, because the bearer token would be in the clear", async () => {
-    const h = harness({ api_key: "k", mcp_url: "http://memory.example.com/mcp" });
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4), run
+  // from a scratch cwd holding {"api_key":"kagura_x","mcp_url":"http://10.255.255.1/mcp"}
+  // with an empty HOME and no KAGURA_API_KEY: the credential resolves from
+  // the file, its mcp_url is the resolved URL, and Python's doctor judges
+  // that URL once, in _check_https:
+  //   WARN MCP URL must use HTTPS for security (got: http://10.255.255.1/mcp). HTTP is only allowed for localhost development.
+  //   INFO Server connectivity check skipped because the MCP URL is insecure
+  //   exit 0
+  // (--json: the two checks are the last, {"mcp_url": …} and {} as details,
+  // "exit_code": 0). This bin printed FAIL mcp_url is not HTTPS as well and
+  // exited 1 (B11).
+  it("warns once, not fails, for a .kagura.json whose plain-HTTP mcp_url the credential resolves to (#69)", async () => {
+    process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+    const url = "http://10.255.255.1/mcp";
+    const h = harness({ api_key: "kagura_x", mcp_url: url });
     const code = await runCli(["doctor"], h.deps);
+    expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+    expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
+    expect(h.out.slice(-2)).toEqual([
+      `WARN MCP URL must use HTTPS for security (got: ${url}). HTTP is only allowed for localhost development.`,
+      "INFO Server connectivity check skipped because the MCP URL is insecure",
+    ]);
+    expect(h.server.requests).toEqual([]);
+    expect(code).toBe(0);
+  });
+
+  it("reports that file URL once with --json too, in Python's shape (#69)", async () => {
+    process.chdir(sandbox);
+    const url = "http://10.255.255.1/mcp";
+    const h = harness({ api_key: "kagura_x", mcp_url: url });
+    const code = await runCli(["doctor", "--json"], h.deps);
+    const report = JSON.parse(h.out.join("\n")) as {
+      checks: { section: string; status: string; message: string; details: unknown }[];
+      exit_code: number;
+      mcp: string;
+    };
+    expect(report.checks.filter((c) => /mcp_url is/.test(c.message))).toEqual([]);
+    expect(report.checks.slice(-2)).toEqual([
+      {
+        section: "mcp",
+        status: "warn",
+        message: `MCP URL must use HTTPS for security (got: ${url}). HTTP is only allowed for localhost development.`,
+        details: { mcp_url: url },
+      },
+      {
+        section: "server",
+        status: "info",
+        message: "Server connectivity check skipped because the MCP URL is insecure",
+        details: {},
+      },
+    ]);
+    expect(report.mcp).toBe("warn");
+    expect(report.exit_code).toBe(0);
+    expect(code).toBe(0);
+  });
+
+  // The file's URL is not the resolved one: the env key brings its own
+  // (KAGURA_MCP_URL, else the default), so checkServer never sees the
+  // file's. Python's doctor does not read it either; this bin keeps failing
+  // it, as `setup claude` refuses that URL whichever source it came from
+  // (README, doctor).
+  it("still fails a plain-HTTP .kagura.json mcp_url that KAGURA_API_KEY's own URL shadows", async () => {
+    process.chdir(sandbox);
+    process.env.KAGURA_API_KEY = "kagura_x";
+    process.env.KAGURA_MCP_URL = "https://x.test/mcp";
+    const h = harness({ api_key: "k", mcp_url: "http://memory.example.com/mcp" });
+    h.server.restResults["/api/v1/system/info"] = { name: "k", version: "0.78.0" };
+    const code = await runCli(["doctor"], h.deps);
+    expect(h.out).toContain(
+      "FAIL mcp_url is not HTTPS: http://memory.example.com/mcp — credentials would be sent in the clear",
+    );
+    expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toEqual([]);
+    expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
     expect(code).toBe(1);
-    expect(h.out.join("\n")).toMatch(/FAIL .*not HTTPS/);
   });
 
   it("accepts plaintext localhost, which is a deliberate dev choice", async () => {
@@ -219,17 +288,32 @@ describe("kagura-memory doctor", () => {
     expect(h.out.join("\n")).not.toMatch(/not HTTPS/);
   });
 
+  // Every spelling the clients refuse is the resolved URL here, so each is
+  // checkServer's one warning, never a FAIL on top of it.
   it.each([
     "HTTP://memory.example.com/mcp",
     "http:memory.example.com/mcp",
     " http://memory.example.com/mcp",
     "ht\ttp://memory.example.com/mcp",
-    // Not http(s) at all: no credential goes anywhere, but it is no HTTPS URL.
-    "ftp://memory.example.com/mcp",
-  ])("fails %j", async (url) => {
+  ])("warns once for %j, which the client refuses, and exits 0 as Python does", async (url) => {
+    process.chdir(sandbox);
+    const h = harness({ api_key: "k", mcp_url: url });
+    expect(await runCli(["doctor"], h.deps)).toBe(0);
+    expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+    expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toHaveLength(1);
+    expect(h.out).toContain("INFO Server connectivity check skipped because the MCP URL is insecure");
+    expect(h.server.requests).toEqual([]);
+  });
+
+  // Not http(s) at all: no credential goes anywhere, but it is no HTTPS URL,
+  // and no HTTPS check refuses it, so checkServer has no warning to defer to.
+  it("fails a configured mcp_url that is not http(s) at all", async () => {
+    process.chdir(sandbox);
+    const url = "ftp://memory.example.com/mcp";
     const h = harness({ api_key: "k", mcp_url: url });
     expect(await runCli(["doctor"], h.deps)).toBe(1);
     expect(h.out).toContain(`FAIL mcp_url is not HTTPS: ${url} — credentials would be sent in the clear`);
+    expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toEqual([]);
   });
 
   it("warns that KAGURA_API_KEY outranks any OAuth profile", async () => {
@@ -240,7 +324,9 @@ describe("kagura-memory doctor", () => {
   });
 
   it("exits 1 when any check fails and 0 when none do", async () => {
-    const bad = harness({ api_key: "k", mcp_url: "http://x.example/mcp" });
+    // A plain-HTTP resolved URL is a warning, as in Python; a URL that is no
+    // http(s) URL at all is still this bin's own failing check.
+    const bad = harness({ api_key: "k", mcp_url: "ftp://x.example/mcp" });
     expect(await runCli(["doctor"], bad.deps)).toBe(1);
 
     const good = harness();

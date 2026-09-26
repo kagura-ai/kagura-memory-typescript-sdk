@@ -199,14 +199,19 @@ const CREDENTIAL_FIX: Record<Exclude<ClaudeScope, "project">, string> = {
     "`kagura-memory setup claude`",
 };
 
-function checkMcp(deps: CliDeps): DoctorCheck[] {
+/**
+ * The `mcp` section: the file's `mcp_url`, `.mcp.json` and the entry
+ * Claude Code uses. `warned` is the resolved MCP URL `checkServer` has
+ * already warned about as Python's `_check_https` does (a warning, the
+ * check skipped), or `null`: a verdict here on that same URL would fail
+ * it for one cause, exit 1 where Python 0.42.0 exits 0.
+ */
+function checkMcp(deps: CliDeps, warned: string | null): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const config = safeConfig(deps);
   // A config built from the environment (no `.kagura.json`) carries
-  // `KAGURA_MCP_URL` or the default, not a URL any file configured. That
-  // is the resolved URL, which `checkServer` reports as Python's
-  // `_check_https` does (a warning, the check skipped); a verdict here too
-  // would fail the same plain-HTTP URL for one cause, where Python exits 0.
+  // `KAGURA_MCP_URL` or the default, not a URL any file configured; that
+  // is the resolved URL, `checkServer`'s to report.
   const envBuilt = config !== null && isEnvFallbackConfig(config as unknown as KaguraConfig);
   const url = !envBuilt && typeof config?.mcp_url === "string" ? config.mcp_url : "";
   if (envBuilt && process.env.KAGURA_MCP_URL) {
@@ -225,6 +230,12 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
     }
     if (!refused && /^https?:/i.test(normalizeUrl(url))) {
       checks.push({ section: "mcp", status: "pass", message: `mcp_url is ${url}` });
+    } else if (url === warned) {
+      // The credential resolved from this file, so its URL is the one
+      // checkServer warned about: Python's single WARN, exit 0. A file
+      // URL that another source shadows (KAGURA_API_KEY, an OAuth
+      // profile) is not reported there and still fails here, as `setup
+      // claude` refuses it.
     } else {
       checks.push({
         section: "mcp",
@@ -573,10 +584,13 @@ export const DOCTOR: Command = {
     // The server check resolves the credential; a failure to is reported
     // with the auth checks, where Python's `_check_auth` reports it.
     const server = await checkServer(deps, args.values.profile);
+    // The only `mcp` check the server check makes is the insecure-URL
+    // warning; checkMcp must not fail that URL a second time.
+    const warned = server.find((c) => c.section === "mcp")?.details?.mcp_url;
     const checks: DoctorCheck[] = [
       ...checkAuth(deps, args.values.profile),
       ...server.filter((c) => c.section === "auth"),
-      ...checkMcp(deps as CliDeps),
+      ...checkMcp(deps as CliDeps, typeof warned === "string" ? warned : null),
       ...(await checkExtras()),
       ...checkKeyCustody(),
       {

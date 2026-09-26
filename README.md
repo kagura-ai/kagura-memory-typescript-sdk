@@ -99,7 +99,9 @@ Credentials travel over HTTPS only. Every client, `login()`, `auth login
 --server` and the URL every `setup` subcommand puts in a harness entry
 (`setup claude`, `setup codex`, `setup hermes` and `setup openclaw`)
 refuse a plain-HTTP URL unless its host is `localhost`, `127.0.0.1` or
-`[::1]`, and `doctor` fails a configured `mcp_url` like that. The URL is
+`[::1]`; `doctor` warns about a resolved MCP URL like that and skips the
+server check, as the Python CLI does, and fails a configured `mcp_url`
+like that which the credential does not use (see `doctor`). The URL is
 read as `fetch` reads it, so the scheme in any case (`HTTP://`), without
 its slashes (`http:host`), or with whitespace or control characters
 around it or a tab or newline inside it is refused all the same, as in
@@ -683,7 +685,14 @@ resolves it, as in Python: `KAGURA_API_KEY`, then the OAuth profile
 (`--profile NAME`, `KAGURA_PROFILE` or the default; an empty `--profile`
 is the default), then `.kagura.json`. A resolved MCP URL that is not HTTPS
 is a warning and the server is not contacted (`Server connectivity check
-skipped because the MCP URL is insecure`). `--json`
+skipped because the MCP URL is insecure`), whichever source it came from:
+an OAuth profile's URL, `KAGURA_MCP_URL`, or the `mcp_url` of the
+`.kagura.json` the credential resolved from (exit 0, as in Python). One
+remaining difference: a plain-HTTP `.kagura.json` `mcp_url` that the
+credential does not use, because `KAGURA_API_KEY` or an OAuth profile
+brings its own URL, still fails the `mcp` section here (`mcp_url is not
+HTTPS: …`, exit 1), since `setup claude` would refuse that URL; the
+Python CLI's `doctor` never reads the file's `mcp_url`. `--json`
 prints Python's shape, with `details` on every check (`{}` when there are
 none). Any failed check exits 1.
 
