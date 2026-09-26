@@ -258,7 +258,12 @@ with a traceback. Two limits of JavaScript numbers remain: a number in the
 payload is sent as JavaScript reads it, so an integer past 2^53 loses its
 last digits and `10.0` is sent as `10`, where Python sends them as
 written; and `-V` above 2^53 is refused as too large (exit 2), where
-Python sends it.
+Python sends it. The summary prints as Python's `json.dumps` prints it
+([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+`created` and `failed` add up exactly past 2^53, and each error keeps
+the server's key order and numbers (`1.0`, `1e+16`, `NaN`). The progress
+events' counts (`-v`) are still JavaScript numbers, so past 2^53 they
+are rounded where Python's are exact.
 
 **Progress.** `files upload` and `resource import` take `-v/--verbose`
 (repeatable) and `--progress rich|json|none`. Progress goes to stderr, one

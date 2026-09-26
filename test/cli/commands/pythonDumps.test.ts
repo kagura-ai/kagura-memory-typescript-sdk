@@ -465,6 +465,15 @@ const LOSSLESS_CASES: Case[] = [
     stdout: "",
     stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
   },
+  {
+    name: "import sums counts past 2^53 exactly and prints errors as json.dumps does",
+    argv: ["resource","import","-r","products","-k","rk","-f","rows.json"],
+    files: {"rows.json": `[${Array.from({ length: 101 }, (_, i) => `{"a": ${i}}`).join(", ")}]`},
+    routes: {"POST /api/v1/resources/products/events/batch":{"status":202,"raw":"{\"created_count\": 9007199254740993, \"failed_count\": 9007199254740993, \"errors\": [{\"index\": 0, \"2\": -0.0, \"a\": 1e16, \"b\": 1.0, \"n\": NaN}]}"}},
+    code: 0,
+    stdout: "{\n  \"created\": 18014398509481986,\n  \"failed\": 18014398509481986,\n  \"total\": 101,\n  \"errors\": [\n    {\n      \"index\": 0,\n      \"2\": -0.0,\n      \"a\": 1e+16,\n      \"b\": 1.0,\n      \"n\": NaN\n    },\n    {\n      \"index\": 0,\n      \"2\": -0.0,\n      \"a\": 1e+16,\n      \"b\": 1.0,\n      \"n\": NaN\n    }\n  ]\n}\n",
+    stderr: "",
+  },
 ];
 
 const AUTH: ResolvedAuth = { kind: "static", apiKey: "k", mcpUrl: "https://api.test/mcp", source: "config" };

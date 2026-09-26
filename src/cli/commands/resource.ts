@@ -48,8 +48,9 @@ import {
   RESOURCE_TOKEN_RESPONSE,
   type Model,
 } from "../../pyModels.js";
-import { formatModelJson } from "../modelDump.js";
+import { formatDumpsJson, formatModelJson } from "../modelDump.js";
 import { resolveConfig } from "../runClientCommand.js";
+import { exactInt } from "../../responseShape.js";
 import {
   detectFormat,
   EXTRA_CELLS,
@@ -726,8 +727,9 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
     detail: { desc: `${events_.length} event(s)` },
   });
 
-  let created = 0;
-  let failed = 0;
+  // Python's ints: a count past 2^53 adds exactly (#69).
+  let created: number | bigint = 0;
+  let failed: number | bigint = 0;
   const errors: unknown[] = [];
   try {
     const client = deps.makeResourceClient(resolveCliAuth(deps, config));
@@ -754,8 +756,8 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
         RESOURCE_EVENT_BATCH_RESPONSE,
         "ResourceClient.ingest_events",
       );
-      created += Number(result.created_count);
-      failed += Number(result.failed_count);
+      created = exactInt(BigInt(created) + BigInt(result.created_count as number | bigint));
+      failed = exactInt(BigInt(failed) + BigInt(result.failed_count as number | bigint));
       // Python keeps the first five errors per batch and prints ten in
       // total; a full dump of a bad 10k-row file is unreadable.
       errors.push(...(result.errors as unknown[]).slice(0, 5));
@@ -780,7 +782,9 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
   // rows than for 101.
   const output: Record<string, unknown> = { created, failed, total: events_.length };
   if (errors.length > 0) output.errors = errors.slice(0, 10);
-  deps.write(formatJson(output));
+  // `json.dumps`, as Python prints it: an error's keys in the server's
+  // order and its numbers as written (`1.0`, `1e+16`, `NaN`).
+  deps.write(formatDumpsJson(output));
   return 0;
 }
 

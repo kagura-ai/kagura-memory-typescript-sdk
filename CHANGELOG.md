@@ -27,6 +27,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escape; a key of the untyped mapping itself holding one prints as
   three U+FFFD, and a key of a mapping nested inside it exits 1 like a
   value. The values the SDK returns are unchanged.
+- **`resource import` adds its counts exactly and prints its summary as
+  Python's `json.dumps` does**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  `created` / `failed` past 2^53 are exact, and an error's `1.0`, `1e16`
+  and `NaN` print `1.0`, `1e+16` and `NaN`, in the server's key order.
 
 ## [0.13.0] - 2026-09-25
 
