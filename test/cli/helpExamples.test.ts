@@ -241,7 +241,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory setup codex --profile default",
     "    kagura-memory setup codex --profile default --context-id CTX_UUID",
     "    kagura-memory setup codex --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
-    // Python's fourth line, `--url-form --oauth`, comes with that flag (plan 70c), which adds it here.
+    "    kagura-memory setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
     "    kagura-memory setup codex --profile default --dry-run",
   ]],
   ["setup hermes", [
@@ -249,7 +249,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory setup hermes --profile default",
     "    kagura-memory setup hermes --profile default --context-id CTX_UUID --agents-md",
     "    kagura-memory setup hermes --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
-    // Python's fourth line, `--url-form --oauth`, comes with that flag (plan 70c), which adds it here.
+    "    kagura-memory setup hermes --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
     "    kagura-memory setup hermes --profile default -y     # print the block only",
   ]],
   ["setup openclaw", [
@@ -257,7 +257,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory setup openclaw --profile default",
     "    kagura-memory setup openclaw --profile default --context-id CTX_UUID --agents-md",
     "    kagura-memory setup openclaw --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
-    // Python's fourth line, `--url-form --oauth`, comes with that flag (plan 70c), which adds it here.
+    "    kagura-memory setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
     "    kagura-memory setup openclaw --profile default --force",
   ]],
   ["workspace invite create", [

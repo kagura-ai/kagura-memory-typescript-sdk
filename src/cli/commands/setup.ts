@@ -3197,7 +3197,6 @@ const codex: Command = {
     "  prints the table for you to add and sign in with `codex mcp login\n" +
     "  NAME`. Codex keeps the token in its own store, keyed on the URL. The\n" +
     "  API-key URL form stays the default.\n\n" +
-    "  kagura-memory setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID\n\n" +
     `${MCP_URL_RULE}\n\n` +
     GUARDRAILS_ADVICE +
     "\n\n" +
@@ -3205,6 +3204,7 @@ const codex: Command = {
       "setup codex --profile default",
       "setup codex --profile default --context-id CTX_UUID",
       "setup codex --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
       "setup codex --profile default --dry-run",
     ),
   spec: {
@@ -3270,13 +3270,13 @@ const hermes: Command = {
     "  Otherwise it prints the block. Sign in later with `hermes mcp login\n" +
     "  NAME` (the browser flow), or on memory-cloud 0.78.0+ with `hermes mcp\n" +
     "  login NAME --flow device`, which needs no loopback callback.\n\n" +
-    "  kagura-memory setup hermes --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID\n\n" +
     MCP_URL_RULE +
     "\n\n" +
     examples(
       "setup hermes --profile default",
       "setup hermes --profile default --context-id CTX_UUID --agents-md",
       "setup hermes --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup hermes --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
       "setup hermes --profile default -y     # print the block only",
     ),
   spec: {
@@ -3331,13 +3331,13 @@ const openclaw: Command = {
     "  probing: sign in with `openclaw mcp login NAME`, then check it with\n" +
     "  `openclaw mcp doctor NAME --probe`. The API-key URL form stays the\n" +
     "  default.\n\n" +
-    "  kagura-memory setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID\n\n" +
     MCP_URL_RULE +
     "\n\n" +
     examples(
       "setup openclaw --profile default",
       "setup openclaw --profile default --context-id CTX_UUID --agents-md",
       "setup openclaw --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
       "setup openclaw --profile default --force",
     ),
   spec: {
