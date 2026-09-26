@@ -13,6 +13,7 @@ import {
   KaguraRateLimitError,
   KaguraResponseError,
 } from "../src/errors.js";
+import { JsonNestingError } from "../src/losslessJson.js";
 import type { ListContextsResponse, SearchConfig } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
 
@@ -2262,6 +2263,41 @@ describe("REST endpoints", () => {
     for (const request of server.requests.slice(1)) {
       expect(request.url).toBe("https://x.test/mcp?profile=core");
     }
+  });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+  // `kagura doctor` against a server sending each body prints
+  // `FAIL Server unreachable: Invalid response format: <message>` (#69).
+  it.each([
+    ["<html>maintenance</html>", "Expecting value: line 1 column 1 (char 0)"],
+    ['{\n  "name": "k\\x"\n}', "Invalid \\escape: line 2 column 13 (char 14)"],
+    [
+      `{"name": "kagura", "version": "0.77.0", "x": ${"1".repeat(4301)}}`,
+      "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; " +
+        "use sys.set_int_max_str_digits() to increase the limit",
+    ],
+  ])("a REST body Python's json.loads refuses reads in its words: %#", async (body, message) => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(body, { status: 200 });
+    const client = makeClient(server);
+    await expect(client.getServerInfo()).rejects.toThrow(
+      new KaguraConnectionError(`Invalid response format: ${message}`),
+    );
+  });
+
+  it("a REST body with NaN reads as Python reads it; one nested past 973 containers fails as there (#69)", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response('{"name": "kagura", "version": "0.77.0", "search_defaults": {"w": NaN}}', {
+      status: 200,
+    });
+    const info = await makeClient(server).getServerInfo();
+    expect((info.search_defaults as unknown as { w: number }).w).toBeNaN();
+
+    const deep = new FakeServer();
+    deep.forcedResponse = new Response(`{"x": ${"[".repeat(10000)}${"]".repeat(10000)}}`, { status: 200 });
+    await expect(makeClient(deep).getServerInfo()).rejects.toThrow(
+      new JsonNestingError("maximum recursion depth exceeded while decoding a JSON array from a unicode string"),
+    );
   });
 
   it("checkServerVersion returns info and never throws on old servers", async () => {

@@ -13,6 +13,7 @@ import {
   KaguraQuotaError,
 } from "../src/errors.js";
 import { SDK_VERSION } from "../src/http.js";
+import { JsonNestingError, JsonNumber, orderedEntries, valueAt } from "../src/losslessJson.js";
 import { DEFAULT_REST_BASE_URL, KaguraRestClient, restClientFromAuth } from "../src/restBase.js";
 import { ResourceClient } from "../src/resourceClient.js";
 import { WorkspaceClient } from "../src/workspaceClient.js";
@@ -736,6 +737,43 @@ describe("response-body helpers", () => {
     expect(() =>
       probe.jsonPublic(envelopeOf("<html>maintenance</html>", 200, "GET", "/api/v1/items")),
     ).toThrow(/Server returned a non-JSON body \(HTTP 200\) for GET \/api\/v1\/items\./);
+  });
+
+  it("json() reads NaN and Infinity as Python's resp.json() does (#69)", () => {
+    const probe = makeProbe(new FakeRest());
+    const body = probe.jsonPublic(envelopeOf('{"a": NaN, "b": -Infinity}')) as { a: number; b: number };
+    expect(body.a).toBeNaN();
+    expect(body.b).toBe(-Infinity);
+  });
+
+  it("json() keeps the number literals and key order for the typed readers (#69)", () => {
+    const probe = makeProbe(new FakeRest());
+    const body = probe.jsonPublic(envelopeOf('{"b": 1, "2": 9007199254740993}')) as Record<string, unknown>;
+    expect(body["2"]).toBe(9007199254740992);
+    expect((valueAt(body, "2") as JsonNumber).text).toBe("9007199254740993");
+    expect(orderedEntries(body).map(([key]) => key)).toEqual(["b", "2"]);
+  });
+
+  it("json() maps an int literal past 4,300 digits to the non-JSON error, as Python's ValueError is", () => {
+    const probe = makeProbe(new FakeRest());
+    expect(() => probe.jsonPublic(envelopeOf(`[${"1".repeat(4301)}]`, 200, "GET", "/api/v1/items"))).toThrow(
+      "Server returned a non-JSON body (HTTP 200) for GET /api/v1/items.",
+    );
+  });
+
+  it("json() lets a body nested past 973 containers fail as Python's RecursionError does", () => {
+    const probe = makeProbe(new FakeRest());
+    let error: unknown;
+    try {
+      probe.jsonPublic(envelopeOf(`${"[".repeat(974)}${"]".repeat(974)}`));
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(JsonNestingError);
+    expect(error).not.toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(
+      "maximum recursion depth exceeded while decoding a JSON array from a unicode string",
+    );
   });
 
   it("expectList() returns a JSON array as-is", () => {

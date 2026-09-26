@@ -208,10 +208,28 @@ unexpected server response for PaginatedResourceTokensResponse
 (tokens.0.created_at: Field required). …`, and so does a body that is no
 record at all (`null`). An untyped mapping nested past pydantic's limit
 (256 containers) exits 1 with pydantic's `Error serializing to JSON:
-ValueError: Circular reference detected (depth exceeded)`. One limit
-remains: inside an untyped mapping (an event's `payload`, a batch's
-`errors`) a number is read as JavaScript reads it, so `1.0` prints `1`
-and an integer past 2^53 loses its last digits.
+ValueError: Circular reference detected (depth exceeded)`. The body is
+read as Python's `json.loads` reads it
+([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),
+so an int field sent `9007199254740993` prints exactly, one sent `1e20`
+exits 1 as pydantic refuses it (`Unable to parse input string as an
+integer, exceeded maximum size`), and a float field sent `-0` prints
+`0.0`. Inside an untyped mapping (an event's `payload`, a batch's
+`errors`) the keys print in the server's order (`{"b": 1, "2": 2}` stays
+so) and each number as Python read it (`1.0`, `1e+16`, `-0.0`, an
+integer past 2^53 exactly). `NaN` and `Infinity` are read, and print
+`null` as pydantic writes them; an integer of more than 4,300 digits
+makes the body non-JSON, as Python's `int()` limit does; and a body
+nested deeper than 973 containers exits 1 with Python's `maximum
+recursion depth exceeded while decoding a JSON array from a unicode
+string`. Three differences remain. Python's depth is its recursion limit
+less the stack in use: 973 is what these commands reach, and `doctor`
+given such a `/api/v1/system/info` body reports a failed server check
+where Python stops with a traceback. A body that is not valid UTF-8 is
+read with U+FFFD in place of the bad bytes, where Python calls it
+non-JSON. And only REST bodies are read this way: the MCP commands
+(`recall`, `remember`, …) still print a whole float as `1` and list an
+object's integer keys first.
 
 **Files and imports.** The `files` commands take their workspace from the
 credential's own source, as the Python CLI does (its #115): `-c` when

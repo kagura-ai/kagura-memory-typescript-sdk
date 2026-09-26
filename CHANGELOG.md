@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **REST bodies are read as Python's `json.loads` reads them**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
+  The resource and files commands keep the server's key order inside an
+  untyped mapping (`{"b": 1, "2": 2}` no longer prints `"2"` first) and
+  print each number as written: an int field sent `9007199254740993`
+  prints exactly and one sent `1e20` is refused as pydantic refuses it, a
+  float field sent `-0` prints `0.0`, and `1e16` / `-0.0` in a `payload`
+  print `1e+16` / `-0.0`. A body with `NaN` or `Infinity` is read rather
+  than refused as non-JSON; one nested deeper than 973 containers fails
+  with Python's `maximum recursion depth exceeded while decoding a JSON
+  array from a unicode string`; and `KaguraClient`'s REST methods word an
+  unreadable body as Python does (`Invalid response format: Expecting
+  value: line 1 column 1 (char 0)`). The values the SDK returns are
+  unchanged.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

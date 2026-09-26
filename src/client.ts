@@ -60,6 +60,7 @@ import type {
   ToolTrigger,
   UsageInfo,
 } from "./models.js";
+import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
 import { pyRepr, pyTypeName } from "./python.js";
@@ -1073,9 +1074,13 @@ export class KaguraClient {
       }
       throwForKaguraStatus(response.status, response.headers, text);
     }
+    // Read as Python's `response.json()` reads it (#69), so a body it
+    // refuses reads in its words; its RecursionError is no ValueError, so
+    // Python lets it through, and so does this.
     try {
-      return JSON.parse(text) as T;
+      return parseJsonLossless(text) as T;
     } catch (e) {
+      if (e instanceof JsonNestingError) throw e;
       throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, { cause: e });
     }
   }
