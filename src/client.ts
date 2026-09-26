@@ -1094,12 +1094,15 @@ export class KaguraClient {
       }
     }
 
+    // Before the try, as post() and restBase do: a refresh that fails is
+    // the KaguraAuthExpiredError it is, not a connection failure (#69).
+    const authorization = await this.auth.getAuthHeader();
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
         method: "GET",
         headers: {
-          authorization: await this.auth.getAuthHeader(),
+          authorization,
           "user-agent": `kagura-memory-sdk/${SDK_VERSION}`,
         },
         signal: AbortSignal.timeout(this.timeoutMs),

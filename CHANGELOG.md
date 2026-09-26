@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An OAuth refresh failure on a `KaguraClient` REST read is a
+  `KaguraAuthExpiredError`** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),
+  as on the MCP path and in the REST clients, where it was a
+  `KaguraConnectionError` (`Connection failed: …`). `doctor` now prints
+  Python's OAuth info line for it rather than `Server unreachable`.
 - **MCP envelope errors read as the Python SDK's**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
   a `null` JSON-RPC body is no result instead of a `TypeError`, a

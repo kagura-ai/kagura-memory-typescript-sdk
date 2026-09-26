@@ -1,8 +1,13 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KaguraClient, MIN_SERVER_VERSION } from "../src/client.js";
 import {
   KaguraAuthError,
+  KaguraAuthExpiredError,
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
@@ -2687,5 +2692,49 @@ describe("the MCP envelope in the Python SDK's words (#69)", () => {
       `rollback_sleep_run: unexpected server response for RollbackSummary (${problem}). ` +
         "The server may be newer than this SDK; upgrading kagura-memory may help.",
     );
+  });
+});
+
+describe("REST reads with an OAuth profile (#69)", () => {
+  it("throws a refresh failure as the auth error it is, not as a connection failure", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-rest-auth-"));
+    try {
+      fs.mkdirSync(path.join(home, ".kagura"), { mode: 0o700 });
+      const profile = {
+        server: "https://x.test",
+        mcp_url: "https://x.test/mcp",
+        client_id: "c",
+        access_token: "at",
+        refresh_token: "",
+        token_type: "Bearer",
+        expires_at: "2020-01-01T00:00:00Z",
+        scope: "",
+        workspace_id: "w",
+        workspace_name: "W",
+        user_email: "u@x",
+        issued_at: "2019-12-31T00:00:00Z",
+      };
+      fs.writeFileSync(
+        path.join(home, ".kagura", "credentials.json"),
+        JSON.stringify({ version: 1, default_profile: "default", profiles: { default: profile } }),
+        { mode: 0o600 },
+      );
+      const calls: string[] = [];
+      const client = new KaguraClient({
+        home,
+        env: {},
+        fetch: async (input) => {
+          calls.push(String(input));
+          return new Response("{}");
+        },
+      });
+      const error = await client.getServerInfo().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraAuthExpiredError);
+      expect(error).not.toBeInstanceOf(KaguraConnectionError);
+      expect((error as Error).message).toMatch(/^This profile was stored without a refresh token/);
+      expect(calls).toEqual([]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

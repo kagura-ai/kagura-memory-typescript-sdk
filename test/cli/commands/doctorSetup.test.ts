@@ -4,8 +4,8 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_MCP_URL } from "../../../src/auth/resolve.js";
-import { MIN_SERVER_VERSION } from "../../../src/client.js";
+import { DEFAULT_MCP_URL, resolveAuth } from "../../../src/auth/resolve.js";
+import { KaguraClient, MIN_SERVER_VERSION, type KaguraClientOptions } from "../../../src/client.js";
 import { KaguraAuthError } from "../../../src/errors.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { classifyMcpEntry, holdsCredential, unsetHeaderVars } from "../../../src/cli/commands/setup.js";
@@ -132,6 +132,36 @@ function claude(...extra: string[]): string[] {
 
 function readJson(file: string): Record<string, any> {
   return JSON.parse(fs.readFileSync(file, "utf-8"));
+}
+
+/** A profile as credentials.json stores it: a valid, unexpired one, `fields` over it. */
+function profileJson(fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    server: "https://x.test",
+    mcp_url: "https://x.test/mcp",
+    client_id: "c",
+    access_token: "at",
+    refresh_token: "rt",
+    token_type: "Bearer",
+    expires_at: "2099-01-01T00:00:00Z",
+    scope: "memory:read",
+    workspace_id: "w",
+    workspace_name: "W",
+    user_email: "u@x",
+    issued_at: "2026-01-01T00:00:00Z",
+    ...fields,
+  };
+}
+
+/** Write `$HOME/.kagura/credentials.json` in the sandbox, mode 600. */
+function writeCredentials(profiles: Record<string, Record<string, unknown>>, defaultProfile = "default"): void {
+  const dir = path.join(process.env.HOME!, ".kagura");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(dir, "credentials.json"),
+    JSON.stringify({ version: 1, default_profile: defaultProfile, profiles }),
+    { mode: 0o600 },
+  );
 }
 
 /** A `claude plugin list --json` stand-in answering with `plugins`. */
@@ -640,6 +670,25 @@ describe("kagura-memory doctor", () => {
           details: {},
         },
       ]);
+    });
+
+    it("reports an OAuth refresh failure as Python's info line, not as unreachable (#69)", async () => {
+      writeCredentials({ default: profileJson({ refresh_token: "", expires_at: "2020-01-01T00:00:00Z" }) });
+      const h = harness({});
+      h.deps.resolveAuth = resolveAuth as unknown as CliDeps["resolveAuth"];
+      h.deps.makeClient = ((o: KaguraClientOptions) =>
+        new KaguraClient({ ...o, fetch: h.server.fetch })) as CliDeps["makeClient"];
+      const { checks } = await serverChecks(h);
+      expect(checks).toEqual([
+        {
+          status: "info",
+          message:
+            "Could not verify server version over REST with an OAuth profile (expected: REST " +
+            "validates API keys, not OAuth bearers; the MCP connection is unaffected).",
+          details: {},
+        },
+      ]);
+      expect(h.server.requests).toEqual([]);
     });
 
     it("fails with the error's message when no client can be built", async () => {
