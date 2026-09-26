@@ -630,10 +630,12 @@ purpose or out of reach:
   (`memories.0.use_count: Field required`).
 - `listMemories` returns its body unchecked. The Python SDK has read it
   through `MemoryListResponse` since 0.40.0.
-- The kept Hermes OAuth entry of 0.41.3 (python-sdk #287) does not arise:
-  `setup hermes` never runs `hermes mcp add`, so there is no overwrite
-  prompt to decline. It prints the entry to put in place of the existing
-  one, as Python does under `-y`.
+- The kept Hermes OAuth entry of 0.41.3 (python-sdk #287) arises only
+  under `setup hermes --url-form --oauth`, the one form that runs
+  `hermes mcp add` (attached, so its overwrite prompt can be declined)
+  and reads the entry back with `hermes config get`. The API-key form
+  never runs `hermes mcp add`: it prints the entry to put in place of the
+  existing one, as Python does under `-y`.
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
