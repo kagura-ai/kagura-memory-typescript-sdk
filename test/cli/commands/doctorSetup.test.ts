@@ -877,15 +877,19 @@ describe("kagura-memory doctor", () => {
       ]);
     });
 
-    it("still calls a 2xx body that is not JSON unreachable", async () => {
-      // Python 0.42.0: "Server unreachable: Invalid response format: Expecting value: line 1
-      // column 1 (char 0)" — the parser's words differ, the prefix does not.
+    it("still calls a 2xx body that is not JSON unreachable, in Python's json words", async () => {
+      // Recorded from the Python CLI 0.42.0; the body is read as json.loads reads it (#69).
       const h = harness();
       h.server.forcedResponse = new Response("not json", { status: 200 });
       const { code, checks } = await serverChecks(h);
       expect(code).toBe(1);
-      expect(checks).toHaveLength(1);
-      expect(checks[0]!.message).toMatch(/^Server unreachable: Invalid response format: /);
+      expect(checks).toEqual([
+        {
+          status: "fail",
+          message: "Server unreachable: Invalid response format: Expecting value: line 1 column 1 (char 0)",
+          details: {},
+        },
+      ]);
     });
 
     it("passes a body with Python's optional fields and flags, and keys it does not know", async () => {

@@ -785,8 +785,9 @@ response for ServerInfo (…). The server may be newer than this SDK;
 upgrading kagura-memory may help.` Any other error from the probe, such
 as a 429, fails the check with its own message (`Rate limit exceeded (HTTP
 429): …`). A body that is not JSON is still `Server unreachable: Invalid
-response format: …`, with JavaScript's parser message where Python prints
-its `json` module's. A credential
+response format: …`, in the words of Python's `json` module (`Expecting
+value: line 1 column 1 (char 0)`), since the body is read as `json.loads`
+reads it. A credential
 that does not resolve fails the auth section with Python's
 `Authentication could not be resolved: …` and skips the server check
 (`info`), as in Python. The credential is resolved as a bare client
