@@ -901,7 +901,17 @@ describe("guardrails digest --out", () => {
 
   it("refuses a fetched block without its markers, naming the file", async () => {
     expect((await digestOut("NEW.md", "- (x) no markers\n")).err).toEqual([
-      "Error: NEW.md: fetched block does not have exactly one begin and one end marker line; " +
+      "Error: NEW.md: fetched block does not have exactly one begin and one end marker line, in that order; " +
+        "left unchanged",
+    ]);
+    expect(fs.existsSync("NEW.md")).toBe(false);
+  });
+
+  it("refuses a fetched block whose end marker comes first, naming the file", async () => {
+    const endFirst =
+      "<!-- kagura-memory:guardrails end -->\n" + EXPORT_BLOCK.replace("<!-- kagura-memory:guardrails end -->\n", "");
+    expect((await digestOut("NEW.md", endFirst)).err).toEqual([
+      "Error: NEW.md: fetched block does not have exactly one begin and one end marker line, in that order; " +
         "left unchanged",
     ]);
     expect(fs.existsSync("NEW.md")).toBe(false);

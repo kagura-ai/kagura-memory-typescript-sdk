@@ -1940,12 +1940,13 @@ describe("--agents-md", () => {
       expect(notes(h)).toContain(`Warning: ~/.codex/AGENTS.md is ${size} bytes; Codex reads only the first 32768.`);
     });
 
-    it("counts the bytes on disk, CRLFs included, which Python's folded count misses", async () => {
+    it("counts the bytes on disk, CRLFs included, as Python 0.41.1 does", async () => {
       fs.mkdirSync(path.dirname(codexAgents()), { recursive: true });
       fs.writeFileSync(codexAgents(), "a\r\n".repeat(11_000)); // 33,000 bytes; 22,000 characters as text
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
-      expect(notes(h).join("\n")).toMatch(/is \d+ bytes; Codex reads only the first 32768\./);
+      const size = fs.statSync(codexAgents()).size;
+      expect(notes(h)).toContain(`Warning: ~/.codex/AGENTS.md is ${size} bytes; Codex reads only the first 32768.`);
     });
 
     it("gives no size warning under the cap", async () => {
@@ -2005,7 +2006,7 @@ describe("--agents-md", () => {
     });
 
     it("says the entry was only printed when no harness CLI applied it", async () => {
-      // Python says "set up" here too.
+      // As Python 0.41.1 says it (python-sdk #285).
       const target = path.join(sandbox, "AGENTS.md");
       for (const name of ["hermes", "codex"]) {
         const h = harness({});
@@ -2382,9 +2383,30 @@ describe("--agents-md", () => {
       expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
       expect(notes(h).join("\n")).not.toContain("reads only the first");
     });
+
+    it("counts a CRLF as two characters, as Python's read_bytes().decode() does", async () => {
+      // python-sdk #285: 21,000 characters as written, 14,000 once CRLF is folded.
+      fs.mkdirSync(path.dirname(workspace()), { recursive: true });
+      fs.writeFileSync(workspace(), "x\r\n".repeat(7_000));
+      const h = harness(openclaw);
+      expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
+      const size = [...new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(workspace()))].length;
+      expect(size).toBeGreaterThan(20_000);
+      expect(notes(h)).toContain(
+        `Warning: ~/.openclaw/workspace/AGENTS.md is ${size} characters; OpenClaw reads only the first 20000.`,
+      );
+    });
   });
 
   describe("its PATH", () => {
+    it("keeps ~user as written, as a relative path (python-sdk #285)", async () => {
+      process.chdir(sandbox);
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "~no-such-user-285/AGENTS.md"), h.deps)).toBe(0);
+      expect(fs.readFileSync(path.join(sandbox, "~no-such-user-285", "AGENTS.md"), "utf-8")).toBe(EXPORT_BLOCK);
+      expect(notes(h)).toContain(`Wrote the guardrail block for context ${CONTEXT} in ~no-such-user-285/AGENTS.md`);
+    });
+
     it("expands a leading ~", async () => {
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "~/notes/n.md"), h.deps)).toBe(0);

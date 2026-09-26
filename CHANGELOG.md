@@ -58,6 +58,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is blank; name a file`, exit 2), where `' '` was taken as a file name.
   `--agents-md`, `--agents-md=VALUE` and the float ranges already behaved
   as 0.41.1 does, and now have recorded tests.
+- **The `AGENTS.md` export** (python-sdk #285): the OpenClaw size warning
+  counts the characters as written, a CRLF as two, as the Python CLI
+  0.41.1 does, where a CRLF file just over 20,000 got no warning; a
+  fetched block with its markers missing or out of order is refused in
+  Python's words (`fetched block does not have exactly one begin and one
+  end marker line, in that order`), by `setup` and by `guardrails digest
+  --out`.
 
 ## [0.13.0] - 2026-09-25
 

@@ -398,9 +398,9 @@ exists); for Hermes the first of `.hermes.md`, `HERMES.md`,
 directory, else `AGENTS.md`; for OpenClaw `AGENTS.md` in its workspace,
 `$OPENCLAW_WORKSPACE_DIR`, else `workspace/` in the state directory. A
 leading `~` or `~/` in PATH is expanded to your home directory (a
-`~user` is left as written; see below), and missing directories are
-created. The context is `--context-id`, else a `--guardrails` context
-UUID, never the
+`~user` is left as written, as in the Python CLI), and missing
+directories are created. The context is `--context-id`, else a
+`--guardrails` context UUID, never the
 URL's `?guardrails=` or `.kagura.json`; without one, `--agents-md` is a
 usage error (exit 2). The block is fetched on the usual credential chain
 (`KAGURA_API_KEY`, the OAuth profile, `.kagura.json`), which setup
@@ -545,19 +545,11 @@ the Python CLI in these ways, each on purpose:
 - Nothing prompts, so `--agents-md` always needs a context, and the
   export is never offered: a dry run of Hermes or OpenClaw says "not
   offered: this port never prompts" (or "not offered with -y").
-- When the entry was only printed (always for Hermes), a failed export
-  says "The MCP entry is printed for you to add", where Python says it is
-  set up. When the export credential is for another server, the message
+- When the export credential is for another server, the message
   says what moves it here, where Python's points at `--profile`: for
   `KAGURA_API_KEY`, which outranks every profile, `KAGURA_MCP_URL` or
   unsetting the key; otherwise `KAGURA_PROFILE`.
-- The Codex size warning counts the bytes on disk, CRLFs included, where
-  Python counts the text with its line endings folded.
-- A `~user` in an `OPENCLAW_*` variable or in `--agents-md PATH` is left
-  as written (`--agents-md '~root/x.md'` names `~root/x.md` in the
-  current directory), where Python looks the user up (`/root/x.md`) and
-  fails the whole setup for an unknown one. File errors of the export are
-  Node's words, not Python's `[Errno …]`.
+- File errors of the export are Node's words, not Python's `[Errno …]`.
 - Output is one JSON document on stdout, with Python's sentences in
   `notes` and the block on stderr. A non-ASCII URL is written as UTF-8
   where Python writes `\uXXXX` escapes; both are valid.

@@ -1900,8 +1900,7 @@ async function writeExport(
 ): Promise<void> {
   const { target, contextId, auth } = exp;
   const label = pathLabel(target);
-  // Python says "set up" when the entry was only printed too, which for
-  // Hermes here is always.
+  // Python 0.41.1's words for both cases (python-sdk #285).
   const failed = applied
     ? "The MCP entry is set up, but the AGENTS.md export failed"
     : "The MCP entry is printed for you to add, but the AGENTS.md export failed";
@@ -1945,11 +1944,16 @@ async function writeExport(
     // Python does: a default such as OpenClaw's workspace may not exist yet.
     fs.mkdirSync(path.dirname(target), { recursive: true });
     status = writeGuardrailBlock(target, digest.text);
-    // Codex's cap is on the bytes it reads, CRLFs included; Python counts
-    // the text with its line endings folded, and misses a file just over.
-    if (cap?.unit === "bytes") size = fs.readFileSync(target).length;
-    // Python's len() of the text: code points, universal newlines.
-    else if (cap?.unit === "characters") size = [...readTextUniversal(target)].length;
+    // As written, as Python 0.41.1 measures it (python-sdk #285): the bytes
+    // for Codex, and for OpenClaw the code points of
+    // `read_bytes().decode("utf-8")`, where a CRLF is two and a BOM one.
+    if (cap !== null) {
+      const raw = fs.readFileSync(target);
+      size =
+        cap.unit === "bytes"
+          ? raw.length
+          : [...new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw)].length;
+    }
   } catch (e) {
     throw new CliError(`${failed}: ${label}: ${excMessage(e)}; left unchanged`);
   }
