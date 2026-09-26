@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import {
   codexTomlBlock,
+  codexTomlOauthBlock,
   hermesEnvVar,
   hermesYamlBlock,
+  hermesYamlOauthBlock,
   isHttpUrl,
   json5HasServer,
   mcpUrlWithQuery,
   normalizeUrl,
   openclawBlock,
+  openclawOauthBlock,
+  openclawOauthEntry,
   pluginServerUrl,
   queryParam,
   shellCommand,
@@ -420,5 +424,31 @@ describe("shellCommand", () => {
 
   it("escapes a single quote", () => {
     expect(shellCommand(["echo", "it's"])).toBe("echo 'it'\\''s'");
+  });
+});
+
+describe("the --oauth entries (python-sdk#282)", () => {
+  const url = "http://127.0.0.1:47701/mcp/w/ws-1";
+
+  it("codex: the table has only url, so Codex's auth defaults to OAuth", () => {
+    expect(codexTomlOauthBlock("kagura-memory", url)).toBe(
+      '[mcp_servers.kagura-memory]\nurl = "http://127.0.0.1:47701/mcp/w/ws-1"',
+    );
+  });
+
+  it("hermes: url and auth: oauth, whole or under an existing mcp_servers key", () => {
+    expect(hermesYamlOauthBlock("kagura-memory", url)).toBe(
+      'mcp_servers:\n  kagura-memory:\n    url: "http://127.0.0.1:47701/mcp/w/ws-1"\n    auth: oauth',
+    );
+    expect(hermesYamlOauthBlock("kagura-memory", url, "    ")).toBe(
+      '    kagura-memory:\n      url: "http://127.0.0.1:47701/mcp/w/ws-1"\n      auth: oauth',
+    );
+  });
+
+  it("openclaw: streamable-http with auth oauth and no headers", () => {
+    expect(openclawOauthEntry(url)).toEqual({ url, transport: "streamable-http", auth: "oauth" });
+    expect(JSON.parse(openclawOauthBlock("kagura-memory", url))).toEqual({
+      mcp: { servers: { "kagura-memory": { url, transport: "streamable-http", auth: "oauth" } } },
+    });
   });
 });

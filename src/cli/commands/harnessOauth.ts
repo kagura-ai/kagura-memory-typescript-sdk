@@ -1,6 +1,6 @@
 /**
  * `setup codex | hermes | openclaw --url-form --oauth` — the pieces that
- * need no harness: the server check and (Task 2) the notes. Ports of
+ * need no harness: the server check and the login notes. Ports of
  * Python 0.42.0's `setup_harness.py` (python-sdk #282, #284).
  *
  * memory-cloud 0.77.0 (memory-cloud#1657) accepts the dynamic client
@@ -65,5 +65,74 @@ export async function checkOauthServer(options: {
     `Nothing was written: --oauth needs memory-cloud 0.77.0+, and ${why}. Before 0.77.0, dynamic client ` +
       `registration rejects ${title}'s own client (memory-cloud#1657). Use --url-form with an API key instead ` +
       "(no --oauth).",
+  );
+}
+
+/** The harnesses `--oauth` sets up. */
+export type OauthHarness = "codex" | "hermes" | "openclaw";
+
+/** Python's harness titles. */
+export const OAUTH_TITLE: Record<OauthHarness, string> = {
+  codex: "Codex",
+  hermes: "Hermes Agent",
+  openclaw: "OpenClaw",
+};
+
+/**
+ * The `--connect-timeout` of an `--oauth` `hermes mcp add`, whose probe runs
+ * the browser sign-in — Python's `HERMES_OAUTH_CONNECT_TIMEOUT_SEC`: Hermes's
+ * own `hermes mcp login` bound (a 300 s callback window plus 15 s). Hermes
+ * keeps it as the entry's `connect_timeout`.
+ */
+export const HERMES_OAUTH_CONNECT_TIMEOUT_S = 315;
+
+/** Python's `sign_in_note` per harness: who signs in, and the way round a browser that cannot reach the callback. */
+function signInNote(harness: OauthHarness, name: string, ran: boolean): string {
+  if (harness === "codex") {
+    const login = `codex mcp login ${name}`;
+    const first = ran
+      ? "Codex signs in itself: `codex mcp add` above started its sign-in if it found OAuth on the server. " +
+        `If it did not log in, run \`${login}\`.`
+      : `Once the table is in config.toml, sign in with \`${login}\`.`;
+    return (
+      `${first} The sign-in redirects the browser to Codex's loopback callback on this host; when the browser ` +
+      "cannot reach it (no browser here, or a remote host), add --no-browser: Codex then prints the URL and " +
+      "takes the callback URL pasted back. Codex keys the token on the entry's URL, so changing its ?guardrails= " +
+      "later (another --guardrails or --context-id) means signing in again."
+    );
+  }
+  if (harness === "hermes") {
+    const login = `hermes mcp login ${name}`;
+    const first = ran
+      ? "Hermes signs in itself: `hermes mcp add` above started its sign-in when it probed the server, with " +
+        `--connect-timeout ${HERMES_OAUTH_CONNECT_TIMEOUT_S} (the bound \`hermes mcp login\` uses), which Hermes ` +
+        `keeps as the entry's connect_timeout. If it did not log in, run \`${login}\``
+      : `Once the entry is in config.yaml, sign in with \`${login}\``;
+    return (
+      `${first} (the browser flow). The sign-in redirects the browser to Hermes's loopback callback on this ` +
+      "host; when the browser cannot reach it (a remote host), paste the redirect URL at Hermes's prompt, or " +
+      `(memory-cloud 0.78.0+) run \`${login} --flow device\`, which signs in with a code at the server's /device page.`
+    );
+  }
+  const login = `openclaw mcp login ${name}`;
+  const first = ran ? "Sign in" : "Once the entry is in openclaw.json, sign in";
+  return (
+    `${first} with \`${login}\`, then check it with the command below. The sign-in redirects the browser to ` +
+    "OpenClaw's loopback callback on this host; when the browser cannot reach it (a remote host), " +
+    `\`${login} --code <code>\` takes the code from the redirect.`
+  );
+}
+
+/**
+ * What replaces the key note for an `--oauth` entry — Python's
+ * `login_note`, one line: who signs in and where, and where the harness
+ * keeps the token. Setup never runs the login and never sees the token.
+ */
+export function oauthLoginNote(harness: OauthHarness, name: string, ran: boolean, tokenStore: string): string {
+  const title = OAUTH_TITLE[harness];
+  return (
+    `${signInNote(harness, name, ran)} memory-cloud's consent screen shows the client name ${title} sends, ` +
+    `which nothing verifies: approve only a sign-in you started. ${title} keeps the token in ${tokenStore}; ` +
+    "setup never sees it."
   );
 }

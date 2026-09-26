@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { checkOauthServer, shownVersion } from "../../../src/cli/commands/harnessOauth.js";
+import { checkOauthServer, oauthLoginNote, shownVersion } from "../../../src/cli/commands/harnessOauth.js";
 
 const D = "http://127.0.0.1:47701";
 
@@ -100,5 +100,47 @@ describe("checkOauthServer", () => {
     await expect(checkOauthServer({ title: "OpenClaw", deployment: D, fetch: server.fetch })).rejects.toThrow(
       refused(`${D} runs memory-cloud 0.76.0`, "OpenClaw"),
     );
+  });
+});
+
+describe("oauthLoginNote (recorded from the Python CLI 0.42.0)", () => {
+  const CODEX_STORE =
+    'the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store in ~/.codex), else in ' +
+    "~/.codex/.credentials.json";
+
+  it("codex, printed", () => {
+    expect(oauthLoginNote("codex", "kagura-memory", false, CODEX_STORE)).toBe(
+      "Once the table is in config.toml, sign in with `codex mcp login kagura-memory`. The sign-in redirects the browser to Codex's loopback callback on this host; when the browser cannot reach it (no browser here, or a remote host), add --no-browser: Codex then prints the URL and takes the callback URL pasted back. Codex keys the token on the entry's URL, so changing its ?guardrails= later (another --guardrails or --context-id) means signing in again. memory-cloud's consent screen shows the client name Codex sends, which nothing verifies: approve only a sign-in you started. Codex keeps the token in the OS keyring (\"Codex MCP Credentials\"; on Windows, its encrypted secrets store in ~/.codex), else in ~/.codex/.credentials.json; setup never sees it.",
+    );
+  });
+
+  it("codex, run", () => {
+    expect(oauthLoginNote("codex", "kagura-memory", true, CODEX_STORE)).toBe(
+      "Codex signs in itself: `codex mcp add` above started its sign-in if it found OAuth on the server. If it did not log in, run `codex mcp login kagura-memory`. The sign-in redirects the browser to Codex's loopback callback on this host; when the browser cannot reach it (no browser here, or a remote host), add --no-browser: Codex then prints the URL and takes the callback URL pasted back. Codex keys the token on the entry's URL, so changing its ?guardrails= later (another --guardrails or --context-id) means signing in again. memory-cloud's consent screen shows the client name Codex sends, which nothing verifies: approve only a sign-in you started. Codex keeps the token in the OS keyring (\"Codex MCP Credentials\"; on Windows, its encrypted secrets store in ~/.codex), else in ~/.codex/.credentials.json; setup never sees it.",
+    );
+  });
+
+  it("hermes, printed and run, naming the device flow (0.41.2)", () => {
+    const store = "~/.hermes/mcp-tokens/kagura-memory.json";
+    expect(oauthLoginNote("hermes", "kagura-memory", false, store)).toBe(
+      "Once the entry is in config.yaml, sign in with `hermes mcp login kagura-memory` (the browser flow). The sign-in redirects the browser to Hermes's loopback callback on this host; when the browser cannot reach it (a remote host), paste the redirect URL at Hermes's prompt, or (memory-cloud 0.78.0+) run `hermes mcp login kagura-memory --flow device`, which signs in with a code at the server's /device page. memory-cloud's consent screen shows the client name Hermes Agent sends, which nothing verifies: approve only a sign-in you started. Hermes Agent keeps the token in ~/.hermes/mcp-tokens/kagura-memory.json; setup never sees it.",
+    );
+    expect(oauthLoginNote("hermes", "kagura-memory", true, store)).toBe(
+      "Hermes signs in itself: `hermes mcp add` above started its sign-in when it probed the server, with --connect-timeout 315 (the bound `hermes mcp login` uses), which Hermes keeps as the entry's connect_timeout. If it did not log in, run `hermes mcp login kagura-memory` (the browser flow). The sign-in redirects the browser to Hermes's loopback callback on this host; when the browser cannot reach it (a remote host), paste the redirect URL at Hermes's prompt, or (memory-cloud 0.78.0+) run `hermes mcp login kagura-memory --flow device`, which signs in with a code at the server's /device page. memory-cloud's consent screen shows the client name Hermes Agent sends, which nothing verifies: approve only a sign-in you started. Hermes Agent keeps the token in ~/.hermes/mcp-tokens/kagura-memory.json; setup never sees it.",
+    );
+  });
+
+  it("openclaw, run and printed", () => {
+    const store = "its state database (~/.openclaw/state/openclaw.sqlite)";
+    expect(oauthLoginNote("openclaw", "kagura-memory", true, store)).toBe(
+      "Sign in with `openclaw mcp login kagura-memory`, then check it with the command below. The sign-in redirects the browser to OpenClaw's loopback callback on this host; when the browser cannot reach it (a remote host), `openclaw mcp login kagura-memory --code <code>` takes the code from the redirect. memory-cloud's consent screen shows the client name OpenClaw sends, which nothing verifies: approve only a sign-in you started. OpenClaw keeps the token in its state database (~/.openclaw/state/openclaw.sqlite); setup never sees it.",
+    );
+    expect(oauthLoginNote("openclaw", "kagura-memory", false, store)).toBe(
+      "Once the entry is in openclaw.json, sign in with `openclaw mcp login kagura-memory`, then check it with the command below. The sign-in redirects the browser to OpenClaw's loopback callback on this host; when the browser cannot reach it (a remote host), `openclaw mcp login kagura-memory --code <code>` takes the code from the redirect. memory-cloud's consent screen shows the client name OpenClaw sends, which nothing verifies: approve only a sign-in you started. OpenClaw keeps the token in its state database (~/.openclaw/state/openclaw.sqlite); setup never sees it.",
+    );
+  });
+
+  it("names the server name it was given", () => {
+    expect(oauthLoginNote("openclaw", "km2", true, "x")).toContain("`openclaw mcp login km2 --code <code>`");
   });
 });
