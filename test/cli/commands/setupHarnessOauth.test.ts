@@ -478,6 +478,17 @@ describe("setup codex --oauth", () => {
     expect(all.slice(all.indexOf(HOOKS_WARNING[0]!), all.indexOf(HOOKS_WARNING[0]!) + 2)).toEqual(HOOKS_WARNING);
   });
 
+  it("with a terminal and the hooks on, warns and still runs the add (Python asks; this bin does not)", async () => {
+    turnOnHooks();
+    const h = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH], h.deps)).toBe(0);
+    expect(h.attached).toEqual([ADD]);
+    const all = notes(h);
+    expect(all.slice(all.indexOf(HOOKS_WARNING[0]!), all.indexOf(HOOKS_WARNING[0]!) + 2)).toEqual(HOOKS_WARNING);
+    expect(all).toContain("Done: codex wrote kagura-memory to ~/.codex/config.toml.");
+    expect(all.join("\n")).not.toContain("Setup cancelled");
+  });
+
   it("--dry-run with a terminal says it would run the add, and runs and sends nothing", async () => {
     const h = oauthHarness({ ...codex, tty: true });
     expect(await runCli(["setup", "codex", ...OAUTH, "--dry-run"], h.deps)).toBe(0);
@@ -862,6 +873,21 @@ describe.each([
     expect(text).not.toContain("not verified");
     // The Hermes opener's "never prompts" is true of the API-key form only.
     if (name === "hermes") expect(text).toContain("for the API-key form, changes nothing there");
+  });
+});
+
+describe("the inert --api-key under --oauth", () => {
+  it.each([
+    ["codex", "Codex"],
+    ["hermes", "Hermes Agent"],
+    ["openclaw", "OpenClaw"],
+  ] as const)("setup %s says the entry holds no key, and never prints the key", async (name, label) => {
+    const h = oauthHarness({ onPath: { [name]: `/usr/bin/${name}` } });
+    expect(await runCli(["setup", name, ...OAUTH, "-y", "--api-key", "kagura_inert_0123456789"], h.deps)).toBe(0);
+    expect(notes(h)).toContain(
+      `Note: --api-key is not stored or used: the ${label} entry holds no key, since ${label} signs in itself.`,
+    );
+    expect([...h.out, ...h.err].join("\n")).not.toContain("kagura_inert");
   });
 });
 
