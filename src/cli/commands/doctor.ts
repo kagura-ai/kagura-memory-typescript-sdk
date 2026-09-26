@@ -436,6 +436,19 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
 }
 
 /**
+ * Python 0.42.0's check for a 2xx `/system/info` body its `ServerInfo`
+ * model refuses (python-sdk #277): the server answered, so not
+ * "unreachable". The message names the fields and suggests the upgrade.
+ */
+function serverUnreadable(e: KaguraResponseError): DoctorCheck {
+  return {
+    section: "server",
+    status: "fail",
+    message: `Server answered, but the SDK could not read /api/v1/system/info: ${e.message}`,
+  };
+}
+
+/**
  * Python's `_check_server`: `Server reachable`, then `Version: …` as
  * pass, fail or info by the shared `meetsMinimum` against the SDK's
  * {@link MIN_SERVER_VERSION} (python-sdk #280). The advisory on stderr is
@@ -452,19 +465,6 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
  * Any other failure (a 429) fails the check with its message, as Python's
  * doctor has done since 0.42.0.
  */
-/**
- * Python 0.42.0's check for a 2xx `/system/info` body its `ServerInfo`
- * model refuses (python-sdk #277): the server answered, so not
- * "unreachable". The message names the fields and suggests the upgrade.
- */
-function serverUnreadable(e: KaguraResponseError): DoctorCheck {
-  return {
-    section: "server",
-    status: "fail",
-    message: `Server answered, but the SDK could not read /api/v1/system/info: ${e.message}`,
-  };
-}
-
 async function checkServer(deps: CommandDeps, profile: string | undefined): Promise<DoctorCheck[]> {
   // With --profile, Python resolves that profile with no key forced over
   // it (`KAGURA_API_KEY` still first), so the check reaches the profile's
