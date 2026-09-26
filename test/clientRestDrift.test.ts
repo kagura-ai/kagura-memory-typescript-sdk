@@ -175,6 +175,34 @@ describe("KaguraClient REST drift (python-sdk #277)", () => {
     await expect(call("get_memory_stats", body)).resolves.toEqual(body);
   });
 
+  it("reads a dict[str, int] value as the literal the body wrote, in the body's key order (#69)", async () => {
+    // Recorded from kagura-memory 0.42.0 (json.loads, then parse_response):
+    // `1e20` is refused where JSON.parse's 100000000000000000000 would pass,
+    // and the problems follow the body's key order, not Object.entries'.
+    const server = new FakeServer();
+    server.forcedResponse = new Response(
+      '{"total": 1, "by_status": {"b": 1e20, "2": "x", "done": 9007199254740993}, "failed_memories": []}',
+      { status: 200 },
+    );
+    await expect(makeClient(server).getEmbeddingStatus()).rejects.toThrow(
+      new KaguraResponseError(
+        "KaguraClient.get_embedding_status: unexpected server response for EmbeddingStatus (by_status.b: " +
+          "Unable to parse input string as an integer, exceeded maximum size; by_status.2: Input should be a " +
+          `valid integer, unable to parse string as an integer). ${HINT}`,
+        "KaguraClient.get_embedding_status",
+      ),
+    );
+    server.forcedResponse = new Response(
+      '{"total": 1, "by_status": {"done": 9007199254740993, "failed": 1.0}, "failed_memories": []}',
+      { status: 200 },
+    );
+    await expect(makeClient(server).getEmbeddingStatus()).resolves.toEqual({
+      total: 1,
+      by_status: { done: 9007199254740992, failed: 1 },
+      failed_memories: [],
+    });
+  });
+
   it.each(Object.keys(METHODS))("%s keeps KaguraConnectionError for a non-JSON 2xx body and a 503", async (method) => {
     const server = new FakeServer();
     server.forcedResponse = new Response("not json", { status: 200 });
