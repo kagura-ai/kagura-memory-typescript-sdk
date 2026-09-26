@@ -6,12 +6,14 @@ import {
   INDEXER_STATUS_RESPONSE,
   PAGINATED_RESOURCE_TOKENS_RESPONSE,
   PyFloat,
+  type Model,
   readModel,
   RESOURCE_EVENT_BATCH_RESPONSE,
   RESOURCE_EVENTS_LIST_RESPONSE,
   RESOURCE_SCHEMA_RESPONSE,
 } from "../../src/pyModels.js";
-import { FLOAT_CASES } from "../pydanticCases.js";
+import { parseJsonLossless } from "../../src/losslessJson.js";
+import { FLOAT_CASES, JSON_NUMBER_CASES } from "../pydanticCases.js";
 
 const HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
 
@@ -186,5 +188,63 @@ describe("formatModelJson: pydantic's serializer depth in an untyped value", () 
 
   it("refuses a payload far deeper than the stack, rather than overflowing it", () => {
     expect(failure(() => formatModelJson(events({ x: lists(100_000, 1) }))).message).toBe(DEPTH);
+  });
+});
+
+describe("readModel on a body read by parseJsonLossless (#69)", () => {
+  const INT: Model = { name: "T", fields: [{ key: "v", kind: "int" }] };
+  const FLOAT: Model = { name: "T", fields: [{ key: "v", kind: "float" }] };
+
+  function dumpV(model: Model, literal: string): string {
+    return formatModelJson(readModel(parseJsonLossless(`{"v": ${literal}}`), model, "op"));
+  }
+
+  it.each(JSON_NUMBER_CASES)("an int field and a float field sent %s read as pydantic reads them", (literal, int, float) => {
+    for (const [model, expected] of [
+      [INT, int],
+      [FLOAT, float],
+    ] as const) {
+      if ("ok" in expected) {
+        expect(dumpV(model, literal)).toBe(`{\n  "v": ${expected.ok}\n}`);
+      } else {
+        expect(() => dumpV(model, literal)).toThrow(
+          new KaguraResponseError(`op: unexpected server response for T (v: ${expected.err}). ${HINT}`, "op"),
+        );
+      }
+    }
+  });
+
+  it("reads each list item's literal, as in an event_ids list", () => {
+    const read = (body: string) =>
+      readModel(parseJsonLossless(body), RESOURCE_EVENT_BATCH_RESPONSE, "ResourceClient.ingest_events");
+    expect(formatModelJson(read('{"created_count": 1, "event_ids": [9007199254740993, 2.0]}').event_ids)).toBe(
+      "[\n  9007199254740993,\n  2\n]",
+    );
+    expect(() => read('{"created_count": 1, "event_ids": [1, 1e20]}')).toThrow(
+      "(event_ids.1: Unable to parse input string as an integer, exceeded maximum size)",
+    );
+  });
+
+  it("gives every other type the plain value", () => {
+    const model: Model = {
+      name: "T",
+      fields: [
+        { key: "s", kind: "str" },
+        { key: "d", kind: "datetime" },
+        { key: "m", kind: "dict" },
+        { key: "l", kind: { list: "str" } },
+        { key: "n", kind: { nullable: "float" } },
+        { key: "lit", kind: { literal: ["a"] } },
+      ],
+    };
+    expect(() =>
+      readModel(parseJsonLossless('{"s": 1, "d": 0, "m": 1, "l": 1, "n": -0, "lit": 1}'), model, "op"),
+    ).toThrow(
+      "op: unexpected server response for T (s: Input should be a valid string; " +
+        "m: Input should be a valid dictionary; l: Input should be a valid list (+1 more)).",
+    );
+    const read = readModel(parseJsonLossless('{"s": "x", "d": 0, "m": {}, "l": [], "n": -0, "lit": "a"}'), model, "op");
+    expect(read.d).toBe("1970-01-01T00:00:00Z");
+    expect(formatModelJson(read.n)).toBe("0.0");
   });
 });

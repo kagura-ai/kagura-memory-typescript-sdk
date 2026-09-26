@@ -15,14 +15,19 @@
  * `2026-06-01T09:00:00.500000Z`. memory-cloud already writes that form, so
  * its timestamps pass through unchanged.
  *
- * One thing stays as JSON.parse leaves it: a number inside an untyped
- * mapping (`payload`, `errors`), where `1.0` reads as `1` and an integer
- * past 2^53 loses its last digits.
+ * A payload read by `parseJsonLossless` (`losslessJson.ts`) keeps its
+ * number literals, and the readers see them as pydantic sees what
+ * `json.loads` made of them (#69): an int field sent `9007199254740993`
+ * reads exactly, `1e20` there is refused (`Unable to parse input string as
+ * an integer, exceeded maximum size`), and a float field sent `-0` reads
+ * `0.0`. An untyped mapping keeps the literals and the key order for the
+ * dump (`cli/modelDump.ts`).
  *
  * Internal: for the SDK's own checks and the CLI's dumps
  * (`cli/modelDump.ts`), not exported from the package entry point.
  */
 
+import { jsonValue, valueAt } from "./losslessJson.js";
 import { pydanticDatetime } from "./pydanticDatetime.js";
 import {
   laxBool,
@@ -112,18 +117,24 @@ function coerced(r: ResponseReader, at: Loc, result: Coerced<unknown>): unknown 
   return undefined;
 }
 
-function readValue(r: ResponseReader, kind: Kind, value: unknown, at: Loc): unknown {
+/**
+ * `raw` read as `kind`. A number literal (`valueAt`'s `JsonNumber`) reaches
+ * the int, float and bool readers as it is; every other type sees the plain
+ * value `JSON.parse` gives.
+ */
+function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknown {
+  const value = jsonValue(raw);
   switch (kind) {
     case "str":
       return coerced(r, at, laxStr(value));
     case "int":
-      return coerced(r, at, laxExactInt(value));
+      return coerced(r, at, laxExactInt(raw));
     case "float": {
-      const result = laxFloat(value);
+      const result = laxFloat(raw);
       return coerced(r, at, result.ok ? { ok: true, value: new PyFloat(result.value) } : result);
     }
     case "bool":
-      return coerced(r, at, laxBool(value));
+      return coerced(r, at, laxBool(raw));
     case "datetime":
       return coerced(r, at, pydanticDatetime(value));
     case "dict":
@@ -134,7 +145,7 @@ function readValue(r: ResponseReader, kind: Kind, value: unknown, at: Loc): unkn
       r.issue(at, "Input should be a valid dictionary");
       return undefined;
   }
-  if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, value, at);
+  if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, raw, at);
   if ("literal" in kind) {
     if (typeof value === "string" && kind.literal.includes(value)) return value;
     r.issue(at, literalMessage(kind.literal));
@@ -145,7 +156,7 @@ function readValue(r: ResponseReader, kind: Kind, value: unknown, at: Loc): unkn
       r.issue(at, "Input should be a valid list");
       return undefined;
     }
-    return value.map((item, index) => readValue(r, kind.list, item, [...at, index]));
+    return value.map((_item, index) => readValue(r, kind.list, valueAt(value, index), [...at, index]));
   }
   return readFields(r, kind.model, value, at);
 }
@@ -155,7 +166,7 @@ function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Rec
   if (obj === null) return undefined;
   const out: Record<string, unknown> = {};
   for (const field of model.fields) {
-    const value = Object.prototype.hasOwnProperty.call(obj, field.key) ? obj[field.key] : undefined;
+    const value = valueAt(obj, field.key);
     if (value === undefined) {
       if (field.default !== undefined) {
         out[field.key] = field.default();

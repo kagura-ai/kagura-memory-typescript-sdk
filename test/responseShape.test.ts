@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import { KaguraError, KaguraResponseError } from "../src/errors.js";
+import { JsonNumber, parseJsonLossless } from "../src/losslessJson.js";
 import {
   ResponseReader,
   UPGRADE_HINT,
@@ -307,5 +308,55 @@ describe("ResponseReader", () => {
     const r = new ResponseReader("op", "M");
     expect(r.list(r.object({})!, "rows", (v) => v)).toEqual([]);
     expect(() => r.check()).toThrow("(rows: Field required)");
+  });
+});
+
+describe("the coercers given a number literal (#69)", () => {
+  const n = (text: string) => new JsonNumber(text);
+
+  it("laxExactInt reads an int literal exactly and a float literal as pydantic does", () => {
+    expect(laxExactInt(n("9007199254740993"))).toEqual({ ok: true, value: 9007199254740993n });
+    expect(laxExactInt(n("-0"))).toEqual({ ok: true, value: 0 });
+    expect(laxExactInt(n("9.223372036854775e18"))).toEqual({ ok: true, value: 9223372036854774784n });
+    expect(laxExactInt(n("1e20"))).toEqual({
+      ok: false,
+      msg: "Unable to parse input string as an integer, exceeded maximum size",
+    });
+  });
+
+  it("laxInt gives the nearest number, with laxExactInt's verdicts", () => {
+    expect(laxInt(n("9007199254740993"))).toEqual({ ok: true, value: 9007199254740992 });
+    expect(laxInt(n("-1e19"))).toEqual({
+      ok: false,
+      msg: "Unable to parse input string as an integer, exceeded maximum size",
+    });
+    expect(laxInt(n("NaN"))).toEqual({ ok: false, msg: "Input should be a finite number" });
+  });
+
+  it("laxFloat reads an int literal as float(int) and keeps a float literal's sign", () => {
+    const zero = laxFloat(n("-0"));
+    expect(zero.ok && Object.is(zero.value, 0)).toBe(true);
+    const negZero = laxFloat(n("-0.0"));
+    expect(negZero.ok && Object.is(negZero.value, -0)).toBe(true);
+    expect(laxFloat(n("1".repeat(401)))).toEqual({ ok: false, msg: "Input should be a valid number" });
+    expect(laxFloat(n("9007199254740993"))).toEqual({ ok: true, value: 9007199254740992 });
+  });
+
+  it("laxBool and laxStr read the literal's value", () => {
+    expect(laxBool(n("1.0"))).toEqual({ ok: true, value: true });
+    expect(laxStr(n("1"))).toEqual({ ok: false, msg: "Input should be a valid string" });
+  });
+
+  it("ResponseReader.field hands a body's literal to the coercer and returns a plain value", () => {
+    const body = parseJsonLossless('{"count": 1e20, "value": -0, "cap": 5}') as Record<string, unknown>;
+    const r = new ResponseReader("op", "M");
+    const value = r.field(body, "value", laxFloat);
+    const cap = r.field(body, "cap", laxInt);
+    expect(Object.is(value, 0)).toBe(true);
+    expect(cap).toBe(5);
+    r.field(body, "count", laxInt);
+    expect(() => r.check()).toThrow(
+      "op: unexpected server response for M (count: Unable to parse input string as an integer, exceeded maximum size).",
+    );
   });
 });

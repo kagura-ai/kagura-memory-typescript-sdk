@@ -469,3 +469,46 @@ export const FLOAT_CASES: ReadonlyArray<[repr: string, json: string]> = [
   ["-8786611448.055605", "-8786611448.055605"],
   ["2.942577090553375e+18", "2.942577090553375e+18"],
 ];
+
+/**
+ * JSON_NUMBER_CASES (#69): a JSON number literal of a body, then what the
+ * Python SDK makes of `json.loads` of it, recorded from pydantic 2.13.4
+ * (pydantic-core 2.46.4) on Python 3.11.9: pydantic's JSON for it in an
+ * `int` field and in a `float` field (`TypeAdapter(int|float).dump_json`)
+ * or the error message; in a `dict[str, Any]` field
+ * (`TypeAdapter(dict[str, Any]).dump_json`); and `json.dumps` of it, which
+ * the Python CLI prints for `resource import`.
+ */
+export const JSON_NUMBER_CASES: ReadonlyArray<
+  [literal: string, int: { ok: string } | { err: string }, float: { ok: string } | { err: string }, untyped: string, dumps: string]
+> = [
+  ["0", { ok: "0" }, { ok: "0.0" }, "0", "0"],
+  ["-0", { ok: "0" }, { ok: "0.0" }, "0", "0"],
+  ["1", { ok: "1" }, { ok: "1.0" }, "1", "1"],
+  ["-1", { ok: "-1" }, { ok: "-1.0" }, "-1", "-1"],
+  ["9007199254740993", { ok: "9007199254740993" }, { ok: "9007199254740992.0" }, "9007199254740993", "9007199254740993"],
+  ["-9007199254740993", { ok: "-9007199254740993" }, { ok: "-9007199254740992.0" }, "-9007199254740993", "-9007199254740993"],
+  ["123456789012345678901", { ok: "123456789012345678901" }, { ok: "1.2345678901234568e+20" }, "123456789012345678901", "123456789012345678901"],
+  ["12345678901234567890", { ok: "12345678901234567890" }, { ok: "1.2345678901234567e+19" }, "12345678901234567890", "12345678901234567890"],
+  ["1".repeat(309), { ok: "1".repeat(309) }, { ok: "1.1111111111111112e+308" }, "1".repeat(309), "1".repeat(309)],
+  ["1".repeat(401), { ok: "1".repeat(401) }, { err: "Input should be a valid number" }, "1".repeat(401), "1".repeat(401)],
+  ["-" + "1".repeat(401), { ok: "-" + "1".repeat(401) }, { err: "Input should be a valid number" }, "-" + "1".repeat(401), "-" + "1".repeat(401)],
+  ["1.0", { ok: "1" }, { ok: "1.0" }, "1.0", "1.0"],
+  ["-0.0", { ok: "0" }, { ok: "-0.0" }, "-0.0", "-0.0"],
+  ["1.5", { err: "Input should be a valid integer, got a number with a fractional part" }, { ok: "1.5" }, "1.5", "1.5"],
+  ["1e18", { ok: "1000000000000000000" }, { ok: "1e+18" }, "1e+18", "1e+18"],
+  ["9.223372036854775e18", { ok: "9223372036854774784" }, { ok: "9.223372036854775e+18" }, "9.223372036854775e+18", "9.223372036854775e+18"],
+  ["9223372036854775807.0", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "9.223372036854776e+18" }, "9.223372036854776e+18", "9.223372036854776e+18"],
+  ["-9223372036854775808.0", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "-9.223372036854776e+18" }, "-9.223372036854776e+18", "-9.223372036854776e+18"],
+  ["1e20", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "1e+20" }, "1e+20", "1e+20"],
+  ["-1e19", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "-1e+19" }, "-1e+19", "-1e+19"],
+  ["1E2", { ok: "100" }, { ok: "100.0" }, "100.0", "100.0"],
+  ["1.0e2", { ok: "100" }, { ok: "100.0" }, "100.0", "100.0"],
+  ["1e400", { err: "Input should be a finite number" }, { ok: "null" }, "null", "Infinity"],
+  ["-1e400", { err: "Input should be a finite number" }, { ok: "null" }, "null", "-Infinity"],
+  ["NaN", { err: "Input should be a finite number" }, { ok: "null" }, "null", "NaN"],
+  ["Infinity", { err: "Input should be a finite number" }, { ok: "null" }, "null", "Infinity"],
+  ["-Infinity", { err: "Input should be a finite number" }, { ok: "null" }, "null", "-Infinity"],
+  ["1e-7", { err: "Input should be a valid integer, got a number with a fractional part" }, { ok: "1e-7" }, "1e-7", "1e-07"],
+  ["2.5e-5", { err: "Input should be a valid integer, got a number with a fractional part" }, { ok: "0.000025" }, "0.000025", "2.5e-05"],
+];
