@@ -38,6 +38,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { loadCredentialsFile, type CredentialsFile } from "../../auth/credentials.js";
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
 import { SOURCE_LABEL, type ResolvedAuth } from "../../auth/types.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
@@ -46,8 +47,9 @@ import { hasGuardrailBlock, writeGuardrailBlock, type GuardrailBlockStatus } fro
 import { baseUrlFromMcp, validateHttpsUrl } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
+import { pyRepr, pyTruthy } from "../../python.js";
 import { isUuid, parseUuid } from "../../uuid.js";
-import { rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
+import { examples, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import type { ExecOptions } from "../exec.js";
 import { formatJson } from "../output.js";
 import { pathlibString } from "../pathlib.js";
@@ -58,14 +60,18 @@ import { resolveConfig } from "../runClientCommand.js";
 import {
   KEY_ENV_VAR,
   codexTomlBlock,
+  codexTomlOauthBlock,
   hermesEnvVar,
   hermesYamlBlock,
+  hermesYamlOauthBlock,
   isHttpUrl,
   json5HasServer,
   mcpUrlWithQuery,
   normalizeUrl,
   openclawBlock,
   openclawEntry,
+  openclawOauthBlock,
+  openclawOauthEntry,
   pluginServerUrl,
   queryParam,
   shellCommand,
@@ -76,6 +82,8 @@ import {
   yamlServersIndent,
   yamlServersInline,
 } from "./harnessConfig.js";
+import { HERMES_OAUTH_CONNECT_TIMEOUT_S, checkOauthServer, oauthLoginNote } from "./harnessOauth.js";
+import { strerror } from "./importFormats.js";
 
 /**
  * The entry's name on every harness. The Codex plugin's hooks look it up
@@ -184,15 +192,28 @@ const URL_FORM: FlagSpec = {
   name: "url-form",
   type: "switch",
   help:
-    "Accepted for compatibility; every entry this port writes is the URL form, which sends a " +
-    "long-lived API key from an environment variable",
+    "Every entry this port writes is the URL form, so this changes nothing alone; --oauth needs it. The entry " +
+    "sends a long-lived API key from an environment variable, which setup never sees; with --oauth it holds no " +
+    "key, and the harness signs in itself.",
 };
 const HARNESS_MCP_URL: FlagSpec = {
   ...MCP_URL,
   help:
-    "The MCP URL your API key works with (…/mcp/w/<workspace>); default: the configured " +
-    `mcp_url, else ${DEFAULT_MCP_URL}`,
+    "The MCP URL your API key works with, or that the harness signs in to with --oauth (…/mcp/w/<workspace>); " +
+    `default: the configured mcp_url, else ${DEFAULT_MCP_URL} (--oauth needs it given)`,
 };
+/** Python's `--oauth`, worded per harness (`_HARNESS_OAUTH_HELP`). */
+function oauthFlag(help: string): FlagSpec {
+  return { name: "oauth", type: "switch", help };
+}
+
+/** Python's two `--oauth` usage errors (`_check_flags`). */
+const OAUTH_NEEDS_URL =
+  "--oauth needs --url-form and --mcp-url: the URL the harness signs in to, e.g. " +
+  "--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>.";
+const OAUTH_EXCLUDES_KEY_ENV =
+  "--oauth and --api-key-env exclude each other: an --oauth entry has no key variable, since the harness signs " +
+  "in itself.";
 const INERT_API_KEY: FlagSpec = {
   ...API_KEY,
   help: "Accepted for compatibility; not stored or used: the entry reads the key from an environment variable",
@@ -218,7 +239,8 @@ const CODEX_GUARDRAILS: FlagSpec = {
     "carry that context's tool guardrail digest. Defaults to --context-id, or to 'off' while the " +
     "kagura-memory plugin's guardrail hooks are on, unless the MCP URL (--mcp-url or the " +
     "configured mcp_url) already sets it. Use a context whose editor list you control. 'off' " +
-    "also removes the guardrails block from get_context_info.",
+    "also removes the guardrails block from get_context_info. With --oauth, changing it later means " +
+    "`codex mcp login` again.",
 };
 /**
  * Hermes and OpenClaw take the flag so a script can pass it to every
@@ -249,7 +271,11 @@ function agentsMd(help: string): FlagSpec {
 
 /** The ones after the harness's own, in the Python CLI's order. */
 const HARNESS_TAIL = [URL_FORM, HARNESS_MCP_URL];
-const HARNESS_END = [FORCE, NON_INTERACTIVE, DRY_RUN, INERT_API_KEY, INERT_PROJECT_DIR];
+const HARNESS_NON_INTERACTIVE: FlagSpec = {
+  ...NON_INTERACTIVE,
+  help: "Never hands the terminal to a harness CLI (--oauth); nothing else here prompts",
+};
+const HARNESS_END = [FORCE, HARNESS_NON_INTERACTIVE, DRY_RUN, INERT_API_KEY, INERT_PROJECT_DIR];
 
 const GUARDRAILS_ADVICE =
   "  Pass --guardrails a context id only for a context whose editor list you\n" +
@@ -1494,6 +1520,17 @@ interface HarnessInput {
   config: KaguraConfig | null;
   /** The variable the entry reads the key from. */
   keyEnv: string;
+  /**
+   * `--oauth`: the entry holds no key and the harness signs in itself
+   * (python-sdk#282). Implies `--url-form` and `--mcp-url`, so `baseUrl`
+   * is the flag's URL.
+   */
+  oauth: boolean;
+  /**
+   * Python's `interactive`: no -y, a terminal on stdin, and a way to hand
+   * it over. Only an --oauth add ever uses it here.
+   */
+  interactive: boolean;
   /** Every key this process knows of ({@link knownKeys}), cut out of whatever a harness CLI prints. */
   secrets: string[];
   force: boolean;
@@ -1553,8 +1590,8 @@ function parseKeyEnv(raw: string | undefined, harness: HarnessName, name: string
 
 /**
  * Read `--agents-md`: undefined when absent, `""` for the harness's
- * default file, else the path. A path of only whitespace is refused,
- * where Python takes it and creates a file named `" "`.
+ * default file, else the path. A path of only whitespace is refused in
+ * the words of Python's `_agents_md_option` (0.41.1+, python-sdk #285).
  */
 function parseAgentsMd(raw: string | undefined): string | undefined {
   if (raw === undefined || raw === "") return raw;
@@ -1589,7 +1626,7 @@ function parseContextFlag(raw: string, profile: string | undefined): string {
   }
 }
 
-function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: HarnessName): HarnessInput {
+function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessName): HarnessInput {
   // The name first: a usage error, as click reports before it runs anything.
   const name = parseName(args);
   rejectExtraArgs(args);
@@ -1603,6 +1640,9 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
   // harness might keep.
   const rawUrl = args.values["mcp-url"];
   const urlArg = rawUrl === undefined ? undefined : normalizeUrl(rawUrl);
+  const oauth = args.flags.has("oauth");
+  if (oauth && (!args.flags.has("url-form") || !urlArg)) throw new CliUsageError(OAUTH_NEEDS_URL);
+  if (oauth && args.values["api-key-env"] !== undefined) throw new CliUsageError(OAUTH_EXCLUDES_KEY_ENV);
   if (urlArg !== undefined) requireMcpUrl(urlArg, true);
   const keyEnv = parseKeyEnv(args.values["api-key-env"], harness, name);
   refuseProfileWithKey(args);
@@ -1655,8 +1695,10 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
   const apiKey = args.values["api-key"];
   if (apiKey !== undefined) {
     notes.push(
-      `Note: --api-key is not stored or used: the ${label} entry reads the key from $${keyEnv}, ` +
-        "and setup never handles the key.",
+      oauth
+        ? `Note: --api-key is not stored or used: the ${label} entry holds no key, since ${label} signs in itself.`
+        : `Note: --api-key is not stored or used: the ${label} entry reads the key from $${keyEnv}, ` +
+            "and setup never handles the key.",
     );
   }
   if (args.values["project-dir"] !== undefined) {
@@ -1690,12 +1732,38 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
     exportContext: flagContext ?? (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
     config,
     keyEnv,
+    oauth,
+    interactive:
+      !args.flags.has("non-interactive") && deps.stdinIsTty?.() === true && deps.execAttached !== undefined,
     secrets: knownKeys(apiKey, config?.api_key, process.env[keyEnv]),
     force: args.flags.has("force"),
     dryRun: args.flags.has("dry-run"),
     nonInteractive: args.flags.has("non-interactive"),
     notes,
   };
+}
+
+/**
+ * With `--oauth`, the server check before anything else runs — Python's
+ * `_check_oauth_server`, called before detection. The note goes on
+ * `input.notes`; a dry run sends no request and says so instead.
+ *
+ * @throws CliError (exit 1) when the server is older than 0.77.0 or its
+ *   version cannot be confirmed; nothing has been detected, run or written
+ *   (`.kagura.json` has been read by then, for the context fallback and
+ *   the export credential, as in Python).
+ */
+async function checkOauthServerFirst(deps: CliDeps, input: HarnessInput): Promise<void> {
+  if (!input.oauth) return;
+  const server = deployment(input.baseUrl);
+  if (input.dryRun) {
+    input.notes.push(
+      `The real run first checks that ${server} runs memory-cloud 0.77.0+ (GET /api/v1/system/info); this dry ` +
+        "run sends no request.",
+    );
+    return;
+  }
+  input.notes.push(await checkOauthServer({ title: LABEL[input.harness], deployment: server, fetch: deps.fetch }));
 }
 
 // --- the AGENTS.md export (--agents-md) -----------------------------------
@@ -1728,17 +1796,141 @@ function isFile(target: string): boolean {
   }
 }
 
-/** The project context files Hermes looks for, in order; it loads only the first. */
-const HERMES_CONTEXT_FILES = [".hermes.md", "HERMES.md", "AGENTS.override.md", "AGENTS.md", "CLAUDE.md"];
+/** The names of each project context file type Hermes looks for, in its order. */
+const HERMES_OWN_FILES = [".hermes.md", "HERMES.md"];
+const HERMES_AGENTS_FILES = ["AGENTS.override.md", "AGENTS.md", "agents.md"];
+const HERMES_CLAUDE_FILES = ["CLAUDE.md", "claude.md"];
 
-/** The context file Hermes loads in `directory`, else its AGENTS.md — Python's `hermes_context_file`. */
-function hermesContextFile(directory: string): string {
-  const found = HERMES_CONTEXT_FILES.find((name) => isFile(path.join(directory, name)));
-  return path.join(directory, found ?? "AGENTS.md");
+/**
+ * A file with something left after `strip()`, read as Hermes reads it —
+ * Python's `_has_text`: UTF-8 with bad bytes replaced, a BOM kept (Python's
+ * `strip()` keeps U+FEFF), and an unreadable file counted as empty.
+ */
+function hasText(target: string): boolean {
+  try {
+    if (!fs.statSync(target).isFile()) return false;
+    return pyStrip(new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(target))) !== "";
+  } catch {
+    return false;
+  }
 }
 
-/** The file the export goes to without a PATH — Python's `agents_md_path`. */
-function agentsMdDefault(harness: HarnessName): string {
+/** The first of `names` in `directory` with text — Python's `_first_with_text`. */
+function firstWithText(directory: string, names: readonly string[]): string | null {
+  for (const name of names) {
+    const target = path.join(directory, name);
+    if (hasText(target)) return target;
+  }
+  return null;
+}
+
+/**
+ * The Cursor rules file Hermes loads in `directory`: `.cursorrules`, else
+ * the first `.cursor/rules/*.mdc` with text by name — Python's
+ * `hermes_cursor_rules`. (Python sorts by code point, JavaScript by UTF-16
+ * unit; they differ only for names past U+FFFF.)
+ */
+function hermesCursorRules(directory: string): string | null {
+  const rulesDir = path.join(directory, ".cursor", "rules");
+  let rules: string[] = [];
+  try {
+    rules = fs
+      .readdirSync(rulesDir)
+      .filter((name) => name.endsWith(".mdc"))
+      .sort()
+      .map((name) => path.join(rulesDir, name));
+  } catch {
+    rules = [];
+  }
+  return [path.join(directory, ".cursorrules"), ...rules].find(hasText) ?? null;
+}
+
+/**
+ * The file the export goes into so that Hermes, run in `directory`, loads
+ * it — port of Python's `hermes_context_file` (python-sdk #278). Hermes
+ * loads only the first of these types that has a file with text:
+ *
+ * 1. `.hermes.md` / `HERMES.md`: the nearest that exists, from `directory`
+ *    up to the git root (`directory` alone outside a repository); an empty
+ *    one ends that search.
+ * 2. `AGENTS.override.md` / `AGENTS.md` / `agents.md`, in every directory
+ *    from the git root down to `directory`.
+ * 3. `CLAUDE.md` / `claude.md` in `directory`.
+ * 4. `.cursorrules` / `.cursor/rules/*.mdc` in `directory`.
+ *
+ * The export goes into the loaded `.hermes.md` / `HERMES.md` (even a
+ * parent's), into `directory`'s AGENTS file that loads (a new `AGENTS.md`
+ * there when only a parent's does), or into the loaded `CLAUDE.md`; with
+ * nothing loaded, a new `AGENTS.md`. Null when only Cursor rules load,
+ * which a new `AGENTS.md` would stop loading.
+ */
+function hermesContextFile(directory: string): string | null {
+  const walk: string[] = [];
+  for (let d = directory; ; d = path.dirname(d)) {
+    walk.push(d);
+    if (path.dirname(d) === d) break;
+  }
+  const root = walk.findIndex((d) => fs.existsSync(path.join(d, ".git")));
+  const chain = root === -1 ? walk.slice(0, 1) : walk.slice(0, root + 1);
+  for (const d of chain) {
+    const own = HERMES_OWN_FILES.map((name) => path.join(d, name)).find(isFile);
+    if (own !== undefined) {
+      if (hasText(own)) return own;
+      break; // an empty one ends the lookup: Hermes moves on to the next type
+    }
+  }
+  const local = firstWithText(directory, HERMES_AGENTS_FILES);
+  if (local !== null) return local;
+  if (chain.slice(1).some((d) => firstWithText(d, HERMES_AGENTS_FILES) !== null)) {
+    return path.join(directory, "AGENTS.md");
+  }
+  const claude = firstWithText(directory, HERMES_CLAUDE_FILES);
+  if (claude !== null) return claude;
+  if (hermesCursorRules(directory) !== null) return null;
+  return path.join(directory, "AGENTS.md");
+}
+
+/**
+ * Why Hermes has no default export file here, naming the file a new
+ * `AGENTS.md` would displace — Python's `_Hermes.no_agents_md_reason`,
+ * unwrapped (a note keeps it on one line; an error wraps it with {@link pyWrap}).
+ */
+function hermesNoDefaultReason(): string {
+  const rules = hermesCursorRules(process.cwd());
+  const label = rules !== null ? pathLabel(rules) : "Cursor rules";
+  return (
+    `Hermes loads only ${label} here, and it loads the first context file type it finds: a new ` +
+    "AGENTS.md would stop it loading that file. Name the file with --agents-md PATH"
+  );
+}
+
+/**
+ * `text` wrapped to follow a two-space indent at 78 columns, never
+ * breaking a `command` — port of Python's `_wrap` (`textwrap.wrap(held,
+ * 78, break_on_hyphens=False, break_long_words=False)`): greedy, a word
+ * longer than the width alone on its line, lengths in code points.
+ */
+function pyWrap(text: string): string {
+  const held = text.replace(/`[^`]*`/g, (span) => span.replace(/ /g, "\0"));
+  const lines: string[] = [];
+  let line = "";
+  for (const word of held.split(/\s+/).filter(Boolean)) {
+    if (line && [...line].length + 1 + [...word].length > 78) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.join("\n  ").replace(/\0/g, " ");
+}
+
+/**
+ * The file the export goes to without a PATH — Python's `agents_md_path`;
+ * null only for Hermes when only Cursor rules load.
+ */
+function agentsMdDefault(harness: HarnessName): string | null {
   if (harness === "codex") {
     // Codex reads the global AGENTS.override.md in place of AGENTS.md.
     const override = pathlibJoin(codexHome(), "AGENTS.override.md");
@@ -1787,9 +1979,19 @@ function absolutePath(target: string): string {
   return path.isAbsolute(target) ? target : pathlibJoin(process.cwd(), target);
 }
 
-/** Where the export goes: `--agents-md PATH` (a leading `~` expanded), else the harness's default file. */
+/**
+ * Where the export goes: `--agents-md PATH` (a leading `~` expanded), else
+ * the harness's default file. With no default (Hermes with only Cursor
+ * rules), setup stops before anything runs, as Python's
+ * `run_setup_harness` does (python-sdk #278).
+ *
+ * @throws CliError (exit 1) with Python's wrapped reason.
+ */
 function agentsMdTarget(input: HarnessInput): string {
-  return input.agentsMd ? pathlibString(expandUser(input.agentsMd)) : agentsMdDefault(input.harness);
+  if (input.agentsMd) return pathlibString(expandUser(input.agentsMd));
+  const target = agentsMdDefault(input.harness);
+  if (target === null) throw new CliError(`Nothing was written: ${pyWrap(hermesNoDefaultReason())}.`);
+  return target;
 }
 
 /**
@@ -1900,8 +2102,7 @@ async function writeExport(
 ): Promise<void> {
   const { target, contextId, auth } = exp;
   const label = pathLabel(target);
-  // Python says "set up" when the entry was only printed too, which for
-  // Hermes here is always.
+  // Python 0.41.1's words for both cases (python-sdk #285).
   const failed = applied
     ? "The MCP entry is set up, but the AGENTS.md export failed"
     : "The MCP entry is printed for you to add, but the AGENTS.md export failed";
@@ -1922,18 +2123,25 @@ async function writeExport(
   }
 
   if (!pyStrip(digest.text)) {
-    notes.push(
-      `Context ${contextId} has no tool guardrails this credential can see (none marked, or the ` +
-        `context is not trusted-tier): nothing was written to ${label}.`,
-    );
-    // Setup never removes a block; `guardrails digest --out` does.
-    let stale = false;
+    // Port of `_write_export`'s empty branch (python-sdk #278): as
+    // `guardrails digest --out` does, an earlier block goes, so the harness
+    // stops loading guardrails the server no longer serves. Without a
+    // block, neither the file nor its directory is created.
+    let removed: GuardrailBlockStatus;
     try {
-      stale = hasGuardrailBlock(readTextUniversal(target));
-    } catch {
-      stale = false;
+      removed = writeGuardrailBlock(target, "");
+    } catch (e) {
+      throw new CliError(`${failed}: ${label}: ${excMessage(e)}; left unchanged`);
     }
-    if (stale) notes.push(`It still has an earlier block; remove it with: ${refresh}`);
+    const none =
+      `Context ${contextId} has no tool guardrails this credential can see (none marked, or the ` +
+      "context is not trusted-tier)";
+    if (removed === "removed") {
+      notes.push(`${none}: removed the earlier guardrail block from ${label}.`);
+      wrote.push(absolutePath(target));
+    } else {
+      notes.push(`${none}: nothing was written to ${label}.`);
+    }
     return;
   }
 
@@ -1945,11 +2153,16 @@ async function writeExport(
     // Python does: a default such as OpenClaw's workspace may not exist yet.
     fs.mkdirSync(path.dirname(target), { recursive: true });
     status = writeGuardrailBlock(target, digest.text);
-    // Codex's cap is on the bytes it reads, CRLFs included; Python counts
-    // the text with its line endings folded, and misses a file just over.
-    if (cap?.unit === "bytes") size = fs.readFileSync(target).length;
-    // Python's len() of the text: code points, universal newlines.
-    else if (cap?.unit === "characters") size = [...readTextUniversal(target)].length;
+    // As written, as Python 0.41.1 measures it (python-sdk #285): the bytes
+    // for Codex, and for OpenClaw the code points of
+    // `read_bytes().decode("utf-8")`, where a CRLF is two and a BOM one.
+    if (cap !== null) {
+      const raw = fs.readFileSync(target);
+      size =
+        cap.unit === "bytes"
+          ? raw.length
+          : [...new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw)].length;
+    }
   } catch (e) {
     throw new CliError(`${failed}: ${label}: ${excMessage(e)}; left unchanged`);
   }
@@ -1989,7 +2202,23 @@ interface HarnessPlan {
   /** Where in configPath the block goes: "it", or a part of it. */
   blockTarget: string;
   /** The harness CLI that applies the entry, or why setup prints the block instead. */
-  cli: { program: string; file: string; argv: string[] } | { program: null; reason: string };
+  cli:
+    | {
+        program: string;
+        file: string;
+        argv: string[];
+        /** Run attached to the terminal (it signs in or prompts), with no timeout. */
+        attached?: boolean;
+        /** Appended to the failure message of an attached run (Python's `add_failure_note`). */
+        failureNote?: string;
+        /**
+         * After the add exited 0: why the entry is not saved as asked, or
+         * null — Python's `not_saved`. A harness that exits 0 on a cancel
+         * (Hermes) can only be judged by the entry it has now.
+         */
+        notSaved?: () => Promise<string | null>;
+      }
+    | { program: null; reason: string };
   /** Notes for before the command, where Python prints them. */
   notes: string[];
   /** Python's closing notes: after a real run or the printed block, not a dry run. */
@@ -2017,6 +2246,33 @@ async function runHarnessCommand(
   if (result.code === 0) return;
   const detail = redactKeys(result.stderr.trim() || result.stdout.trim(), secrets);
   throw new CliError(`${command} failed: ${detail || `exit code ${result.code}`}`);
+}
+
+/**
+ * Run a harness CLI attached to the terminal — Python's `_run_or_fail`
+ * with `attached=True`: its output went to the terminal, so a failure
+ * names only the exit code, then `note`.
+ */
+async function runAttachedHarness(
+  deps: CliDeps,
+  file: string,
+  program: string,
+  argv: string[],
+  note: string,
+): Promise<void> {
+  const code = await deps.execAttached!(file, argv);
+  if (code === 0) return;
+  throw new CliError(`\`${[program, ...argv.slice(0, 2)].join(" ")}\` failed: exit code ${code}${note}`);
+}
+
+/**
+ * Python's `_print_reason` for an add that runs attached: why setup prints
+ * the block instead. `what`: `starts the sign-in` (Codex) or `is
+ * interactive` (Hermes).
+ */
+function oauthPrintReason(input: HarnessInput, what: string): string {
+  const why = input.nonInteractive ? "-y was given" : "stdin is not a terminal";
+  return `\`${input.harness} mcp add\` ${what} and ${why}`;
 }
 
 /**
@@ -2057,7 +2313,17 @@ async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
       notes.push(`${stops ? "With --force, would run" : "Would run"}: ${display}`);
       printBlock(deps, `Would configure ${where}:`, plan.block);
     } else {
-      await runHarnessCommand(deps, file, program, argv, input.secrets);
+      if (plan.cli.attached === true) {
+        await runAttachedHarness(deps, file, program, argv, plan.cli.failureNote ?? "");
+      } else {
+        await runHarnessCommand(deps, file, program, argv, input.secrets);
+      }
+      if (plan.cli.notSaved !== undefined) {
+        const problem = await plan.cli.notSaved();
+        if (problem !== null) {
+          throw new CliError(`${problem}${exp !== null ? "; setup skipped the AGENTS.md export" : ""}.`);
+        }
+      }
       appliedWith = display;
       notes.push(`Done: ${program} wrote ${input.name} to ${where}.`);
     }
@@ -2076,17 +2342,27 @@ async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
           `(the guardrail block for context ${exp.contextId})`,
       );
     } else if (noInstructions) {
-      // Python offers the export at a prompt; this port never prompts.
-      const when = input.nonInteractive ? "not offered with -y" : "not offered: this port never prompts";
-      notes.push(`AGENTS.md: ${pathLabel(agentsMdDefault(input.harness))} (${when}; --agents-md writes it)`);
+      const target = agentsMdDefault(input.harness);
+      if (target === null) {
+        // Python's `_echo_dry_run_export` for a harness with no default file.
+        notes.push(`AGENTS.md: not offered. ${hermesNoDefaultReason()}.`);
+      } else {
+        // Python offers the export at a prompt; this port never prompts.
+        const when = input.nonInteractive ? "not offered with -y" : "not offered: this port never prompts";
+        notes.push(`AGENTS.md: ${pathLabel(target)} (${when}; --agents-md writes it)`);
+      }
     }
   } else {
     notes.push(...plan.after);
     if (exp === null && noInstructions) {
-      notes.push(
-        "Re-run with --agents-md --context-id <id> to put a snapshot of a context's tool guardrails " +
-          `into ${pathLabel(agentsMdDefault(input.harness))}, which ${LABEL[input.harness]} loads every session.`,
-      );
+      // No hint when no default file fits: a new one would displace the user's.
+      const target = agentsMdDefault(input.harness);
+      if (target !== null) {
+        notes.push(
+          "Re-run with --agents-md --context-id <id> to put a snapshot of a context's tool guardrails " +
+            `into ${pathLabel(target)}, which ${LABEL[input.harness]} loads every session.`,
+        );
+      }
     }
   }
 
@@ -2176,20 +2452,153 @@ function codexDigestNotes(context: string, url: string, keyEnv: string): string[
   ];
 }
 
+/** Whether `mcpUrl` is on `server`; false when it cannot be read as a URL — Python's `_on_server`. */
+function onServer(mcpUrl: string, server: string): boolean {
+  try {
+    return deployment(mcpUrl) === server;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this CLI's usual credential chain is on `server` — Python's
+ * `_cli_chain_on`. It runs after the entry is written, so any failure to
+ * resolve counts as no credential.
+ */
+function cliChainOn(deps: CliDeps, input: HarnessInput, server: string): boolean {
+  try {
+    const auth = deps.resolveAuth({ apiKey: null, mcpUrl: null, profile: null, config: input.config });
+    return onServer(auth.mcpUrl, server);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The stored profiles on `server`, by name — Python's `_profiles_on`. It
+ * goes through this CLI's own loader, so it names only profiles that
+ * `KAGURA_PROFILE=<name>` can load: the loader treats a file with any
+ * malformed profile as empty, and it runs after the write, so a file that
+ * cannot be read holds none.
+ */
+function profilesOn(deps: CliDeps, server: string): string[] {
+  let profiles: CredentialsFile["profiles"];
+  try {
+    profiles = loadCredentialsFile(deps.credentialsPath).profiles;
+  } catch {
+    return [];
+  }
+  return Object.entries(profiles)
+    .filter(([, creds]) => onServer(creds.mcpUrl, server))
+    .map(([name]) => name)
+    .sort();
+}
+
+/** `command` run on `profile`, even with KAGURA_API_KEY set here — Python's `_on_profile`. */
+function onProfile(profile: string, command: string): string {
+  const run = `KAGURA_PROFILE=${shellQuote(profile)} ${command}`;
+  return pyStrip(process.env.KAGURA_API_KEY ?? "") ? `env -u KAGURA_API_KEY ${run}` : run;
+}
+
+/**
+ * The `.kagura.json` every command of this bin loads first, when it cannot
+ * be loaded — Python's `_broken_config`: its path and why, never its
+ * contents. This bin's loader also refuses JSON that is not an object.
+ */
+function brokenConfig(deps: CliDeps): string | null {
+  try {
+    deps.loadConfig();
+    return null;
+  } catch {
+    // Named below.
+  }
+  const local = path.join(process.cwd(), ".kagura.json");
+  const isLocal = fs.existsSync(local);
+  const target = isLocal ? local : path.join(os.homedir(), ".kagura.json");
+  const label = isLocal ? pathLabel(absolutePath(".kagura.json")) : "~/.kagura.json";
+  let text: string;
+  try {
+    // ignoreBOM keeps a leading U+FEFF in `text`, so JSON.parse refuses it as
+    // the loader's did: Python's json.loads names "Unexpected UTF-8 BOM".
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(target));
+  } catch (e) {
+    return `${label} (${e instanceof TypeError ? "not UTF-8 JSON" : strerror(e)})`;
+  }
+  try {
+    JSON.parse(text);
+  } catch {
+    return `${label} (not UTF-8 JSON)`;
+  }
+  return `${label} (not a JSON object)`;
+}
+
+/**
+ * The closing notes on an --oauth Codex entry whose URL names a guardrails
+ * context — Python's `_preview_command` for `entry.oauth` and its caller.
+ * Codex's token stays with Codex, so the preview runs on this CLI's own
+ * credential when that is on the entry's server; else on a stored profile
+ * there; else after a login there. Pinning the server with KAGURA_MCP_URL
+ * would send KAGURA_API_KEY, a key for another server, to it.
+ */
+function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: string): string[] {
+  const server = deployment(url);
+  const digest = shellCommand(["kagura-memory", "guardrails", "digest", context, "--target", "instructions"]);
+  const reads = "(Codex gets what the account it signed in with can read):";
+  let preview: string;
+  let command: string;
+  if (cliChainOn(deps, input, server)) {
+    preview = `Preview it on the kagura-memory CLI's credential ${reads}`;
+    command = digest;
+  } else {
+    const there = profilesOn(deps, server);
+    preview =
+      there.length > 0
+        ? `The kagura-memory CLI's usual credential is not on ${server}; preview it on a profile there ` +
+          `(${there.join(", ")}) ${reads}`
+        : `The kagura-memory CLI's usual credential is not on ${server}, and no profile is: log in there with ` +
+          `\`kagura-memory auth login --server ${server} --profile NAME\`, then preview it ${reads}`;
+    command = onProfile(there[0] ?? "NAME", digest);
+  }
+  const notes = [
+    `Codex should get the tool guardrail digest of context ${context} in the MCP instructions when it connects. ` +
+      "The server sends only its base text instead when the entry's credential cannot read that context, the " +
+      `context has no guardrails, or the deployment turns the digest off. ${preview} ${command}`,
+  ];
+  const broken = brokenConfig(deps);
+  if (broken !== null) {
+    notes.push(`The preview fails until ${broken} is fixed or removed: every kagura-memory command reads it first.`);
+  }
+  notes.push("Use a context whose editor list you control: every editor's guardrail summaries reach the model.");
+  return notes;
+}
+
 async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "codex");
+  await checkOauthServerFirst(deps, input);
   const { name, keyEnv } = input;
   const home = codexHome();
   const configPath = pathlibJoin(home, "config.toml");
   const found = tomlHasServer(readText(configPath), name);
+  const hooksOn = codexHooksEnabled(home, name);
 
   // Codex reads the server's instructions, so guardrails take effect
   // here. A value already in the URL, from --mcp-url or the configured
   // mcp_url, is kept as written.
   const notes: string[] = [];
+  if (input.oauth && hooksOn) {
+    notes.push(
+      "Warning: the kagura-memory Codex plugin's guardrail hooks read their credential only from a URL entry " +
+        "with a bearer (bearer_token_env_var, env_http_headers or http_headers), so with an --oauth entry they " +
+        "do nothing.",
+      `They are turned on here for the ${name} entry (a config.json under ` +
+        `${pathLabel(pathlibJoin(home, "plugins", "data"))}/kagura-memory-*/): to keep them, re-run with ` +
+        "--url-form and an API key (no --oauth).",
+    );
+  }
   let guardrails = input.guardrails;
   if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
-    if (codexHooksEnabled(home, name)) {
+    if (hooksOn && !input.oauth) {
       // The plugin's hooks read this same table and deliver the
       // guardrails themselves; the server need not repeat them.
       guardrails = "off";
@@ -2205,6 +2614,48 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile));
   const url = mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile });
 
+  const codex = deps.which("codex");
+  if (input.oauth) {
+    // `codex mcp add --url` with no bearer saves the entry and then starts
+    // Codex's browser sign-in, so it runs attached, or not at all.
+    const cli: HarnessPlan["cli"] =
+      codex === null
+        ? { program: null, reason: notOnPath("codex") }
+        : !input.interactive
+          ? { program: null, reason: oauthPrintReason(input, "starts the sign-in") }
+          : {
+              program: "codex",
+              file: codex,
+              argv: ["mcp", "add", name, "--url", url],
+              attached: true,
+              failureNote:
+                "\n  Codex saves the entry before it signs in, so it may be saved already: check with\n" +
+                `  \`codex mcp get ${name}\`, then sign in with \`codex mcp login ${name}\`.`,
+            };
+    const tokenStore =
+      `the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store in ${pathLabel(home)}), ` +
+      `else in ${pathLabel(pathlibJoin(home, ".credentials.json"))}`;
+    const lane = queryParam(url, "guardrails");
+    const after = [oauthLoginNote("codex", name, cli.program !== null, tokenStore)];
+    if (lane !== undefined && isUuid(lane)) after.push(...codexOauthDigestNotes(deps, input, parseUuid(lane), url));
+    after.push(
+      "Restart Codex (or start a new session) to load the entry.",
+      `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
+    );
+    return applyPlan(deps, {
+      input,
+      url,
+      configPath,
+      found,
+      stops: true,
+      block: codexTomlOauthBlock(name, url),
+      blockTarget: "it",
+      cli,
+      notes,
+      after,
+    });
+  }
+
   const after = [
     `Codex reads the API key from $${keyEnv} when it connects: set it in the environment that ` +
       `starts Codex, e.g. \`export ${keyEnv}=<your-api-key>\` in your shell profile. ` +
@@ -2217,7 +2668,6 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
   );
 
-  const codex = deps.which("codex");
   return applyPlan(deps, {
     input,
     url,
@@ -2337,8 +2787,160 @@ function readHermesConfig(target: string): { text: string; unread: string | null
   }
 }
 
+/**
+ * What setup keeps of a Hermes `mcp_servers.<name>` entry — Python's
+ * `_HermesEntry`: never a header value, the env or any other key, which
+ * can hold a secret. Nothing here is echoed; {@link hermesEntryKind}
+ * describes it.
+ */
+interface HermesEntry {
+  command: string | null;
+  args: string[];
+  url: string | null;
+  oauth: boolean;
+  /** `headers` has an `Authorization` key, in any case. */
+  authorization: boolean;
+  enabled: boolean;
+}
+
+function hermesEntryFrom(value: unknown): HermesEntry {
+  const entry = isObject(value) ? value : {};
+  // As `hermes mcp list` reads it: a string counts only as true/1/yes.
+  let enabled: unknown = Object.hasOwn(entry, "enabled") ? entry.enabled : true;
+  if (typeof enabled === "string") enabled = ["true", "1", "yes"].includes(enabled.toLowerCase());
+  const headers = entry.headers;
+  return {
+    command: typeof entry.command === "string" ? entry.command : null,
+    args: Array.isArray(entry.args) ? entry.args.map((a) => (typeof a === "string" ? a : pyRepr(a))) : [],
+    url: typeof entry.url === "string" ? entry.url : null,
+    oauth: entry.auth === "oauth",
+    authorization: isObject(headers) && Object.keys(headers).some((k) => k.toLowerCase() === "authorization"),
+    enabled: pyTruthy(enabled),
+  };
+}
+
+/** Python's `_HermesEntry.kind`: a url wins over a command, as in `hermes mcp list`. */
+function hermesEntryKind(entry: HermesEntry): string {
+  if (entry.url !== null) {
+    if (entry.oauth) return "URL with OAuth";
+    if (entry.authorization) return "URL with an Authorization header";
+    return "URL with no credential";
+  }
+  if (entry.command !== null) {
+    return runsProxy({ command: entry.command, args: entry.args }) ? "stdio (kagura-mcp)" : "stdio (another command)";
+  }
+  return "an entry setup does not recognise";
+}
+
+/**
+ * `mcp_servers.<name>` from `hermes config get … --json` — Python's
+ * `_config_get` + `_read_entry`. `entry` is null when Hermes has no such
+ * entry ("Config key not set", exit 1, or a JSON null); `read` is false when
+ * the command failed otherwise (an older Hermes).
+ */
+async function readHermesEntry(
+  deps: CliDeps,
+  file: string,
+  name: string,
+): Promise<{ read: boolean; entry: HermesEntry | null }> {
+  const r = await deps.execFile(file, ["config", "get", `mcp_servers.${name}`, "--json"], HARNESS_EXEC);
+  if (!r.timedOut && r.code === 1 && r.stderr.includes("Config key not set")) return { read: true, entry: null };
+  const out = pyStrip(r.stdout);
+  if (r.timedOut || r.code !== 0 || !out) return { read: false, entry: null };
+  try {
+    const value: unknown = JSON.parse(out.split(/\r\n|\r|\n/).pop()!);
+    return { read: true, entry: value === null ? null : hermesEntryFrom(value) };
+  } catch {
+    return { read: false, entry: null };
+  }
+}
+
+/** The form `hermes mcp list` shows for `name` — Python's `_list_detect`, for a Hermes whose `config get` failed. */
+async function hermesListForm(deps: CliDeps, file: string, name: string): Promise<"URL" | "stdio" | null> {
+  const r = await deps.execFile(file, ["mcp", "list"], HARNESS_EXEC);
+  if (r.timedOut || r.code !== 0) return null;
+  for (const line of r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split(/\r\n|\r|\n/)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 2 && parts[0] === name) return /^https?:\/\//.test(parts[1]!) ? "URL" : "stdio";
+  }
+  return null;
+}
+
+/** Python's 0.41.3 message for an entry Hermes kept (python-sdk#287). */
+function hermesKeptEntry(name: string, kind: string): string {
+  return (
+    `Hermes's ${name} entry is still the existing one (${kind}): Hermes keeps the existing entry when its ` +
+    "overwrite prompt is declined, or when the add stops before saving, so nothing was saved. Re-run with " +
+    "--force and accept Hermes's overwrite prompt"
+  );
+}
+
+/**
+ * After an --oauth `hermes mcp add` exited 0: why the entry is not saved as
+ * asked, or null — Python's `_Hermes.not_saved` with `entry.oauth`. Hermes
+ * exits 0 when the user cancels an overwrite, declines to save after a
+ * failed probe, or continues without authentication; only the entry read
+ * back tells.
+ *
+ * @param replaced An entry of this name existed before the add (--force).
+ */
+async function hermesOauthNotSaved(
+  deps: CliDeps,
+  file: string,
+  name: string,
+  url: string,
+  replaced: boolean,
+): Promise<string | null> {
+  const { read, entry } = await readHermesEntry(deps, file, name);
+  if (!read) {
+    if ((await hermesListForm(deps, file, name)) !== "URL") {
+      return (
+        `\`hermes mcp list\` shows no new ${name} entry: \`hermes mcp add\` was\n` +
+        "  cancelled or failed there, so nothing was saved"
+      );
+    }
+    return (
+      `Setup could not read back Hermes's ${name} entry (\`hermes config get mcp_servers.${name}\` failed), so ` +
+      "it cannot tell whether Hermes saved an OAuth entry it can sign in with: check it with that command or " +
+      "`hermes mcp list`"
+    );
+  }
+  if (entry === null) {
+    return `Hermes has no ${name} entry: \`hermes mcp add\` was cancelled or failed\n  there, so nothing was saved`;
+  }
+  // `--auth header` never writes `auth`, so for an OAuth entry the url alone tells.
+  if (entry.url !== url) {
+    return replaced
+      ? hermesKeptEntry(name, hermesEntryKind(entry))
+      : `Hermes's ${name} entry (${hermesEntryKind(entry)}) is not the one setup asked for, so nothing was saved`;
+  }
+  if (!entry.oauth) {
+    // Hermes writes `auth` only as `oauth`. When it cannot set up OAuth it
+    // asks "Continue without authentication?" (default yes) and saves no
+    // `auth`; when its overwrite prompt is declined it keeps the old entry.
+    const noOauth = `Hermes's ${name} entry has no auth: oauth, so it cannot sign in to Kagura: `;
+    return replaced
+      ? `${noOauth}Hermes keeps the existing entry when its overwrite prompt is declined, and continues without ` +
+          "authentication when it cannot set up OAuth. Re-run with --force and accept Hermes's overwrite prompt"
+      : `${noOauth}Hermes continues without authentication when it cannot set up OAuth. Re-run with --force to ` +
+          "replace it";
+  }
+  if (!entry.enabled) {
+    // "Save config anyway?" after a failed probe saves `enabled: false`,
+    // which `hermes mcp login` does not turn back on.
+    return (
+      `Hermes saved ${name} disabled, since its sign-in or connection check did not finish, and it never ` +
+      `connects to a disabled entry. Sign in with \`hermes mcp login ${name}\` (add --flow device on ` +
+      "memory-cloud 0.78.0+ when the browser cannot reach this host), then turn the entry on with " +
+      `\`hermes config set mcp_servers.${name}.enabled true\``
+    );
+  }
+  return null;
+}
+
 async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "hermes");
+  await checkOauthServerFirst(deps, input);
   const { name, keyEnv } = input;
   const home = hermesHome();
   const configPath = pathlibJoin(home, "config.yaml");
@@ -2352,45 +2954,79 @@ async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   // last: the servers under the first would be gone without an error.
   const { text, unread } = readHermesConfig(configPath);
   const indent = yamlServersIndent(text);
-  if (unread !== null) {
-    notes.push(
-      `Setup could not read ${where} (${unread}): if it already has a top-level mcp_servers: key, ` +
-        `put only the ${name} entry under it.`,
-    );
-  } else if (indent !== null) {
-    notes.push(
-      `${where} already has a top-level mcp_servers: key, so only the entry is printed: a second one ` +
-        "would replace the first and every server under it.",
-    );
-    if (yamlServersInline(text)) {
+  const hermes = deps.which("hermes");
+  const found = yamlHasServer(text, name);
+  // A function, so the closure gets a plain string rather than a narrowed `string | null`.
+  const oauthAdd = (file: string): HarnessPlan["cli"] => ({
+    program: "hermes",
+    file,
+    argv: [
+      ...["mcp", "add", name, "--url", url, "--auth", "oauth"],
+      ...["--connect-timeout", String(HERMES_OAUTH_CONNECT_TIMEOUT_S)],
+    ],
+    attached: true,
+    notSaved: () => hermesOauthNotSaved(deps, file, name, url, found),
+  });
+  // The API-key form is never run: `hermes mcp add` prompts for the key and
+  // the tools to enable, and this port never hands a CLI the terminal for
+  // it (Python's -y). The --oauth add signs in at its probe, so it runs
+  // attached with a terminal and without -y, as in Python.
+  const cli: HarnessPlan["cli"] = !input.oauth
+    ? {
+        program: null,
+        reason:
+          hermes === null ? notOnPath("hermes") : "`hermes mcp add` is interactive and this port never prompts",
+      }
+    : hermes === null
+      ? { program: null, reason: notOnPath("hermes") }
+      : !input.interactive
+        ? { program: null, reason: oauthPrintReason(input, "is interactive") }
+        : oauthAdd(hermes);
+  // The config.yaml notes only go with a printed block (Python's `show_block`).
+  if (cli.program === null || input.dryRun) {
+    if (unread !== null) {
       notes.push(
-        "Its mcp_servers value is written inline (flow style or null): rewrite it as a block mapping, " +
-          `one server per indented key, before adding ${name}.`,
+        `Setup could not read ${where} (${unread}): if it already has a top-level mcp_servers: key, ` +
+          `put only the ${name} entry under it.`,
       );
+    } else if (indent !== null) {
+      notes.push(
+        `${where} already has a top-level mcp_servers: key, so only the entry is printed: a second one ` +
+          "would replace the first and every server under it.",
+      );
+      if (yamlServersInline(text)) {
+        notes.push(
+          "Its mcp_servers value is written inline (flow style or null): rewrite it as a block mapping, " +
+            `one server per indented key, before adding ${name}.`,
+        );
+      }
     }
   }
 
-  const hermes = deps.which("hermes");
   return applyPlan(deps, {
     input,
     url,
     configPath,
-    found: yamlHasServer(text, name),
+    found,
     stops: hermes !== null,
-    block: hermesYamlBlock(name, url, keyEnv, indent ?? undefined),
+    block: input.oauth
+      ? hermesYamlOauthBlock(name, url, indent ?? undefined)
+      : hermesYamlBlock(name, url, keyEnv, indent ?? undefined),
     blockTarget: indent === null ? "it" : "its mcp_servers: mapping",
-    // Never run: `hermes mcp add` prompts for the key and the tools to
-    // enable, and this port never hands a CLI the terminal. Python's -y.
-    cli: {
-      program: null,
-      reason: hermes === null ? notOnPath("hermes") : "`hermes mcp add` is interactive and this port never prompts",
-    },
+    cli,
     notes,
-    // Hermes resolves ${VAR} in config.yaml from its environment and from
-    // the .env beside it.
     after: [
-      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(home, ".env"))} with an editor: the ` +
-        "entry reads it from there, and setup never sees the key.",
+      input.oauth
+        ? oauthLoginNote(
+            "hermes",
+            name,
+            cli.program !== null,
+            pathLabel(pathlibJoin(home, "mcp-tokens", `${name}.json`)),
+          )
+        : // Hermes resolves ${VAR} in config.yaml from its environment and
+          // from the .env beside it.
+          `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(home, ".env"))} with an editor: the ` +
+          "entry reads it from there, and setup never sees the key.",
       `Check it with: ${shellCommand(["hermes", "mcp", "test", name])}`,
     ],
   });
@@ -2423,6 +3059,7 @@ function openclawWorkspaceDir(): string {
 
 async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "openclaw");
+  await checkOauthServerFirst(deps, input);
   const { name, keyEnv } = input;
   const stateDir = openclawStateDir();
   const configPath = openclawEnvPath("OPENCLAW_CONFIG_PATH") ?? pathlibJoin(stateDir, "openclaw.json");
@@ -2432,10 +3069,15 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
 
   // `add` refuses a name that exists, so replacing one goes through `set`,
   // as in Python; so does any --force run, since the scan could miss an
-  // entry OpenClaw has, and `set` adds one too. --no-probe: the key is not
-  // in the .env yet.
-  const argv =
-    found || input.force
+  // entry OpenClaw has. An --oauth entry is never probed by `add` (it waits
+  // for `openclaw mcp login`); the API-key form skips the probe with
+  // --no-probe, since the key is not in the .env yet.
+  const replace = found || input.force;
+  const argv = input.oauth
+    ? replace
+      ? ["mcp", "set", name, JSON.stringify(openclawOauthEntry(url))]
+      : ["mcp", "add", name, "--url", url, "--transport", "streamable-http", "--auth", "oauth"]
+    : replace
       ? ["mcp", "set", name, JSON.stringify(openclawEntry(url, keyEnv))]
       : [
           "mcp",
@@ -2451,13 +3093,25 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
         ];
 
   const openclaw = deps.which("openclaw");
+  const keyNote = input.oauth
+    ? oauthLoginNote(
+        "openclaw",
+        name,
+        openclaw !== null,
+        `its state database (${pathLabel(pathlibJoin(stateDir, "state", "openclaw.sqlite"))})`,
+      )
+    : // The .env is in the state directory, even when OPENCLAW_CONFIG_PATH
+      // puts the config elsewhere.
+      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(stateDir, ".env"))} with an editor: ` +
+      `the entry sends \${${keyEnv}} (mcp.servers headers take no SecretRef), and setup never sees ` +
+      "the key.";
   return applyPlan(deps, {
     input,
     url,
     configPath,
     found,
     stops: openclaw !== null,
-    block: openclawBlock(name, url, keyEnv),
+    block: input.oauth ? openclawOauthBlock(name, url) : openclawBlock(name, url, keyEnv),
     blockTarget: "it",
     cli:
       openclaw === null
@@ -2465,11 +3119,7 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
         : { program: "openclaw", file: openclaw, argv },
     notes,
     after: [
-      // The .env is in the state directory, even when OPENCLAW_CONFIG_PATH
-      // puts the config elsewhere.
-      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(stateDir, ".env"))} with an editor: ` +
-        `the entry sends \${${keyEnv}} (mcp.servers headers take no SecretRef), and setup never sees ` +
-        "the key.",
+      keyNote,
       "The Gateway hot-reloads the file. MCP tools appear in OpenClaw's coding and messaging tool " +
         "profiles, not in minimal.",
       `Check it with: ${shellCommand(["openclaw", "mcp", "doctor", name, "--probe"])}`,
@@ -2498,7 +3148,18 @@ const claude: Command = {
     "  --guardrails or --tool-profile drops an earlier value, and says so.\n\n" +
     "  This port installs no hooks or slash commands: the Python CLI's flags\n" +
     "  for them, and --no-auto-context, are accepted and change nothing.\n\n" +
-    GUARDRAILS_ADVICE,
+    GUARDRAILS_ADVICE +
+    "\n\n" +
+    examples(
+      "setup claude",
+      "setup claude --profile default        # OAuth via kagura-mcp (recommended)",
+      "setup claude --profile default --scope user   # one entry for every project",
+      "setup claude --profile default --guardrails off --tool-profile core",
+      "setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}",
+      "setup claude -y --api-key kagura_xxx --context-id my-project",
+      "setup claude --no-commands      # plugin users: its /kagura-memory:* instead",
+      "setup claude --no-auto-context  # always show full context list",
+    ),
   spec: { flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ...PYTHON_ONLY_FLAGS] },
   run: (deps, args) => runClaude(deps as CliDeps, args),
 };
@@ -2531,8 +3192,24 @@ const codex: Command = {
     "  the context's export block into ~/.codex/AGENTS.md, fetched with the\n" +
     "  usual credential (KAGURA_API_KEY, the OAuth profile, .kagura.json),\n" +
     "  which must be for the entry's server.\n\n" +
+    "  With --url-form --oauth (memory-cloud 0.77.0+, whose client registration\n" +
+    "  accepts Codex; setup checks the version first), the entry is a bare URL\n" +
+    "  and Codex then signs in itself: `codex mcp add` starts the browser\n" +
+    "  sign-in, so setup runs it attached to this terminal (its output on\n" +
+    "  stderr) only with a terminal on stdin and without -y, and otherwise\n" +
+    "  prints the table for you to add and sign in with `codex mcp login\n" +
+    "  NAME`. Codex keeps the token in its own store, keyed on the URL. The\n" +
+    "  API-key URL form stays the default.\n\n" +
     `${MCP_URL_RULE}\n\n` +
-    GUARDRAILS_ADVICE,
+    GUARDRAILS_ADVICE +
+    "\n\n" +
+    examples(
+      "setup codex --profile default",
+      "setup codex --profile default --context-id CTX_UUID",
+      "setup codex --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup codex --profile default --dry-run",
+    ),
   spec: {
     flags: [
       HARNESS_PROFILE,
@@ -2548,7 +3225,13 @@ const codex: Command = {
       ...HARNESS_TAIL,
       apiKeyEnv(
         "The variable Codex reads the API key from (bearer_token_env_var; default KAGURA_API_KEY, " +
-          "which every kagura-memory command also ranks above OAuth profiles)",
+          "which every kagura-memory command also ranks above OAuth profiles). Not with --oauth.",
+      ),
+      oauthFlag(
+        "With --url-form: a URL entry with no key. memory-cloud 0.77.0+ (setup checks first) accepts Codex's client " +
+          "registration, and Codex then signs in itself: `codex mcp add` starts the browser sign-in, so it runs only " +
+          "with a terminal and without -y; otherwise setup prints the table, and you sign in with `codex mcp login " +
+          "NAME` (--no-browser when the browser cannot reach Codex's loopback callback).",
       ),
       ...HARNESS_END,
     ],
@@ -2562,21 +3245,45 @@ const hermes: Command = {
     "  Prints the mcp_servers block and the config.yaml to add it to\n" +
     "  ($HERMES_HOME, or the active Hermes profile's:\n" +
     "  ~/.hermes/profiles/<name> when ~/.hermes/active_profile names one,\n" +
-    "  else ~/.hermes), and changes nothing there: `hermes mcp add` is\n" +
-    "  interactive and this port never prompts. When config.yaml already has\n" +
-    "  an mcp_servers key, the entry alone is printed, to go under it. The\n" +
+    "  else ~/.hermes) and, for the API-key form, changes nothing there:\n" +
+    "  `hermes mcp add` asks for the key, and this port never prompts. When\n" +
+    "  config.yaml already has an mcp_servers key, the entry alone is\n" +
+    "  printed, to go under it. The\n" +
     "  entry reads the API key from MCP_<NAME>_API_KEY (MCP_KAGURA_MEMORY_API_KEY\n" +
     "  by default), the variable `hermes mcp add` derives from --name, in the\n" +
     "  .env beside config.yaml: add the key there yourself; setup never sees\n" +
     "  it. Check it with: hermes mcp test kagura-memory.\n\n" +
     "  Hermes does not read MCP instructions: guardrails reach it through\n" +
-    "  get_context_info (on by default) and, if you choose, an AGENTS.md\n" +
-    "  export block (--agents-md with --context-id, or a --guardrails\n" +
-    "  CONTEXT_ID): a snapshot of the context's tool guardrails in the context\n" +
-    "  file Hermes loads in this directory. --guardrails off is refused, and a\n" +
-    "  context id, from the flag or the URL, is not written; a first\n" +
-    "  ?guardrails=off in the URL is kept, alone, with a warning.\n\n" +
-    MCP_URL_RULE,
+    "  get_context_info (on by default) and, if you choose, an export block\n" +
+    "  (--agents-md with --context-id, or a --guardrails CONTEXT_ID) in the\n" +
+    "  context file Hermes loads from this directory, so a user's own file\n" +
+    "  keeps loading. Hermes loads only the first type it finds\n" +
+    "  (.hermes.md/HERMES.md, AGENTS files, CLAUDE.md, Cursor rules); with\n" +
+    "  only Cursor rules, name a file with --agents-md PATH. --guardrails off\n" +
+    "  is refused, and a context id, from the flag or the URL, is not written;\n" +
+    "  a first ?guardrails=off in the URL is kept, alone, with a warning.\n\n" +
+    "  With --url-form --oauth (memory-cloud 0.77.0+, whose client registration\n" +
+    "  accepts Hermes Agent; setup checks the version first), the entry is a\n" +
+    "  URL with `auth: oauth`. With a terminal on stdin and without -y, setup\n" +
+    "  runs `hermes mcp add NAME --url URL --auth oauth --connect-timeout 315`\n" +
+    "  attached to this terminal (its output on stderr): Hermes signs in when\n" +
+    "  it probes the server, within the bound `hermes mcp login` uses, which\n" +
+    "  it keeps as the entry's connect_timeout. Setup then reads the entry\n" +
+    "  back with `hermes config get` and stops (exit 1) when Hermes kept\n" +
+    "  another entry, saved one without auth: oauth, or saved it disabled.\n" +
+    "  With -y or without a terminal, it prints the block instead. Sign in\n" +
+    "  later with `hermes mcp login NAME` (the browser flow), or on\n" +
+    "  memory-cloud 0.78.0+ with `hermes mcp login NAME --flow device`, which\n" +
+    "  needs no loopback callback. The API-key URL form stays the default.\n\n" +
+    MCP_URL_RULE +
+    "\n\n" +
+    examples(
+      "setup hermes --profile default",
+      "setup hermes --profile default --context-id CTX_UUID --agents-md",
+      "setup hermes --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup hermes --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup hermes --profile default -y     # print the block only",
+    ),
   spec: {
     flags: [
       HARNESS_PROFILE,
@@ -2584,12 +3291,19 @@ const hermes: Command = {
       HARNESS_CONTEXT_ID,
       guardrailsNotWritten("Hermes"),
       agentsMd(
-        "Write the context's tool guardrail export block into PATH (default: the context file Hermes " +
-          "loads here, the first of .hermes.md, HERMES.md, AGENTS.override.md, AGENTS.md, CLAUDE.md, " +
-          "else AGENTS.md). Only the marked block changes.",
+        "Write the context's tool guardrail export block into PATH (default: the context file Hermes loads " +
+          "from here: the nearest .hermes.md or HERMES.md up to the git root, else this directory's AGENTS " +
+          "file, else its CLAUDE.md, else a new AGENTS.md; none when only Cursor rules load, which a new " +
+          "AGENTS.md would stop loading). Only the marked block changes; an empty set removes it.",
       ),
       ...HARNESS_TAIL,
       apiKeyEnv("Not accepted: Hermes names the variable MCP_<NAME>_API_KEY"),
+      oauthFlag(
+        "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ (setup checks first) " +
+          "accepts Hermes's client registration, and Hermes then signs in itself when `hermes mcp add` probes it " +
+          "(given --connect-timeout 315, which Hermes keeps), or later with `hermes mcp login NAME`; on memory-cloud " +
+          "0.78.0+, `hermes mcp login NAME --flow device` signs in with a code and needs no loopback callback.",
+      ),
       ...HARNESS_END,
     ],
   },
@@ -2616,7 +3330,21 @@ const openclaw: Command = {
     "  --guardrails off is refused, and a context id, from the flag or the\n" +
     "  URL, is not written; a first ?guardrails=off in the URL is kept, alone,\n" +
     "  with a warning.\n\n" +
-    MCP_URL_RULE,
+    "  With --url-form --oauth (memory-cloud 0.77.0+, whose client registration\n" +
+    "  accepts OpenClaw; setup checks the version first), the entry is a URL\n" +
+    '  with `auth: "oauth"` and no header, which OpenClaw saves without\n' +
+    "  probing: sign in with `openclaw mcp login NAME`, then check it with\n" +
+    "  `openclaw mcp doctor NAME --probe`. The API-key URL form stays the\n" +
+    "  default.\n\n" +
+    MCP_URL_RULE +
+    "\n\n" +
+    examples(
+      "setup openclaw --profile default",
+      "setup openclaw --profile default --context-id CTX_UUID --agents-md",
+      "setup openclaw --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup openclaw --profile default --force",
+    ),
   spec: {
     flags: [
       HARNESS_PROFILE,
@@ -2631,7 +3359,12 @@ const openclaw: Command = {
       ...HARNESS_TAIL,
       apiKeyEnv(
         "The variable the Authorization header references, kept in OpenClaw's .env " +
-          "($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY)",
+          "($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY). Not with --oauth.",
+      ),
+      oauthFlag(
+        "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ (setup checks first) " +
+          "accepts OpenClaw's client registration. OpenClaw saves the entry without probing; sign in with `openclaw " +
+          "mcp login NAME`, then run `openclaw mcp doctor NAME --probe`.",
       ),
       ...HARNESS_END,
     ],

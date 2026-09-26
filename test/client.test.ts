@@ -2325,12 +2325,16 @@ describe("REST endpoints", () => {
     }
   });
 
-  it.each([null, [], "x"])("checkServerVersion neither throws nor warns on a body that is no object (%j)", async (body) => {
+  it.each([null, [], "x"])("checkServerVersion throws KaguraResponseError on a body that is no object (%j), without warning", async (body) => {
+    // Python 0.42.0 (python-sdk #277): get_server_info parses the body first.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const server = new FakeServer();
       server.restResults["/api/v1/system/info"] = body;
-      await expect(makeClient(server).checkServerVersion()).resolves.toEqual(body);
+      await expect(makeClient(server).checkServerVersion()).rejects.toThrow(
+        "KaguraClient.get_server_info: unexpected server response for ServerInfo " +
+          "(Input should be a valid dictionary or instance of ServerInfo).",
+      );
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
@@ -2338,16 +2342,15 @@ describe("REST endpoints", () => {
   });
 
   it.each([null, 75, { major: 0 }])(
-    "checkServerVersion neither throws nor warns on a non-string version %j",
+    "checkServerVersion throws KaguraResponseError on a non-string version %j, without warning",
     async (version) => {
-      // It used to call version.split and throw a TypeError, against its
-      // "never throws" contract.
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         const server = new FakeServer();
         server.restResults["/api/v1/system/info"] = { name: "mc", version };
-        const info = await makeClient(server).checkServerVersion();
-        expect(info.version).toEqual(version);
+        await expect(makeClient(server).checkServerVersion()).rejects.toThrow(
+          "(version: Input should be a valid string)",
+        );
         expect(warn).not.toHaveBeenCalled();
       } finally {
         warn.mockRestore();

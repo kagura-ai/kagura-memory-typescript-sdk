@@ -179,6 +179,79 @@ function reprString(value: string): string {
   return `${quoteChar}${out}${quoteChar}`;
 }
 
+/** Python's `str.isprintable()`: true when `repr()` would escape no character of `text`. */
+export function pyIsPrintable(text: string): boolean {
+  for (const ch of text) {
+    if (ch !== " " && NON_PRINTABLE.test(ch)) return false;
+  }
+  return true;
+}
+
+/** `reprlib.Repr`'s defaults in CPython 3.11. */
+const REPRLIB = { maxlevel: 6, maxlist: 6, maxdict: 4, maxstring: 30, maxlong: 40, maxother: 30 } as const;
+
+/** reprlib's cut: the first `i` and last `j` code points of `s` around `...`, when `s` is over `max`. */
+function reprlibCut(s: string, max: number): string {
+  const chars = [...s];
+  if (chars.length <= max) return s;
+  const i = Math.max(0, Math.floor((max - 3) / 2));
+  const j = Math.max(0, max - 3 - i);
+  return `${chars.slice(0, i).join("")}...${chars.slice(chars.length - j).join("")}`;
+}
+
+/** `x[start:]` of a Python sequence: a negative start counts from the end. */
+function pySliceFrom<T>(items: T[], start: number): T[] {
+  return items.slice(start < 0 ? Math.max(0, items.length + start) : start);
+}
+
+/**
+ * `reprlib.repr(value)` with the default `Repr` (CPython 3.11) — for a
+ * value a server sent, printed where Python prints it so: strings cut to 30
+ * characters, ints to 40, other scalars to 30, lists to 6 items, dicts to 4
+ * sorted keys, 6 levels deep. Dict keys are sorted by UTF-16 code unit,
+ * which differs from Python's code-point order only for astral characters.
+ */
+export function reprlibRepr(value: unknown): string {
+  return reprlibValue(value, REPRLIB.maxlevel);
+}
+
+function reprlibValue(value: unknown, level: number): string {
+  if (typeof value === "string") {
+    // Port of Repr.repr_str: repr the head; when that is too long, repr
+    // head + tail and cut that.
+    const chars = [...value];
+    const max = REPRLIB.maxstring;
+    const s = pyRepr(chars.slice(0, max).join(""));
+    if ([...s].length <= max) return s;
+    const i = Math.max(0, Math.floor((max - 3) / 2));
+    const j = Math.max(0, max - 3 - i);
+    const again = [...pyRepr([...chars.slice(0, i), ...pySliceFrom(chars, chars.length - j)].join(""))];
+    return `${again.slice(0, i).join("")}...${pySliceFrom(again, again.length - j).join("")}`;
+  }
+  if (typeof value === "bigint" || (typeof value === "number" && Number.isInteger(value))) {
+    return reprlibCut(pyRepr(value), REPRLIB.maxlong);
+  }
+  if (Array.isArray(value)) {
+    if (level <= 0 && value.length > 0) return "[...]";
+    const pieces = value.slice(0, REPRLIB.maxlist).map((item) => reprlibValue(item, level - 1));
+    if (value.length > REPRLIB.maxlist) pieces.push("...");
+    return `[${pieces.join(", ")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    if (keys.length === 0) return "{}";
+    if (level <= 0) return "{...}";
+    const pieces = keys
+      .slice(0, REPRLIB.maxdict)
+      .map((key) => `${reprlibValue(key, level - 1)}: ${reprlibValue(record[key], level - 1)}`);
+    if (keys.length > REPRLIB.maxdict) pieces.push("...");
+    return `{${pieces.join(", ")}}`;
+  }
+  // A float, a bool, None: Repr.repr_instance.
+  return reprlibCut(pyRepr(value), REPRLIB.maxother);
+}
+
 /**
  * Python's `repr()` of a float: the shortest digits that round-trip (the
  * same digits JS picks), in fixed notation from 1e-4 up to 1e16 and with a
@@ -241,6 +314,17 @@ function reprValue(value: unknown, ancestors: object[]): string {
   const inner = [...ancestors, value];
   const entries = Object.entries(value).map(([k, v]) => `${reprString(k)}: ${reprValue(v, inner)}`);
   return `{${entries.join(", ")}}`;
+}
+
+/**
+ * Python's `bool()` of a decoded JSON value: `None`, `False`, `0`, `""`,
+ * `[]` and `{}` are false, anything else is true.
+ */
+export function pyTruthy(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return Boolean(value);
 }
 
 /**

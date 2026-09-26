@@ -146,8 +146,9 @@ export function pathIdParam(param: Param, value: string, what: string): string {
  * An out-of-range value is printed as click prints it, converted: the
  * int for an IntRange (`+4000` and `04000` both read `4000`), the Python
  * float repr for a FloatRange (`2` reads `2.0`, `1e1` reads `10.0`).
- * NaN is refused, which click's FloatRange is not: its comparisons are
- * all false for NaN, so it lets `nan` through.
+ * NaN is refused as click's `FloatRange` refuses it: `nan is not in the
+ * range 0.0<=x<=1.0.` (its comparisons are all false for NaN, and click's
+ * range check is written so that this counts as outside the range).
  */
 export function parseRanged(
   param: Param,

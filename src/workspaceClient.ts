@@ -29,6 +29,7 @@ import {
   responseShapeError,
 } from "./responseShape.js";
 import { pathSegment } from "./pathSegment.js";
+import { normalizeUuid } from "./pyCompat.js";
 import { KaguraRestClient, requireInt } from "./restBase.js";
 import type { RequestContext, RestResponse } from "./restBase.js";
 
@@ -48,30 +49,15 @@ const UNIFORM_403 = "Insufficient permissions";
 // kill-switch, plan gate, self-role-change, key/workspace mismatch) that is
 // already actionable and must pass through untouched.
 
-const UUID_HEX_RE = /^[0-9a-f]{32}$/i;
-
 /**
- * Return the canonical UUID string, rejecting non-UUIDs before the URL.
- *
- * Python's `uuid.UUID` tolerates non-canonical spellings (`{braces}`,
- * `urn:uuid:` prefix, dashless 32-hex, uppercase); interpolating the RAW
- * input would send those to the server and surface as a misleading uniform
- * 404 — normalize instead of just validating.
+ * A workspace id in canonical form: every spelling Python's `uuid.UUID`
+ * takes (`{braces}`, `urn:uuid:`, dashless, uppercase), through the same
+ * port the CLI and `MemoryClient` use, so one id cannot pass one client
+ * and fail another. Sending the RAW input would surface as a misleading
+ * uniform 404 — normalize instead of just validating.
  */
 function normalizeWorkspaceId(workspaceId: string): string {
-  const stripped = String(workspaceId)
-    .replace(/^urn:/, "")
-    .replace(/^uuid:/, "")
-    .replace(/^[{}]+|[{}]+$/g, "")
-    .replace(/-/g, "");
-  if (!UUID_HEX_RE.test(stripped)) {
-    throw new Error(`workspaceId must be a UUID, got ${JSON.stringify(workspaceId)}`);
-  }
-  const hex = stripped.toLowerCase();
-  return (
-    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
-    `${hex.slice(16, 20)}-${hex.slice(20)}`
-  );
+  return normalizeUuid(workspaceId, "workspaceId");
 }
 
 /**
@@ -137,7 +123,8 @@ export interface CreateInvitationOptions {
   role?: string;
   /**
    * Context grant — required (min 1) for member/viewer invitations,
-   * ignored for admin. Sent on the wire as `allowed_context_ids`.
+   * ignored for admin. Each must be a UUID (an `Error` otherwise, before
+   * any request); sent as `allowed_context_ids` in canonical form.
    */
   allowedContextIds?: string[];
   /**
@@ -276,7 +263,9 @@ export class WorkspaceClient extends KaguraRestClient {
     }
     const body: Record<string, unknown> = { email, role };
     if (allowedContextIds !== undefined) {
-      body.allowed_context_ids = allowedContextIds;
+      // Port of create_invitation's normalize_uuid (python-sdk #285): the
+      // server answers a non-UUID here with an HTTP 500.
+      body.allowed_context_ids = allowedContextIds.map((c) => normalizeUuid(c, "allowedContextIds"));
     }
     if (expiresInDays !== undefined) {
       body.expires_in_days = expiresInDays;

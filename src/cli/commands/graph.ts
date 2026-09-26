@@ -7,7 +7,7 @@
  * re-running with the right one.
  */
 
-import { requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
+import { examples, requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
 import { CliError, parseFloatOption, parseIntOption, parseRanged, parseTags } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
@@ -41,6 +41,10 @@ function optionalFloat(args: ParsedArgs, flag: FlagSpec): number | undefined {
 const edgeList: Command = {
   summary: "List edges connected to a memory.",
   args: "CONTEXT_ID MEMORY_ID",
+  description: examples(
+    "edge list CTX_UUID MEM_UUID",
+    "edge list CTX_UUID MEM_UUID --min-weight 0.5 --type related_to",
+  ),
   spec: { flags: [MIN_WEIGHT, EDGE_TYPES, LIMIT] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
@@ -86,6 +90,10 @@ const CONFIDENCE: FlagSpec = {
 const edgeCreate: Command = {
   summary: "Create or upsert an edge from SOURCE_ID to TARGET_ID.",
   args: "CONTEXT_ID SOURCE_ID TARGET_ID",
+  description: examples(
+    "edge create CTX_UUID SRC_UUID TGT_UUID",
+    "edge create CTX_UUID SRC_UUID TGT_UUID --type depends_on --weight 0.8",
+  ),
   spec: { flags: [EDGE_TYPE, WEIGHT, CONFIDENCE] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
@@ -107,6 +115,10 @@ const edgeCreate: Command = {
 const edgeUpdate: Command = {
   summary: "Update an existing edge's weight and/or type.",
   args: "CONTEXT_ID SOURCE_ID TARGET_ID",
+  description: examples(
+    "edge update CTX_UUID SRC_UUID TGT_UUID --weight 0.9",
+    "edge update CTX_UUID SRC_UUID TGT_UUID --type related_to --weight 0.7",
+  ),
   spec: {
     flags: [
       { ...WEIGHT, help: "New edge weight 0.0-3.0", defaultLabel: undefined },
@@ -144,6 +156,7 @@ const edgeUpdate: Command = {
 const edgeDelete: Command = {
   summary: "Delete the edge between SOURCE_ID and TARGET_ID.",
   args: "CONTEXT_ID SOURCE_ID TARGET_ID",
+  description: examples("edge delete CTX_UUID SRC_UUID TGT_UUID", "edge delete CTX_UUID SRC_UUID TGT_UUID -y"),
   spec: { flags: [YES] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");

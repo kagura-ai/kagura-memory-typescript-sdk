@@ -81,24 +81,22 @@ export function hasGuardrailBlock(text: string): boolean {
  * one: a file never keeps a guardrail the server no longer serves.
  *
  * @throws GuardrailBlockError when the fetched block does not have exactly
- *   one begin line followed by one end line, or when `text` holds more than
- *   one block or a broken one (unterminated, or its end before its begin),
- *   which is fixed by hand rather than guessed at.
+ *   one begin line followed by one end line (Python's message: `…, in that
+ *   order`), or when `text` holds more than one block or a broken one
+ *   (unterminated, or its end before its begin), which is fixed by hand
+ *   rather than guessed at.
  */
 export function spliceGuardrailBlock(text: string, block: string): string {
   const fetched = pyStrip(block);
   if (fetched) {
     const { begins, ends } = markerLines(fetched.split("\n"));
-    if (begins.length !== 1 || ends.length !== 1) {
+    // Port of splice_guardrail_block (Python SDK 0.41.1, python-sdk #285):
+    // one begin line, then one end line. Out of order, the block would be
+    // written, and the next run would refuse the file as broken.
+    if (begins.length !== 1 || ends.length !== 1 || ends[0]! < begins[0]!) {
       throw new GuardrailBlockError(
-        "fetched block does not have exactly one begin and one end marker line",
+        "fetched block does not have exactly one begin and one end marker line, in that order",
       );
-    }
-    // Python counts the markers but not their order, so it would write a
-    // block its next run refuses as broken. The server never sends one;
-    // refuse it here rather than write a file that locks itself.
-    if (ends[0]! < begins[0]!) {
-      throw new GuardrailBlockError("fetched block has its end marker line before its begin one");
     }
   }
 
