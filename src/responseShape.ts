@@ -106,6 +106,18 @@ export function exactInt(value: bigint): number | bigint {
 }
 
 /**
+ * A JavaScript number in an `int` field, as pydantic's `float_as_int`
+ * reads a float: finite and whole (`-0` is 0), else refused in its words.
+ */
+function wholeNumber(value: number): Coerced<number> {
+  if (!Number.isFinite(value)) return fail("Input should be a finite number");
+  if (!Number.isInteger(value)) {
+    return fail("Input should be a valid integer, got a number with a fractional part");
+  }
+  return ok(value + 0);
+}
+
+/**
  * An `int` field given a number literal of the body (#69), as pydantic
  * reads what `json.loads` made of it: an int literal exactly (`-0` is 0,
  * 309 digits are 309 digits); a float literal when it is finite, whole and
@@ -113,15 +125,12 @@ export function exactInt(value: bigint): number | bigint {
  */
 function intFromLiteral(literal: JsonNumber): Coerced<number | bigint> {
   if (literal.isInt) return ok(exactInt(literal.bigint()));
-  const value = literal.value;
-  if (!Number.isFinite(value)) return fail("Input should be a finite number");
-  if (!Number.isInteger(value)) {
-    return fail("Input should be a valid integer, got a number with a fractional part");
-  }
-  if (Math.abs(value) >= INT_FROM_FLOAT_LIMIT) {
+  const whole = wholeNumber(literal.value);
+  if (!whole.ok) return whole;
+  if (Math.abs(whole.value) >= INT_FROM_FLOAT_LIMIT) {
     return fail("Unable to parse input string as an integer, exceeded maximum size");
   }
-  return ok(exactInt(BigInt(value)));
+  return ok(exactInt(BigInt(whole.value)));
 }
 
 /**
@@ -139,13 +148,7 @@ export const laxInt: Coercer<number> = (value) => {
     return result.ok ? ok(Number(result.value)) : result;
   }
   if (typeof value === "boolean") return ok(value ? 1 : 0);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return fail("Input should be a finite number");
-    if (!Number.isInteger(value)) {
-      return fail("Input should be a valid integer, got a number with a fractional part");
-    }
-    return ok(value + 0);
-  }
+  if (typeof value === "number") return wholeNumber(value);
   if (typeof value === "string") {
     const result = pydanticIntText(value);
     return result.ok ? ok(Number(result.value)) : fail(result.msg);
