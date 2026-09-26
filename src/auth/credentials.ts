@@ -30,6 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { KaguraAuthExpiredError } from "../errors.js";
+import { pyStr } from "../python.js";
 import { refreshAccessToken } from "./deviceFlow.js";
 import { withFileLock } from "./filelock.js";
 import type { AuthProvider } from "./types.js";
@@ -157,6 +158,21 @@ function requireString(d: Record<string, unknown>, key: string): string {
   return value;
 }
 
+/** `d[key]` whatever its type, as Python's `d[key]` reads it; absent throws. */
+function requirePresent(d: Record<string, unknown>, key: string): unknown {
+  if (!Object.prototype.hasOwnProperty.call(d, key)) {
+    throw new Error(`credentials profile missing required field '${key}'`);
+  }
+  return d[key];
+}
+
+/** Python's truthiness of a JSON value. */
+function pyTruthy(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object" && value !== null) return Object.keys(value).length > 0;
+  return Boolean(value);
+}
+
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === "string" ? value : fallback;
 }
@@ -168,8 +184,11 @@ export function credentialsFromDict(d: Record<string, unknown>): OAuthCredential
     server: requireString(d, "server"),
     mcpUrl: requireString(d, "mcp_url"),
     clientId: requireString(d, "client_id"),
-    accessToken: requireString(d, "access_token"),
-    refreshToken: requireString(d, "refresh_token"),
+    // Python's from_dict reads both untyped (#69): it sends
+    // f"Bearer {access_token}", and refreshes only when refresh_token is
+    // truthy -- "" here, which every refresh path treats as none.
+    accessToken: pyStr(requirePresent(d, "access_token")),
+    refreshToken: ((value) => (pyTruthy(value) ? pyStr(value) : ""))(requirePresent(d, "refresh_token")),
     tokenType: stringOr(d.token_type, "Bearer"),
     expiresAt: parseIso(requireString(d, "expires_at")),
     scope: stringOr(d.scope, ""),

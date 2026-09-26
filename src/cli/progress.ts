@@ -24,7 +24,7 @@ import {
   type ProgressCallback,
   type ProgressEvent,
 } from "../progress.js";
-import { pyRepr } from "../python.js";
+import { pyStr } from "../python.js";
 
 export const PROGRESS_CHOICES = ["rich", "json", "none"] as const;
 export type ProgressFormat = (typeof PROGRESS_CHOICES)[number];
@@ -126,11 +126,6 @@ export function ndjsonLine(event: ProgressEvent, at: Date): string {
   if (event.msg) line.msg = event.msg;
   if (event.detail !== undefined && Object.keys(event.detail).length > 0) line.detail = event.detail;
   return formatJsonLine(line, { ensureAscii: false });
-}
-
-/** Python's `str()` of a JSON value: a string as is, anything else as its repr. */
-function pyStr(value: unknown): string {
-  return typeof value === "string" ? value : pyRepr(value);
 }
 
 /**

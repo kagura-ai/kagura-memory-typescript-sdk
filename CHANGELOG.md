@@ -6,6 +6,111 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ResourceClient`'s readers refuse a body the Python SDK's model
+  refuses** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  `createToken`, `listTokens`, `updateToken`, `setupResource`,
+  `getResourceImpact`, `listResources`, `getIndexerStatus`,
+  `getResourceSchema`, `listResourceEvents` and `ingestEvent` throw
+  `KaguraResponseError` (`ResourceClient.<method>: unexpected server
+  response for <Model> (…)`) where they returned the body unchecked. An
+  accepted body is still returned as it arrived. `KaguraClient`'s REST
+  readers get the same check in #70.
+- **A hand-edited credentials profile is read as the Python SDK reads it**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  one whose `refresh_token` is `null`, or whose `access_token` is no
+  string, is kept (sent as `Bearer 123`, no refresh) where the whole file
+  was read as empty and every command said no credentials were found. A
+  number token is rendered from the JavaScript number (`1.0` sends
+  `Bearer 1`, Python `Bearer 1.0`): the file is read with `JSON.parse`
+  (README, "Hand-edited credentials").
+- **`doctor` checks the server the SDK would use**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
+  Without `--profile` it forced `.kagura.json`'s key and URL; it now
+  resolves as a bare client does, as Python's does: `KAGURA_API_KEY`, then
+  the OAuth profile, then `.kagura.json`, so `KAGURA_REQUIRE_PROFILE` and a
+  missing `KAGURA_PROFILE` fail the auth section and skip the check. An
+  insecure resolved MCP URL is Python's warning, and the check is skipped
+  (`Server connectivity check skipped because the MCP URL is insecure`),
+  where it failed, from every source: `KAGURA_MCP_URL` with no
+  `.kagura.json`, and the `mcp_url` of the `.kagura.json` the credential
+  resolved from, get the warning alone (exit 0), where the `mcp` section
+  also failed them (`mcp_url is not HTTPS: …`, exit 1). A plain-HTTP
+  `.kagura.json` `mcp_url` that `KAGURA_API_KEY` or an OAuth profile
+  shadows still fails, as `setup claude` refuses it (README, `doctor`).
+  `--profile missing`
+  no longer fails when `KAGURA_API_KEY` is set, and `--profile ''` means
+  the default profile. A selected profile that does not exist is reported
+  once, by the resolution's `Authentication could not be resolved: …`,
+  no longer also as `no profile named …`; an expired profile that
+  `KAGURA_API_KEY` shadows is no failure, as Python only warns; and with
+  no `.kagura.json` the auth section no longer says `.kagura.json carries
+  an api_key` for the key the environment supplied. A `.kagura.json`
+  that does not parse fails the
+  check with the message naming it, never as `No credentials found`.
+- **An OAuth refresh failure on a `KaguraClient` REST read is a
+  `KaguraAuthExpiredError`** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),
+  as on the MCP path and in the REST clients, where it was a
+  `KaguraConnectionError` (`Connection failed: …`). `doctor` now prints
+  Python's OAuth info line for it rather than `Server unreachable`.
+- **MCP envelope errors read as the Python SDK's**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  a `null` JSON-RPC body is no result instead of a `TypeError`, a
+  JSON-RPC `error.message` that is no string is rendered with Python's
+  `str()` (it could throw a `TypeError`), a tool error's non-string code or
+  message likewise (`t failed (None): …`, where it read `unknown` /
+  `Unknown error`), and a `partial_rollback` whose `rollback_summary` does
+  not match the model says `(rollback_summary could not be read)` with the
+  `KaguraResponseError` as its `cause`. A number literal in a code or
+  message still renders from the JavaScript number (`1.0` reads `1`) and
+  an object's integer-like keys print first, where Python prints the
+  literal and keeps the key order (README, "The MCP envelope").
+- **Lax number and bool fields read strings as pydantic-core does**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
+  An int field takes `"0-1"` (as -1), `"0__7"` and `" +1"` as pydantic
+  does, and refuses a digit run past 4,300 characters with `Unable to parse
+  input string as an integer, exceeded maximum size`. A float field follows
+  pydantic's `str_as_float`, where it followed Python's `float()`: `"1_.5"`,
+  `"+_1"` and `"1e_10"` read, `" 1_000"` and `"1_000\n"` do not. A bool
+  field sent a whole number of magnitude 2^63 or more says `Input should be
+  a valid boolean`. A string holding a lone surrogate is refused in any
+  field but a `str`, datetimes and `Literal`s included, with `Input should
+  be a valid string, unable to parse raw data as a unicode string`. One
+  gap stays (README "Reading responses"): an int field of an MCP tool
+  result (`recallSeries`' `count`, a bucket's `count`) sent a whole float
+  literal of 2^63 or more (`1e20`) reads it as that double, where pydantic
+  refuses it, because the tool text is read with `JSON.parse` and the
+  literal is gone.
+- **REST bodies are read as Python's `json.loads` reads them**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
+  The resource and files commands keep the server's key order inside an
+  untyped mapping (`{"b": 1, "2": 2}` no longer prints `"2"` first) and
+  print each number as written: an int field sent `9007199254740993`
+  prints exactly and one sent `1e20` is refused as pydantic refuses it, a
+  float field sent `-0` prints `0.0`, and `1e16` / `-0.0` in a `payload`
+  print `1e+16` / `-0.0`. A body with `NaN` or `Infinity` is read rather
+  than refused as non-JSON; one nested deeper than 973 containers fails
+  with Python's `maximum recursion depth exceeded while decoding a JSON
+  array from a unicode string`; and `KaguraClient`'s REST methods word an
+  unreadable body as Python does (`Invalid response format: Expecting
+  value: line 1 column 1 (char 0)`). A string value holding a lone
+  surrogate fails as pydantic's dump does (`Error serializing to JSON:
+  UnicodeEncodeError: 'utf-8' codec can't encode character '\udXXX' in
+  position N: surrogates not allowed`, `characters in position N-M` for a
+  run) instead of printing the `\udXXX` escape; a key of the untyped
+  mapping itself holding one prints as three U+FFFD, and a key of a
+  mapping nested inside it exits 1 like a value. The values the SDK
+  returns are unchanged.
+- **`resource import` adds its counts exactly and prints its summary as
+  Python's `json.dumps` does**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  `created` / `failed` past 2^53 are exact, an error's `1.0`, `1e16`
+  and `NaN` print `1.0`, `1e+16` and `NaN`, in the server's key order,
+  and a lone surrogate in an error's string or key prints as `?` (one per
+  code unit), as the Python CLI's `errors="replace"` stdout writes it,
+  rather than the `\ud800` escape.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

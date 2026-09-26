@@ -1,8 +1,13 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KaguraClient, MIN_SERVER_VERSION } from "../src/client.js";
 import {
   KaguraAuthError,
+  KaguraAuthExpiredError,
   KaguraConnectionError,
   KaguraError,
   KaguraNotFoundError,
@@ -13,6 +18,7 @@ import {
   KaguraRateLimitError,
   KaguraResponseError,
 } from "../src/errors.js";
+import { JsonNestingError } from "../src/losslessJson.js";
 import type { ListContextsResponse, SearchConfig } from "../src/models.js";
 import { FakeServer, makeClient, SESSION_EXPIRED_BODY } from "./fakeServer.js";
 
@@ -995,6 +1001,9 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       c.rollbackSleepRun({ contextId: "c", reportId: "r1" }),
     )) as KaguraPartialRollbackError;
     expect(err).toBeInstanceOf(KaguraPartialRollbackError);
+    // Python's note (#69): a summary the SDK cannot read must not hide the
+    // committed partial reversal.
+    expect(err.message).toBe("rollback_sleep_run failed (partial_rollback): partial (rollback_summary could not be read)");
     expect(err.reportId).toBeNull();
     expect(err.summary).toEqual({});
   });
@@ -2264,6 +2273,41 @@ describe("REST endpoints", () => {
     }
   });
 
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+  // `kagura doctor` against a server sending each body prints
+  // `FAIL Server unreachable: Invalid response format: <message>` (#69).
+  it.each([
+    ["<html>maintenance</html>", "Expecting value: line 1 column 1 (char 0)"],
+    ['{\n  "name": "k\\x"\n}', "Invalid \\escape: line 2 column 13 (char 14)"],
+    [
+      `{"name": "kagura", "version": "0.77.0", "x": ${"1".repeat(4301)}}`,
+      "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; " +
+        "use sys.set_int_max_str_digits() to increase the limit",
+    ],
+  ])("a REST body Python's json.loads refuses reads in its words: %#", async (body, message) => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response(body, { status: 200 });
+    const client = makeClient(server);
+    const error = await client.getServerInfo().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(`Invalid response format: ${message}`);
+  });
+
+  it("a REST body with NaN reads as Python reads it; one nested past 973 containers fails as there (#69)", async () => {
+    const server = new FakeServer();
+    server.forcedResponse = new Response('{"name": "kagura", "version": "0.77.0", "search_defaults": {"w": NaN}}', {
+      status: 200,
+    });
+    const info = await makeClient(server).getServerInfo();
+    expect((info.search_defaults as unknown as { w: number }).w).toBeNaN();
+
+    const deep = new FakeServer();
+    deep.forcedResponse = new Response(`{"x": ${"[".repeat(10000)}${"]".repeat(10000)}}`, { status: 200 });
+    await expect(makeClient(deep).getServerInfo()).rejects.toThrow(
+      new JsonNestingError("maximum recursion depth exceeded while decoding a JSON array from a unicode string"),
+    );
+  });
+
   it("checkServerVersion returns info and never throws on old servers", async () => {
     const server = new FakeServer();
     server.restResults["/api/v1/system/info"] = { name: "mc", version: "0.1.0" };
@@ -2546,5 +2590,245 @@ describe("callRawTool (#28)", () => {
     const client = makeClient(new FakeServer());
     await expect(client.callRawTool("  ")).rejects.toThrow(/toolName must be a non-empty string/);
     await expect(client.callRawTool("")).rejects.toThrow(/toolName must be a non-empty string/);
+  });
+});
+
+describe("the MCP envelope in the Python SDK's words (#69)", () => {
+  /** A client whose session is open, so the next reply can be forced. */
+  async function openClient(server: FakeServer): Promise<KaguraClient> {
+    const client = makeClient(server);
+    await client.callRawTool("t");
+    return client;
+  }
+
+  it("reads a null JSON-RPC body as no result, as Python's `response.json() or {}` does", async () => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response("null", { status: 200 });
+    await expect(client.callRawTool("t")).resolves.toEqual({});
+  });
+
+  // Recorded from the Python SDK 0.42.0's _make_jsonrpc_request against a
+  // mock transport: f"MCP error: {error.get('message', error)}".
+  it.each([
+    [{ error: { code: -32603 } }, "MCP error: {'code': -32603}"],
+    [{ error: { message: { toString: 1 } } }, "MCP error: {'toString': 1}"],
+    [{ error: { message: null } }, "MCP error: None"],
+    [{ error: { message: [1, "a"] } }, "MCP error: [1, 'a']"],
+    [{ error: { code: -32600, message: "bad request" } }, "MCP error: bad request"],
+  ])("renders the JSON-RPC error %j as Python's str()", async (body, message) => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, ...body }), { status: 200 });
+    const error = await client.callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(message);
+  });
+
+  // Recorded from the Python SDK 0.42.0's KaguraClient._raise_for_mcp_error.
+  it.each([
+    [{ status: "error", error: null, message: { toString: 1 } }, KaguraError, "t failed (None): {'toString': 1}"],
+    [{ status: "error", error: 5, message: null }, KaguraError, "t failed (5): None"],
+    [{ status: "error", message: true }, KaguraError, "t failed (unknown): True"],
+    [{ status: "error", error: { k: "v" } }, KaguraError, "t failed ({'k': 'v'}): Unknown error"],
+    [{ status: "error", error: "context_not_found", message: [1, "a"] }, KaguraNotFoundError, "t: [1, 'a']"],
+  ] as const)("renders the tool error %j as Python's str()", async (result, cls, message) => {
+    const server = new FakeServer();
+    server.toolResults.t = result;
+    const error = await makeClient(server).callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(cls);
+    expect((error as Error).message).toBe(message);
+  });
+
+  // The documented difference (README, "The MCP envelope"): the tool text
+  // and the JSON-RPC body are read with JSON.parse, so a number literal
+  // renders from the JavaScript number and integer-like keys print first.
+  // The Python SDK 0.42.0 prints `t failed (x): 1.0`, `t failed (1.0): m`,
+  // `t failed (x): {'b': 1, '1': 2}` and `MCP error: 1.0` here.
+  it.each([
+    ['{"status":"error","error":"x","message":1.0}', "t failed (x): 1"],
+    ['{"status":"error","error":"x","message":1e2}', "t failed (x): 100"],
+    ['{"status":"error","error":"x","message":-0.0}', "t failed (x): 0"],
+    ['{"status":"error","error":1.0,"message":"m"}', "t failed (1): m"],
+    ['{"status":"error","error":"x","message":{"b":1,"1":2}}', "t failed (x): {'1': 2, 'b': 1}"],
+  ])("renders a number literal in the tool text %s from the JavaScript number (documented difference)", async (text, message) => {
+    const server = new FakeServer();
+    server.toolTexts.t = text;
+    const error = await makeClient(server).callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraError);
+    expect((error as Error).message).toBe(message);
+  });
+
+  // The documented difference (README, "The MCP envelope"): a JSON-RPC
+  // `error` that is no object is rendered with str(), where the Python SDK
+  // 0.42.0 stops with `AttributeError: 'NoneType' object has no attribute
+  // 'get'` (`'list' object` for `[1]`).
+  it.each([
+    [{ error: null }, "MCP error: None"],
+    [{ error: [1] }, "MCP error: [1]"],
+  ])("renders the JSON-RPC error %j, no object, as str() (documented difference)", async (body, message) => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, ...body }), { status: 200 });
+    const error = await client.callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(message);
+  });
+
+  it("renders a number literal in the JSON-RPC error message from the JavaScript number (documented difference)", async () => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response('{"jsonrpc":"2.0","id":2,"error":{"message":1.0}}', { status: 200 });
+    const error = await client.callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe("MCP error: 1");
+  });
+
+  // Recorded from the Python SDK 0.42.0 (pydantic 2.13.4, pydantic-core
+  // 2.46.4): `RollbackSummary.model_validate` on each summary. A present
+  // null is no default; a lone surrogate is refused before the int parse;
+  // the reader lists three problems and counts the rest, as Python's
+  // response_shape_error does.
+  const NINE_BAD = {
+    edges_deleted: "x",
+    merges_reversed: "x",
+    merges_unreversible: "x",
+    importance_restored: "x",
+    promotions_reversed: "x",
+    importance_kept: "x",
+    promotions_kept: "x",
+    archives_restored: "x",
+    errors: "x",
+  };
+  const INT_PARSING = "Input should be a valid integer, unable to parse string as an integer";
+  it.each([
+    [undefined, "Input should be a valid dictionary or instance of RollbackSummary"],
+    [null, "Input should be a valid dictionary or instance of RollbackSummary"],
+    [[], "Input should be a valid dictionary or instance of RollbackSummary"],
+    [{ edges_deleted: "x" }, `edges_deleted: ${INT_PARSING}`],
+    [{ edges_deleted: null }, "edges_deleted: Input should be a valid integer"],
+    [
+      { edges_deleted: "\u{d800}" },
+      "edges_deleted: Input should be a valid string, unable to parse raw data as a unicode string",
+    ],
+    [{ errors: "x" }, "errors: Input should be a valid list"],
+    [{ errors: [1, "a", null] }, "errors.0: Input should be a valid string; errors.2: Input should be a valid string"],
+    [NINE_BAD, `edges_deleted: ${INT_PARSING}; merges_reversed: ${INT_PARSING}; merges_unreversible: ${INT_PARSING} (+6 more)`],
+  ])("notes a rollback_summary it cannot read (%j), as Python does", async (summary, problem) => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "partial_rollback",
+      message: "partial",
+      report_id: 5,
+      ...(summary === undefined ? {} : { rollback_summary: summary }),
+    };
+    const error = (await makeClient(server)
+      .rollbackSleepRun({ contextId: "c", reportId: "r1" })
+      .catch((e: unknown) => e)) as KaguraPartialRollbackError;
+    expect(error).toBeInstanceOf(KaguraPartialRollbackError);
+    expect(error.message).toBe("rollback_sleep_run failed (partial_rollback): partial (rollback_summary could not be read)");
+    expect(error.reportId).toBeNull();
+    expect(error.summary).toEqual({});
+    expect(error.cause).toBeInstanceOf(KaguraResponseError);
+    expect((error.cause as Error).message).toBe(
+      `rollback_sleep_run: unexpected server response for RollbackSummary (${problem}). ` +
+        "The server may be newer than this SDK; upgrading kagura-memory may help.",
+    );
+  });
+});
+
+describe("REST reads with an OAuth profile (#69)", () => {
+  it("throws a refresh failure as the auth error it is, not as a connection failure", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-rest-auth-"));
+    try {
+      fs.mkdirSync(path.join(home, ".kagura"), { mode: 0o700 });
+      const profile = {
+        server: "https://x.test",
+        mcp_url: "https://x.test/mcp",
+        client_id: "c",
+        access_token: "at",
+        refresh_token: "",
+        token_type: "Bearer",
+        expires_at: "2020-01-01T00:00:00Z",
+        scope: "",
+        workspace_id: "w",
+        workspace_name: "W",
+        user_email: "u@x",
+        issued_at: "2019-12-31T00:00:00Z",
+      };
+      fs.writeFileSync(
+        path.join(home, ".kagura", "credentials.json"),
+        JSON.stringify({ version: 1, default_profile: "default", profiles: { default: profile } }),
+        { mode: 0o600 },
+      );
+      const calls: string[] = [];
+      const client = new KaguraClient({
+        home,
+        env: {},
+        fetch: async (input) => {
+          calls.push(String(input));
+          return new Response("{}");
+        },
+      });
+      const error = await client.getServerInfo().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraAuthExpiredError);
+      expect(error).not.toBeInstanceOf(KaguraConnectionError);
+      expect((error as Error).message).toMatch(/^This profile was stored without a refresh token/);
+      expect(calls).toEqual([]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("throws a refresh the token endpoint cannot be reached for once-wrapped, as Python does", async () => {
+    // Python 0.42.0: KaguraConnectionError('Could not reach
+    // http://…/api/v1/oauth/token/: All connection attempts failed'). The
+    // header is awaited before the fetch try, so the refresh's own error
+    // is not wrapped again as `Connection failed: …`. The refresh goes
+    // through the OAuth provider's fetch, the global one, not the client's.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-rest-auth-"));
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: unknown) => {
+      calls.push(`refresh ${String(input)}`);
+      throw new TypeError("fetch failed");
+    });
+    try {
+      fs.mkdirSync(path.join(home, ".kagura"), { mode: 0o700 });
+      const profile = {
+        server: "https://x.test",
+        mcp_url: "https://x.test/mcp",
+        client_id: "c",
+        access_token: "at",
+        refresh_token: "rt",
+        token_type: "Bearer",
+        expires_at: "2020-01-01T00:00:00Z",
+        scope: "",
+        workspace_id: "w",
+        workspace_name: "W",
+        user_email: "u@x",
+        issued_at: "2019-12-31T00:00:00Z",
+      };
+      fs.writeFileSync(
+        path.join(home, ".kagura", "credentials.json"),
+        JSON.stringify({ version: 1, default_profile: "default", profiles: { default: profile } }),
+        { mode: 0o600 },
+      );
+      const client = new KaguraClient({
+        home,
+        env: {},
+        fetch: async (input) => {
+          calls.push(`rest ${String(input)}`);
+          return new Response("{}");
+        },
+      });
+      const error = await client.getServerInfo().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraConnectionError);
+      expect((error as Error).message).toBe("Could not reach https://x.test/api/v1/oauth/token/: fetch failed");
+      expect(calls).toEqual(["refresh https://x.test/api/v1/oauth/token/"]);
+    } finally {
+      vi.unstubAllGlobals();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

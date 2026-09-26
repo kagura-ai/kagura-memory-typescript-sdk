@@ -20,7 +20,14 @@
  */
 
 import { KaguraResponseError } from "./errors.js";
-import { pyFloatAscii, stripNumberSpace } from "./python.js";
+import { JsonNumber, valueAt } from "./losslessJson.js";
+import {
+  FLOAT_PARSING,
+  hasLoneSurrogate,
+  pydanticFloatText,
+  pydanticIntText,
+  STRING_UNICODE,
+} from "./pydanticNumber.js";
 
 /** Python's `_UPGRADE_HINT`, the last sentence of every response error. */
 export const UPGRADE_HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
@@ -85,60 +92,106 @@ export type Coercer<T> = (value: unknown) => Coerced<T>;
 const ok = <T>(value: T): Coerced<T> => ({ ok: true, value });
 const fail = (msg: string): Coerced<never> => ({ ok: false, msg });
 
-/** Pydantic's `int` digits, after strip: `_` between digits, and a zero-only fraction (`"50.0"`). */
-const LAX_INT_TEXT = /^[+-]?\d(?:_?\d)*(?:\.0+)?$/;
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/** pydantic's bound for a float read as an `int`: an i64 holds less than 2^63. */
+const INT_FROM_FLOAT_LIMIT = 2 ** 63;
 
 /**
- * An `int` field: a whole number, a bool, or a string of one (`" 50 "`,
- * `"1_000"`, `"50.0"`), as pydantic 2 accepts them: stripped of the
- * whitespace `int()` skips (NEL, but no BOM), in ASCII digits.
+ * A whole number as the SDK returns one: a `number` up to
+ * `Number.MAX_SAFE_INTEGER`, the exact `bigint` past it.
+ */
+export function exactInt(value: bigint): number | bigint {
+  return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : value;
+}
+
+/**
+ * A JavaScript number in an `int` field, as pydantic's `float_as_int`
+ * reads a float: finite and whole (`-0` is 0), else refused in its words.
+ */
+function wholeNumber(value: number): Coerced<number> {
+  if (!Number.isFinite(value)) return fail("Input should be a finite number");
+  if (!Number.isInteger(value)) {
+    return fail("Input should be a valid integer, got a number with a fractional part");
+  }
+  return ok(value + 0);
+}
+
+/**
+ * An `int` field given a number literal of the body (#69), as pydantic
+ * reads what `json.loads` made of it: an int literal exactly (`-0` is 0,
+ * 309 digits are 309 digits); a float literal when it is finite, whole and
+ * of magnitude below 2^63 (`1e18` is 10^18, `1e20` is refused).
+ */
+function intFromLiteral(literal: JsonNumber): Coerced<number | bigint> {
+  if (literal.isInt) return ok(exactInt(literal.bigint()));
+  const whole = wholeNumber(literal.value);
+  if (!whole.ok) return whole;
+  if (Math.abs(whole.value) >= INT_FROM_FLOAT_LIMIT) {
+    return fail("Unable to parse input string as an integer, exceeded maximum size");
+  }
+  return ok(exactInt(BigInt(whole.value)));
+}
+
+/**
+ * An `int` field: a whole number, a bool, or a string pydantic-core's
+ * `str_as_int` reads (`" 50 "`, `"1_000"`, `"50.0"`, `"0-1"`; see
+ * `pydanticNumber.ts`). A number literal ({@link JsonNumber}) is read as
+ * {@link laxExactInt} reads it, then as the nearest `number`. A value
+ * past 2^53 is the nearest double, and one of 2^1024 or more (309 digits)
+ * is `Infinity`: the fields read with laxInt are typed `number` (README
+ * "Reading responses"); {@link laxExactInt} keeps them exact.
  */
 export const laxInt: Coercer<number> = (value) => {
-  if (typeof value === "boolean") return ok(value ? 1 : 0);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return fail("Input should be a finite number");
-    if (!Number.isInteger(value)) {
-      return fail("Input should be a valid integer, got a number with a fractional part");
-    }
-    return ok(value + 0);
+  if (value instanceof JsonNumber) {
+    const result = intFromLiteral(value);
+    return result.ok ? ok(Number(result.value)) : result;
   }
+  if (typeof value === "boolean") return ok(value ? 1 : 0);
+  if (typeof value === "number") return wholeNumber(value);
   if (typeof value === "string") {
-    const text = stripNumberSpace(value);
-    if (LAX_INT_TEXT.test(text)) return ok(Number(text.replace(/_/g, "")) + 0);
-    return fail("Input should be a valid integer, unable to parse string as an integer");
+    const result = pydanticIntText(value);
+    return result.ok ? ok(Number(result.value)) : fail(result.msg);
   }
   return fail("Input should be a valid integer");
 };
 
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
-
 /**
- * {@link laxInt}, exact past 2^53: a string of digits beyond
+ * {@link laxInt}, exact past 2^53: a string whose value is beyond
  * `Number.MAX_SAFE_INTEGER` reads as the `bigint` Python's `int` holds,
  * rather than as a rounded neighbour. memory-cloud sends a resource
  * event's BigInt id as such a string, and the Python model's `int` prints
- * it as a number.
+ * it as a number. So does an int literal of the body
+ * ({@link JsonNumber}): `9007199254740993` reads `9007199254740993n`.
  */
 export const laxExactInt: Coercer<number | bigint> = (value) => {
+  if (value instanceof JsonNumber) return intFromLiteral(value);
   if (typeof value === "string") {
-    const text = stripNumberSpace(value);
-    if (LAX_INT_TEXT.test(text)) {
-      const exact = BigInt(text.replace(/_/g, "").replace(/\.0+$/, ""));
-      return ok(exact >= -MAX_SAFE && exact <= MAX_SAFE ? Number(exact) : exact);
-    }
+    const result = pydanticIntText(value);
+    return result.ok ? ok(exactInt(result.value)) : fail(result.msg);
   }
   return laxInt(value);
 };
 
-/** A `float` field: a number, a bool, or a string `float()` would read in ASCII digits. */
+/**
+ * A `float` field: a number, a bool, or a string pydantic-core's
+ * `str_as_float` reads. A float literal ({@link JsonNumber}) is its value (`-0.0`
+ * stays `-0`, `NaN` stays NaN); an int literal is Python's `float(int)`:
+ * the nearest double, `-0` is `0`, and one past the largest double is
+ * refused.
+ */
 export const laxFloat: Coercer<number> = (value) => {
+  if (value instanceof JsonNumber) {
+    if (!value.isInt) return ok(value.value);
+    const float = value.value + 0;
+    return Number.isFinite(float) ? ok(float) : fail("Input should be a valid number");
+  }
   if (typeof value === "boolean") return ok(value ? 1 : 0);
   if (typeof value === "number") return ok(value);
   if (typeof value === "string") {
-    const parsed = pyFloatAscii(value);
-    return parsed === undefined
-      ? fail("Input should be a valid number, unable to parse string as a number")
-      : ok(parsed);
+    if (hasLoneSurrogate(value)) return fail(STRING_UNICODE);
+    const parsed = pydanticFloatText(value);
+    return parsed === undefined ? fail(FLOAT_PARSING) : ok(parsed);
   }
   return fail("Input should be a valid number");
 };
@@ -146,26 +199,57 @@ export const laxFloat: Coercer<number> = (value) => {
 const TRUE_TEXT = new Set(["1", "on", "t", "true", "y", "yes"]);
 const FALSE_TEXT = new Set(["0", "off", "f", "false", "n", "no"]);
 
+const BOOL_TYPE = "Input should be a valid boolean";
+const BOOL_PARSING = "Input should be a valid boolean, unable to interpret input";
+/** 2^63: pydantic-core's `float_as_int` takes a whole float strictly inside +/-2^63 only. */
+const I64_BOUND = 2 ** 63;
+const I64_MIN = -(2n ** 63n);
+const I64_END = 2n ** 63n;
+
 /**
- * A `bool` field: a bool, `0` / `1`, or one of pydantic's words in any
- * case (`"yes"`, `"off"`, `"t"`, …), unstripped.
+ * A float in a `bool` field, as pydantic's `validate_bool` reads one:
+ * `0` and `1` (`1.0` too) are bools, another whole number strictly inside
+ * +/-2^63 is read and refused, anything else (a fraction, 2^63 or more,
+ * NaN, an infinity) is no bool at all.
+ */
+function boolFromFloat(value: number): Coerced<boolean> {
+  if (value === 0 || value === 1) return ok(value === 1);
+  return Number.isInteger(value) && value > -I64_BOUND && value < I64_BOUND ? fail(BOOL_PARSING) : fail(BOOL_TYPE);
+}
+
+/**
+ * A JSON number literal in a `bool` field, as pydantic reads what
+ * `json.loads` makes of it: an int literal inside the i64 range is `0`,
+ * `1` or read and refused (`int_as_bool`), one outside it is no bool; any
+ * other literal (`.`, `e`, `E`) is a float ({@link boolFromFloat}).
+ */
+export function boolFromNumberLiteral(text: string): Coerced<boolean> {
+  if (!/^-?\d+$/.test(text)) return boolFromFloat(Number(text));
+  const value = BigInt(text);
+  if (value === 0n || value === 1n) return ok(value === 1n);
+  return value >= I64_MIN && value < I64_END ? fail(BOOL_PARSING) : fail(BOOL_TYPE);
+}
+
+/**
+ * A `bool` field: a bool, a number {@link boolFromFloat} accepts, or one
+ * of pydantic's words in any case (`"yes"`, `"off"`, `"t"`, …),
+ * unstripped. A number literal of the body ({@link JsonNumber}) is read
+ * as the literal it is ({@link boolFromNumberLiteral}); a JavaScript
+ * number cannot tell the int literal 9223372036854775807 from 2^63, so a
+ * plain `number` is read as the float it rounds to.
  */
 export const laxBool: Coercer<boolean> = (value) => {
+  if (value instanceof JsonNumber) return boolFromNumberLiteral(value.text);
   if (typeof value === "boolean") return ok(value);
-  if (typeof value === "number") {
-    if (value === 0 || value === 1) return ok(value === 1);
-    // A whole number is read and refused; a fraction is not a bool at all.
-    return Number.isInteger(value)
-      ? fail("Input should be a valid boolean, unable to interpret input")
-      : fail("Input should be a valid boolean");
-  }
+  if (typeof value === "number") return boolFromFloat(value);
   if (typeof value === "string") {
+    if (hasLoneSurrogate(value)) return fail(STRING_UNICODE);
     const text = value.toLowerCase();
     if (TRUE_TEXT.has(text)) return ok(true);
     if (FALSE_TEXT.has(text)) return ok(false);
-    return fail("Input should be a valid boolean, unable to interpret input");
+    return fail(BOOL_PARSING);
   }
-  return fail("Input should be a valid boolean");
+  return fail(BOOL_TYPE);
 };
 
 /** A `str` field: strings only; pydantic does not stringify a number. */
@@ -225,10 +309,14 @@ export class ResponseReader {
     return null;
   }
 
-  /** One field of `obj`, coerced; absent is `Field required` unless it has a default. */
+  /**
+   * One field of `obj`, coerced; absent is `Field required` unless it has a
+   * default. A number the body wrote there reaches `coerce` as its
+   * {@link JsonNumber} (`losslessJson.ts`); a coercer returns a plain value.
+   */
   field<T>(obj: Record<string, unknown>, key: string, coerce: Coercer<T>, options: FieldOptions<T> = {}): T {
     const at = [...(options.at ?? []), key];
-    const raw = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+    const raw = valueAt(obj, key);
     if (raw === undefined) {
       if ("default" in options) return options.default as T;
       this.issue(at, "Field required");

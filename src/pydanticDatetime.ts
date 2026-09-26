@@ -25,6 +25,7 @@
  * Internal: not exported from the package entry point.
  */
 
+import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import type { Coerced } from "./responseShape.js";
 
 /** Milliseconds rather than seconds past this magnitude, as speedate reads a Unix time. */
@@ -276,6 +277,9 @@ export function pydanticDatetime(value: unknown): Coerced<string> {
       : checked(parts);
   }
   if (typeof value !== "string") return { ok: false, msg: "Input should be a valid datetime" };
+  // pydantic reads the string as UTF-8 before parsing it: a lone surrogate
+  // cannot be (#69).
+  if (hasLoneSurrogate(value)) return { ok: false, msg: STRING_UNICODE };
 
   const parts = parseDateTime(value);
   if (parts !== null) return checked(parts);

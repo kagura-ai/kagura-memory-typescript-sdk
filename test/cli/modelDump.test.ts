@@ -1,17 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { formatModelJson, pydanticFloat } from "../../src/cli/modelDump.js";
+import { formatDumpsJson, formatModelJson, pydanticFloat } from "../../src/cli/modelDump.js";
+import { CliError } from "../../src/cli/parse.js";
 import { KaguraResponseError } from "../../src/errors.js";
 import {
   INDEXER_STATUS_RESPONSE,
   PAGINATED_RESOURCE_TOKENS_RESPONSE,
   PyFloat,
+  type Model,
   readModel,
   RESOURCE_EVENT_BATCH_RESPONSE,
   RESOURCE_EVENTS_LIST_RESPONSE,
   RESOURCE_SCHEMA_RESPONSE,
 } from "../../src/pyModels.js";
-import { FLOAT_CASES } from "../pydanticCases.js";
+import { parseJsonLossless } from "../../src/losslessJson.js";
+import { FLOAT_CASES, JSON_NUMBER_CASES } from "../pydanticCases.js";
 
 const HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
 
@@ -57,6 +60,127 @@ describe("formatModelJson: model_dump_json(indent=2)", () => {
     expect(formatModelJson({ s: 'é日 \u007f"\\\n\u0000\u001b' })).toBe(
       '{\n  "s": "é日 \u007f\\"\\\\\\n\\u0000\\u001b"\n}',
     );
+  });
+});
+
+describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-8 (#69)", () => {
+  // Measured on pydantic 2.13.4: a string value holding a lone surrogate
+  // fails the dump with CPython's UnicodeEncodeError text, the position a
+  // code-point index, a run of them as `S-E`; a key is converted lossily.
+  const refused = (where: string) =>
+    `Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode ${where}: surrogates not allowed`;
+
+  it.each([
+    ["a high surrogate first", "\u{d800}", "character '\\ud800' in position 0"],
+    ["a low surrogate third", "ab\u{dfff}", "character '\\udfff' in position 2"],
+    ["counted in code points: an astral character is one", "😀\u{d800}", "character '\\ud800' in position 1"],
+    ["a run of lone surrogates as a range", "😀x\u{dc00}\u{dc00}y", "characters in position 2-3"],
+    ["only the first run", "\u{d800}a\u{dc00}", "character '\\ud800' in position 0"],
+    ["a high surrogate at the end", "abc\u{dbff}", "character '\\udbff' in position 3"],
+  ])("refuses a string value holding %s", (_name, text, where) => {
+    expect(failure(() => formatModelJson({ s: text })).message).toBe(refused(where));
+    expect(failure(() => formatModelJson({ l: ["ok", text] })).message).toBe(refused(where));
+    expect(failure(() => formatModelJson(parseJsonLossless(JSON.stringify({ p: { s: text } })))).message).toBe(
+      refused(where),
+    );
+  });
+
+  it("keeps a surrogate pair, one code point", () => {
+    expect(formatModelJson({ s: "😀" })).toBe('{\n  "s": "😀"\n}');
+  });
+
+  // A key's fate depends on its level (measured the same way): the keys of
+  // the `dict`-typed field's own mapping go through pydantic's `str` key
+  // serializer, which converts a lone surrogate lossily; a mapping nested
+  // inside the untyped value (in a list of it too) is inferred, and its key
+  // is refused like a value, before the entry's value is looked at.
+
+  /** An events page whose first event's `payload` is `payload`, the untyped mapping `readModel` marks. */
+  const events = (payload: string) =>
+    readModel(
+      parseJsonLossless(`{"events": [{"id": 1, "op": "upsert", "doc_id": "d", "payload": ${payload}}]}`),
+      RESOURCE_EVENTS_LIST_RESPONSE,
+      "ResourceClient.list_resource_events",
+    );
+
+  it("writes a lone surrogate in a key of the untyped mapping itself as pydantic's lossy conversion does, three U+FFFD each", () => {
+    expect(formatModelJson(events('{"\\ud800": 1, "a\\udfff\\udc00b": 2}'))).toContain(
+      '"payload": {\n        "���": 1,\n        "a������b": 2\n      }',
+    );
+  });
+
+  it("converts the keys of each mapping of a list[dict] field the same way", () => {
+    const batch = readModel(
+      parseJsonLossless('{"created_count": 0, "errors": [{"\\ud800": 1}]}'),
+      RESOURCE_EVENT_BATCH_RESPONSE,
+      "ResourceClient.ingest_events",
+    );
+    expect(formatModelJson(batch)).toContain('"errors": [\n    {\n      "���": 1\n    }\n  ]');
+  });
+
+  it("refuses the value after converting a key of the untyped mapping itself, in pydantic's order", () => {
+    expect(failure(() => formatModelJson(events('{"\\ud800": "a\\udfff"}'))).message).toBe(
+      refused("character '\\udfff' in position 1"),
+    );
+  });
+
+  it.each([
+    ["a mapping nested in the untyped value", '{"p": {"\\ud800": 1}}', "character '\\ud800' in position 0"],
+    ["a mapping in a list in the untyped value", '{"p": [{"\\ud800": 1}]}', "character '\\ud800' in position 0"],
+    ["a nested mapping, a run in the key", '{"p": {"a\\udfff\\udc00b": 1}}', "characters in position 1-2"],
+    ["a nested mapping, the key before its value", '{"p": {"\\ud800": "\\udfff"}}', "character '\\ud800' in position 0"],
+    ["a nested mapping, the key before a later value", '{"p": {"a": "\\udfff", "\\ud800": 1}}', "character '\\udfff' in position 0"],
+  ])("refuses a lone surrogate in a key of %s, as pydantic infers it", (_name, payload, where) => {
+    expect(failure(() => formatModelJson(events(payload))).message).toBe(refused(where));
+  });
+
+  it("keys outside any untyped value are model field names: written as they are", () => {
+    // No Python counterpart (a model's field names are fixed); the dumper leaves them alone.
+    expect(formatModelJson({ "\u{d800}": 1 })).toBe('{\n  "���": 1\n}');
+  });
+
+  it("json.dumps has no such refusal: the CLI's errors=replace stdout prints ? per lone code unit", () => {
+    // Recorded from the Python CLI 0.42.0: `_force_utf8_io` reconfigures
+    // stdout with errors="replace", so the code unit json.dumps kept is `?`.
+    expect(formatDumpsJson({ "\u{d800}": "a\u{dfff}", p: { "\u{dbff}": "\u{1f600}\u{dfff}\u{d800}\u{d800}x\u{10000}" } })).toBe(
+      '{\n  "?": "a?",\n  "p": {\n    "?": "\u{1f600}???x\u{10000}"\n  }\n}',
+    );
+  });
+});
+
+describe("formatModelJson through readModel: a lone surrogate, which pydantic cannot write (#69)", () => {
+  // Recorded from pydantic 2.13.4: model_dump_json fails with Python's
+  // UnicodeEncodeError, naming the first run of lone surrogates by code
+  // point; a dict[str, Any] field's own keys are written lossily instead.
+  const events = (event: Record<string, unknown>) =>
+    readModel({ events: [{ id: 1, op: "upsert", doc_id: "d", ...event }] }, RESOURCE_EVENTS_LIST_RESPONSE, "op");
+  const encode = (what: string) =>
+    `Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode ${what}: surrogates not allowed`;
+
+  it.each([
+    ["a str field", { doc_id: "a\u{d800}" }, "character '\\ud800' in position 1"],
+    ["a run, counted by code point", { doc_id: "\u{1f600}\u{dc00}\u{d800}x" }, "characters in position 1-2"],
+    ["only the first run", { doc_id: "ab\u{d800}x\u{dc00}" }, "character '\\ud800' in position 2"],
+    ["a value in an untyped field", { event_metadata: { v: "\u{dfff}" } }, "character '\\udfff' in position 0"],
+    ["a key nested in an untyped field", { payload: { x: { "\u{d800}": 1 } } }, "character '\\ud800' in position 0"],
+    ["the key before its value", { payload: { x: { "a\u{d800}": "\u{dc00}" } } }, "character '\\ud800' in position 1"],
+    ["an item in a list", { payload: { x: [1, { y: "\u{d800}" }] } }, "character '\\ud800' in position 0"],
+  ] as const)("fails the dump for %s, in Python's words", (_name, event, what) => {
+    const error = failure(() => formatModelJson(events(event)));
+    expect(error).toBeInstanceOf(CliError);
+    expect(error.message).toBe(encode(what));
+  });
+
+  it("writes a dict[str, Any] field's own keys with three U+FFFD per lone surrogate", () => {
+    expect(formatModelJson(events({ payload: { "k\u{d800}": 1, z: 2 } }))).toContain(
+      `"k\u{fffd}\u{fffd}\u{fffd}": 1`,
+    );
+    const batch = readModel({ created_count: 0, errors: [{ "\u{dfff}\u{d800}": 1 }] }, RESOURCE_EVENT_BATCH_RESPONSE, "op");
+    expect(formatModelJson(batch)).toContain(`"${"\u{fffd}".repeat(6)}": 1`);
+  });
+
+  it("prints a surrogate pair (an emoji) as written", () => {
+    expect(formatModelJson(events({ doc_id: "\u{1f600}" }))).toContain(`"doc_id": "\u{1f600}"`);
   });
 });
 
@@ -186,5 +310,118 @@ describe("formatModelJson: pydantic's serializer depth in an untyped value", () 
 
   it("refuses a payload far deeper than the stack, rather than overflowing it", () => {
     expect(failure(() => formatModelJson(events({ x: lists(100_000, 1) }))).message).toBe(DEPTH);
+  });
+});
+
+describe("readModel on a body read by parseJsonLossless (#69)", () => {
+  const INT: Model = { name: "T", fields: [{ key: "v", kind: "int" }] };
+  const FLOAT: Model = { name: "T", fields: [{ key: "v", kind: "float" }] };
+
+  function dumpV(model: Model, literal: string): string {
+    return formatModelJson(readModel(parseJsonLossless(`{"v": ${literal}}`), model, "op"));
+  }
+
+  it.each(JSON_NUMBER_CASES)("an int field and a float field sent %s read as pydantic reads them", (literal, int, float) => {
+    for (const [model, expected] of [
+      [INT, int],
+      [FLOAT, float],
+    ] as const) {
+      if ("ok" in expected) {
+        expect(dumpV(model, literal)).toBe(`{\n  "v": ${expected.ok}\n}`);
+      } else {
+        expect(() => dumpV(model, literal)).toThrow(
+          new KaguraResponseError(`op: unexpected server response for T (v: ${expected.err}). ${HINT}`, "op"),
+        );
+      }
+    }
+  });
+
+  it("reads each list item's literal, as in an event_ids list", () => {
+    const read = (body: string) =>
+      readModel(parseJsonLossless(body), RESOURCE_EVENT_BATCH_RESPONSE, "ResourceClient.ingest_events");
+    expect(formatModelJson(read('{"created_count": 1, "event_ids": [9007199254740993, 2.0]}').event_ids)).toBe(
+      "[\n  9007199254740993,\n  2\n]",
+    );
+    expect(() => read('{"created_count": 1, "event_ids": [1, 1e20]}')).toThrow(
+      "(event_ids.1: Unable to parse input string as an integer, exceeded maximum size)",
+    );
+  });
+
+  it("gives every other type the plain value", () => {
+    const model: Model = {
+      name: "T",
+      fields: [
+        { key: "s", kind: "str" },
+        { key: "d", kind: "datetime" },
+        { key: "m", kind: "dict" },
+        { key: "l", kind: { list: "str" } },
+        { key: "n", kind: { nullable: "float" } },
+        { key: "lit", kind: { literal: ["a"] } },
+      ],
+    };
+    expect(() =>
+      readModel(parseJsonLossless('{"s": 1, "d": 0, "m": 1, "l": 1, "n": -0, "lit": 1}'), model, "op"),
+    ).toThrow(
+      "op: unexpected server response for T (s: Input should be a valid string; " +
+        "m: Input should be a valid dictionary; l: Input should be a valid list (+1 more)).",
+    );
+    const read = readModel(parseJsonLossless('{"s": "x", "d": 0, "m": {}, "l": [], "n": -0, "lit": "a"}'), model, "op");
+    expect(read.d).toBe("1970-01-01T00:00:00Z");
+    expect(formatModelJson(read.n)).toBe("0.0");
+  });
+});
+
+describe("an untyped mapping read by parseJsonLossless prints as Python read it (#69)", () => {
+  const DICT: Model = { name: "T", fields: [{ key: "d", kind: "dict" }] };
+
+  it.each(JSON_NUMBER_CASES)("%s in a dict[str, Any] and in json.dumps", (literal, _int, _float, untyped, dumps) => {
+    const read = readModel(parseJsonLossless(`{"d": {"v": ${literal}}}`), DICT, "op");
+    expect(formatModelJson(read)).toBe(`{\n  "d": {\n    "v": ${untyped}\n  }\n}`);
+    expect(formatDumpsJson(parseJsonLossless(`{"v": ${literal}}`))).toBe(`{\n  "v": ${dumps}\n}`);
+  });
+
+  it("keeps the server's key order, nested and in lists", () => {
+    const read = readModel(parseJsonLossless('{"d": {"b": 1, "2": [{"10": 3, "x": 0}], "id": "x"}}'), DICT, "op");
+    expect(formatModelJson(read)).toBe(
+      '{\n  "d": {\n    "b": 1,\n    "2": [\n      {\n        "10": 3,\n        "x": 0\n      }\n    ],\n    "id": "x"\n  }\n}',
+    );
+    expect(formatDumpsJson(parseJsonLossless('{"b": 1, "2": 2}'))).toBe('{\n  "b": 1,\n  "2": 2\n}');
+  });
+
+  it("prints a duplicate key once, at its first place with its last value, as a Python dict holds it", () => {
+    const read = readModel(parseJsonLossless('{"d": {"a": 1, "b": 2, "a": 3}}'), DICT, "op");
+    expect(formatModelJson(read)).toBe('{\n  "d": {\n    "a": 3,\n    "b": 2\n  }\n}');
+    expect(formatDumpsJson(parseJsonLossless('{"2": 1, "b": 2, "2": 3.0}'))).toBe('{\n  "2": 3.0,\n  "b": 2\n}');
+  });
+
+  it("prints a value changed since it was read as it now is", () => {
+    const body = parseJsonLossless('{"a": 1.0, "b": 2}') as Record<string, unknown>;
+    body.b = 2.5;
+    body.c = 3;
+    expect(formatDumpsJson(body)).toBe('{\n  "a": 1.0,\n  "b": 2.5,\n  "c": 3\n}');
+  });
+
+  it("json.dumps writes bigints exactly, a PyFloat as repr, and has no depth limit", () => {
+    expect(formatDumpsJson({ n: 18014398509481986n, f: new PyFloat(1e-7), e: [], o: {} })).toBe(
+      '{\n  "n": 18014398509481986,\n  "f": 1e-07,\n  "e": [],\n  "o": {}\n}',
+    );
+    const deep = parseJsonLossless(`{"d": {"x": ${"[".repeat(300)}1${"]".repeat(300)}}}`);
+    expect(formatDumpsJson(deep).split("\n")).toHaveLength(2 * 302 + 1);
+    expect(() => formatModelJson(readModel(deep, DICT, "op"))).toThrow(
+      "Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)",
+    );
+  });
+});
+
+describe("readModel: a lone surrogate in a non-str field (#69)", () => {
+  it("refuses it in a Literal field with pydantic's string_unicode message", () => {
+    const error = failure(() =>
+      readModel({ events: [{ id: 1, op: "\u{d800}", doc_id: "d" }] }, RESOURCE_EVENTS_LIST_RESPONSE, "op"),
+    );
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect(error.message).toBe(
+      "op: unexpected server response for ResourceEventsListResponse (events.0.op: Input should be a " +
+        `valid string, unable to parse raw data as a unicode string). ${HINT}`,
+    );
   });
 });

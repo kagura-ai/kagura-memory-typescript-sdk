@@ -4,13 +4,13 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_MCP_URL } from "../../../src/auth/resolve.js";
-import { MIN_SERVER_VERSION } from "../../../src/client.js";
+import { DEFAULT_MCP_URL, resolveAuth } from "../../../src/auth/resolve.js";
+import { KaguraClient, MIN_SERVER_VERSION, type KaguraClientOptions } from "../../../src/client.js";
 import { KaguraAuthError } from "../../../src/errors.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { classifyMcpEntry, holdsCredential, unsetHeaderVars } from "../../../src/cli/commands/setup.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
-import type { KaguraConfig } from "../../../src/config.js";
+import { loadConfig, type KaguraConfig } from "../../../src/config.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
 
 interface Harness {
@@ -58,6 +58,7 @@ function harness(
     login: (() => {}) as unknown as CliDeps["login"],
     refresh: (() => {}) as unknown as CliDeps["refresh"],
     loadConfig: () => config,
+    resolveAuth,
     makeClient: (o: Record<string, unknown>) => makeClient(server, o),
     makeFilesClient: (() => {
       throw new Error("unused");
@@ -103,6 +104,12 @@ beforeEach(() => {
     // The variable a user-scope entry sends: setup says whether this shell
     // has it, and doctor warns when it is unset.
     "KAGURA_MCP_API_KEY",
+    // doctor resolves the credential as a bare client does; the
+    // developer's own profile selection must not leak in.
+    "KAGURA_PROFILE",
+    "KAGURA_REQUIRE_PROFILE",
+    "KAGURA_AGE_IDENTITY",
+    "KAGURA_AGE_IDENTITY_FILE",
   ]) {
     delete process.env[name];
   }
@@ -134,6 +141,36 @@ function readJson(file: string): Record<string, any> {
   return JSON.parse(fs.readFileSync(file, "utf-8"));
 }
 
+/** A profile as credentials.json stores it: a valid, unexpired one, `fields` over it. */
+function profileJson(fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    server: "https://x.test",
+    mcp_url: "https://x.test/mcp",
+    client_id: "c",
+    access_token: "at",
+    refresh_token: "rt",
+    token_type: "Bearer",
+    expires_at: "2099-01-01T00:00:00Z",
+    scope: "memory:read",
+    workspace_id: "w",
+    workspace_name: "W",
+    user_email: "u@x",
+    issued_at: "2026-01-01T00:00:00Z",
+    ...fields,
+  };
+}
+
+/** Write `$HOME/.kagura/credentials.json` in the sandbox, mode 600. */
+function writeCredentials(profiles: Record<string, Record<string, unknown>>, defaultProfile = "default"): void {
+  const dir = path.join(process.env.HOME!, ".kagura");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(dir, "credentials.json"),
+    JSON.stringify({ version: 1, default_profile: defaultProfile, profiles }),
+    { mode: 0o600 },
+  );
+}
+
 /** A `claude plugin list --json` stand-in answering with `plugins`. */
 function pluginList(plugins: unknown, code = 0): Programs {
   return {
@@ -156,11 +193,80 @@ describe("kagura-memory doctor", () => {
     }
   });
 
-  it("fails on a plaintext mcp_url, because the bearer token would be in the clear", async () => {
-    const h = harness({ api_key: "k", mcp_url: "http://memory.example.com/mcp" });
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4), run
+  // from a scratch cwd holding {"api_key":"kagura_x","mcp_url":"http://10.255.255.1/mcp"}
+  // with an empty HOME and no KAGURA_API_KEY: the credential resolves from
+  // the file, its mcp_url is the resolved URL, and Python's doctor judges
+  // that URL once, in _check_https:
+  //   WARN MCP URL must use HTTPS for security (got: http://10.255.255.1/mcp). HTTP is only allowed for localhost development.
+  //   INFO Server connectivity check skipped because the MCP URL is insecure
+  //   exit 0
+  // (--json: the two checks are the last, {"mcp_url": …} and {} as details,
+  // "exit_code": 0). This bin printed FAIL mcp_url is not HTTPS as well and
+  // exited 1 (B11).
+  it("warns once, not fails, for a .kagura.json whose plain-HTTP mcp_url the credential resolves to (#69)", async () => {
+    process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+    const url = "http://10.255.255.1/mcp";
+    const h = harness({ api_key: "kagura_x", mcp_url: url });
     const code = await runCli(["doctor"], h.deps);
+    expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+    expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
+    expect(h.out.slice(-2)).toEqual([
+      `WARN MCP URL must use HTTPS for security (got: ${url}). HTTP is only allowed for localhost development.`,
+      "INFO Server connectivity check skipped because the MCP URL is insecure",
+    ]);
+    expect(h.server.requests).toEqual([]);
+    expect(code).toBe(0);
+  });
+
+  it("reports that file URL once with --json too, in Python's shape (#69)", async () => {
+    process.chdir(sandbox);
+    const url = "http://10.255.255.1/mcp";
+    const h = harness({ api_key: "kagura_x", mcp_url: url });
+    const code = await runCli(["doctor", "--json"], h.deps);
+    const report = JSON.parse(h.out.join("\n")) as {
+      checks: { section: string; status: string; message: string; details: unknown }[];
+      exit_code: number;
+      mcp: string;
+    };
+    expect(report.checks.filter((c) => /mcp_url is/.test(c.message))).toEqual([]);
+    expect(report.checks.slice(-2)).toEqual([
+      {
+        section: "mcp",
+        status: "warn",
+        message: `MCP URL must use HTTPS for security (got: ${url}). HTTP is only allowed for localhost development.`,
+        details: { mcp_url: url },
+      },
+      {
+        section: "server",
+        status: "info",
+        message: "Server connectivity check skipped because the MCP URL is insecure",
+        details: {},
+      },
+    ]);
+    expect(report.mcp).toBe("warn");
+    expect(report.exit_code).toBe(0);
+    expect(code).toBe(0);
+  });
+
+  // The file's URL is not the resolved one: the env key brings its own
+  // (KAGURA_MCP_URL, else the default), so checkServer never sees the
+  // file's. Python's doctor does not read it either; this bin keeps failing
+  // it, as `setup claude` refuses that URL whichever source it came from
+  // (README, doctor).
+  it("still fails a plain-HTTP .kagura.json mcp_url that KAGURA_API_KEY's own URL shadows", async () => {
+    process.chdir(sandbox);
+    process.env.KAGURA_API_KEY = "kagura_x";
+    process.env.KAGURA_MCP_URL = "https://x.test/mcp";
+    const h = harness({ api_key: "k", mcp_url: "http://memory.example.com/mcp" });
+    h.server.restResults["/api/v1/system/info"] = { name: "k", version: "0.78.0" };
+    const code = await runCli(["doctor"], h.deps);
+    expect(h.out).toContain(
+      "FAIL mcp_url is not HTTPS: http://memory.example.com/mcp — credentials would be sent in the clear",
+    );
+    expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toEqual([]);
+    expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
     expect(code).toBe(1);
-    expect(h.out.join("\n")).toMatch(/FAIL .*not HTTPS/);
   });
 
   it("accepts plaintext localhost, which is a deliberate dev choice", async () => {
@@ -182,17 +288,32 @@ describe("kagura-memory doctor", () => {
     expect(h.out.join("\n")).not.toMatch(/not HTTPS/);
   });
 
+  // Every spelling the clients refuse is the resolved URL here, so each is
+  // checkServer's one warning, never a FAIL on top of it.
   it.each([
     "HTTP://memory.example.com/mcp",
     "http:memory.example.com/mcp",
     " http://memory.example.com/mcp",
     "ht\ttp://memory.example.com/mcp",
-    // Not http(s) at all: no credential goes anywhere, but it is no HTTPS URL.
-    "ftp://memory.example.com/mcp",
-  ])("fails %j", async (url) => {
+  ])("warns once for %j, which the client refuses, and exits 0 as Python does", async (url) => {
+    process.chdir(sandbox);
+    const h = harness({ api_key: "k", mcp_url: url });
+    expect(await runCli(["doctor"], h.deps)).toBe(0);
+    expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+    expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toHaveLength(1);
+    expect(h.out).toContain("INFO Server connectivity check skipped because the MCP URL is insecure");
+    expect(h.server.requests).toEqual([]);
+  });
+
+  // Not http(s) at all: no credential goes anywhere, but it is no HTTPS URL,
+  // and no HTTPS check refuses it, so checkServer has no warning to defer to.
+  it("fails a configured mcp_url that is not http(s) at all", async () => {
+    process.chdir(sandbox);
+    const url = "ftp://memory.example.com/mcp";
     const h = harness({ api_key: "k", mcp_url: url });
     expect(await runCli(["doctor"], h.deps)).toBe(1);
     expect(h.out).toContain(`FAIL mcp_url is not HTTPS: ${url} — credentials would be sent in the clear`);
+    expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toEqual([]);
   });
 
   it("warns that KAGURA_API_KEY outranks any OAuth profile", async () => {
@@ -203,7 +324,9 @@ describe("kagura-memory doctor", () => {
   });
 
   it("exits 1 when any check fails and 0 when none do", async () => {
-    const bad = harness({ api_key: "k", mcp_url: "http://x.example/mcp" });
+    // A plain-HTTP resolved URL is a warning, as in Python; a URL that is no
+    // http(s) URL at all is still this bin's own failing check.
+    const bad = harness({ api_key: "k", mcp_url: "ftp://x.example/mcp" });
     expect(await runCli(["doctor"], bad.deps)).toBe(1);
 
     const good = harness();
@@ -642,6 +765,25 @@ describe("kagura-memory doctor", () => {
       ]);
     });
 
+    it("reports an OAuth refresh failure as Python's info line, not as unreachable (#69)", async () => {
+      writeCredentials({ default: profileJson({ refresh_token: "", expires_at: "2020-01-01T00:00:00Z" }) });
+      const h = harness({});
+      h.deps.resolveAuth = resolveAuth as unknown as CliDeps["resolveAuth"];
+      h.deps.makeClient = ((o: KaguraClientOptions) =>
+        new KaguraClient({ ...o, fetch: h.server.fetch })) as CliDeps["makeClient"];
+      const { checks } = await serverChecks(h);
+      expect(checks).toEqual([
+        {
+          status: "info",
+          message:
+            "Could not verify server version over REST with an OAuth profile (expected: REST " +
+            "validates API keys, not OAuth bearers; the MCP connection is unaffected).",
+          details: {},
+        },
+      ]);
+      expect(h.server.requests).toEqual([]);
+    });
+
     it("fails with the error's message when no client can be built", async () => {
       const h = harness();
       h.deps.makeClient = (() => {
@@ -750,8 +892,275 @@ describe("kagura-memory doctor", () => {
         return { code, checks: report.checks.filter((c) => c.section === "server") };
       })();
       expect(seen).toEqual([{ profile: "other" }]);
-      expect(resolved).toEqual([{ apiKey: null, mcpUrl: null, profile: "other" }]);
+      expect(resolved).toEqual([
+        { apiKey: null, mcpUrl: null, profile: "other", config: { api_key: "k", mcp_url: "https://x.test/mcp" } },
+      ]);
       expect(checks).toMatchObject([{ status: "info" }]);
+    });
+
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4)
+    // against a fake server; each test names its scenario.
+    it("resolves an OAuth profile before .kagura.json's key, as a bare client does (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python: OAuth INFO, exit 0. The client is built with no key forced.
+      writeCredentials({ default: profileJson() });
+      const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
+      const seen: unknown[] = [];
+      h.deps.makeClient = ((o: Record<string, unknown>) => {
+        seen.push(o);
+        return makeClient(h.server, o);
+      }) as CliDeps["makeClient"];
+      h.server.forcedResponse = new Response('{"detail":"Invalid API key"}', { status: 401 });
+      const code = await runCli(["doctor"], h.deps);
+      expect(seen).toEqual([{}]);
+      expect(h.out).toContain(
+        "INFO Could not verify server version over REST with an OAuth profile (expected: REST validates " +
+          "API keys, not OAuth bearers; the MCP connection is unaffected).",
+      );
+      expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    it("checks KAGURA_API_KEY's server, not .kagura.json's (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python: FAIL Server unreachable: Connection failed: …, exit 1.
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      process.env.KAGURA_MCP_URL = "https://dead.test/mcp";
+      const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
+      const hosts: string[] = [];
+      h.deps.makeClient = ((o: KaguraClientOptions) =>
+        new KaguraClient({
+          ...o,
+          fetch: async (input) => {
+            hosts.push(new URL(String(input)).host);
+            throw new TypeError("fetch failed");
+          },
+        })) as CliDeps["makeClient"];
+      const code = await runCli(["doctor"], h.deps);
+      expect(hosts).toEqual(["dead.test"]);
+      expect(h.out).toContain("FAIL Server unreachable: Connection failed: fetch failed");
+      expect(code).toBe(1);
+    });
+
+    it.each([
+      [
+        { KAGURA_REQUIRE_PROFILE: "1" },
+        { default: profileJson(), other: profileJson() },
+        "FAIL Authentication could not be resolved: Multiple profiles configured and none selected; refusing " +
+          "to use the implicit default 'default' because KAGURA_REQUIRE_PROFILE is set.\n" +
+          "  Select one explicitly: kagura auth use <name>, --profile <name>, or KAGURA_PROFILE=<name>\n" +
+          "  Available profiles: default, other",
+      ],
+      [
+        { KAGURA_PROFILE: "nope" },
+        { default: profileJson() },
+        "FAIL Authentication could not be resolved: Profile 'nope' (from KAGURA_PROFILE env) not found in " +
+          "credentials.json.\n  Run: kagura auth login --profile nope\n" +
+          "  Or inspect ~/.kagura/credentials.json to see which profiles exist.",
+      ],
+    ])("fails auth and skips the server with %j, though .kagura.json has a key (#69)", async (env, profiles, line) => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      Object.assign(process.env, env);
+      writeCredentials(profiles);
+      const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
+      const code = await runCli(["doctor"], h.deps);
+      // Python's one FAIL line for the cause: no `no profile named` beside it.
+      expect(h.out.filter((l) => l.startsWith("FAIL"))).toEqual([line]);
+      expect(h.out).toContain("INFO Server connectivity check skipped because auth resolution failed");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(1);
+    });
+
+    it("fails --profile missing once, in Python's words, when no KAGURA_API_KEY is set (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python 0.42.0: the auth section's one FAIL is the resolution's;
+      // its `_check_auth` has no line of its own for the missing profile.
+      writeCredentials({ default: profileJson() });
+      const h = harness();
+      const code = await runCli(["doctor", "--profile", "missing"], h.deps);
+      expect(h.out.filter((l) => l.startsWith("FAIL"))).toEqual([
+        "FAIL Authentication could not be resolved: Profile 'missing' (from profile argument) not found in " +
+          "credentials.json.\n  Run: kagura auth login --profile missing\n" +
+          "  Or inspect ~/.kagura/credentials.json to see which profiles exist.",
+      ]);
+      expect(h.out.join("\n")).not.toContain("no profile named");
+      expect(h.out).toContain("INFO Server connectivity check skipped because auth resolution failed");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(1);
+    });
+
+    it("still fails a default_profile the credentials file names and lacks", async () => {
+      // The SDK's own diagnostic for a broken file; no selection in play.
+      writeCredentials({ other: profileJson() }, "default");
+      const h = harness();
+      await runCli(["doctor"], h.deps);
+      expect(h.out).toContain("FAIL no profile named 'default'; available: other");
+    });
+
+    it("does not fail an expired profile that KAGURA_API_KEY shadows (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python 0.42.0: `WARN OAuth profile is shadowed by KAGURA_API_KEY;
+      // auto-refresh will not be used`, no FAIL; exit 1 only when the
+      // server is unreachable.
+      writeCredentials({ default: profileJson({ expires_at: "2020-01-01T00:00:00Z", refresh_token: "" }) });
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out).toContain("WARN KAGURA_API_KEY is set and takes precedence over any OAuth profile");
+      expect(h.out.filter((l) => l.startsWith("FAIL"))).toEqual([]);
+      expect(h.out.join("\n")).not.toContain("has expired");
+      expect(code).toBe(0);
+    });
+
+    it("does not report a .kagura.json api_key when there is no .kagura.json (#69)", async () => {
+      process.chdir(sandbox); // no .kagura.json here, none in $HOME
+      // The real loadConfig falls back to the environment; Python's
+      // `_configured_api_key` reads the file alone: `.kagura.json api_key
+      // is not set`.
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      const h = harness();
+      h.deps.loadConfig = loadConfig;
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out.join("\n")).not.toContain(".kagura.json carries an api_key");
+      expect(h.out).toContain("WARN KAGURA_API_KEY is set and takes precedence over any OAuth profile");
+      expect(code).toBe(0);
+    });
+
+    it("skips the server check for a --profile whose MCP URL is insecure, as Python's _check_https does (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python: WARN <validate_https_url message>, INFO skipped, exit 0.
+      writeCredentials({ default: profileJson(), a: profileJson({ mcp_url: "http://example.invalid/mcp" }) });
+      const h = harness({});
+      const code = await runCli(["doctor", "--profile", "a"], h.deps);
+      expect(h.out).toContain(
+        "WARN MCP URL must use HTTPS for security (got: http://example.invalid/mcp). " +
+          "HTTP is only allowed for localhost development.",
+      );
+      expect(h.out).toContain("INFO Server connectivity check skipped because the MCP URL is insecure");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    it("skips the server check for KAGURA_API_KEY with an insecure KAGURA_MCP_URL, never sending the key", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      process.env.KAGURA_MCP_URL = "http://example.invalid/mcp";
+      const h = harness();
+      const code = await runCli(["doctor", "--json"], h.deps);
+      const report = JSON.parse(h.out.join("\n")) as {
+        checks: { section: string; status: string; message: string; details: unknown }[];
+      };
+      expect(report.checks.slice(-2)).toEqual([
+        {
+          section: "mcp",
+          status: "warn",
+          message:
+            "MCP URL must use HTTPS for security (got: http://example.invalid/mcp). " +
+            "HTTP is only allowed for localhost development.",
+          details: { mcp_url: "http://example.invalid/mcp" },
+        },
+        {
+          section: "server",
+          status: "info",
+          message: "Server connectivity check skipped because the MCP URL is insecure",
+          details: {},
+        },
+      ]);
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    // The real loadConfig: with no .kagura.json it builds a config from the
+    // environment, whose mcp_url is KAGURA_MCP_URL or the default, not a
+    // URL any file configured. Python's doctor never judges that one
+    // twice: _check_https warns and the server check is skipped, exit 0.
+    it.each(["  http://x.invalid/mcp", "http:x.invalid/mcp"])(
+      "warns once, not fails, for KAGURA_API_KEY with the insecure KAGURA_MCP_URL %j and no .kagura.json (#69)",
+      async (url) => {
+        process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+        process.env.KAGURA_API_KEY = "kagura_x";
+        process.env.KAGURA_MCP_URL = url;
+        const h = harness();
+        h.deps.loadConfig = loadConfig;
+        const code = await runCli(["doctor"], h.deps);
+        expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+        expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
+        expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toHaveLength(1);
+        expect(h.out).toContain("INFO Server connectivity check skipped because the MCP URL is insecure");
+        expect(h.server.requests).toEqual([]);
+        expect(code).toBe(0);
+      },
+    );
+
+    it("reports no configured mcp_url, not the default as a PASS, when only KAGURA_API_KEY is set", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      process.env.KAGURA_API_KEY = "kagura_x";
+      const h = harness();
+      h.deps.loadConfig = loadConfig;
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out).toContain("INFO no mcp_url configured; the default is used");
+      expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
+      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(code).toBe(0);
+    });
+
+    // Python's run_doctor calls load_config() first and stops with its
+    // ValueError naming the file; the base doctor here printed the same
+    // message as the server check's failure (the client's own read
+    // surfaced it). Resolving against an empty config instead said "No
+    // credentials found … Or create: .kagura.json", advice to create the
+    // file that exists and is broken.
+    it("fails naming a .kagura.json that does not parse, never as a missing credential (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), "{ not json");
+      const h = harness();
+      h.deps.loadConfig = loadConfig;
+      const code = await runCli(["doctor"], h.deps);
+      const fails = h.out.filter((line) => line.startsWith("FAIL"));
+      expect(fails).toHaveLength(1);
+      expect(fails[0]).toMatch(/^FAIL Invalid JSON or encoding in \.kagura\.json \(expected UTF-8\): line 1 column 3/);
+      expect(h.out.join("\n")).not.toContain("No credentials found");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(1);
+    });
+
+    it("passes --profile missing when KAGURA_API_KEY is set, as Python's env key wins (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      writeCredentials({ default: profileJson() });
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor", "--profile", "missing"], h.deps);
+      expect(h.out.join("\n")).not.toContain("no profile named 'missing'");
+      expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(code).toBe(0);
+    });
+
+    it("reads --profile '' as the default profile, as Python's `profile or …` does (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      writeCredentials({ default: profileJson() });
+      const h = harness({});
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor", "--profile", ""], h.deps);
+      expect(h.out).toContain("PASS profile 'default' is active until 2099-01-01T00:00:00.000Z");
+      expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    it("reaches the server with a hand-edited profile Python reads (#69)", async () => {
+      // Python 0.42.0 sends "Bearer 123" for access_token 123, refresh_token null.
+      writeCredentials({ default: profileJson({ access_token: 123, refresh_token: null }) });
+      const h = harness({});
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      h.deps.makeClient = ((o: KaguraClientOptions) =>
+        new KaguraClient({ ...o, fetch: h.server.fetch })) as CliDeps["makeClient"];
+      const { checks } = await serverChecks(h);
+      expect(checks.map((c) => c.message)).toEqual(["Server reachable", "Version: 0.78.0"]);
+      expect(h.server.requests.map((r) => r.headers.authorization)).toEqual(["Bearer 123"]);
     });
 
     it("prints the two lines as Python does", async () => {

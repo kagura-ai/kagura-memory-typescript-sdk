@@ -99,7 +99,9 @@ Credentials travel over HTTPS only. Every client, `login()`, `auth login
 --server` and the URL every `setup` subcommand puts in a harness entry
 (`setup claude`, `setup codex`, `setup hermes` and `setup openclaw`)
 refuse a plain-HTTP URL unless its host is `localhost`, `127.0.0.1` or
-`[::1]`, and `doctor` fails a configured `mcp_url` like that. The URL is
+`[::1]`; `doctor` warns about a resolved MCP URL like that and skips the
+server check, as the Python CLI does, and fails a configured `mcp_url`
+like that which the credential does not use (see `doctor`). The URL is
 read as `fetch` reads it, so the scheme in any case (`HTTP://`), without
 its slashes (`http:host`), or with whitespace or control characters
 around it or a tab or newline inside it is refused all the same, as in
@@ -208,10 +210,38 @@ unexpected server response for PaginatedResourceTokensResponse
 (tokens.0.created_at: Field required). …`, and so does a body that is no
 record at all (`null`). An untyped mapping nested past pydantic's limit
 (256 containers) exits 1 with pydantic's `Error serializing to JSON:
-ValueError: Circular reference detected (depth exceeded)`. One limit
-remains: inside an untyped mapping (an event's `payload`, a batch's
-`errors`) a number is read as JavaScript reads it, so `1.0` prints `1`
-and an integer past 2^53 loses its last digits.
+ValueError: Circular reference detected (depth exceeded)`. The body is
+read as Python's `json.loads` reads it
+([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),
+so an int field sent `9007199254740993` prints exactly, one sent `1e20`
+exits 1 as pydantic refuses it (`Unable to parse input string as an
+integer, exceeded maximum size`), and a float field sent `-0` prints
+`0.0`. Inside an untyped mapping (an event's `payload`, a batch's
+`errors`) the keys print in the server's order (`{"b": 1, "2": 2}` stays
+so) and each number as Python read it (`1.0`, `1e+16`, `-0.0`, an
+integer past 2^53 exactly). `NaN` and `Infinity` are read, and print
+`null` as pydantic writes them; an integer of more than 4,300 digits
+makes the body non-JSON, as Python's `int()` limit does; and a body
+nested deeper than 973 containers exits 1 with Python's `maximum
+recursion depth exceeded while decoding a JSON array from a unicode
+string`. A string value holding a lone surrogate (`"\ud800"`) exits 1
+with pydantic's `Error serializing to JSON: UnicodeEncodeError: 'utf-8'
+codec can't encode character '\ud800' in position 0: surrogates not
+allowed`; a key of the untyped mapping itself holding one prints as
+three U+FFFD, as pydantic converts it, and a key of a mapping nested
+inside it exits 1 like a value. Three differences remain. Python's depth
+is its recursion limit less the stack in use: 973 is what these commands
+reach, and `doctor` given such a `/api/v1/system/info` body reports a
+failed server check where Python stops with a traceback. The body is
+decoded as UTF-8, as `fetch` decodes every body: one that is not valid
+UTF-8 is read with U+FFFD in place of the bad bytes, where Python calls
+it non-JSON, or, for a lone surrogate sent as its three raw bytes
+(`ED A0 80`), reads it and then refuses the dump; and a UTF-16 or UTF-32
+body, with or without a BOM, which Python's `json.loads` detects and
+reads, is non-JSON here (`Server returned a non-JSON body (HTTP 200)
+…`). No memory-cloud server sends either. And only REST bodies are read
+this way: the MCP commands (`recall`, `remember`, …) still print a whole
+float as `1` and list an object's integer keys first.
 
 **Files and imports.** The `files` commands take their workspace from the
 credential's own source, as the Python CLI does (its #115): `-c` when
@@ -235,7 +265,16 @@ with a traceback. Two limits of JavaScript numbers remain: a number in the
 payload is sent as JavaScript reads it, so an integer past 2^53 loses its
 last digits and `10.0` is sent as `10`, where Python sends them as
 written; and `-V` above 2^53 is refused as too large (exit 2), where
-Python sends it.
+Python sends it. The summary prints as Python's `json.dumps` prints it
+([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+`created` and `failed` add up exactly past 2^53, and each error keeps
+the server's key order and numbers (`1.0`, `1e+16`, `NaN`); a lone
+surrogate in an error's string or key prints as `?` (one per code unit,
+`"😀???x"`), as the Python CLI's UTF-8 stdout with `errors="replace"`
+writes what `json.dumps` kept. The counts in
+`--progress json`'s events (`detail.created_so_far`, the success event's
+`detail.created`) are still JavaScript numbers, so past 2^53 they are
+rounded where Python's are exact; `-v` prints no counts.
 
 **Progress.** `files upload` and `resource import` take `-v/--verbose`
 (repeatable) and `--progress rich|json|none`. Progress goes to stderr, one
@@ -647,9 +686,23 @@ unreachable: `Server unreachable: Invalid response format: …`, naming the
 problem in the SDK's words where Python prints pydantic's. A credential
 that does not resolve fails the auth section with Python's
 `Authentication could not be resolved: …` and skips the server check
-(`info`), as in Python. With
-`--profile NAME` the server is checked with that profile, as in Python
-(`KAGURA_API_KEY` still comes first), not with the default. `--json`
+(`info`), as in Python. The credential is resolved as a bare client
+resolves it, as in Python: `KAGURA_API_KEY`, then the OAuth profile
+(`--profile NAME`, `KAGURA_PROFILE` or the default; an empty `--profile`
+is the default), then `.kagura.json`. A selected profile that does not
+exist fails the auth section once, with the resolution's message, and
+with `KAGURA_API_KEY` set an expired or missing profile is no failure, as
+in Python, whose warning is that the key shadows the profile. A resolved
+MCP URL that is not HTTPS is a warning and the server is not contacted
+(`Server connectivity check skipped because the MCP URL is insecure`),
+whichever source it came from:
+an OAuth profile's URL, `KAGURA_MCP_URL`, or the `mcp_url` of the
+`.kagura.json` the credential resolved from (exit 0, as in Python). One
+remaining difference: a plain-HTTP `.kagura.json` `mcp_url` that the
+credential does not use, because `KAGURA_API_KEY` or an OAuth profile
+brings its own URL, still fails the `mcp` section here (`mcp_url is not
+HTTPS: …`, exit 1), since `setup claude` would refuse that URL; the
+Python CLI's `doctor` never reads the file's `mcp_url`. `--json`
 prints Python's shape, with `details` on every check (`{}` when there are
 none). Any failed check exits 1.
 
@@ -940,10 +993,17 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
 | `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`, and `rate_limit_exceeded`, the daily MCP call cap every non-read-only tool checks (`quotaType` `api_mcp_daily`, `resetsAt` the next UTC midnight); REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
-| `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
+| `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
 | `KaguraError` | any other code | — |
+
+`ResourceClient`'s readers check each 2xx body against the Python SDK's
+model, as Python's `_parse` does, and throw `KaguraResponseError` for one
+it refuses (`ingestEvents` checks only that the body is an object). A body
+the model accepts is returned as it arrived: its extra keys and lax values
+(`"6"` for an int) are kept, where Python returns the model's coerced
+copy.
 
 memory-cloud v0.75.0+ tags every plan and quota refusal with a `gate`
 (`plan`, `quota`, `allowlist` or `deployment`), and the SDK chooses the
@@ -1407,6 +1467,77 @@ age private keys are custodied differently and are **not** readable across
 the two. See
 [`docs/design/2026-07-05-typescript-port-design.md`](docs/design/2026-07-05-typescript-port-design.md)
 for the original scope decisions.
+
+**Reading responses.** The SDK reads each field of a response as the
+Python SDK's pydantic model reads it in lax mode, with pydantic's
+messages ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/66),
+[#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+an int field takes `"0-1"` (-1) and `"0__7"` and refuses a digit run past
+4,300 characters, a float field follows pydantic's `str_as_float` rather
+than Python's `float()`, and a string holding a lone surrogate is refused
+in any field but a `str`. Three limits of JavaScript numbers remain. An
+int field of a typed result (`recallSeries`' `count`, the guardrail caps,
+a member key's or invitation's `id`) holds a `number`, so a value past
+2^53 is the nearest double and one of 2^1024 or more (309 digits) is
+`Infinity`, where Python keeps the exact int; widening those types would
+break callers. The other two hold only where a body is read with
+`JSON.parse`, which cannot tell `1e20` from `100000000000000000000` or
+`9223372036854775807` from 2^63: the text of an MCP tool result
+(`recallSeries`' `count`, a bucket's `count`,
+`ResourceClient.setupResource`'s `token_id`). Every REST reader
+(`ResourceClient`, `FilesClient`, `MemoryClient`, `WorkspaceClient`,
+`KaguraClient`'s REST methods, so the `resource` and `files` dumps too)
+keeps the literal and agrees with pydantic. In a tool result, an int
+field sent a whole float literal of 2^63 or more (`1e20`,
+`9223372036854775808.0`) reads it as that double, where pydantic refuses
+it with `Unable to parse input string as an integer, exceeded maximum
+size` and accepts the int literal exactly. And a bool field sent the JSON number
+9223372036854775807 or -9223372036854775808 would read it as the double
++/-2^63 and say `Input should be a valid boolean`, where pydantic says
+`…, unable to interpret input`; no MCP tool result has a bool field
+today, so this is the coercer's limit rather than any field's.
+
+**The MCP envelope.** A JSON-RPC or tool error is rendered as the Python
+SDK renders it, with Python's `str()` of whatever the server sent
+(`MCP error: {'code': -32603}`, `t failed (None): …`), and a `null`
+JSON-RPC body reads as no result. Three differences remain. A JSON-RPC
+`error` that is no object (`{"error": "boom"}`, `null`, `[1]`) reads
+`MCP error: boom` (`None`, `[1]`), where the Python SDK stops with an
+`AttributeError`; likewise a JSON-RPC body that is no object (`5`, `"x"`,
+`[1]`, an empty body) and a `result` that is no object read as no result
+(`{}`), where the Python SDK stops with a `TypeError`, an
+`AttributeError` or a raw `JSONDecodeError`: Python has no words to port
+there. A number literal in a code or message is rendered from the
+JavaScript number (`1.0` reads `1`, `1e2` `100`, `-0.0` `0`, an int past
+2^53 its nearest double) and an object's integer-like keys print first,
+where Python prints the literal and keeps the key order: the JSON-RPC
+body and the tool text are read with `JSON.parse`. And
+`KaguraPartialRollbackError.summary` is the `rollback_summary` as it
+arrived, once checked against Python's `RollbackSummary` (an
+`edges_deleted` of `"6"` stays the string, an unknown key stays), where
+Python's model holds `6` and drops the key; `rollbackSleepRun`'s success
+result is returned the same way.
+
+**Hand-edited credentials.** A profile in `~/.kagura/credentials.json`
+whose `access_token` is no string, or whose `refresh_token` is `null`, is
+read as the Python SDK reads it: the token is sent as Python's `str()` of
+it (`Bearer 123`) and a falsy refresh token means none. One difference
+remains, the same as for the MCP envelope: a number literal in a token is
+rendered from the JavaScript number (`1.0` sends `Bearer 1` where Python
+sends `Bearer 1.0`, `-0.0` `Bearer 0`, `1e16` `Bearer 10000000000000000`
+where Python sends `Bearer 1e+16`, an int past 2^53 its nearest double)
+and an object token's integer-like keys print first, because the file is
+read with `JSON.parse`. When this SDK rewrites the file (a refresh, `auth
+use`), it writes those two tokens as strings (`"123"`, `""`) where Python
+writes them back as they were; both SDKs read either form the same way,
+so after a rewrite of a number token Python sends the rendered string too.
+Two more differences are on the Python side of such a file: the Python
+CLI's own `auth status` stops with a `TypeError` on a number token (its
+`_redact_token` takes the token's `len`), where `kagura-memory auth
+status` prints the profile; and `auth token` on a profile whose
+`access_token` is `null` prints an empty line there (`click.echo(None)`)
+and `None` here, the token being rendered when the file is read, while
+the header is `Bearer None` in both.
 
 ## Development
 

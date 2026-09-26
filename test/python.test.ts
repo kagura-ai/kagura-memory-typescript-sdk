@@ -10,10 +10,10 @@ import {
   PY_INT,
   pyBigInt,
   pyFloat,
-  pyFloatAscii,
   pyFloatRepr,
   pyInt,
   pyRepr,
+  pyStr,
   pyTypeName,
 } from "../src/python.js";
 
@@ -238,10 +238,18 @@ describe("float() grammar", () => {
   ])("float(%j) is %s, as Python reads it", (input, expected) => {
     expect(pyFloat(input)).toBe(expected);
   });
+});
 
-  it("reads ASCII digits only for pydantic's lax float, stripped as float() strips", () => {
-    expect(pyFloatAscii("\u{85}5 ")).toBe(5);
-    expect(pyFloatAscii("\u{661}")).toBeUndefined();
-    expect(pyFloatAscii("\u{feff}5")).toBeUndefined();
+describe("pyStr: Python's str() of a JSON value", () => {
+  it.each([
+    ["x", "x"],
+    [null, "None"],
+    [true, "True"],
+    [5, "5"],
+    [1.5, "1.5"],
+    [[1, "a"], "[1, 'a']"],
+    [{ toString: 1 }, "{'toString': 1}"],
+  ] as const)("%j -> %s", (value, expected) => {
+    expect(pyStr(value)).toBe(expected);
   });
 });

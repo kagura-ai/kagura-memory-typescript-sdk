@@ -21,8 +21,9 @@ import {
   loadCredentialsFile,
   profileNamed,
 } from "../../auth/credentials.js";
+import type { ResolvedAuth } from "../../auth/types.js";
 import { MIN_SERVER_VERSION, warnBelowMinimum, type KaguraClientOptions } from "../../client.js";
-import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
+import { isEnvFallbackConfig, jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import type { ServerInfo } from "../../models.js";
@@ -33,7 +34,6 @@ import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
 import { formatJson } from "../output.js";
 import type { FlagSpec } from "../parseArgs.js";
 import type { CliDeps } from "../run.js";
-import { mcpOptions } from "../runClientCommand.js";
 import { shellQuote } from "./harnessConfig.js";
 import {
   classifyMcpEntry,
@@ -66,6 +66,12 @@ const JSON_FLAG: FlagSpec = { name: "json", type: "switch", help: "Emit machine-
 function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const credsPath = defaultCredentialsPath();
+  const envKey = process.env.KAGURA_API_KEY;
+  const envKeySet = envKey !== undefined && envKey.trim() !== "";
+  // Python's `profile or os.getenv("KAGURA_PROFILE") or None`: an empty
+  // --profile falls back like an absent one.
+  const envProfile = process.env.KAGURA_PROFILE || undefined;
+  const selected = profile || envProfile;
 
   if (!fs.existsSync(credsPath)) {
     checks.push({
@@ -90,14 +96,23 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
       if (names.length === 0) {
         checks.push({ section: "auth", status: "warn", message: "credentials file has no profiles" });
       } else {
-        const target = profile ?? file.defaultProfile;
+        const target = selected ?? file.defaultProfile;
         const creds = profileNamed(file, target);
         if (creds === undefined) {
-          checks.push({
-            section: "auth",
-            status: "fail",
-            message: `no profile named '${target}'; available: ${names.sort().join(", ")}`,
-          });
+          // Python resolves KAGURA_API_KEY before any profile, so a missing
+          // one is no failure then; a selected one (--profile,
+          // KAGURA_PROFILE) that is missing fails the resolution, which
+          // checkServer reports in Python's words (`Authentication could
+          // not be resolved: Profile 'x' … not found`), the one FAIL line
+          // Python 0.42.0 prints. Only a default_profile the file itself
+          // names and lacks is reported here.
+          if (!envKeySet && selected === undefined) {
+            checks.push({
+              section: "auth",
+              status: "fail",
+              message: `no profile named '${target}'; available: ${names.sort().join(", ")}`,
+            });
+          }
         } else if (!isExpired(creds)) {
           checks.push({
             section: "auth",
@@ -111,14 +126,17 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
             status: "warn",
             message: `profile '${target}' has expired but can refresh`,
           });
-        } else {
+        } else if (!envKeySet) {
+          // With KAGURA_API_KEY set the profile is not used, so its state
+          // is no failure: Python 0.42.0 prints only `WARN OAuth profile is
+          // shadowed by KAGURA_API_KEY` (the precedence warning below).
           checks.push({
             section: "auth",
             status: "fail",
             message: `profile '${target}' has expired and has no refresh token; run: kagura-memory auth login`,
           });
         }
-        if (names.length > 1 && profile === undefined) {
+        if (names.length > 1 && selected === undefined) {
           // The SDK warns about this at construction time too; saying it
           // here is what makes "why did it write to the wrong workspace"
           // answerable before the fact.
@@ -132,8 +150,7 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
     }
   }
 
-  const envKey = process.env.KAGURA_API_KEY;
-  if (envKey !== undefined && envKey.trim()) {
+  if (envKeySet) {
     // The env var beats every OAuth profile, which surprises people who
     // just ran `auth login` and still reach the wrong workspace.
     checks.push({
@@ -143,8 +160,12 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
     });
   }
 
+  // Python's `_configured_api_key` reads the file alone: a config built
+  // from the environment (no `.kagura.json`) carries KAGURA_API_KEY, which
+  // is the env key already reported, not a key any file carries.
   const config = safeConfig(deps);
-  if (typeof config?.api_key === "string" && config.api_key.trim()) {
+  const fromFile = config !== null && !isEnvFallbackConfig(config as unknown as KaguraConfig);
+  if (fromFile && typeof config.api_key === "string" && config.api_key.trim()) {
     checks.push({
       section: "auth",
       status: "info",
@@ -190,11 +211,24 @@ const CREDENTIAL_FIX: Record<Exclude<ClaudeScope, "project">, string> = {
     "`kagura-memory setup claude`",
 };
 
-function checkMcp(deps: CliDeps): DoctorCheck[] {
+/**
+ * The `mcp` section: the file's `mcp_url`, `.mcp.json` and the entry
+ * Claude Code uses. `warned` is the resolved MCP URL `checkServer` has
+ * already warned about as Python's `_check_https` does (a warning, the
+ * check skipped), or `null`: a verdict here on that same URL would fail
+ * it for one cause, exit 1 where Python 0.42.0 exits 0.
+ */
+function checkMcp(deps: CliDeps, warned: string | null): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const config = safeConfig(deps);
-  const url = typeof config?.mcp_url === "string" ? config.mcp_url : "";
-  if (url) {
+  // A config built from the environment (no `.kagura.json`) carries
+  // `KAGURA_MCP_URL` or the default, not a URL any file configured; that
+  // is the resolved URL, `checkServer`'s to report.
+  const envBuilt = config !== null && isEnvFallbackConfig(config as unknown as KaguraConfig);
+  const url = !envBuilt && typeof config?.mcp_url === "string" ? config.mcp_url : "";
+  if (envBuilt && process.env.KAGURA_MCP_URL) {
+    // Named by checkServer's warning when insecure; nothing to add here.
+  } else if (url) {
     // A plaintext MCP URL means the bearer token crosses the wire in the
     // clear; localhost is the one place that is a deliberate dev choice.
     // The clients' own check decides, so doctor fails exactly the plain
@@ -208,6 +242,12 @@ function checkMcp(deps: CliDeps): DoctorCheck[] {
     }
     if (!refused && /^https?:/i.test(normalizeUrl(url))) {
       checks.push({ section: "mcp", status: "pass", message: `mcp_url is ${url}` });
+    } else if (url === warned) {
+      // The credential resolved from this file, so its URL is the one
+      // checkServer warned about: Python's single WARN, exit 0. A file
+      // URL that another source shadows (KAGURA_API_KEY, an OAuth
+      // profile) is not reported there and still fails here, as `setup
+      // claude` refuses it.
     } else {
       checks.push({
         section: "mcp",
@@ -420,19 +460,12 @@ const OAUTH_VERSION_UNVERIFIED =
   "Could not verify server version over REST with an OAuth profile " +
   "(expected: REST validates API keys, not OAuth bearers; the MCP connection is unaffected).";
 
-/** Whether `options` resolve to an OAuth profile, as the client built from them does. */
-function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boolean {
-  try {
-    return (
-      deps.resolveAuth({
-        apiKey: options.apiKey ?? null,
-        mcpUrl: options.mcpUrl ?? null,
-        profile: options.profile ?? null,
-      }).kind === "oauth"
-    );
-  } catch {
-    return false;
-  }
+/** Python's pair for a credential that does not resolve: the auth failure, then the skipped check. */
+function authUnresolved(e: KaguraAuthError): DoctorCheck[] {
+  return [
+    { section: "auth", status: "fail", message: `Authentication could not be resolved: ${excMessage(e)}` },
+    { section: "server", status: "info", message: "Server connectivity check skipped because auth resolution failed" },
+  ];
 }
 
 /**
@@ -442,22 +475,60 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
  * `checkServerVersion`'s, from the same comparison, so the two cannot
  * disagree.
  *
+ * The credential is resolved first, as Python's `run_doctor` resolves it
+ * for a bare client: `KAGURA_API_KEY`, then the OAuth profile (`--profile`,
+ * `KAGURA_PROFILE` or the default), then `.kagura.json`. A credential that
+ * does not resolve fails the auth section, as Python's `_check_auth`
+ * reports it, and skips this check, as Python's doctor has no client to
+ * check with. A resolved MCP URL that is not HTTPS is Python's
+ * `_check_https` warning, and the check is skipped rather than sending the
+ * credential in the clear.
+ *
  * The body is read as Python's `get_server_info` reads it, through its
  * `ServerInfo` model, and one the model refuses is unreachable, as
- * Python's `KaguraConnectionError` for it is. A credential that does not
- * resolve fails the auth section, as Python's `_check_auth` reports it,
- * and skips this check, as Python's doctor has no client to check with.
+ * Python's `KaguraConnectionError` for it is.
  *
  * A failure other than an auth or connection error (a body that is no
  * JSON, a 429) fails the check with its message, where Python's doctor
  * stops with a traceback.
  */
 async function checkServer(deps: CommandDeps, profile: string | undefined): Promise<DoctorCheck[]> {
-  // With --profile, Python resolves that profile with no key forced over
-  // it (`KAGURA_API_KEY` still first), so the check reaches the profile's
-  // own server rather than the default's.
-  const clientOptions: KaguraClientOptions =
-    profile !== undefined ? { profile } : mcpOptions((safeConfig(deps) ?? {}) as KaguraConfig);
+  // Python's run_doctor resolves as a bare client does (api_key=None,
+  // mcp_url=None): KAGURA_API_KEY, then the OAuth profile (--profile,
+  // KAGURA_PROFILE or the default), then .kagura.json. Forcing the config
+  // file's key and URL checked a server the SDK does not use (#69).
+  //
+  // The config is loaded first, as Python's `run_doctor` calls
+  // `load_config()` before anything else: a `.kagura.json` that does not
+  // parse fails this check with the message naming it (Python stops with
+  // that message). Substituting an empty config would resolve it as "No
+  // credentials found", whose advice is to create the file that exists.
+  let config: KaguraConfig;
+  try {
+    config = deps.loadConfig();
+  } catch (e) {
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
+  }
+  let resolved: ResolvedAuth;
+  try {
+    resolved = deps.resolveAuth({ apiKey: null, mcpUrl: null, profile: profile ?? null, config });
+  } catch (e) {
+    if (e instanceof KaguraAuthError) return authUnresolved(e);
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
+  }
+
+  // Python's _check_https: a plaintext URL is a warning, and the server is
+  // not contacted with the credential in the clear.
+  try {
+    validateHttpsUrl(resolved.mcpUrl, "MCP URL");
+  } catch (e) {
+    return [
+      { section: "mcp", status: "warn", message: excMessage(e), details: { mcp_url: resolved.mcpUrl } },
+      { section: "server", status: "info", message: "Server connectivity check skipped because the MCP URL is insecure" },
+    ];
+  }
+
+  const clientOptions: KaguraClientOptions = profile !== undefined ? { profile } : {};
 
   // Construction is inside the try because it validates the URL and can
   // throw — and a check whose job is to *report* a bad URL must not be the
@@ -466,12 +537,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
   try {
     client = deps.makeClient(clientOptions);
   } catch (e) {
-    if (e instanceof KaguraAuthError) {
-      return [
-        { section: "auth", status: "fail", message: `Authentication could not be resolved: ${excMessage(e)}` },
-        { section: "server", status: "info", message: "Server connectivity check skipped because auth resolution failed" },
-      ];
-    }
+    if (e instanceof KaguraAuthError) return authUnresolved(e);
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
   let info: unknown;
@@ -480,7 +546,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
   } catch (e) {
     if (e instanceof KaguraAuthError) {
       return [
-        resolvesToOAuth(deps, clientOptions)
+        resolved.kind === "oauth"
           ? { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED }
           : { section: "server", status: "fail", message: excMessage(e) },
       ];
@@ -530,10 +596,13 @@ export const DOCTOR: Command = {
     // The server check resolves the credential; a failure to is reported
     // with the auth checks, where Python's `_check_auth` reports it.
     const server = await checkServer(deps, args.values.profile);
+    // The only `mcp` check the server check makes is the insecure-URL
+    // warning; checkMcp must not fail that URL a second time.
+    const warned = server.find((c) => c.section === "mcp")?.details?.mcp_url;
     const checks: DoctorCheck[] = [
       ...checkAuth(deps, args.values.profile),
       ...server.filter((c) => c.section === "auth"),
-      ...checkMcp(deps as CliDeps),
+      ...checkMcp(deps as CliDeps, typeof warned === "string" ? warned : null),
       ...(await checkExtras()),
       ...checkKeyCustody(),
       {
