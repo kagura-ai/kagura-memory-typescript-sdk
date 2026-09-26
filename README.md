@@ -551,8 +551,6 @@ the Python CLI in these ways, each on purpose:
   says what moves it here, where Python's points at `--profile`: for
   `KAGURA_API_KEY`, which outranks every profile, `KAGURA_MCP_URL` or
   unsetting the key; otherwise `KAGURA_PROFILE`.
-- `--agents-md=VALUE` takes VALUE literally even when it begins with a
-  dash, where click reads `--agents-md=-y` as the default file plus `-y`.
 - The Codex size warning counts the bytes on disk, CRLFs included, where
   Python counts the text with its line endings folded.
 - A `~user` in an `OPENCLAW_*` variable or in `--agents-md PATH` is left
@@ -573,8 +571,6 @@ would accept.
   apart from `--external-id=` in the `update-memory` case below.
 - `context update --lock --unlock` is a usage error (exit 2, "mutually
   exclusive; pick one"), where click takes whichever flag comes last.
-- `setup … --agents-md=' '` (a path of only whitespace) is a usage error
-  (exit 2), where Python writes a file named `" "`.
 - `--rerank --no-rerank` is the same usage error, on `recall` and on
   `context search-config`.
 - `auth logout --all --profile NAME` is the same usage error, where click
@@ -585,8 +581,6 @@ would accept.
   CLI refuses that too, as `updateMemory` does.
 - `-k=5` (a short option, `=`, a value) reads `5`, where click reads `=5`
   as the value and then refuses it.
-- A float range such as `files upload --importance` refuses `nan`, which
-  click's `FloatRange` lets through (every comparison with NaN is false).
 - An option that takes a value does not take a following argument that
   begins with a dash and is not a number (a lone `-` is still a value):
   `--name-contains -auth` is a missing value here (`Error: Option
@@ -594,9 +588,6 @@ would accept.
   Write `--name-contains=-auth`. A number is anything `float()` reads,
   so `-١` is one. `auth login --invite` is the exception, since an invite
   token may begin with a dash.
-- `guardrails digest --out ''` is a usage error (exit 2). Click takes the
-  empty path as the current directory, and the Python CLI then fails to
-  write to it (exit 1).
 - An id the command puts in a URL path, `FILE_ID` (`files delete`, `files
   download-url`), the resource id (`-r/--resource-id` of `resource stats`,
   `indexer-status`, `schema`, `ingest`, `ingest-batch` and `import`, and

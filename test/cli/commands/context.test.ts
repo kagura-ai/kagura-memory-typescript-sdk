@@ -136,6 +136,18 @@ describe("kagura-memory context delete", () => {
 });
 
 describe("kagura-memory context search-config", () => {
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+  // its _FloatRange refuses nan, which click's FloatRange let through (python-sdk #285).
+  it.each([
+    ["--semantic", "nan", "Error: Invalid value for '--semantic': nan is not in the range 0.0<=x<=1.0."],
+    ["--bm25", "-NaN", "Error: Invalid value for '--bm25': nan is not in the range 0.0<=x<=1.0."],
+    ["--semantic", "inf", "Error: Invalid value for '--semantic': inf is not in the range 0.0<=x<=1.0."],
+  ])("refuses %s %s (exit 2)", async (flag, value, message) => {
+    const { code, h } = await wire(["context", "search-config", "ctx-1", flag, value]);
+    expect(code).toBe(2);
+    expect(h.err).toEqual([message]);
+  });
+
   it("refuses an empty update with exit 1", async () => {
     const { code, h } = await wire(["context", "search-config", "ctx-1"]);
     expect(code).toBe(1);

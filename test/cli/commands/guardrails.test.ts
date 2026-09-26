@@ -682,7 +682,15 @@ describe("guardrails digest", () => {
     [["--out", "adir"], "Error: Invalid value for '--out': File 'adir' is a directory."],
     [["--out", "adir/."], "Error: Invalid value for '--out': File 'adir/.' is a directory."],
     [["--out", "adir", "--target", "instructions"], "Error: Invalid value for '--out': File 'adir' is a directory."],
-    [["--out", ""], "Error: Invalid value for '--out': the path is empty."],
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+    // `_nonblank_path_option` runs after click.Path's own checks.
+    [["--out", ""], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out="], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", " "], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "\t"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "", "--target", "instructions"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "."], "Error: Invalid value for '--out': File '.' is a directory."],
+    [["--out", "./"], "Error: Invalid value for '--out': File './' is a directory."],
   ])("refuses %j with exit 2 before anything is sent", async (argv, message) => {
     fs.mkdirSync("adir");
     const h = harness();

@@ -1814,7 +1814,7 @@ describe("--agents-md", () => {
       },
     );
 
-    it("refuses a PATH of only whitespace (exit 2), where Python creates a file named ' '", async () => {
+    it("refuses a PATH of only whitespace (exit 2), in Python's words", async () => {
       process.chdir(sandbox);
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md= "), h.deps)).toBe(2);
@@ -1825,11 +1825,41 @@ describe("--agents-md", () => {
       expect(filesUnder(sandbox)).toEqual([]);
     });
 
-    it("takes --agents-md=VALUE literally, where click would parse a dash-led VALUE as an option", async () => {
+    it("takes --agents-md=VALUE literally, as Python's _HarnessCommand does", async () => {
       process.chdir(sandbox);
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md=-y"), h.deps)).toBe(0);
       expect(fs.readFileSync(path.join(sandbox, "-y"), "utf-8")).toBe(EXPORT_BLOCK);
+    });
+
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+    it("refuses a whitespace PATH given after a space too", async () => {
+      process.chdir(sandbox);
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "  ", "-y"), h.deps)).toBe(2);
+      expect(h.err).toEqual([
+        "Error: Invalid value for '--agents-md': the path is blank; name a file, or give --agents-md alone " +
+          "for the default one",
+      ]);
+      expect(filesUnder(sandbox)).toEqual([]);
+    });
+
+    it.each(["--dry-run", "-"])("takes --agents-md=%s as the file's name", async (value) => {
+      process.chdir(sandbox);
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "-c", CONTEXT, `--agents-md=${value}`), h.deps)).toBe(0);
+      expect(fs.readFileSync(path.join(sandbox, value), "utf-8")).toBe(EXPORT_BLOCK);
+      expect(fs.existsSync(codexAgents())).toBe(false);
+      expect(notes(h)).not.toContain("Dry run: nothing is written, run or fetched.");
+    });
+
+    it("reads --agents-md= as the default file, and a dash-led word after a space as the next option", async () => {
+      for (const argv of [["--agents-md="], ["--agents-md", "-y"]]) {
+        fs.rmSync(path.join(home, ".codex"), { recursive: true, force: true });
+        const h = harness(codex);
+        expect(await runCli(setup("codex", "-c", CONTEXT, ...argv), h.deps)).toBe(0);
+        expect(fs.readFileSync(codexAgents(), "utf-8")).toBe(EXPORT_BLOCK);
+      }
     });
 
     it("given alone before another option, means the default file", async () => {

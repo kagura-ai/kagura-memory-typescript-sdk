@@ -195,6 +195,14 @@ const COMPLETE = {
 };
 
 describe("files upload", () => {
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+  it("refuses --importance nan (exit 2), sending nothing", async () => {
+    const h = harness();
+    expect(await runCli(["files", "upload", file, "--remember", "--importance", "nan"], h.deps)).toBe(2);
+    expect(h.err).toEqual(["Error: Invalid value for '--importance': nan is not in the range 0.0<=x<=1.0."]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
   it("uploads into the workspace paired with the credential and prints the file object", async () => {
     const h = harness();
     expect(await runCli(["files", "upload", file], h.deps)).toBe(0);

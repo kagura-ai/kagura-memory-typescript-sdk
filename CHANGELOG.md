@@ -53,6 +53,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `allowedContextIds` entry before any request and sends each one in
   canonical form. `member remove` and `revoke-key` ask about the workspace
   in canonical form, as the Python CLI 0.41.1 does.
+- **`guardrails digest --out`** refuses an empty or whitespace-only path
+  in the Python CLI 0.41.1's words (`Invalid value for '--out': the path
+  is blank; name a file`, exit 2), where `' '` was taken as a file name.
+  `--agents-md`, `--agents-md=VALUE` and the float ranges already behaved
+  as 0.41.1 does, and now have recorded tests.
 
 ## [0.13.0] - 2026-09-25
 
