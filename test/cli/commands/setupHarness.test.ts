@@ -123,6 +123,26 @@ let home: string;
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_CWD = process.cwd();
 
+/**
+ * True when the sandboxes this file creates (all under `os.tmpdir()`) sit on
+ * a case-insensitive filesystem (macOS APFS default, Windows): a file
+ * written under one case is found under any other. Probed once, since the
+ * temp directory's case sensitivity does not change between tests. Where
+ * this is true, `AGENTS.md`/`agents.md` and `CLAUDE.md`/`claude.md` name the
+ * same file, so `hermesContextFile`'s probe order (the upper-case spelling
+ * comes first in each pair) — not the spelling actually on disk — decides
+ * which name the export note prints.
+ */
+const CASE_INSENSITIVE_FS = (() => {
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-case-probe-"));
+  try {
+    fs.writeFileSync(path.join(probe, "case.tmp"), "");
+    return fs.existsSync(path.join(probe, "CASE.TMP"));
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
 beforeEach(() => {
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-setup-"));
   home = path.join(sandbox, "home");
@@ -2360,8 +2380,12 @@ describe("--agents-md", () => {
       ["agents-chain-from-root", { ".git/x": "", "AGENTS.md": "root", "sub/CLAUDE.md": "claude" }, "sub", "sub/AGENTS.md"],
       ["empty-hermes-md", { ".hermes.md": "", "AGENTS.md": "agents" }, ".", "AGENTS.md"],
       ["empty-override", { "AGENTS.override.md": " \n", "AGENTS.md": "agents" }, ".", "AGENTS.md"],
-      ["lower-agents-md", { "agents.md": "agents" }, ".", "agents.md"],
-      ["lower-claude-md", { "claude.md": "claude" }, ".", "claude.md"],
+      // On a case-insensitive filesystem, "agents.md"/"claude.md" are the
+      // same file as "AGENTS.md"/"CLAUDE.md", so the probe (which checks the
+      // upper-case spelling first) matches and returns that spelling instead
+      // of the one actually on disk — as Python's `Path.is_file()` does too.
+      ["lower-agents-md", { "agents.md": "agents" }, ".", CASE_INSENSITIVE_FS ? "AGENTS.md" : "agents.md"],
+      ["lower-claude-md", { "claude.md": "claude" }, ".", CASE_INSENSITIVE_FS ? "CLAUDE.md" : "claude.md"],
       ["hermes-md-above-git-root", { ".hermes.md": "own", "repo/.git/x": "" }, "repo", "repo/AGENTS.md"],
       ["no-git-cwd-only", { ".hermes.md": "own", "sub/x": "" }, "sub", "sub/AGENTS.md"],
       ["empty-sub-hermes-md", { ".git/x": "", ".hermes.md": "own", "sub/.hermes.md": "" }, "sub", "sub/AGENTS.md"],
