@@ -261,7 +261,10 @@ written; and `-V` above 2^53 is refused as too large (exit 2), where
 Python sends it. The summary prints as Python's `json.dumps` prints it
 ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
 `created` and `failed` add up exactly past 2^53, and each error keeps
-the server's key order and numbers (`1.0`, `1e+16`, `NaN`). The progress
+the server's key order and numbers (`1.0`, `1e+16`, `NaN`); a lone
+surrogate in an error's string or key prints as `?` (one per code unit,
+`"😀???x"`), as the Python CLI's UTF-8 stdout with `errors="replace"`
+writes what `json.dumps` kept. The progress
 events' counts (`-v`) are still JavaScript numbers, so past 2^53 they
 are rounded where Python's are exact.
 

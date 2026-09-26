@@ -138,8 +138,12 @@ describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-
     expect(formatModelJson({ "\ud800": 1 })).toBe('{\n  "���": 1\n}');
   });
 
-  it("json.dumps has no such refusal: the string is written as JSON.stringify escapes it", () => {
-    expect(formatDumpsJson({ "\ud800": "a\udfff" })).toBe('{\n  "\\ud800": "a\\udfff"\n}');
+  it("json.dumps has no such refusal: the CLI's errors=replace stdout prints ? per lone code unit", () => {
+    // Recorded from the Python CLI 0.42.0: `_force_utf8_io` reconfigures
+    // stdout with errors="replace", so the code unit json.dumps kept is `?`.
+    expect(formatDumpsJson({ "\ud800": "a\udfff", p: { "\udbff": "\ud83d\ude00\udfff\ud800\ud800x\ud800\udc00" } })).toBe(
+      '{\n  "?": "a?",\n  "p": {\n    "?": "\ud83d\ude00???x\ud800\udc00"\n  }\n}',
+    );
   });
 });
 

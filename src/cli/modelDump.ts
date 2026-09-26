@@ -42,6 +42,11 @@ const DEPTH_EXCEEDED = "Error serializing to JSON: ValueError: Circular referenc
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 /** What pydantic-core's lossy conversion makes of a lone surrogate's three WTF-8 bytes. */
 const LOSSY_SURROGATE = "\ufffd\ufffd\ufffd";
+/**
+ * What the Python CLI's stdout makes of a lone surrogate `json.dumps` kept:
+ * `_force_utf8_io` reconfigures it to `errors="replace"`, one `?` per code unit.
+ */
+const REPLACED_SURROGATE = "?";
 
 /** What differs between pydantic's JSON and `json.dumps`'s. */
 interface Style {
@@ -53,7 +58,8 @@ interface Style {
    * Whether strings are written as UTF-8, as pydantic's serializer does: a
    * lone surrogate fails a value (see {@link loneSurrogateError}) and is
    * {@link LOSSY_SURROGATE} in a key of the untyped mapping itself, failing
-   * a key nested inside it (see {@link key}). `json.dumps` keeps the code unit.
+   * a key nested inside it (see {@link key}). `json.dumps` keeps the code
+   * unit, which the CLI's stdout then prints as {@link REPLACED_SURROGATE}.
    */
   utf8: boolean;
 }
@@ -136,10 +142,9 @@ function loneSurrogateError(text: string): CliError | null {
 
 /** A string as `style` writes it: {@link JSON.stringify}'s escapes, which are pydantic's too. */
 function string(value: string, style: Style): string {
-  if (style.utf8) {
-    const error = loneSurrogateError(value);
-    if (error !== null) throw error;
-  }
+  if (!style.utf8) return JSON.stringify(value.replace(LONE_SURROGATE, REPLACED_SURROGATE));
+  const error = loneSurrogateError(value);
+  if (error !== null) throw error;
   return JSON.stringify(value);
 }
 
@@ -152,7 +157,7 @@ function string(value: string, style: Style): string {
  */
 function key(value: string, depth: number | null, style: Style): string {
   if (depth !== null) return string(value, style);
-  return JSON.stringify(style.utf8 ? value.replace(LONE_SURROGATE, LOSSY_SURROGATE) : value);
+  return JSON.stringify(value.replace(LONE_SURROGATE, style.utf8 ? LOSSY_SURROGATE : REPLACED_SURROGATE));
 }
 
 /** A JSON number of an untyped value, its literal unknown: an integer as its digits, else a float. */
@@ -187,8 +192,9 @@ export function formatModelJson(value: unknown): string {
 /**
  * `value` as `json.dumps(value, indent=2, ensure_ascii=False)` writes it:
  * {@link formatModelJson}'s layout and strings, a float as Python's
- * `repr` (`1e-07`, `NaN`), no depth limit of its own and no refusal of a
- * lone surrogate (`json.dumps` keeps the code unit).
+ * `repr` (`1e-07`, `NaN`), no depth limit of its own, and a lone surrogate
+ * in a string or a key as `?`: `json.dumps` keeps the code unit, and the
+ * CLI's stdout (`_force_utf8_io`, `errors="replace"`) writes it so.
  */
 export function formatDumpsJson(value: unknown): string {
   return write(value, "", null, JSON_DUMPS);

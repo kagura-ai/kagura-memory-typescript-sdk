@@ -30,8 +30,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`resource import` adds its counts exactly and prints its summary as
   Python's `json.dumps` does**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
-  `created` / `failed` past 2^53 are exact, and an error's `1.0`, `1e16`
-  and `NaN` print `1.0`, `1e+16` and `NaN`, in the server's key order.
+  `created` / `failed` past 2^53 are exact, an error's `1.0`, `1e16`
+  and `NaN` print `1.0`, `1e+16` and `NaN`, in the server's key order,
+  and a lone surrogate in an error's string or key prints as `?` (one per
+  code unit), as the Python CLI's `errors="replace"` stdout writes it,
+  rather than the `\ud800` escape.
 
 ## [0.13.0] - 2026-09-25
 

@@ -229,7 +229,8 @@ const CASES: Case[] = [
  * past which Python's `json.loads` fails, and a lone surrogate, which
  * pydantic's dump refuses in a string and in a key of a mapping nested
  * inside an untyped value, and writes lossily in a key of the untyped
- * mapping itself.
+ * mapping itself; `resource import`'s `json.dumps` summary keeps it and
+ * the CLI's UTF-8 stdout (`errors="replace"`) prints one `?` per code unit.
  */
 const LOSSLESS_CASES: Case[] = [
   {
@@ -464,6 +465,33 @@ const LOSSLESS_CASES: Case[] = [
     code: 1,
     stdout: "",
     stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
+  },
+  {
+    name: "import error lone surrogate value prints ?",
+    argv: ["resource","import","-r","products","-k","rk","-f","rows.json"],
+    files: {"rows.json": "[{\"a\": 1}]"},
+    routes: {"POST /api/v1/resources/products/events/batch":{"status":202,"raw":"{\"created_count\": 1, \"errors\": [{\"index\": 0, \"m\": \"\\ud800\"}]}"}},
+    code: 0,
+    stdout: "{\n  \"created\": 1,\n  \"failed\": 0,\n  \"total\": 1,\n  \"errors\": [\n    {\n      \"index\": 0,\n      \"m\": \"?\"\n    }\n  ]\n}\n",
+    stderr: "",
+  },
+  {
+    name: "import error lone surrogate key prints ?",
+    argv: ["resource","import","-r","products","-k","rk","-f","rows.json"],
+    files: {"rows.json": "[{\"a\": 1}]"},
+    routes: {"POST /api/v1/resources/products/events/batch":{"status":202,"raw":"{\"created_count\": 1, \"errors\": [{\"index\": 0, \"\\ud800\": 1}]}"}},
+    code: 0,
+    stdout: "{\n  \"created\": 1,\n  \"failed\": 0,\n  \"total\": 1,\n  \"errors\": [\n    {\n      \"index\": 0,\n      \"?\": 1\n    }\n  ]\n}\n",
+    stderr: "",
+  },
+  {
+    name: "import error lone surrogate run after an astral character prints ???",
+    argv: ["resource","import","-r","products","-k","rk","-f","rows.json"],
+    files: {"rows.json": "[{\"a\": 1}]"},
+    routes: {"POST /api/v1/resources/products/events/batch":{"status":202,"raw":"{\"created_count\": 1, \"errors\": [{\"index\": 0, \"m\": \"\\ud83d\\ude00\\udfff\\ud800\\ud800x\", \"\\udc00\\ud83d\\ude00\": {\"\\udbff\": \"\\ud800\\udc00\\udc00\"}}]}"}},
+    code: 0,
+    stdout: "{\n  \"created\": 1,\n  \"failed\": 0,\n  \"total\": 1,\n  \"errors\": [\n    {\n      \"index\": 0,\n      \"m\": \"\ud83d\ude00???x\",\n      \"?\ud83d\ude00\": {\n        \"?\": \"\ud800\udc00?\"\n      }\n    }\n  ]\n}\n",
+    stderr: "",
   },
   {
     name: "import sums counts past 2^53 exactly and prints errors as json.dumps does",
