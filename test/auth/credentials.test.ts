@@ -756,10 +756,17 @@ describe("a hand-edited profile, read as Python's from_dict reads it (#69)", () 
   };
 
   // Python sends f"Bearer {access_token}" and refreshes only when
-  // refresh_token is truthy.
+  // refresh_token is truthy: bool([]), bool({}) and bool(0) are False,
+  // bool([0]), bool({'a': 0}) and bool('0') are True (recorded).
   it.each([
     [{ refresh_token: null }, "at", ""],
     [{ refresh_token: false }, "at", ""],
+    [{ refresh_token: [] }, "at", ""],
+    [{ refresh_token: {} }, "at", ""],
+    [{ refresh_token: 0 }, "at", ""],
+    [{ refresh_token: [0] }, "at", "[0]"],
+    [{ refresh_token: { a: 0 } }, "at", "{'a': 0}"],
+    [{ refresh_token: "0" }, "at", "0"],
     [{ access_token: 123 }, "123", "rt"],
     [{ access_token: null }, "None", "rt"],
     [{ access_token: { a: 1 } }, "{'a': 1}", "rt"],
