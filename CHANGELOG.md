@@ -16,8 +16,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing `KAGURA_PROFILE` fail the auth section and skip the check. An
   insecure resolved MCP URL is Python's warning, and the check is skipped
   (`Server connectivity check skipped because the MCP URL is insecure`),
-  where it failed. `--profile missing` no longer fails when
-  `KAGURA_API_KEY` is set, and `--profile ''` means the default profile.
+  where it failed; `KAGURA_MCP_URL` with no `.kagura.json` is that
+  resolved URL, not a configured `mcp_url`, so it gets the warning alone
+  (exit 0), where the `mcp` section also failed it. `--profile missing`
+  no longer fails when `KAGURA_API_KEY` is set, and `--profile ''` means
+  the default profile. A `.kagura.json` that does not parse fails the
+  check with the message naming it, never as `No credentials found`.
 - **An OAuth refresh failure on a `KaguraClient` REST read is a
   `KaguraAuthExpiredError`** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),
   as on the MCP path and in the REST clients, where it was a

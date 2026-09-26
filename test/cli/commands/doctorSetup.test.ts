@@ -10,7 +10,7 @@ import { KaguraAuthError } from "../../../src/errors.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { classifyMcpEntry, holdsCredential, unsetHeaderVars } from "../../../src/cli/commands/setup.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
-import type { KaguraConfig } from "../../../src/config.js";
+import { loadConfig, type KaguraConfig } from "../../../src/config.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
 
 interface Harness {
@@ -926,6 +926,61 @@ describe("kagura-memory doctor", () => {
       ]);
       expect(h.server.requests).toEqual([]);
       expect(code).toBe(0);
+    });
+
+    // The real loadConfig: with no .kagura.json it builds a config from the
+    // environment, whose mcp_url is KAGURA_MCP_URL or the default, not a
+    // URL any file configured. Python's doctor never judges that one
+    // twice: _check_https warns and the server check is skipped, exit 0.
+    it.each(["  http://x.invalid/mcp", "http:x.invalid/mcp"])(
+      "warns once, not fails, for KAGURA_API_KEY with the insecure KAGURA_MCP_URL %j and no .kagura.json (#69)",
+      async (url) => {
+        process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+        process.env.KAGURA_API_KEY = "kagura_x";
+        process.env.KAGURA_MCP_URL = url;
+        const h = harness();
+        h.deps.loadConfig = loadConfig;
+        const code = await runCli(["doctor"], h.deps);
+        expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+        expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
+        expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toHaveLength(1);
+        expect(h.out).toContain("INFO Server connectivity check skipped because the MCP URL is insecure");
+        expect(h.server.requests).toEqual([]);
+        expect(code).toBe(0);
+      },
+    );
+
+    it("reports no configured mcp_url, not the default as a PASS, when only KAGURA_API_KEY is set", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      process.env.KAGURA_API_KEY = "kagura_x";
+      const h = harness();
+      h.deps.loadConfig = loadConfig;
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out).toContain("INFO no mcp_url configured; the default is used");
+      expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
+      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(code).toBe(0);
+    });
+
+    // Python's run_doctor calls load_config() first and stops with its
+    // ValueError naming the file; the base doctor here printed the same
+    // message as the server check's failure (the client's own read
+    // surfaced it). Resolving against an empty config instead said "No
+    // credentials found … Or create: .kagura.json", advice to create the
+    // file that exists and is broken.
+    it("fails naming a .kagura.json that does not parse, never as a missing credential (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), "{ not json");
+      const h = harness();
+      h.deps.loadConfig = loadConfig;
+      const code = await runCli(["doctor"], h.deps);
+      const fails = h.out.filter((line) => line.startsWith("FAIL"));
+      expect(fails).toHaveLength(1);
+      expect(fails[0]).toMatch(/^FAIL Invalid JSON or encoding in \.kagura\.json \(expected UTF-8\): line 1 column 3/);
+      expect(h.out.join("\n")).not.toContain("No credentials found");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(1);
     });
 
     it("passes --profile missing when KAGURA_API_KEY is set, as Python's env key wins (#69)", async () => {

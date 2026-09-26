@@ -23,7 +23,7 @@ import {
 } from "../../auth/credentials.js";
 import type { ResolvedAuth } from "../../auth/types.js";
 import { MIN_SERVER_VERSION, warnBelowMinimum, type KaguraClientOptions } from "../../client.js";
-import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
+import { isEnvFallbackConfig, jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import type { ServerInfo } from "../../models.js";
@@ -202,8 +202,16 @@ const CREDENTIAL_FIX: Record<Exclude<ClaudeScope, "project">, string> = {
 function checkMcp(deps: CliDeps): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const config = safeConfig(deps);
-  const url = typeof config?.mcp_url === "string" ? config.mcp_url : "";
-  if (url) {
+  // A config built from the environment (no `.kagura.json`) carries
+  // `KAGURA_MCP_URL` or the default, not a URL any file configured. That
+  // is the resolved URL, which `checkServer` reports as Python's
+  // `_check_https` does (a warning, the check skipped); a verdict here too
+  // would fail the same plain-HTTP URL for one cause, where Python exits 0.
+  const envBuilt = config !== null && isEnvFallbackConfig(config as unknown as KaguraConfig);
+  const url = !envBuilt && typeof config?.mcp_url === "string" ? config.mcp_url : "";
+  if (envBuilt && process.env.KAGURA_MCP_URL) {
+    // Named by checkServer's warning when insecure; nothing to add here.
+  } else if (url) {
     // A plaintext MCP URL means the bearer token crosses the wire in the
     // clear; localhost is the one place that is a deliberate dev choice.
     // The clients' own check decides, so doctor fails exactly the plain
@@ -466,14 +474,21 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
   // mcp_url=None): KAGURA_API_KEY, then the OAuth profile (--profile,
   // KAGURA_PROFILE or the default), then .kagura.json. Forcing the config
   // file's key and URL checked a server the SDK does not use (#69).
+  //
+  // The config is loaded first, as Python's `run_doctor` calls
+  // `load_config()` before anything else: a `.kagura.json` that does not
+  // parse fails this check with the message naming it (Python stops with
+  // that message). Substituting an empty config would resolve it as "No
+  // credentials found", whose advice is to create the file that exists.
+  let config: KaguraConfig;
+  try {
+    config = deps.loadConfig();
+  } catch (e) {
+    return [{ section: "server", status: "fail", message: excMessage(e) }];
+  }
   let resolved: ResolvedAuth;
   try {
-    resolved = deps.resolveAuth({
-      apiKey: null,
-      mcpUrl: null,
-      profile: profile ?? null,
-      config: (safeConfig(deps) ?? {}) as KaguraConfig,
-    });
+    resolved = deps.resolveAuth({ apiKey: null, mcpUrl: null, profile: profile ?? null, config });
   } catch (e) {
     if (e instanceof KaguraAuthError) return authUnresolved(e);
     return [{ section: "server", status: "fail", message: excMessage(e) }];
