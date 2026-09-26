@@ -1477,6 +1477,14 @@ object's integer-like keys print first, where Python prints the literal
 and keeps the key order: the JSON-RPC body and the tool text are read with
 `JSON.parse`.
 
+**Hand-edited credentials.** A profile in `~/.kagura/credentials.json`
+whose `access_token` is no string, or whose `refresh_token` is `null`, is
+read as the Python SDK reads it: the token is sent as Python's `str()` of
+it (`Bearer 123`) and a falsy refresh token means none. When this SDK
+rewrites the file (a refresh, `auth use`), it writes those two tokens as
+strings (`"123"`, `""`) where Python writes them back as they were; both
+SDKs read either form the same way.
+
 ## Development
 
 ```bash

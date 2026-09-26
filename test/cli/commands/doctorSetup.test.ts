@@ -1007,6 +1007,18 @@ describe("kagura-memory doctor", () => {
       expect(code).toBe(0);
     });
 
+    it("reaches the server with a hand-edited profile Python reads (#69)", async () => {
+      // Python 0.42.0 sends "Bearer 123" for access_token 123, refresh_token null.
+      writeCredentials({ default: profileJson({ access_token: 123, refresh_token: null }) });
+      const h = harness({});
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      h.deps.makeClient = ((o: KaguraClientOptions) =>
+        new KaguraClient({ ...o, fetch: h.server.fetch })) as CliDeps["makeClient"];
+      const { checks } = await serverChecks(h);
+      expect(checks.map((c) => c.message)).toEqual(["Server reachable", "Version: 0.78.0"]);
+      expect(h.server.requests.map((r) => r.headers.authorization)).toEqual(["Bearer 123"]);
+    });
+
     it("prints the two lines as Python does", async () => {
       const h = harness();
       h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version: "0.78.0" };

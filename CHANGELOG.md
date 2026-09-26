@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A hand-edited credentials profile is read as the Python SDK reads it**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  one whose `refresh_token` is `null`, or whose `access_token` is no
+  string, is kept (sent as `Bearer 123`, no refresh) where the whole file
+  was read as empty and every command said no credentials were found.
 - **`doctor` checks the server the SDK would use**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
   Without `--profile` it forced `.kagura.json`'s key and URL; it now
