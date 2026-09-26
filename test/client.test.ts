@@ -2789,7 +2789,7 @@ describe("REST reads with an OAuth profile (#69)", () => {
     // through the OAuth provider's fetch, the global one, not the client's.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-rest-auth-"));
     const calls: string[] = [];
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", async (input: unknown) => {
       calls.push(`refresh ${String(input)}`);
       throw new TypeError("fetch failed");
     });
