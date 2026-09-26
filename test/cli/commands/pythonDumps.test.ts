@@ -227,7 +227,9 @@ const CASES: Case[] = [
  * bytes: key order in untyped mappings, number literals in typed and
  * untyped fields, NaN and Infinity, duplicate keys, the nesting depth
  * past which Python's `json.loads` fails, and a lone surrogate, which
- * pydantic's dump refuses in a string and writes lossily in a key.
+ * pydantic's dump refuses in a string and in a key of a mapping nested
+ * inside an untyped value, and writes lossily in a key of the untyped
+ * mapping itself.
  */
 const LOSSLESS_CASES: Case[] = [
   {
@@ -430,6 +432,38 @@ const LOSSLESS_CASES: Case[] = [
     code: 1,
     stdout: "",
     stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\udfff' in position 1: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate key in a nested mapping",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"p\": {\"\\ud800\": 1}}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate run in a nested mapping's key",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"p\": {\"a\\udfff\\udc00b\": 1}}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode characters in position 1-2: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate key in a mapping in a list",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"p\": [{\"\\ud800\": 1}]}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate nested key then value",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"p\": {\"\\ud800\": \"\\udfff\"}}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
   },
 ];
 

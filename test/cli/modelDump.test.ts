@@ -88,16 +88,54 @@ describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-
     expect(formatModelJson({ s: "😀" })).toBe('{\n  "s": "😀"\n}');
   });
 
-  it("writes a lone surrogate in a key as pydantic's lossy conversion does, three U+FFFD each", () => {
-    expect(formatModelJson({ "\ud800": 1, "a\udfff\udc00b": 2 })).toBe(
-      '{\n  "���": 1,\n  "a������b": 2\n}',
+  // A key's fate depends on its level (measured the same way): the keys of
+  // the `dict`-typed field's own mapping go through pydantic's `str` key
+  // serializer, which converts a lone surrogate lossily; a mapping nested
+  // inside the untyped value (in a list of it too) is inferred, and its key
+  // is refused like a value, before the entry's value is looked at.
+
+  /** An events page whose first event's `payload` is `payload`, the untyped mapping `readModel` marks. */
+  const events = (payload: string) =>
+    readModel(
+      parseJsonLossless(`{"events": [{"id": 1, "op": "upsert", "doc_id": "d", "payload": ${payload}}]}`),
+      RESOURCE_EVENTS_LIST_RESPONSE,
+      "ResourceClient.list_resource_events",
+    );
+
+  it("writes a lone surrogate in a key of the untyped mapping itself as pydantic's lossy conversion does, three U+FFFD each", () => {
+    expect(formatModelJson(events('{"\\ud800": 1, "a\\udfff\\udc00b": 2}'))).toContain(
+      '"payload": {\n        "���": 1,\n        "a������b": 2\n      }',
     );
   });
 
-  it("refuses the value after converting the key, in pydantic's order", () => {
-    expect(failure(() => formatModelJson({ "\ud800": "a\udfff" })).message).toBe(
+  it("converts the keys of each mapping of a list[dict] field the same way", () => {
+    const batch = readModel(
+      parseJsonLossless('{"created_count": 0, "errors": [{"\\ud800": 1}]}'),
+      RESOURCE_EVENT_BATCH_RESPONSE,
+      "ResourceClient.ingest_events",
+    );
+    expect(formatModelJson(batch)).toContain('"errors": [\n    {\n      "���": 1\n    }\n  ]');
+  });
+
+  it("refuses the value after converting a key of the untyped mapping itself, in pydantic's order", () => {
+    expect(failure(() => formatModelJson(events('{"\\ud800": "a\\udfff"}'))).message).toBe(
       refused("character '\\udfff' in position 1"),
     );
+  });
+
+  it.each([
+    ["a mapping nested in the untyped value", '{"p": {"\\ud800": 1}}', "character '\\ud800' in position 0"],
+    ["a mapping in a list in the untyped value", '{"p": [{"\\ud800": 1}]}', "character '\\ud800' in position 0"],
+    ["a nested mapping, a run in the key", '{"p": {"a\\udfff\\udc00b": 1}}', "characters in position 1-2"],
+    ["a nested mapping, the key before its value", '{"p": {"\\ud800": "\\udfff"}}', "character '\\ud800' in position 0"],
+    ["a nested mapping, the key before a later value", '{"p": {"a": "\\udfff", "\\ud800": 1}}', "character '\\udfff' in position 0"],
+  ])("refuses a lone surrogate in a key of %s, as pydantic infers it", (_name, payload, where) => {
+    expect(failure(() => formatModelJson(events(payload))).message).toBe(refused(where));
+  });
+
+  it("keys outside any untyped value are model field names: written as they are", () => {
+    // No Python counterpart (a model's field names are fixed); the dumper leaves them alone.
+    expect(formatModelJson({ "\ud800": 1 })).toBe('{\n  "���": 1\n}');
   });
 
   it("json.dumps has no such refusal: the string is written as JSON.stringify escapes it", () => {

@@ -17,7 +17,12 @@
  *
  * pydantic writes UTF-8, so a string value holding a lone surrogate (a
  * `"\ud800"` in the body) fails its dump with CPython's `UnicodeEncodeError`
- * text, while a key holding one is converted lossily (three U+FFFD each).
+ * text. A key holding one depends on its level: a key of the untyped
+ * mapping itself (the `dict[str, Any]` field's own, or each mapping of a
+ * `list[dict[str, Any]]`) goes through pydantic's `str` key serializer,
+ * which converts it lossily (three U+FFFD each); a key of a mapping nested
+ * inside the untyped value is inferred and refused like a value, before the
+ * entry's value is looked at.
  */
 
 import { JsonNumber, orderedEntries, valueAt } from "../losslessJson.js";
@@ -47,7 +52,8 @@ interface Style {
   /**
    * Whether strings are written as UTF-8, as pydantic's serializer does: a
    * lone surrogate fails a value (see {@link loneSurrogateError}) and is
-   * {@link LOSSY_SURROGATE} in a key. `json.dumps` keeps the code unit.
+   * {@link LOSSY_SURROGATE} in a key of the untyped mapping itself, failing
+   * a key nested inside it (see {@link key}). `json.dumps` keeps the code unit.
    */
   utf8: boolean;
 }
@@ -137,8 +143,15 @@ function string(value: string, style: Style): string {
   return JSON.stringify(value);
 }
 
-/** A mapping key as `style` writes it. */
-function key(value: string, style: Style): string {
+/**
+ * A mapping key as `style` writes it. `depth` is the mapping's own (see
+ * {@link write}): `null` for a model's field names and for the keys of the
+ * untyped mapping itself, which pydantic's `str` key serializer converts
+ * lossily; a number for a mapping nested inside an untyped value, whose
+ * key pydantic infers and refuses like a string value.
+ */
+function key(value: string, depth: number | null, style: Style): string {
+  if (depth !== null) return string(value, style);
   return JSON.stringify(style.utf8 ? value.replace(LONE_SURROGATE, LOSSY_SURROGATE) : value);
 }
 
@@ -164,7 +177,8 @@ function literal(value: JsonNumber, style: Style): string {
  *
  * @throws CliError with pydantic's message when an untyped value nests
  *   deeper than pydantic writes (see {@link MAX_UNTYPED_DEPTH}), or a
- *   string value holds a lone surrogate (see {@link loneSurrogateError}).
+ *   string value or a key nested inside an untyped value holds a lone
+ *   surrogate (see {@link loneSurrogateError} and {@link key}).
  */
 export function formatModelJson(value: unknown): string {
   return write(value, "", null, PYDANTIC);
@@ -218,7 +232,7 @@ function write(value: unknown, indent: string, depth: number | null, style: Styl
   if (entries.length === 0) return "{}";
   const next = enter(outer);
   const lines = entries.map(
-    ([name]) => `${inner}${key(name, style)}: ${write(valueAt(value, name), inner, next, style)}`,
+    ([name]) => `${inner}${key(name, depth, style)}: ${write(valueAt(value, name), inner, next, style)}`,
   );
   return `{\n${lines.join(",\n")}\n${indent}}`;
 }

@@ -225,8 +225,9 @@ recursion depth exceeded while decoding a JSON array from a unicode
 string`. A string value holding a lone surrogate (`"\ud800"`) exits 1
 with pydantic's `Error serializing to JSON: UnicodeEncodeError: 'utf-8'
 codec can't encode character '\ud800' in position 0: surrogates not
-allowed`, and an untyped key holding one prints as three U+FFFD, as
-pydantic converts it. Three differences remain. Python's depth is its recursion limit
+allowed`; a key of the untyped mapping itself holding one prints as
+three U+FFFD, as pydantic converts it, and a key of a mapping nested
+inside it exits 1 like a value. Three differences remain. Python's depth is its recursion limit
 less the stack in use: 973 is what these commands reach, and `doctor`
 given such a `/api/v1/system/info` body reports a failed server check
 where Python stops with a traceback. A body that is not valid UTF-8 is

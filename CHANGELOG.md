@@ -24,8 +24,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   surrogate fails as pydantic's dump does (`Error serializing to JSON:
   UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
   position 0: surrogates not allowed`) instead of printing the `\ud800`
-  escape, and an untyped key holding one prints as three U+FFFD. The
-  values the SDK returns are unchanged.
+  escape; a key of the untyped mapping itself holding one prints as
+  three U+FFFD, and a key of a mapping nested inside it exits 1 like a
+  value. The values the SDK returns are unchanged.
 
 ## [0.13.0] - 2026-09-25
 
