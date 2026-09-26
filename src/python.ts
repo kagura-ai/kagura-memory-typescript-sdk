@@ -256,3 +256,8 @@ export function pyTypeName(value: unknown): string {
       return typeof value;
   }
 }
+
+/** Python's `str()` of a JSON value: a string as it is, anything else its `repr()`. */
+export function pyStr(value: unknown): string {
+  return typeof value === "string" ? value : pyRepr(value);
+}

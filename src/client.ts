@@ -11,6 +11,7 @@ import {
   KaguraNotFoundError,
   KaguraPartialRollbackError,
   KaguraPermissionError,
+  KaguraResponseError,
   // Referenced only from JSDoc {@link} on the plan-gated options.
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
@@ -64,7 +65,7 @@ import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
-import { pyRepr, pyTypeName } from "./python.js";
+import { pyRepr, pyStr, pyTypeName } from "./python.js";
 import {
   ResponseReader,
   laxFloat,
@@ -725,6 +726,42 @@ function readMeasurementResult(data: unknown): MeasurementResult {
   return result!;
 }
 
+const ROLLBACK_COUNTS = [
+  "edges_deleted",
+  "merges_reversed",
+  "merges_unreversible",
+  "importance_restored",
+  "promotions_reversed",
+  "importance_kept",
+  "promotions_kept",
+  "archives_restored",
+] as const;
+
+/**
+ * A partial rollback's `rollback_summary` checked as the Python SDK's
+ * `RollbackSummary` model checks it, and returned as it arrived.
+ *
+ * @throws KaguraResponseError in the Python SDK's words.
+ */
+function readRollbackSummary(raw: unknown, operation: string): RollbackSummary {
+  const r = new ResponseReader(operation, "RollbackSummary");
+  const obj = r.object(raw);
+  if (obj !== null) {
+    for (const key of ROLLBACK_COUNTS) r.field(obj, key, laxInt, { default: 0 });
+    r.list(
+      obj,
+      "errors",
+      (item, at) => {
+        const checked = laxStr(item);
+        if (!checked.ok) r.issue(at, checked.msg);
+      },
+      { default: [] },
+    );
+  }
+  r.check();
+  return raw as RollbackSummary;
+}
+
 /**
  * Read a `recall_series` payload as the Python SDK's `MeasurementSeries`
  * model reads it; a missing `series` is `[]`, but a `null` one is drift.
@@ -996,16 +1033,24 @@ export class KaguraClient {
       throwForKaguraStatus(response.status, response.headers, text);
     }
 
-    let data: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+      parsed = text ? JSON.parse(text) : {};
     } catch (e) {
       throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, { cause: e });
     }
-    if (data && typeof data === "object" && "error" in data) {
-      const error = data.error as Record<string, unknown> | undefined;
-      const message = error && typeof error === "object" ? (error.message ?? JSON.stringify(error)) : String(error);
-      throw new KaguraConnectionError(`MCP error: ${String(message)}`);
+    // Python's `response.json() or {}`: a `null` (or another falsy) body is no result.
+    const empty = !parsed || (Array.isArray(parsed) && parsed.length === 0);
+    const data = (empty ? {} : parsed) as Record<string, unknown>;
+    if (typeof data === "object" && data !== null && "error" in data) {
+      // Python: f"MCP error: {error.get('message', error)}" -- str() of
+      // whatever the server sent, a present null included.
+      const error = data.error;
+      const message =
+        typeof error === "object" && error !== null && Object.prototype.hasOwnProperty.call(error, "message")
+          ? (error as Record<string, unknown>).message
+          : error;
+      throw new KaguraConnectionError(`MCP error: ${pyStr(message)}`);
     }
 
     const result = data.result;
@@ -1200,8 +1245,11 @@ export class KaguraClient {
     if (result.status !== "error") {
       return;
     }
-    const code = typeof result.error === "string" ? result.error : "unknown";
-    const message = typeof result.message === "string" ? result.message : "Unknown error";
+    // Python: result.get(key, default), then str() of it -- a present null
+    // is "None", a number or an object its repr.
+    const has = (key: string) => Object.prototype.hasOwnProperty.call(result, key);
+    const code = has("error") ? pyStr(result.error) : "unknown";
+    const message = has("message") ? pyStr(result.message) : "Unknown error";
     if (
       code === "report_not_found" ||
       code === "context_not_found" ||
@@ -1212,6 +1260,21 @@ export class KaguraClient {
       throw new KaguraNotFoundError(`${operation}: ${message}`);
     }
     const failure = `${operation} failed (${code}): ${message}`;
+    if (code === "partial_rollback") {
+      const reportId = typeof result.report_id === "string" ? result.report_id : null;
+      let summary: RollbackSummary;
+      try {
+        summary = readRollbackSummary(result.rollback_summary, operation);
+      } catch (drift) {
+        if (!(drift instanceof KaguraResponseError)) throw drift;
+        // The partial reversal is already committed; a summary the SDK
+        // cannot read must not hide that (Python's #256).
+        throw new KaguraPartialRollbackError(`${failure} (rollback_summary could not be read)`, reportId, {}, {
+          cause: drift,
+        });
+      }
+      throw new KaguraPartialRollbackError(failure, reportId, summary);
+    }
     const gated = gateError(
       result,
       code,
@@ -1221,16 +1284,6 @@ export class KaguraClient {
     );
     if (gated !== null) {
       throw gated;
-    }
-    if (code === "partial_rollback") {
-      const summary = result.rollback_summary;
-      throw new KaguraPartialRollbackError(
-        failure,
-        typeof result.report_id === "string" ? result.report_id : null,
-        typeof summary === "object" && summary !== null && !Array.isArray(summary)
-          ? (summary as RollbackSummary)
-          : {},
-      );
     }
     if (code === "permission_denied") {
       throw new KaguraPermissionError(

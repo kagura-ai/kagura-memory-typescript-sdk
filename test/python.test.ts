@@ -13,6 +13,7 @@ import {
   pyFloatRepr,
   pyInt,
   pyRepr,
+  pyStr,
   pyTypeName,
 } from "../src/python.js";
 
@@ -236,5 +237,19 @@ describe("float() grammar", () => {
     ["\u{85}-2.5\u{a0}", -2.5],
   ])("float(%j) is %s, as Python reads it", (input, expected) => {
     expect(pyFloat(input)).toBe(expected);
+  });
+});
+
+describe("pyStr: Python's str() of a JSON value", () => {
+  it.each([
+    ["x", "x"],
+    [null, "None"],
+    [true, "True"],
+    [5, "5"],
+    [1.5, "1.5"],
+    [[1, "a"], "[1, 'a']"],
+    [{ toString: 1 }, "{'toString': 1}"],
+  ] as const)("%j -> %s", (value, expected) => {
+    expect(pyStr(value)).toBe(expected);
   });
 });

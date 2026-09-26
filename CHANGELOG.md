@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MCP envelope errors read as the Python SDK's**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  a `null` JSON-RPC body is no result instead of a `TypeError`, a
+  JSON-RPC `error.message` that is no string is rendered with Python's
+  `str()` (it could throw a `TypeError`), a tool error's non-string code or
+  message likewise (`t failed (None): …`, where it read `unknown` /
+  `Unknown error`), and a `partial_rollback` whose `rollback_summary` does
+  not match the model says `(rollback_summary could not be read)` with the
+  `KaguraResponseError` as its `cause`.
 - **Lax number and bool fields read strings as pydantic-core does**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
   An int field takes `"0-1"` (as -1), `"0__7"` and `" +1"` as pydantic

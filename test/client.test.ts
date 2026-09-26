@@ -996,6 +996,9 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       c.rollbackSleepRun({ contextId: "c", reportId: "r1" }),
     )) as KaguraPartialRollbackError;
     expect(err).toBeInstanceOf(KaguraPartialRollbackError);
+    // Python's note (#69): a summary the SDK cannot read must not hide the
+    // committed partial reversal.
+    expect(err.message).toBe("rollback_sleep_run failed (partial_rollback): partial (rollback_summary could not be read)");
     expect(err.reportId).toBeNull();
     expect(err.summary).toEqual({});
   });
@@ -2582,5 +2585,79 @@ describe("callRawTool (#28)", () => {
     const client = makeClient(new FakeServer());
     await expect(client.callRawTool("  ")).rejects.toThrow(/toolName must be a non-empty string/);
     await expect(client.callRawTool("")).rejects.toThrow(/toolName must be a non-empty string/);
+  });
+});
+
+describe("the MCP envelope in the Python SDK's words (#69)", () => {
+  /** A client whose session is open, so the next reply can be forced. */
+  async function openClient(server: FakeServer): Promise<KaguraClient> {
+    const client = makeClient(server);
+    await client.callRawTool("t");
+    return client;
+  }
+
+  it("reads a null JSON-RPC body as no result, as Python's `response.json() or {}` does", async () => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response("null", { status: 200 });
+    await expect(client.callRawTool("t")).resolves.toEqual({});
+  });
+
+  // Recorded from the Python SDK 0.42.0's _make_jsonrpc_request against a
+  // mock transport: f"MCP error: {error.get('message', error)}".
+  it.each([
+    [{ error: { code: -32603 } }, "MCP error: {'code': -32603}"],
+    [{ error: { message: { toString: 1 } } }, "MCP error: {'toString': 1}"],
+    [{ error: { message: null } }, "MCP error: None"],
+    [{ error: { message: [1, "a"] } }, "MCP error: [1, 'a']"],
+    [{ error: { code: -32600, message: "bad request" } }, "MCP error: bad request"],
+  ])("renders the JSON-RPC error %j as Python's str()", async (body, message) => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, ...body }), { status: 200 });
+    const error = await client.callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(message);
+  });
+
+  // Recorded from the Python SDK 0.42.0's KaguraClient._raise_for_mcp_error.
+  it.each([
+    [{ status: "error", error: null, message: { toString: 1 } }, KaguraError, "t failed (None): {'toString': 1}"],
+    [{ status: "error", error: 5, message: null }, KaguraError, "t failed (5): None"],
+    [{ status: "error", message: true }, KaguraError, "t failed (unknown): True"],
+    [{ status: "error", error: { k: "v" } }, KaguraError, "t failed ({'k': 'v'}): Unknown error"],
+    [{ status: "error", error: "context_not_found", message: [1, "a"] }, KaguraNotFoundError, "t: [1, 'a']"],
+  ] as const)("renders the tool error %j as Python's str()", async (result, cls, message) => {
+    const server = new FakeServer();
+    server.toolResults.t = result;
+    const error = await makeClient(server).callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(cls);
+    expect((error as Error).message).toBe(message);
+  });
+
+  it.each([
+    [undefined, "Input should be a valid dictionary or instance of RollbackSummary"],
+    [{ edges_deleted: "x" }, "edges_deleted: Input should be a valid integer, unable to parse string as an integer"],
+  ])("notes a rollback_summary it cannot read (%j), as Python does", async (summary, problem) => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "partial_rollback",
+      message: "partial",
+      report_id: 5,
+      ...(summary === undefined ? {} : { rollback_summary: summary }),
+    };
+    const error = (await makeClient(server)
+      .rollbackSleepRun({ contextId: "c", reportId: "r1" })
+      .catch((e: unknown) => e)) as KaguraPartialRollbackError;
+    expect(error).toBeInstanceOf(KaguraPartialRollbackError);
+    expect(error.message).toBe("rollback_sleep_run failed (partial_rollback): partial (rollback_summary could not be read)");
+    expect(error.reportId).toBeNull();
+    expect(error.summary).toEqual({});
+    expect(error.cause).toBeInstanceOf(KaguraResponseError);
+    expect((error.cause as Error).message).toBe(
+      `rollback_sleep_run: unexpected server response for RollbackSummary (${problem}). ` +
+        "The server may be newer than this SDK; upgrading kagura-memory may help.",
+    );
   });
 });

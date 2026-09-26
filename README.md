@@ -971,7 +971,7 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
 | `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`, and `rate_limit_exceeded`, the daily MCP call cap every non-read-only tool checks (`quotaType` `api_mcp_daily`, `resetsAt` the next UTC midnight); REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
-| `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all | `reportId`, `summary` |
+| `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
 | `KaguraError` | any other code | — |
@@ -1461,6 +1461,13 @@ a bool field sent the JSON number 9223372036854775807 or
 -9223372036854775808 reads it as the double +/-2^63 and says `Input
 should be a valid boolean`, where pydantic says `…, unable to interpret
 input`. The `resource` and `files` dumps read the literal itself and agree with pydantic.
+
+**The MCP envelope.** A JSON-RPC or tool error is rendered as the Python
+SDK renders it, with Python's `str()` of whatever the server sent
+(`MCP error: {'code': -32603}`, `t failed (None): …`), and a `null`
+JSON-RPC body reads as no result. One difference remains: a JSON-RPC
+`error` that is no object (`{"error": "boom"}`) reads `MCP error: boom`,
+where the Python SDK stops with an `AttributeError`.
 
 ## Development
 
