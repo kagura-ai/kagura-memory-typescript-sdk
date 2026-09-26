@@ -820,13 +820,17 @@ exits 1 with its `KaguraResponseError` text; timestamps are printed as
 the server wrote them. `--role` matches exactly, as
 click's `Choice` does (`Admin` is refused). As in the Python CLI (0.41.1+):
 a workspace that is not a UUID is refused before `member remove` or
-`revoke-key` asks, and the question names it in canonical form; each `invite create -c` must be a context UUID (exit 2,
-`Invalid value for '--context' / '-c': 'x' is not a valid context UUID.`,
-before anything is read) and is sent in canonical form; a user id of `.`,
-`..` or nothing (`USER_ID` or `--user`) is refused (exit 2) before
-anything is asked or sent; a `context_id` in `.kagura.json` that is not a
-string reads as absent; and an invitation with no email prints `-`, as
-`invite list` does.
+`revoke-key` asks, and the question names it in canonical form; each
+`invite create -c` must be a context UUID (exit 2, `Invalid value for
+'--context' / '-c': 'x' is not a valid context UUID.`, before anything
+is read) and is sent in canonical form; a user id of `.`, `..` or
+nothing (`USER_ID` or `--user`) is refused (exit 2) before anything is
+asked or sent; a `context_id` in `.kagura.json` that is not a string
+reads as absent; and an invitation with no email prints `-`, as
+`invite list` does. When more than one of these is wrong, the error
+names them in declaration order (`EMAIL`, `--role`, `-c`,
+`--expires-days`), where click names whichever comes first on the
+command line.
 
 **`measure record` and `measure series`** take the context as their
 first argument, never from `.kagura.json`: an observation recorded in the
