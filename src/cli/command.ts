@@ -106,6 +106,18 @@ export function rejectExtraArgs(args: ParsedArgs, allowed = 0): void {
   }
 }
 
+/**
+ * An `Examples:` block for a command's `description`, one example per
+ * line — what the Python CLI's `\b` + `Examples:` docstring blocks render
+ * from 0.41.1 (python-sdk #285; before, click rewrapped them into one
+ * run-on line). A line is a command after `kagura-memory `, or, when it
+ * starts with a space, a continuation written as given
+ * (`"  --source-uri …"`).
+ */
+export function examples(...lines: string[]): string {
+  return ["  Examples:", ...lines.map((l) => `    ${l.startsWith(" ") ? l : `kagura-memory ${l}`}`)].join("\n");
+}
+
 const INDENT = "  ";
 
 /** `-c, --context-id TEXT` — how click lays out an option's forms. */

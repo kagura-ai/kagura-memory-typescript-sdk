@@ -9,7 +9,14 @@
  *     public`), so omitting it creates a *private* context.
  */
 
-import { requireArg, requireOption, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
+import {
+  examples,
+  requireArg,
+  requireOption,
+  rejectExtraArgs,
+  type Command,
+  type CommandGroup,
+} from "../command.js";
 import { formatJson } from "../output.js";
 import { CliError, pairedFlag, parseChoice, parseRanged } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -76,6 +83,10 @@ const list: Command = {
 
 const create: Command = {
   summary: "Create a new context.",
+  description: examples(
+    "context create -n my-project",
+    'context create -n dev -d "Development notes" -s "Project dev context"',
+  ),
   spec: {
     flags: [
       { ...NAME, required: true },
@@ -114,6 +125,7 @@ const create: Command = {
 const deleteContext: Command = {
   summary: "Soft-delete a context and all its memories.",
   args: "CONTEXT_ID",
+  description: examples("context delete CTX_UUID", "context delete CTX_UUID -y"),
   spec: { flags: [YES] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
@@ -130,6 +142,11 @@ const deleteContext: Command = {
 const update: Command = {
   summary: "Update a context's settings.",
   args: "CONTEXT_ID",
+  description: examples(
+    'context update CTX_UUID -s "Updated summary"',
+    "context update CTX_UUID --lock",
+    "context update CTX_UUID --unlock",
+  ),
   spec: {
     flags: [
       { ...DISPLAY_NAME, help: "Updated display name" },
@@ -194,6 +211,11 @@ const RERANKER: FlagSpec = {
 const searchConfig: Command = {
   summary: "Update search configuration for a context.",
   args: "CONTEXT_ID",
+  description: examples(
+    "context search-config CTX_UUID --semantic 0.5 --bm25 0.5",
+    "context search-config CTX_UUID --rerank --reranker voyage",
+    "context search-config CTX_UUID --rerank --reranker self_hosted",
+  ),
   spec: {
     flags: [
       SEMANTIC,

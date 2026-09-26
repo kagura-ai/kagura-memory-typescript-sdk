@@ -42,6 +42,7 @@ import { KaguraAuthError, excMessage } from "../errors.js";
 import { baseUrlFromMcp } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 import {
+  examples,
   isGroup,
   rejectExtraArgs,
   renderGroupHelp,
@@ -794,6 +795,15 @@ const AUTH_GROUP: CommandGroup = {
     login: {
       summary: "Authenticate via OAuth2 device flow.",
       description:
+        examples(
+          "auth login                      # read + write (default)",
+          "auth login --read-only          # read-only",
+          'auth login --scope "memory:read memory:write profile:read"  # custom',
+          "auth login --profile work",
+          "auth login --no-browser         # for SSH / headless",
+          "auth login --invite https://<host>/join/<token>  # invite-only sign-up",
+        ) +
+        "\n\n" +
         "  --invite signs a new account up with a beta invite and approves this\n" +
         "  login from one link, on a server that supports it. An older server\n" +
         "  gets two steps instead, and one that takes no invites a notice. The\n" +
@@ -803,6 +813,12 @@ const AUTH_GROUP: CommandGroup = {
     },
     refresh: {
       summary: "Rotate access_token (optionally requesting a new scope).",
+      description: examples(
+        "auth refresh",
+        'auth refresh --scope "memory:read"                       # narrow to read-only',
+        'auth refresh --scope "memory:read memory:write"          # widen (triggers device flow)',
+        "auth refresh --profile work",
+      ),
       spec: REFRESH_SPEC,
       run: (deps, args) => cmdRefresh(deps as CliDeps, args),
     },

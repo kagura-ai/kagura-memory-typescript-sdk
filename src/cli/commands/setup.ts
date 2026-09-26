@@ -47,7 +47,7 @@ import { baseUrlFromMcp, validateHttpsUrl } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
 import { isUuid, parseUuid } from "../../uuid.js";
-import { rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
+import { examples, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import type { ExecOptions } from "../exec.js";
 import { formatJson } from "../output.js";
 import { pathlibString } from "../pathlib.js";
@@ -2653,7 +2653,18 @@ const claude: Command = {
     "  --guardrails or --tool-profile drops an earlier value, and says so.\n\n" +
     "  This port installs no hooks or slash commands: the Python CLI's flags\n" +
     "  for them, and --no-auto-context, are accepted and change nothing.\n\n" +
-    GUARDRAILS_ADVICE,
+    GUARDRAILS_ADVICE +
+    "\n\n" +
+    examples(
+      "setup claude",
+      "setup claude --profile default        # OAuth via kagura-mcp (recommended)",
+      "setup claude --profile default --scope user   # one entry for every project",
+      "setup claude --profile default --guardrails off --tool-profile core",
+      "setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}",
+      "setup claude -y --api-key kagura_xxx --context-id my-project",
+      "setup claude --no-commands      # plugin users: its /kagura-memory:* instead",
+      "setup claude --no-auto-context  # always show full context list",
+    ),
   spec: { flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ...PYTHON_ONLY_FLAGS] },
   run: (deps, args) => runClaude(deps as CliDeps, args),
 };
@@ -2687,7 +2698,14 @@ const codex: Command = {
     "  usual credential (KAGURA_API_KEY, the OAuth profile, .kagura.json),\n" +
     "  which must be for the entry's server.\n\n" +
     `${MCP_URL_RULE}\n\n` +
-    GUARDRAILS_ADVICE,
+    GUARDRAILS_ADVICE +
+    "\n\n" +
+    examples(
+      "setup codex --profile default",
+      "setup codex --profile default --context-id CTX_UUID",
+      "setup codex --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup codex --profile default --dry-run",
+    ),
   spec: {
     flags: [
       HARNESS_PROFILE,
@@ -2733,7 +2751,14 @@ const hermes: Command = {
     "  only Cursor rules, name a file with --agents-md PATH. --guardrails off\n" +
     "  is refused, and a context id, from the flag or the URL, is not written;\n" +
     "  a first ?guardrails=off in the URL is kept, alone, with a warning.\n\n" +
-    MCP_URL_RULE,
+    MCP_URL_RULE +
+    "\n\n" +
+    examples(
+      "setup hermes --profile default",
+      "setup hermes --profile default --context-id CTX_UUID --agents-md",
+      "setup hermes --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup hermes --profile default -y     # print the block only",
+    ),
   spec: {
     flags: [
       HARNESS_PROFILE,
@@ -2774,7 +2799,14 @@ const openclaw: Command = {
     "  --guardrails off is refused, and a context id, from the flag or the\n" +
     "  URL, is not written; a first ?guardrails=off in the URL is kept, alone,\n" +
     "  with a warning.\n\n" +
-    MCP_URL_RULE,
+    MCP_URL_RULE +
+    "\n\n" +
+    examples(
+      "setup openclaw --profile default",
+      "setup openclaw --profile default --context-id CTX_UUID --agents-md",
+      "setup openclaw --url-form --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
+      "setup openclaw --profile default --force",
+    ),
   spec: {
     flags: [
       HARNESS_PROFILE,

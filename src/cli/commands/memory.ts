@@ -14,7 +14,7 @@
 
 import type { KaguraClient, SourceType } from "../../client.js";
 import { pyTruthy } from "../../python.js";
-import { requireArg, requireOption, rejectExtraArgs, type Command } from "../command.js";
+import { examples, requireArg, requireOption, rejectExtraArgs, type Command } from "../command.js";
 import {
   CliError,
   buildDetails,
@@ -248,6 +248,7 @@ const recall: Command = {
 
 const reference: Command = {
   summary: "Get full details of a specific memory.",
+  description: examples('reference -m "abc-123-def"', 'reference -c dev -m "abc-123-def"'),
   spec: {
     flags: [CONTEXT_ID, { ...MEMORY_ID, required: true, help: "Memory ID to get full details" }],
   },
@@ -264,6 +265,11 @@ const FORGET_K = kFlag("Max memories to delete in query mode", "10");
 
 const forget: Command = {
   summary: "Delete memories (soft delete; kept until the server's retention window passes, default 30 days).",
+  description: examples(
+    'forget -m "abc-123-def"',
+    'forget -q "outdated test data" -k 5',
+    'forget -c dev -m "memory-uuid"',
+  ),
   spec: {
     flags: [
       CONTEXT_ID,
@@ -513,6 +519,7 @@ const MIN_WEIGHT: FlagSpec = {
 
 const explore: Command = {
   summary: "Explore related memories via Neural Memory graph.",
+  description: examples('explore -m "abc-123-def"', 'explore -c dev -m "abc-123" --depth 3'),
   spec: {
     flags: [
       CONTEXT_ID,
