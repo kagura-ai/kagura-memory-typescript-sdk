@@ -13,9 +13,11 @@ import {
   pyFloatAscii,
   pyFloatRepr,
   pyInt,
+  pyIsPrintable,
   pyRepr,
   pyTruthy,
   pyTypeName,
+  reprlibRepr,
 } from "../src/python.js";
 
 describe("pyRepr of a string", () => {
@@ -264,5 +266,53 @@ describe("pyTruthy", () => {
     [{ a: null }, true],
   ])("reads %j as Python's bool() does", (value, expected) => {
     expect(pyTruthy(value)).toBe(expected);
+  });
+});
+
+describe("pyIsPrintable", () => {
+  it.each([
+    ["0.77.0", true],
+    ["a b", true],
+    ["", true],
+    ["\u001b[2J", false],
+    ["a\nb", false],
+    ["a\u00a0b", false],
+  ])("%j -> %s, as str.isprintable()", (text, expected) => {
+    expect(pyIsPrintable(text)).toBe(expected);
+  });
+});
+
+/**
+ * `reprlib.repr()` with the default `Repr` (CPython 3.11.9), recorded with
+ * `kagura_memory.setup_harness._shown_version` on values it passes to it.
+ * A JSON number that is whole (`1.0`, `1e300`) reads as an int in
+ * JavaScript, so floats are only the non-whole ones here.
+ */
+describe("reprlibRepr", () => {
+  it.each<[unknown, string]>([
+    ["0.76.0\u001b[2J", "'0.76.0\\x1b[2J'"],
+    ["9".repeat(65), "'999999999999...9999999999999'"],
+    ["a\nb", "'a\\nb'"],
+    ["é".repeat(70), "'éééééééééééé...ééééééééééééé'"],
+    ["\u001b".repeat(10), "'\\x1b\\x1b\\x1b...b\\x1b\\x1b\\x1b'"],
+    ["a".repeat(20) + "\u001b".repeat(20), "'aaaaaaaaaaaa...b\\x1b\\x1b\\x1b'"],
+    ["\u001b".repeat(70), "'\\x1b\\x1b\\x1b...b\\x1b\\x1b\\x1b'"],
+    [76, "76"],
+    [-5, "-5"],
+    [10n ** 45n, "100000000000000000...0000000000000000000"],
+    [1.5, "1.5"],
+    [true, "True"],
+    [false, "False"],
+    [null, "None"],
+    [[1, 2, 3, 4, 5, 6, 7], "[1, 2, 3, 4, 5, 6, ...]"],
+    [{ b: 1, a: 2, c: 3, d: 4, e: 5 }, "{'a': 2, 'b': 1, 'c': 3, 'd': 4, ...}"],
+    [[[[[[[[1]]]]]]], "[[[[[[[...]]]]]]]"],
+    [{ v: "x".repeat(40) }, "{'v': 'xxxxxxxxxxxx...xxxxxxxxxxxxx'}"],
+    [["x".repeat(40)], "['xxxxxxxxxxxx...xxxxxxxxxxxxx']"],
+    [[], "[]"],
+    [{}, "{}"],
+  ])("case %# -> %s", (value, expected) => {
+    // %# (the index), not %j: JSON.stringify throws on the bigint case.
+    expect(reprlibRepr(value)).toBe(expected);
   });
 });
