@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatModelJson, pydanticFloat } from "../../src/cli/modelDump.js";
+import { formatDumpsJson, formatModelJson, pydanticFloat } from "../../src/cli/modelDump.js";
 import { KaguraResponseError } from "../../src/errors.js";
 import {
   INDEXER_STATUS_RESPONSE,
@@ -246,5 +246,41 @@ describe("readModel on a body read by parseJsonLossless (#69)", () => {
     const read = readModel(parseJsonLossless('{"s": "x", "d": 0, "m": {}, "l": [], "n": -0, "lit": "a"}'), model, "op");
     expect(read.d).toBe("1970-01-01T00:00:00Z");
     expect(formatModelJson(read.n)).toBe("0.0");
+  });
+});
+
+describe("an untyped mapping read by parseJsonLossless prints as Python read it (#69)", () => {
+  const DICT: Model = { name: "T", fields: [{ key: "d", kind: "dict" }] };
+
+  it.each(JSON_NUMBER_CASES)("%s in a dict[str, Any] and in json.dumps", (literal, _int, _float, untyped, dumps) => {
+    const read = readModel(parseJsonLossless(`{"d": {"v": ${literal}}}`), DICT, "op");
+    expect(formatModelJson(read)).toBe(`{\n  "d": {\n    "v": ${untyped}\n  }\n}`);
+    expect(formatDumpsJson(parseJsonLossless(`{"v": ${literal}}`))).toBe(`{\n  "v": ${dumps}\n}`);
+  });
+
+  it("keeps the server's key order, nested and in lists", () => {
+    const read = readModel(parseJsonLossless('{"d": {"b": 1, "2": [{"10": 3, "x": 0}], "id": "x"}}'), DICT, "op");
+    expect(formatModelJson(read)).toBe(
+      '{\n  "d": {\n    "b": 1,\n    "2": [\n      {\n        "10": 3,\n        "x": 0\n      }\n    ],\n    "id": "x"\n  }\n}',
+    );
+    expect(formatDumpsJson(parseJsonLossless('{"b": 1, "2": 2}'))).toBe('{\n  "b": 1,\n  "2": 2\n}');
+  });
+
+  it("prints a value changed since it was read as it now is", () => {
+    const body = parseJsonLossless('{"a": 1.0, "b": 2}') as Record<string, unknown>;
+    body.b = 2.5;
+    body.c = 3;
+    expect(formatDumpsJson(body)).toBe('{\n  "a": 1.0,\n  "b": 2.5,\n  "c": 3\n}');
+  });
+
+  it("json.dumps writes bigints exactly, a PyFloat as repr, and has no depth limit", () => {
+    expect(formatDumpsJson({ n: 18014398509481986n, f: new PyFloat(1e-7), e: [], o: {} })).toBe(
+      '{\n  "n": 18014398509481986,\n  "f": 1e-07,\n  "e": [],\n  "o": {}\n}',
+    );
+    const deep = parseJsonLossless(`{"d": {"x": ${"[".repeat(300)}1${"]".repeat(300)}}}`);
+    expect(formatDumpsJson(deep).split("\n")).toHaveLength(2 * 302 + 1);
+    expect(() => formatModelJson(readModel(deep, DICT, "op"))).toThrow(
+      "Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)",
+    );
   });
 });
