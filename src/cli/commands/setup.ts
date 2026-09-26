@@ -38,6 +38,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { defaultCredentialsPath } from "../../auth/credentials.js";
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
 import { SOURCE_LABEL, type ResolvedAuth } from "../../auth/types.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
@@ -80,6 +81,7 @@ import {
   yamlServersInline,
 } from "./harnessConfig.js";
 import { checkOauthServer, oauthLoginNote } from "./harnessOauth.js";
+import { strerror } from "./importFormats.js";
 
 /**
  * The entry's name on every harness. The Codex plugin's hooks look it up
@@ -2433,6 +2435,124 @@ function codexDigestNotes(context: string, url: string, keyEnv: string): string[
   ];
 }
 
+/** Whether `mcpUrl` is on `server`; false when it cannot be read as a URL — Python's `_on_server`. */
+function onServer(mcpUrl: string, server: string): boolean {
+  try {
+    return deployment(mcpUrl) === server;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this CLI's usual credential chain is on `server` — Python's
+ * `_cli_chain_on`. It runs after the entry is written, so any failure to
+ * resolve counts as no credential.
+ */
+function cliChainOn(deps: CliDeps, input: HarnessInput, server: string): boolean {
+  try {
+    const auth = deps.resolveAuth({ apiKey: null, mcpUrl: null, profile: null, config: input.config });
+    return onServer(auth.mcpUrl, server);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The stored profiles on `server`, by name — Python's `_profiles_on`. The
+ * file is read raw, never rewritten: a profile whose `mcp_url` is not a
+ * string is left out, and a file that cannot be read holds none.
+ */
+function profilesOn(deps: CliDeps, server: string): string[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(fs.readFileSync(deps.credentialsPath ?? defaultCredentialsPath(), "utf-8"));
+  } catch {
+    return [];
+  }
+  const profiles = isObject(data) && isObject(data.profiles) ? data.profiles : {};
+  return Object.entries(profiles)
+    .filter(([, p]) => isObject(p) && typeof p.mcp_url === "string" && onServer(p.mcp_url, server))
+    .map(([name]) => name)
+    .sort();
+}
+
+/** `command` run on `profile`, even with KAGURA_API_KEY set here — Python's `_on_profile`. */
+function onProfile(profile: string, command: string): string {
+  const run = `KAGURA_PROFILE=${shellQuote(profile)} ${command}`;
+  return pyStrip(process.env.KAGURA_API_KEY ?? "") ? `env -u KAGURA_API_KEY ${run}` : run;
+}
+
+/**
+ * The `.kagura.json` every command of this bin loads first, when it cannot
+ * be loaded — Python's `_broken_config`: its path and why, never its
+ * contents. This bin's loader also refuses JSON that is not an object.
+ */
+function brokenConfig(deps: CliDeps): string | null {
+  try {
+    deps.loadConfig();
+    return null;
+  } catch {
+    // Named below.
+  }
+  const local = path.join(process.cwd(), ".kagura.json");
+  const isLocal = fs.existsSync(local);
+  const target = isLocal ? local : path.join(os.homedir(), ".kagura.json");
+  const label = isLocal ? pathLabel(absolutePath(".kagura.json")) : "~/.kagura.json";
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(target));
+  } catch (e) {
+    return `${label} (${e instanceof TypeError ? "not UTF-8 JSON" : strerror(e)})`;
+  }
+  try {
+    JSON.parse(text);
+  } catch {
+    return `${label} (not UTF-8 JSON)`;
+  }
+  return `${label} (not a JSON object)`;
+}
+
+/**
+ * The closing notes on an --oauth Codex entry whose URL names a guardrails
+ * context — Python's `_preview_command` for `entry.oauth` and its caller.
+ * Codex's token stays with Codex, so the preview runs on this CLI's own
+ * credential when that is on the entry's server; else on a stored profile
+ * there; else after a login there. Pinning the server with KAGURA_MCP_URL
+ * would send KAGURA_API_KEY, a key for another server, to it.
+ */
+function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: string): string[] {
+  const server = deployment(url);
+  const digest = shellCommand(["kagura-memory", "guardrails", "digest", context, "--target", "instructions"]);
+  const reads = "(Codex gets what the account it signed in with can read):";
+  let preview: string;
+  let command: string;
+  if (cliChainOn(deps, input, server)) {
+    preview = `Preview it on the kagura-memory CLI's credential ${reads}`;
+    command = digest;
+  } else {
+    const there = profilesOn(deps, server);
+    preview =
+      there.length > 0
+        ? `The kagura-memory CLI's usual credential is not on ${server}; preview it on a profile there ` +
+          `(${there.join(", ")}) ${reads}`
+        : `The kagura-memory CLI's usual credential is not on ${server}, and no profile is: log in there with ` +
+          `\`kagura-memory auth login --server ${server} --profile NAME\`, then preview it ${reads}`;
+    command = onProfile(there[0] ?? "NAME", digest);
+  }
+  const notes = [
+    `Codex should get the tool guardrail digest of context ${context} in the MCP instructions when it connects. ` +
+      "The server sends only its base text instead when the entry's credential cannot read that context, the " +
+      `context has no guardrails, or the deployment turns the digest off. ${preview} ${command}`,
+  ];
+  const broken = brokenConfig(deps);
+  if (broken !== null) {
+    notes.push(`The preview fails until ${broken} is fixed or removed: every kagura-memory command reads it first.`);
+  }
+  notes.push("Use a context whose editor list you control: every editor's guardrail summaries reach the model.");
+  return notes;
+}
+
 async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "codex");
   await checkOauthServerFirst(deps, input);
@@ -2495,6 +2615,13 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     const tokenStore =
       `the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store in ${pathLabel(home)}), ` +
       `else in ${pathLabel(pathlibJoin(home, ".credentials.json"))}`;
+    const lane = queryParam(url, "guardrails");
+    const after = [oauthLoginNote("codex", name, cli.program !== null, tokenStore)];
+    if (lane !== undefined && isUuid(lane)) after.push(...codexOauthDigestNotes(deps, input, parseUuid(lane), url));
+    after.push(
+      "Restart Codex (or start a new session) to load the entry.",
+      `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
+    );
     return applyPlan(deps, {
       input,
       url,
@@ -2505,11 +2632,7 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
       blockTarget: "it",
       cli,
       notes,
-      after: [
-        oauthLoginNote("codex", name, cli.program !== null, tokenStore),
-        "Restart Codex (or start a new session) to load the entry.",
-        `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
-      ],
+      after,
     });
   }
 

@@ -486,3 +486,115 @@ describe("setup codex --oauth", () => {
     expect(notes(h)).toContain(`Would run: codex mcp add kagura-memory --url ${U}`);
   });
 });
+
+describe("setup codex --oauth: the guardrails preview (Python's _preview_command)", () => {
+  const codex = { onPath: { codex: "/usr/bin/codex" }, tty: true };
+  const HEAD =
+    `Codex should get the tool guardrail digest of context ${CONTEXT} in the MCP instructions when it connects. ` +
+    "The server sends only its base text instead when the entry's credential cannot read that context, the " +
+    "context has no guardrails, or the deployment turns the digest off.";
+  const DIGEST = `kagura-memory guardrails digest ${CONTEXT} --target instructions`;
+  const NO_PROFILE =
+    `The kagura-memory CLI's usual credential is not on ${D}, and no profile is: log in there with ` +
+    `\`kagura-memory auth login --server ${D} --profile NAME\`, then preview it (Codex gets what the account it ` +
+    "signed in with can read):";
+  const EDITORS = "Use a context whose editor list you control: every editor's guardrail summaries reach the model.";
+  const writeCredentials = (profiles: Record<string, unknown>) => {
+    fs.mkdirSync(path.join(home, ".kagura"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".kagura", "credentials.json"),
+      JSON.stringify({ version: 1, default_profile: "default", profiles }),
+    );
+  };
+  const run = async (h: Oauth) => runCli(["setup", "codex", ...OAUTH, "--context-id", CONTEXT], h.deps);
+  const digestNotes = (h: Oauth) =>
+    notes(h).filter((n) => n.startsWith("Codex should get") || n.startsWith("The preview fails") || n === EDITORS);
+
+  it("on the CLI's credential when it is on the entry's server", async () => {
+    const h = oauthHarness({ ...codex, auth: ON_SERVER });
+    expect(await run(h)).toBe(0);
+    expect(digestNotes(h)).toEqual([
+      `${HEAD} Preview it on the kagura-memory CLI's credential (Codex gets what the account it signed in with can read): ${DIGEST}`,
+      EDITORS,
+    ]);
+    const all = notes(h);
+    expect(all.indexOf(digestNotes(h)[0]!)).toBe(
+      all.indexOf("Restart Codex (or start a new session) to load the entry.") - 2,
+    );
+  });
+
+  it("names the login to run when neither the CLI's credential nor any profile is on that server", async () => {
+    const h = oauthHarness(codex);
+    expect(await run(h)).toBe(0);
+    expect(digestNotes(h)).toEqual([`${HEAD} ${NO_PROFILE} KAGURA_PROFILE=NAME ${DIGEST}`, EDITORS]);
+    expect(h.out.join("\n")).not.toContain("KAGURA_MCP_URL");
+  });
+
+  it("unsets KAGURA_API_KEY in the command while it is set, and never prints it", async () => {
+    process.env.KAGURA_API_KEY = "kagura_x_secret_key_value";
+    const h = oauthHarness(codex);
+    expect(await run(h)).toBe(0);
+    expect(digestNotes(h)[0]).toBe(`${HEAD} ${NO_PROFILE} env -u KAGURA_API_KEY KAGURA_PROFILE=NAME ${DIGEST}`);
+    expect(h.out.join("\n")).not.toContain("kagura_x_secret_key_value");
+  });
+
+  it("counts a chain that cannot resolve as no credential", async () => {
+    const h = oauthHarness({
+      ...codex,
+      auth: () => {
+        throw new Error("No credentials found.");
+      },
+    });
+    expect(await run(h)).toBe(0);
+    expect(digestNotes(h)[0]).toBe(`${HEAD} ${NO_PROFILE} KAGURA_PROFILE=NAME ${DIGEST}`);
+  });
+
+  it("names the stored profiles on that server, and previews on the first", async () => {
+    writeCredentials({
+      zeta: { mcp_url: U },
+      default: { mcp_url: "https://memory.kagura-ai.com/mcp" },
+      work: { mcp_url: `${D}/mcp` },
+      broken: { mcp_url: 5 },
+    });
+    const h = oauthHarness(codex);
+    expect(await run(h)).toBe(0);
+    expect(digestNotes(h)[0]).toBe(
+      `${HEAD} The kagura-memory CLI's usual credential is not on ${D}; preview it on a profile there (work, zeta) ` +
+        `(Codex gets what the account it signed in with can read): KAGURA_PROFILE=work ${DIGEST}`,
+    );
+  });
+
+  it.each([
+    ["not JSON", "{not json", "not UTF-8 JSON"],
+    ["not an object", "[]", "not a JSON object"],
+  ])("names a .kagura.json that is %s, which every command reads first", async (_case, text, why) => {
+    fs.writeFileSync(path.join(work, ".kagura.json"), text);
+    const h = oauthHarness({ ...codex, config: "disk" });
+    expect(await run(h)).toBe(0);
+    expect(notes(h)).toContain(
+      `The preview fails until ${path.join(process.cwd(), ".kagura.json")} (${why}) is fixed or removed: every ` +
+        "kagura-memory command reads it first.",
+    );
+    expect(notes(h)).toContain("Done: codex wrote kagura-memory to ~/.codex/config.toml.");
+    expect(h.out.join("\n")).not.toContain("{not json");
+  });
+
+  it("names a .kagura.json that is a directory by its strerror", async () => {
+    fs.mkdirSync(path.join(work, ".kagura.json"));
+    const h = oauthHarness({ ...codex, config: "disk" });
+    expect(await run(h)).toBe(0);
+    expect(notes(h)).toContain(
+      `The preview fails until ${path.join(process.cwd(), ".kagura.json")} (Is a directory) is fixed or removed: ` +
+        "every kagura-memory command reads it first.",
+    );
+  });
+
+  it("has no preview without a guardrails context, or with guardrails off", async () => {
+    const plain = oauthHarness(codex);
+    expect(await runCli(["setup", "codex", ...OAUTH], plain.deps)).toBe(0);
+    expect(digestNotes(plain)).toEqual([]);
+    const off = oauthHarness(codex);
+    expect(await runCli(["setup", "codex", ...OAUTH, "--guardrails", "off"], off.deps)).toBe(0);
+    expect(digestNotes(off)).toEqual([]);
+  });
+});
