@@ -105,13 +105,14 @@ const remember: Command = {
     "  rejects string-typed lat/lon with a 422 by design. Updating a memory\n" +
     "  replaces details wholesale; `kagura-memory update-memory --merge-details`\n" +
     "  revises location while keeping the other keys (or re-send them yourself).\n\n" +
-    "  Examples:\n" +
-    '    kagura-memory remember -s "FastAPI DI pattern" --content "Use Depends()..."\n' +
-    '    kagura-memory remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"\n' +
-    '    kagura-memory remember -s "Spec" --content "$(cat spec.md)" \\\n' +
-    "      --source-uri file:///spec.md --source-type file\n" +
-    '    kagura-memory remember -s "Coffee with Sato" --content "..." \\\n' +
-    '      --location "35.68,139.76,Tokyo HQ"',
+    examples(
+      'remember -s "FastAPI DI pattern" --content "Use Depends()..."',
+      'remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"',
+      'remember -s "Spec" --content "$(cat spec.md)" \\',
+      "  --source-uri file:///spec.md --source-type file",
+      'remember -s "Coffee with Sato" --content "..." \\',
+      '  --location "35.68,139.76,Tokyo HQ"',
+    ),
   spec: {
     flags: [
       CONTEXT_ID,
@@ -352,8 +353,8 @@ export async function currentDetailsForMerge(
   contextId: string,
   memoryId: string,
 ): Promise<Record<string, unknown>> {
-  const result = await client.reference({ contextId, memoryId });
-  const memory = isPlainObject(result) ? result.memory : undefined;
+  // `reference()` returns the tool's structured object (`callToolChecked`).
+  const memory = (await client.reference({ contextId, memoryId })).memory;
   if (!isPlainObject(memory)) {
     throw new CliError("--merge-details: the reference reply carried no memory object");
   }
@@ -406,14 +407,15 @@ const updateMemory: Command = {
     "  treats as unmark; '\"location\": null' is rejected by the server (422).\n" +
     "  Coordinates must be JSON numbers, not strings: the server rejects string-\n" +
     "  typed lat/lon with a 422 by design.\n\n" +
-    "  Examples:\n" +
-    '    kagura-memory update-memory -m MEM_UUID -s "updated summary"\n' +
-    '    kagura-memory update-memory --external-id ext-key -s "summary" --content "..." -t note\n' +
-    "    kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate\n" +
-    "    kagura-memory update-memory -m MEM_UUID \\\n" +
-    "      --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'\n" +
-    "    kagura-memory update-memory -m MEM_UUID --merge-details \\\n" +
-    '      --location "35.68,139.76,Tokyo HQ"',
+    examples(
+      'update-memory -m MEM_UUID -s "updated summary"',
+      'update-memory --external-id ext-key -s "summary" --content "..." -t note',
+      "update-memory -m MEM_UUID --dismiss-supersede-candidate",
+      "update-memory -m MEM_UUID \\",
+      "  --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'",
+      "update-memory -m MEM_UUID --merge-details \\",
+      '  --location "35.68,139.76,Tokyo HQ"',
+    ),
   spec: {
     flags: [
       CONTEXT_ID,
