@@ -38,11 +38,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unreadable body as Python does (`Invalid response format: Expecting
   value: line 1 column 1 (char 0)`). A string value holding a lone
   surrogate fails as pydantic's dump does (`Error serializing to JSON:
-  UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
-  position 0: surrogates not allowed`) instead of printing the `\ud800`
-  escape; a key of the untyped mapping itself holding one prints as
-  three U+FFFD, and a key of a mapping nested inside it exits 1 like a
-  value. The values the SDK returns are unchanged.
+  UnicodeEncodeError: 'utf-8' codec can't encode character '\udXXX' in
+  position N: surrogates not allowed`, `characters in position N-M` for a
+  run) instead of printing the `\udXXX` escape; a key of the untyped
+  mapping itself holding one prints as three U+FFFD, and a key of a
+  mapping nested inside it exits 1 like a value. The values the SDK
+  returns are unchanged.
 - **`resource import` adds its counts exactly and prints its summary as
   Python's `json.dumps` does**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { formatDumpsJson, formatModelJson, pydanticFloat } from "../../src/cli/modelDump.js";
+import { CliError } from "../../src/cli/parse.js";
 import { KaguraResponseError } from "../../src/errors.js";
 import {
   INDEXER_STATUS_RESPONSE,
@@ -144,6 +145,42 @@ describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-
     expect(formatDumpsJson({ "\ud800": "a\udfff", p: { "\udbff": "\ud83d\ude00\udfff\ud800\ud800x\ud800\udc00" } })).toBe(
       '{\n  "?": "a?",\n  "p": {\n    "?": "\ud83d\ude00???x\ud800\udc00"\n  }\n}',
     );
+  });
+});
+
+describe("formatModelJson: a lone surrogate, which pydantic cannot write (#69)", () => {
+  // Recorded from pydantic 2.13.4: model_dump_json fails with Python's
+  // UnicodeEncodeError, naming the first run of lone surrogates by code
+  // point; a dict[str, Any] field's own keys are written lossily instead.
+  const events = (event: Record<string, unknown>) =>
+    readModel({ events: [{ id: 1, op: "upsert", doc_id: "d", ...event }] }, RESOURCE_EVENTS_LIST_RESPONSE, "op");
+  const encode = (what: string) =>
+    `Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode ${what}: surrogates not allowed`;
+
+  it.each([
+    ["a str field", { doc_id: "a\u{d800}" }, "character '\\ud800' in position 1"],
+    ["a run, counted by code point", { doc_id: "\u{1f600}\u{dc00}\u{d800}x" }, "characters in position 1-2"],
+    ["only the first run", { doc_id: "ab\u{d800}x\u{dc00}" }, "character '\\ud800' in position 2"],
+    ["a value in an untyped field", { event_metadata: { v: "\u{dfff}" } }, "character '\\udfff' in position 0"],
+    ["a key nested in an untyped field", { payload: { x: { "\u{d800}": 1 } } }, "character '\\ud800' in position 0"],
+    ["the key before its value", { payload: { x: { "a\u{d800}": "\u{dc00}" } } }, "character '\\ud800' in position 1"],
+    ["an item in a list", { payload: { x: [1, { y: "\u{d800}" }] } }, "character '\\ud800' in position 0"],
+  ] as const)("fails the dump for %s, in Python's words", (_name, event, what) => {
+    const error = failure(() => formatModelJson(events(event)));
+    expect(error).toBeInstanceOf(CliError);
+    expect(error.message).toBe(encode(what));
+  });
+
+  it("writes a dict[str, Any] field's own keys with three U+FFFD per lone surrogate", () => {
+    expect(formatModelJson(events({ payload: { "k\u{d800}": 1, z: 2 } }))).toContain(
+      `"k\u{fffd}\u{fffd}\u{fffd}": 1`,
+    );
+    const batch = readModel({ created_count: 0, errors: [{ "\u{dfff}\u{d800}": 1 }] }, RESOURCE_EVENT_BATCH_RESPONSE, "op");
+    expect(formatModelJson(batch)).toContain(`"${"\u{fffd}".repeat(6)}": 1`);
+  });
+
+  it("prints a surrogate pair (an emoji) as written", () => {
+    expect(formatModelJson(events({ doc_id: "\u{1f600}" }))).toContain(`"doc_id": "\u{1f600}"`);
   });
 });
 

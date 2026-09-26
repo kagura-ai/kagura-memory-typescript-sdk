@@ -5,7 +5,9 @@
  * Python CLI 0.41.0 (click 8.3.3, pydantic 2.13.4) against a fake server
  * sending these exact bytes. They include responses with keys the model
  * does not have, responses without its optional keys, lax values (`"6"`
- * for an int, `12.0` for a float), and ones the model refuses.
+ * for an int, `12.0` for a float), and ones the model refuses. The
+ * lone-surrogate cases (#69) were recorded from the Python CLI 0.42.0
+ * (click 8.3.3, pydantic 2.13.4) the same way.
  */
 
 import * as fs from "node:fs";
@@ -218,6 +220,54 @@ const CASES: Case[] = [
     code: 1,
     stdout: "",
     stderr: "Error: ResourceClient.get_resource_schema: unexpected server response for ResourceSchemaResponse (Input should be a valid dictionary or instance of ResourceSchemaResponse). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
+  },
+  {
+    name: "events doc_id with a lone surrogate",
+    argv: ["resource", "events", "products"],
+    routes: {"GET /api/v1/resources/products/events": {status: 200, raw: JSON.stringify({events: [{id: 1, op: "upsert", doc_id: "a\u{d800}"}]})}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed\n",
+  },
+  {
+    name: "events payload key with a lone surrogate",
+    argv: ["resource", "events", "products"],
+    routes: {"GET /api/v1/resources/products/events": {status: 200, raw: JSON.stringify({events: [{id: 1, op: "upsert", doc_id: "d", payload: {"k\u{d800}": 1, z: 2}}]})}},
+    code: 0,
+    stdout: "{\n  \"events\": [\n    {\n      \"id\": 1,\n      \"op\": \"upsert\",\n      \"doc_id\": \"d\",\n      \"version\": null,\n      \"idempotency_key\": null,\n      \"importance\": null,\n      \"created_at\": null,\n      \"payload\": {\n        \"k\u{fffd}\u{fffd}\u{fffd}\": 1,\n        \"z\": 2\n      },\n      \"event_metadata\": {},\n      \"payload_bytes\": null,\n      \"payload_truncated\": false\n    }\n  ],\n  \"next_cursor\": null\n}\n",
+    stderr: "",
+  },
+  {
+    name: "events nested payload key with a lone surrogate",
+    argv: ["resource", "events", "products"],
+    routes: {"GET /api/v1/resources/products/events": {status: 200, raw: JSON.stringify({events: [{id: 1, op: "upsert", doc_id: "d", payload: {x: {"\u{d800}": 1}}}]})}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
+  },
+  {
+    name: "events metadata value with a run of lone surrogates after an emoji",
+    argv: ["resource", "events", "products"],
+    routes: {"GET /api/v1/resources/products/events": {status: 200, raw: JSON.stringify({events: [{id: 1, op: "upsert", doc_id: "d", event_metadata: {v: "\u{1f600}\u{dc00}\u{d800}x"}}]})}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode characters in position 1-2: surrogates not allowed\n",
+  },
+  {
+    name: "events id with a lone surrogate",
+    argv: ["resource", "events", "products"],
+    routes: {"GET /api/v1/resources/products/events": {status: 200, raw: JSON.stringify({events: [{id: "1\u{d800}", op: "upsert", doc_id: "d"}]})}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: ResourceClient.list_resource_events: unexpected server response for ResourceEventsListResponse (events.0.id: Input should be a valid string, unable to parse raw data as a unicode string). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
+  },
+  {
+    name: "events op, importance, created_at and payload_truncated with lone surrogates",
+    argv: ["resource", "events", "products"],
+    routes: {"GET /api/v1/resources/products/events": {status: 200, raw: JSON.stringify({events: [{id: 1, op: "\u{d800}", doc_id: "d", importance: "1\u{d800}", created_at: "2026-06-01\u{d800}", payload_truncated: "t\u{d800}"}]})}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: ResourceClient.list_resource_events: unexpected server response for ResourceEventsListResponse (events.0.op: Input should be a valid string, unable to parse raw data as a unicode string; events.0.importance: Input should be a valid string, unable to parse raw data as a unicode string; events.0.created_at: Input should be a valid string, unable to parse raw data as a unicode string (+1 more)). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
   },
 ];
 
