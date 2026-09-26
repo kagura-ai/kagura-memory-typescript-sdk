@@ -52,6 +52,13 @@ const MIN_INVITE_HANDOFF_TRIPLE = requireVersion(
  * during login. Best effort, and never throws: a failed or timed-out
  * request, a status other than 200, or a body that is not a non-empty JSON
  * object all yield `null`.
+ *
+ * Redirects are not followed (`redirect: "manual"`): a 3xx comes back as
+ * is and counts as "not a 200", as the Python SDK's httpx client
+ * (`follow_redirects=False`) sees it. Following one would read another
+ * URL's answer — possibly another host's — as `server`'s, and the
+ * `--oauth` gate in `commands/harnessOauth.ts` must judge the deployment
+ * the entry names.
  */
 export async function fetchSystemInfo(
   server: string,
@@ -62,6 +69,7 @@ export async function fetchSystemInfo(
     const response = await fetchImpl(`${server.replace(/\/+$/, "")}/api/v1/system/info`, {
       method: "GET",
       headers: { "User-Agent": `kagura-memory-sdk/${SDK_VERSION}`, Accept: "application/json" },
+      redirect: "manual",
       signal: AbortSignal.timeout(INVITE_PROBE_TIMEOUT_MS),
     });
     if (response.status !== 200) return null;

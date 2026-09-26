@@ -14,11 +14,11 @@ const D = "http://127.0.0.1:47701";
 
 /** A fake `/api/v1/system/info`: the body it sends, or a status, or a network error. */
 function infoServer(answer: { body?: unknown; status?: number; error?: boolean }) {
-  const requests: { url: string; headers: Record<string, string> }[] = [];
+  const requests: { url: string; headers: Record<string, string>; init?: RequestInit }[] = [];
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const headers: Record<string, string> = {};
     new Headers(init?.headers).forEach((v, k) => (headers[k] = v));
-    requests.push({ url: String(input), headers });
+    requests.push({ url: String(input), headers, init });
     if (answer.error) throw new TypeError("fetch failed");
     return new Response(JSON.stringify(answer.body ?? {}), { status: answer.status ?? 200 });
   };
@@ -51,6 +51,9 @@ describe("checkOauthServer", () => {
     );
     expect(server.requests.map((r) => r.url)).toEqual([`${D}/api/v1/system/info`]);
     expect(Object.keys(server.requests[0]!.headers)).not.toContain("authorization");
+    // Python's httpx client does not follow redirects, so the answer read
+    // is the deployment's own, never the one a Location header points at.
+    expect(server.requests[0]!.init?.redirect).toBe("manual");
   });
 
   it("passes a later release written as the server writes it", async () => {
@@ -80,6 +83,7 @@ describe("checkOauthServer", () => {
       `setup could not confirm the version of ${D} (/api/v1/system/info reports 76)`,
     ],
     ["a 500", { status: 500 }, unconfirmed],
+    ["a 302", { status: 302 }, unconfirmed],
     ["an empty object", { body: {} }, unconfirmed],
     ["a JSON array", { body: [1] }, unconfirmed],
     ["no answer", { error: true }, unconfirmed],
