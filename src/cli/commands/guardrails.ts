@@ -113,7 +113,9 @@ const OUT: FlagSpec = {
  * or an existing file this user cannot read; a path that does not exist
  * passes, and nothing is created here), then as `_nonblank_path_option`
  * does (src/kagura_memory/cli.py, python-sdk #285): an empty or
- * whitespace-only path is no file name.
+ * whitespace-only path is no file name. That check reads the path as
+ * `pathlib` names it, the form the write goes to: `'./ '`, `' /'` and
+ * `' /.'` are all the file `' '`, and `''` is `.`.
  */
 function checkOutPath(raw: string): void {
   const invalid = (problem: string) => new CliUsageError(`Invalid value for '--out': ${problem}`);
@@ -131,7 +133,8 @@ function checkOutPath(raw: string): void {
       throw invalid(`File ${pyRepr(raw)} is not readable.`);
     }
   }
-  if (!pyStrip(raw)) throw invalid("the path is blank; name a file");
+  const shown = pathlibString(raw);
+  if (shown === "." || !pyStrip(shown)) throw invalid("the path is blank; name a file");
 }
 
 const digest: Command = {

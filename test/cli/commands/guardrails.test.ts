@@ -689,6 +689,12 @@ describe("guardrails digest", () => {
     [["--out", " "], "Error: Invalid value for '--out': the path is blank; name a file"],
     [["--out", "\t"], "Error: Invalid value for '--out': the path is blank; name a file"],
     [["--out", "", "--target", "instructions"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    // The blank check reads the pathlib form, the name the write would
+    // create: each of these is the file ' '.
+    [["--out", "./ "], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", " /"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", " /."], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "\u3000/"], "Error: Invalid value for '--out': the path is blank; name a file"],
     [["--out", "."], "Error: Invalid value for '--out': File '.' is a directory."],
     [["--out", "./"], "Error: Invalid value for '--out': File './' is a directory."],
   ])("refuses %j with exit 2 before anything is sent", async (argv, message) => {
@@ -697,6 +703,21 @@ describe("guardrails digest", () => {
     expect(await runCli(["guardrails", "digest", ...argv], h.deps)).toBe(2);
     expect(h.err).toEqual([message]);
     expect(h.rest.requests).toEqual([]);
+  });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4): a
+  // blank LAST segment under a real directory names the file ' ' there,
+  // which is not blank.
+  it("does not take --out 'a/./ ' as blank", async () => {
+    fs.mkdirSync("a");
+    const h = harness();
+    serveDigest(h, EXPORT_BLOCK);
+    expect(await runCli(["guardrails", "digest", CTX, "--out", "a/./ "], h.deps)).toBe(0);
+    expect(h.err).toEqual([]);
+    expect(h.out).toEqual([
+      `{"path": ${JSON.stringify(path.join("a", " "))}, "status": "written", "tool_triggered_version": "${VERSION}"}`,
+    ]);
+    expect(fs.readFileSync(path.join("a", " "), "utf8")).toBe(EXPORT_BLOCK);
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
