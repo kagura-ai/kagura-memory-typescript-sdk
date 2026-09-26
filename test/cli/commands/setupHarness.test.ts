@@ -2589,7 +2589,10 @@ describe("--agents-md", () => {
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "~no-such-user-285/AGENTS.md"), h.deps)).toBe(0);
       expect(fs.readFileSync(path.join(sandbox, "~no-such-user-285", "AGENTS.md"), "utf-8")).toBe(EXPORT_BLOCK);
-      expect(notes(h)).toContain(`Wrote the guardrail block for context ${CONTEXT} in ~no-such-user-285/AGENTS.md`);
+      // Named as `str(Path(...))` names it: on Windows `/` reads as `\`, so
+      // Python there says `~no-such-user-285\AGENTS.md`.
+      const label = path.join("~no-such-user-285", "AGENTS.md");
+      expect(notes(h)).toContain(`Wrote the guardrail block for context ${CONTEXT} in ${label}`);
     });
 
     it("expands a leading ~", async () => {
