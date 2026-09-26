@@ -71,12 +71,12 @@ describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-
     `Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode ${where}: surrogates not allowed`;
 
   it.each([
-    ["a high surrogate first", "\ud800", "character '\\ud800' in position 0"],
-    ["a low surrogate third", "ab\udfff", "character '\\udfff' in position 2"],
-    ["counted in code points: an astral character is one", "😀\ud800", "character '\\ud800' in position 1"],
-    ["a run of lone surrogates as a range", "😀x\udc00\udc00y", "characters in position 2-3"],
-    ["only the first run", "\ud800a\udc00", "character '\\ud800' in position 0"],
-    ["a high surrogate at the end", "abc\udbff", "character '\\udbff' in position 3"],
+    ["a high surrogate first", "\u{d800}", "character '\\ud800' in position 0"],
+    ["a low surrogate third", "ab\u{dfff}", "character '\\udfff' in position 2"],
+    ["counted in code points: an astral character is one", "😀\u{d800}", "character '\\ud800' in position 1"],
+    ["a run of lone surrogates as a range", "😀x\u{dc00}\u{dc00}y", "characters in position 2-3"],
+    ["only the first run", "\u{d800}a\u{dc00}", "character '\\ud800' in position 0"],
+    ["a high surrogate at the end", "abc\u{dbff}", "character '\\udbff' in position 3"],
   ])("refuses a string value holding %s", (_name, text, where) => {
     expect(failure(() => formatModelJson({ s: text })).message).toBe(refused(where));
     expect(failure(() => formatModelJson({ l: ["ok", text] })).message).toBe(refused(where));
@@ -136,19 +136,19 @@ describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-
 
   it("keys outside any untyped value are model field names: written as they are", () => {
     // No Python counterpart (a model's field names are fixed); the dumper leaves them alone.
-    expect(formatModelJson({ "\ud800": 1 })).toBe('{\n  "���": 1\n}');
+    expect(formatModelJson({ "\u{d800}": 1 })).toBe('{\n  "���": 1\n}');
   });
 
   it("json.dumps has no such refusal: the CLI's errors=replace stdout prints ? per lone code unit", () => {
     // Recorded from the Python CLI 0.42.0: `_force_utf8_io` reconfigures
     // stdout with errors="replace", so the code unit json.dumps kept is `?`.
-    expect(formatDumpsJson({ "\ud800": "a\udfff", p: { "\udbff": "\ud83d\ude00\udfff\ud800\ud800x\ud800\udc00" } })).toBe(
-      '{\n  "?": "a?",\n  "p": {\n    "?": "\ud83d\ude00???x\ud800\udc00"\n  }\n}',
+    expect(formatDumpsJson({ "\u{d800}": "a\u{dfff}", p: { "\u{dbff}": "\u{1f600}\u{dfff}\u{d800}\u{d800}x\u{10000}" } })).toBe(
+      '{\n  "?": "a?",\n  "p": {\n    "?": "\u{1f600}???x\u{10000}"\n  }\n}',
     );
   });
 });
 
-describe("formatModelJson: a lone surrogate, which pydantic cannot write (#69)", () => {
+describe("formatModelJson through readModel: a lone surrogate, which pydantic cannot write (#69)", () => {
   // Recorded from pydantic 2.13.4: model_dump_json fails with Python's
   // UnicodeEncodeError, naming the first run of lone surrogates by code
   // point; a dict[str, Any] field's own keys are written lossily instead.

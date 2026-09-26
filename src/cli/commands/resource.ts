@@ -48,9 +48,9 @@ import {
   RESOURCE_TOKEN_RESPONSE,
   type Model,
 } from "../../pyModels.js";
+import { exactInt } from "../../responseShape.js";
 import { formatDumpsJson, formatModelJson } from "../modelDump.js";
 import { resolveConfig } from "../runClientCommand.js";
-import { exactInt } from "../../responseShape.js";
 import {
   detectFormat,
   EXTRA_CELLS,

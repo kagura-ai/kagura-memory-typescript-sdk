@@ -38,10 +38,14 @@ import { CliError } from "./parse.js";
 const MAX_UNTYPED_DEPTH = 255;
 const DEPTH_EXCEEDED = "Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)";
 
-/** A UTF-16 surrogate with no partner: one code point, which Python's UTF-8 codec refuses. */
-const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+/**
+ * Every UTF-16 surrogate with no partner: one code point, which Python's
+ * UTF-8 codec refuses. With the `u` flag a pair is one astral code point,
+ * outside the range (`pydanticNumber.ts`'s `hasLoneSurrogate` tests the same).
+ */
+const LONE_SURROGATE = /[\u{d800}-\u{dfff}]/gu;
 /** What pydantic-core's lossy conversion makes of a lone surrogate's three WTF-8 bytes. */
-const LOSSY_SURROGATE = "\ufffd\ufffd\ufffd";
+const LOSSY_SURROGATE = "\u{fffd}\u{fffd}\u{fffd}";
 /**
  * What the Python CLI's stdout makes of a lone surrogate `json.dumps` kept:
  * `_force_utf8_io` reconfigures it to `errors="replace"`, one `?` per code unit.
@@ -110,8 +114,8 @@ const JSON_DUMPS: Style = { float: dumpsFloat, limitDepth: false, utf8: false };
  * character is one), or the run's `S-E` when the next code points are lone
  * surrogates too. Measured on pydantic 2.13.4 (pydantic-core 2.46.4).
  *
- *   "ab\udfff" -> character '\udfff' in position 2
- *   "\ud83d\ude00x\udc00\udc00y" -> characters in position 2-3
+ *   "ab\u{dfff}" -> character '\udfff' in position 2
+ *   "\u{1f600}x\u{dc00}\u{dc00}y" -> characters in position 2-3
  */
 function loneSurrogateError(text: string): CliError | null {
   let position = 0;

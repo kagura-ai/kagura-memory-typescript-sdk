@@ -473,7 +473,7 @@ const LOSSLESS_CASES: Case[] = [
     argv: ["resource","events","products"],
     routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"\\ud800\": 1}}]}"}},
     code: 0,
-    stdout: "{\n  \"events\": [\n    {\n      \"id\": 1,\n      \"op\": \"upsert\",\n      \"doc_id\": \"d\",\n      \"version\": null,\n      \"idempotency_key\": null,\n      \"importance\": null,\n      \"created_at\": null,\n      \"payload\": {\n        \"\ufffd\ufffd\ufffd\": 1\n      },\n      \"event_metadata\": {},\n      \"payload_bytes\": null,\n      \"payload_truncated\": false\n    }\n  ],\n  \"next_cursor\": null\n}\n",
+    stdout: "{\n  \"events\": [\n    {\n      \"id\": 1,\n      \"op\": \"upsert\",\n      \"doc_id\": \"d\",\n      \"version\": null,\n      \"idempotency_key\": null,\n      \"importance\": null,\n      \"created_at\": null,\n      \"payload\": {\n        \"\u{fffd}\u{fffd}\u{fffd}\": 1\n      },\n      \"event_metadata\": {},\n      \"payload_bytes\": null,\n      \"payload_truncated\": false\n    }\n  ],\n  \"next_cursor\": null\n}\n",
     stderr: "",
   },
   {
@@ -540,7 +540,7 @@ const LOSSLESS_CASES: Case[] = [
     files: {"rows.json": "[{\"a\": 1}]"},
     routes: {"POST /api/v1/resources/products/events/batch":{"status":202,"raw":"{\"created_count\": 1, \"errors\": [{\"index\": 0, \"m\": \"\\ud83d\\ude00\\udfff\\ud800\\ud800x\", \"\\udc00\\ud83d\\ude00\": {\"\\udbff\": \"\\ud800\\udc00\\udc00\"}}]}"}},
     code: 0,
-    stdout: "{\n  \"created\": 1,\n  \"failed\": 0,\n  \"total\": 1,\n  \"errors\": [\n    {\n      \"index\": 0,\n      \"m\": \"\ud83d\ude00???x\",\n      \"?\ud83d\ude00\": {\n        \"?\": \"\ud800\udc00?\"\n      }\n    }\n  ]\n}\n",
+    stdout: "{\n  \"created\": 1,\n  \"failed\": 0,\n  \"total\": 1,\n  \"errors\": [\n    {\n      \"index\": 0,\n      \"m\": \"\u{1f600}???x\",\n      \"?\u{1f600}\": {\n        \"?\": \"\u{10000}?\"\n      }\n    }\n  ]\n}\n",
     stderr: "",
   },
   {

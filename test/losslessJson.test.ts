@@ -79,10 +79,10 @@ const DECODE_ERRORS: ReadonlyArray<[body: string, message: string]> = [
   ["{\"a\":1}\n  {", "Extra data: line 2 column 3 (char 10)"],
   ["{\n  \"name\": \"k\\x\"\n}", "Invalid \\escape: line 2 column 13 (char 14)"],
   // Positions count code points, as a Python str index does.
-  ["\"\u65e5\u672c\"x", "Extra data: line 1 column 5 (char 4)"],
-  ["\"\ud83d\ude00\" x", "Extra data: line 1 column 5 (char 4)"],
+  ["\"\u{65e5}\u{672c}\"x", "Extra data: line 1 column 5 (char 4)"],
+  ["\"\u{1f600}\" x", "Extra data: line 1 column 5 (char 4)"],
   // fetch's text() drops one UTF-8 BOM, as json.loads(bytes) does; a second is text.
-  ["\ufeff[]", "Expecting value: line 1 column 1 (char 0)"],
+  ["\u{feff}[]", "Expecting value: line 1 column 1 (char 0)"],
   // Only JSON's four whitespace characters are skipped: a vertical tab, a
   // form feed or a no-break space is a value that is not there, or extra data.
   ["\v[1]", "Expecting value: line 1 column 1 (char 0)"],
@@ -117,7 +117,7 @@ describe("parseJsonLossless: Python's json.loads", () => {
       id: i,
       doc_id: `SKU-${i}`,
       importance: i / 7,
-      payload: { name: 'Widget \u65e5\u672c "q"', "2": i, tags: ["a", "b"] },
+      payload: { name: 'Widget \u{65e5}\u{672c} "q"', "2": i, tags: ["a", "b"] },
     }));
     const body = JSON.stringify({ events });
     expect(body.length).toBeGreaterThan(2_000_000);

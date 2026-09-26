@@ -11,6 +11,7 @@ import { JsonNumber, parseJsonLossless } from "../src/losslessJson.js";
 import {
   ResponseReader,
   UPGRADE_HINT,
+  boolFromNumberLiteral,
   formatResponseIssues,
   laxBool,
   laxExactInt,
@@ -19,7 +20,6 @@ import {
   laxStr,
   nullable,
   responseModelError,
-  boolFromNumberLiteral,
   responseShapeError,
   type Coercer,
 } from "../src/responseShape.js";
