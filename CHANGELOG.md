@@ -18,7 +18,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field sent a whole number of magnitude 2^63 or more says `Input should be
   a valid boolean`. A string holding a lone surrogate is refused in any
   field but a `str`, datetimes and `Literal`s included, with `Input should
-  be a valid string, unable to parse raw data as a unicode string`.
+  be a valid string, unable to parse raw data as a unicode string`. One
+  gap stays (README "Reading responses"): an int field of an MCP tool
+  result (`recallSeries`' `count`, a bucket's `count`) sent a whole float
+  literal of 2^63 or more (`1e20`) reads it as that double, where pydantic
+  refuses it, because the tool text is read with `JSON.parse` and the
+  literal is gone.
 - **REST bodies are read as Python's `json.loads` reads them**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
   The resource and files commands keep the server's key order inside an

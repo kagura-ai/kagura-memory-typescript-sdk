@@ -390,6 +390,22 @@ describe("the lax coercers read strings as pydantic-core does (#69)", () => {
     expect(laxExactInt("9".repeat(309))).toEqual({ ok: true, value: BigInt("9".repeat(309)) });
   });
 
+  it("reads a plain whole float of 2^63 or more as that double, a documented limit (pydantic refuses it)", () => {
+    // An MCP tool result is read with JSON.parse, so `1e20` and
+    // `9223372036854775808.0` reach laxInt as the number 1e20 / 2^63 and
+    // are indistinguishable from `100000000000000000000`, which pydantic
+    // accepts. pydantic 2.13.4 (pydantic-core 2.46.4) refuses the float
+    // literals: "Unable to parse input string as an integer, exceeded
+    // maximum size". README "Reading responses".
+    expect(laxInt(1e20)).toEqual({ ok: true, value: 1e20 });
+    expect(laxInt(9223372036854775808)).toEqual({ ok: true, value: 2 ** 63 });
+    // A JsonNumber (REST body) keeps the literal and gives pydantic's verdict.
+    expect(laxInt(new JsonNumber("1e20"))).toEqual({
+      ok: false,
+      msg: "Unable to parse input string as an integer, exceeded maximum size",
+    });
+  });
+
   it.each(FLOAT_TEXT_CASES.map(([input, expected]) => [caseLabel(input), input, expected] as const))(
     "float field %s",
     (_label, input, expected) => {

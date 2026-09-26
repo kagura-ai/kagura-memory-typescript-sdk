@@ -1446,13 +1446,19 @@ messages ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues
 an int field takes `"0-1"` (-1) and `"0__7"` and refuses a digit run past
 4,300 characters, a float field follows pydantic's `str_as_float` rather
 than Python's `float()`, and a string holding a lone surrogate is refused
-in any field but a `str`. Two limits of JavaScript numbers remain. An int
-field of a typed result (`recallSeries`' `count`, the guardrail caps, a
-member key's or invitation's `id`) holds a `number`, so a value past 2^53
-is the nearest double and one of 2^1024 or more (309 digits) is
+in any field but a `str`. Three limits of JavaScript numbers remain. An
+int field of a typed result (`recallSeries`' `count`, the guardrail caps,
+a member key's or invitation's `id`) holds a `number`, so a value past
+2^53 is the nearest double and one of 2^1024 or more (309 digits) is
 `Infinity`, where Python keeps the exact int; widening those types would
-break callers. And a bool field sent the JSON number 9223372036854775807
-or -9223372036854775808 reads it as the double +/-2^63 and says `Input
+break callers. An int field of an MCP tool result (`recallSeries`'
+`count`, a bucket's `count`) sent a whole float literal of 2^63 or more
+(`1e20`, `9223372036854775808.0`) reads it as that double, where pydantic
+refuses it with `Unable to parse input string as an integer, exceeded
+maximum size`: the tool text is read with `JSON.parse`, which cannot tell
+`1e20` from `100000000000000000000` (which pydantic accepts exactly). And
+a bool field sent the JSON number 9223372036854775807 or
+-9223372036854775808 reads it as the double +/-2^63 and says `Input
 should be a valid boolean`, where pydantic says `…, unable to interpret
 input`. The `resource` and `files` dumps read the literal itself and agree with pydantic.
 
