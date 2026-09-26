@@ -286,7 +286,10 @@ describe("pyIsPrintable", () => {
  * `reprlib.repr()` with the default `Repr` (CPython 3.11.9), recorded with
  * `kagura_memory.setup_harness._shown_version` on values it passes to it.
  * A JSON number that is whole (`1.0`, `1e300`) reads as an int in
- * JavaScript, so floats are only the non-whole ones here.
+ * JavaScript, so floats are only the non-whole ones here; an integer past
+ * 2^53 loses digits the same way (`99999999999999999999` prints as
+ * `100000000000000000000`, where Python keeps it), until a lossless
+ * reader lands.
  */
 describe("reprlibRepr", () => {
   it.each<[unknown, string]>([

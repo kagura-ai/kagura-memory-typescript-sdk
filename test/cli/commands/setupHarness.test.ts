@@ -2526,6 +2526,7 @@ describe("--agents-md", () => {
       expect(notes(h).join("\n")).not.toContain("reads only the first");
     });
 
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
     it("counts a CRLF as two characters, as Python's read_bytes().decode() does", async () => {
       // python-sdk #285: 21,000 characters as written, 14,000 once CRLF is folded.
       fs.mkdirSync(path.dirname(workspace()), { recursive: true });
@@ -2534,6 +2535,24 @@ describe("--agents-md", () => {
       expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
       const size = [...new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(workspace()))].length;
       expect(size).toBeGreaterThan(20_000);
+      expect(notes(h)).toContain(
+        `Warning: ~/.openclaw/workspace/AGENTS.md is ${size} characters; OpenClaw reads only the first 20000.`,
+      );
+    });
+
+    it("counts a BOM as one character and an astral character as one, as len(str) does", async () => {
+      // 20,002 code points in 80,004 bytes and 40,002 UTF-16 units: Python's
+      // `len(raw.decode("utf-8"))` keeps U+FEFF and counts U+1F600 once. The
+      // count is of the file as written, export block included.
+      fs.mkdirSync(path.dirname(workspace()), { recursive: true });
+      fs.writeFileSync(workspace(), `\ufeff${"\u{1F600}".repeat(20_000)}\n`);
+      const codePoints = () => [...new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(workspace()))].length;
+      expect(codePoints()).toBe(20_002);
+      const h = harness(openclaw);
+      expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
+      const size = codePoints();
+      expect(size).toBeGreaterThan(20_002);
+      expect(size).toBeLessThan(21_000); // 40,002 and more if UTF-16 units were counted
       expect(notes(h)).toContain(
         `Warning: ~/.openclaw/workspace/AGENTS.md is ${size} characters; OpenClaw reads only the first 20000.`,
       );

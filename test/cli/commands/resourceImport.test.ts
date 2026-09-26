@@ -276,7 +276,9 @@ describe("resource import: reading and batching", () => {
     expect(h.ingest.bodies[0]).toContain('"payload":{"name":"x","2024":"a","1":"b"}');
   });
 
-  it("refuses a CSV row with more cells than the header, where Python's model raises a traceback", async () => {
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4): a
+  // ClickException since 0.41.1 (python-sdk #285), where 0.40.1's model raised.
+  it("refuses a CSV row with more cells than the header, in the Python CLI's words", async () => {
     const h = harness();
     expect(await runCli([...IMPORT, "-f", write("r.csv", "a,b\n1,2\n1,2,3\n")], h.deps)).toBe(1);
     expect(h.err).toEqual(["Error: Row 2: more fields than the header has columns."]);
@@ -292,6 +294,7 @@ describe("resource import: reading and batching", () => {
     expect(h.ingest.batches).toEqual([]);
   });
 
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
   it("refuses a row with cells past the header before any event", async () => {
     const h = harness();
     const file = write("extra.csv", "id,name\n1,a\n2,b,EXTRA\n");
@@ -467,6 +470,7 @@ describe("resource import: -v and --progress", () => {
     expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
     expect(events(h.err)).toEqual([]);
     expect(h.err).toEqual(["Error: boom"]);
+    expect(h.ingest.batches).toEqual([]);
   });
 
   describe("NaN and Infinity, which json.loads reads and httpx refuses to send", () => {

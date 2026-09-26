@@ -907,6 +907,7 @@ describe("guardrails digest --out", () => {
     expect(fs.existsSync("NEW.md")).toBe(false);
   });
 
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
   it("refuses a fetched block whose end marker comes first, naming the file", async () => {
     const endFirst =
       "<!-- kagura-memory:guardrails end -->\n" + EXPORT_BLOCK.replace("<!-- kagura-memory:guardrails end -->\n", "");
