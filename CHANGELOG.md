@@ -105,12 +105,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that fails prints the error alone, where the stream began with
   `import_start` and ended with `error`.
 - **`--help` shows every command's examples**, one per line, as the
-  Python CLI 0.41.1 does (python-sdk #285): the 29 commands whose
+  Python CLI 0.41.1 does (python-sdk #285): the 28 commands whose
   examples the Python CLI 0.40.1 printed as one run-on line (`auth
   login|refresh`, `context create|delete|update|search-config`, `edge
-  …`, `explore`, `forget`, `reference`, `remember`, `resource tokens …`,
+  …`, `explore`, `forget`, `reference`, `resource tokens …`,
   `resource list|stats|indexer-status|schema|events|ingest|ingest-batch`,
-  `setup claude|codex|hermes|openclaw`) showed none here.
+  `setup claude|codex|hermes|openclaw`) showed none here (`remember`
+  already had its block).
 
 ## [0.13.0] - 2026-09-25
 
