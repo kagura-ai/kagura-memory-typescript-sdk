@@ -2288,9 +2288,9 @@ describe("REST endpoints", () => {
     const server = new FakeServer();
     server.forcedResponse = new Response(body, { status: 200 });
     const client = makeClient(server);
-    await expect(client.getServerInfo()).rejects.toThrow(
-      new KaguraConnectionError(`Invalid response format: ${message}`),
-    );
+    const error = await client.getServerInfo().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(`Invalid response format: ${message}`);
   });
 
   it("a REST body with NaN reads as Python reads it; one nested past 973 containers fails as there (#69)", async () => {
@@ -2659,6 +2659,22 @@ describe("the MCP envelope in the Python SDK's words (#69)", () => {
     expect((error as Error).message).toBe(message);
   });
 
+  // The documented difference (README, "The MCP envelope"): a JSON-RPC
+  // `error` that is no object is rendered with str(), where the Python SDK
+  // 0.42.0 stops with `AttributeError: 'NoneType' object has no attribute
+  // 'get'` (`'list' object` for `[1]`).
+  it.each([
+    [{ error: null }, "MCP error: None"],
+    [{ error: [1] }, "MCP error: [1]"],
+  ])("renders the JSON-RPC error %j, no object, as str() (documented difference)", async (body, message) => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, ...body }), { status: 200 });
+    const error = await client.callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe(message);
+  });
+
   it("renders a number literal in the JSON-RPC error message from the JavaScript number (documented difference)", async () => {
     const server = new FakeServer();
     const client = await openClient(server);
@@ -2668,9 +2684,36 @@ describe("the MCP envelope in the Python SDK's words (#69)", () => {
     expect((error as Error).message).toBe("MCP error: 1");
   });
 
+  // Recorded from the Python SDK 0.42.0 (pydantic 2.13.4, pydantic-core
+  // 2.46.4): `RollbackSummary.model_validate` on each summary. A present
+  // null is no default; a lone surrogate is refused before the int parse;
+  // the reader lists three problems and counts the rest, as Python's
+  // response_shape_error does.
+  const NINE_BAD = {
+    edges_deleted: "x",
+    merges_reversed: "x",
+    merges_unreversible: "x",
+    importance_restored: "x",
+    promotions_reversed: "x",
+    importance_kept: "x",
+    promotions_kept: "x",
+    archives_restored: "x",
+    errors: "x",
+  };
+  const INT_PARSING = "Input should be a valid integer, unable to parse string as an integer";
   it.each([
     [undefined, "Input should be a valid dictionary or instance of RollbackSummary"],
-    [{ edges_deleted: "x" }, "edges_deleted: Input should be a valid integer, unable to parse string as an integer"],
+    [null, "Input should be a valid dictionary or instance of RollbackSummary"],
+    [[], "Input should be a valid dictionary or instance of RollbackSummary"],
+    [{ edges_deleted: "x" }, `edges_deleted: ${INT_PARSING}`],
+    [{ edges_deleted: null }, "edges_deleted: Input should be a valid integer"],
+    [
+      { edges_deleted: "\u{d800}" },
+      "edges_deleted: Input should be a valid string, unable to parse raw data as a unicode string",
+    ],
+    [{ errors: "x" }, "errors: Input should be a valid list"],
+    [{ errors: [1, "a", null] }, "errors.0: Input should be a valid string; errors.2: Input should be a valid string"],
+    [NINE_BAD, `edges_deleted: ${INT_PARSING}; merges_reversed: ${INT_PARSING}; merges_unreversible: ${INT_PARSING} (+6 more)`],
   ])("notes a rollback_summary it cannot read (%j), as Python does", async (summary, problem) => {
     const server = new FakeServer();
     server.toolResults.rollback_sleep_run = {
@@ -2734,6 +2777,57 @@ describe("REST reads with an OAuth profile (#69)", () => {
       expect((error as Error).message).toMatch(/^This profile was stored without a refresh token/);
       expect(calls).toEqual([]);
     } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("throws a refresh the token endpoint cannot be reached for once-wrapped, as Python does", async () => {
+    // Python 0.42.0: KaguraConnectionError('Could not reach
+    // http://…/api/v1/oauth/token/: All connection attempts failed'). The
+    // header is awaited before the fetch try, so the refresh's own error
+    // is not wrapped again as `Connection failed: …`. The refresh goes
+    // through the OAuth provider's fetch, the global one, not the client's.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-rest-auth-"));
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      calls.push(`refresh ${String(input)}`);
+      throw new TypeError("fetch failed");
+    });
+    try {
+      fs.mkdirSync(path.join(home, ".kagura"), { mode: 0o700 });
+      const profile = {
+        server: "https://x.test",
+        mcp_url: "https://x.test/mcp",
+        client_id: "c",
+        access_token: "at",
+        refresh_token: "rt",
+        token_type: "Bearer",
+        expires_at: "2020-01-01T00:00:00Z",
+        scope: "",
+        workspace_id: "w",
+        workspace_name: "W",
+        user_email: "u@x",
+        issued_at: "2019-12-31T00:00:00Z",
+      };
+      fs.writeFileSync(
+        path.join(home, ".kagura", "credentials.json"),
+        JSON.stringify({ version: 1, default_profile: "default", profiles: { default: profile } }),
+        { mode: 0o600 },
+      );
+      const client = new KaguraClient({
+        home,
+        env: {},
+        fetch: async (input) => {
+          calls.push(`rest ${String(input)}`);
+          return new Response("{}");
+        },
+      });
+      const error = await client.getServerInfo().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraConnectionError);
+      expect((error as Error).message).toBe("Could not reach https://x.test/api/v1/oauth/token/: fetch failed");
+      expect(calls).toEqual(["refresh https://x.test/api/v1/oauth/token/"]);
+    } finally {
+      vi.unstubAllGlobals();
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
