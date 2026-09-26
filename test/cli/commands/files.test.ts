@@ -401,6 +401,21 @@ describe("files upload", () => {
     });
   });
 
+  describe("a non-string context_id in .kagura.json", () => {
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+    // `kagura files list` with {"api_key": …, "context_id": 123} prints this (exit 1).
+    it("reads as absent, naming --context-id", async () => {
+      const h = harness({ config: { api_key: "cfg-key", context_id: 123 } as unknown as KaguraConfig });
+      expect(await runCli(["files", "list"], h.deps)).toBe(1);
+      expect(h.err).toEqual([
+        'Error: .kagura.json has api_key but context_id is missing or "auto". Set context_id to the ' +
+          "workspace UUID bound to this api_key, or pass --context-id. (Falling back to the OAuth " +
+          "profile would mix credential sources — see issue #115.)",
+      ]);
+      expect(h.rest.requests).toEqual([]);
+    });
+  });
+
   describe("--remember", () => {
     it("writes one memory linked to the file, with Python's payload", async () => {
       const h = harness();

@@ -409,12 +409,33 @@ describe("workspace member remove", () => {
     expect(h.out).toEqual(["Removed google_2"]);
   });
 
-  it("refuses a workspace that is no UUID before asking (Python asks first)", async () => {
+  it("refuses a workspace that is no UUID before asking", async () => {
     const h = harness({ confirm: true });
     expect(await runCli(["workspace", "member", "remove", "google_2", "-w", "AUTO"], h.deps)).toBe(1);
     expect(h.err).toEqual(["Error: workspace_id must be a UUID, got 'AUTO'"]);
     expect(h.questions).toEqual([]);
     expect(h.rest.requests).toEqual([]);
+  });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+  // `kagura workspace member remove google_2 -w ' {11111111222233334444555555555555}'`
+  // asks "Remove google_2 from workspace 11111111-2222-3333-4444-555555555555? [y/N]:".
+  it("asks about the workspace in canonical form, as the request names it", async () => {
+    const h = harness({ confirm: true });
+    h.rest.status = 204;
+    const argv = ["workspace", "member", "remove", "google_2", "-w", ` {${WS.replace(/-/g, "").toUpperCase()}}`];
+    expect(await runCli(argv, h.deps)).toBe(0);
+    expect(h.questions).toEqual([`Remove google_2 from workspace ${WS}?`]);
+    expect(lastRequest(h).url).toBe(`https://test.com/api/v1/workspaces/${WS}/members/google_2`);
+  });
+
+  it("asks revoke-key about the workspace in canonical form too", async () => {
+    // Python: "Revoke key #42 of google_2 in workspace 11111111-2222-3333-4444-55555555555a?"
+    // for -w 'urn:uuid:11111111-2222-3333-4444-55555555555A'.
+    const h = harness({ confirm: false });
+    const upper = "urn:uuid:11111111-2222-3333-4444-55555555555A";
+    expect(await runCli(["auth", "revoke-key", "42", "-u", "google_2", "-w", upper], h.deps)).toBe(1);
+    expect(h.questions).toEqual(["Revoke key #42 of google_2 in workspace 11111111-2222-3333-4444-55555555555a?"]);
   });
 
   it("checks a .kagura.json context_id the same way", async () => {
@@ -477,6 +498,34 @@ describe("the workspace a command targets", () => {
     const h = harness({ auth: new KaguraAuthError("No credentials found.\n  Run: kagura auth login") });
     expect(await runCli(["workspace", "member", "list", "-w", WS], h.deps)).toBe(1);
     expect(h.err).toEqual(["Error: No credentials found.\n  Run: kagura auth login"]);
+  });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+  // a non-string context_id in .kagura.json reads as absent (python-sdk #285;
+  // Python 0.41.0 failed with "'int' object has no attribute 'strip'").
+  const NO_WORKSPACE =
+    'Error: .kagura.json has api_key but context_id is missing or "auto". Set context_id to the ' +
+    "workspace UUID bound to this api_key, or pass --workspace. (Falling back to the OAuth " +
+    "profile would mix credential sources — see issue #115.)";
+
+  it.each([123, ["x"], { a: 1 }])("reads a context_id of %j as absent (exit 1)", async (value) => {
+    for (const argv of [
+      ["workspace", "member", "list"],
+      ["auth", "list-keys", "-u", "google_2"],
+      ["auth", "create-key", "-u", "google_2", "-n", "ci", "--expires-days", "90"],
+    ]) {
+      const h = harness({ config: { api_key: "k", context_id: value } as unknown as KaguraConfig });
+      expect(await runCli(argv, h.deps), argv.join(" ")).toBe(1);
+      expect(h.err).toEqual([NO_WORKSPACE]);
+      expect(h.rest.requests).toEqual([]);
+    }
+  });
+
+  it("gives no 403 hint for a non-string context_id when -w names the workspace", async () => {
+    const h = harness({ config: { api_key: "k", context_id: 123 } as unknown as KaguraConfig });
+    reply(h, []);
+    expect(await runCli(["workspace", "member", "list", "-w", WS], h.deps)).toBe(0);
+    expect(h.built.map((b) => b.hint)).toEqual([null]);
   });
 });
 
@@ -617,7 +666,7 @@ describe("workspace invite create", () => {
     reply(h, { id: 9, email: null, role: "admin" });
     expect(await runCli(["workspace", "invite", "create", "a@x.com", "--role", "admin"], h.deps)).toBe(0);
     expect(sentJson(h)).toEqual({ email: "a@x.com", role: "admin" });
-    // A missing email reads `-` as in `invite list` (Python prints `None`).
+    // A missing email reads `-` as in `invite list`, as Python 0.41.1+ prints it.
     expect(h.out).toEqual(["Invitation #9 → - (role=admin, expires=never)\n(no url returned)"]);
   });
 
@@ -645,16 +694,21 @@ describe("workspace invite create", () => {
     ]);
   });
 
-  it.each(["not-a-uuid", ` ${CTX}`])(
-    "refuses a -c that is no UUID before sending anything (exit 1): %j",
-    async (context) => {
-      // Python sends it as typed, and the server answers HTTP 500.
-      const h = harness();
-      expect(await runCli(["workspace", "invite", "create", "a@b.com", "-c", CTX, "-c", context], h.deps)).toBe(1);
-      expect(h.err).toEqual([`Error: context_id must be a UUID, got '${context}'`]);
-      expect(h.rest.requests).toEqual([]);
-    },
-  );
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+  // `_context_uuids_param` refuses a -c that is no UUID as a usage error,
+  // before the config is read, whatever the role.
+  it.each([
+    [["-c", CTX, "-c", "ctx-1"], "'ctx-1'"],
+    [["-c", ` ${CTX}`], `' ${CTX}'`],
+    [["-c", ""], "''"],
+    [["--role", "admin", "-c", "not-a-uuid"], "'not-a-uuid'"],
+  ])("refuses %j before anything is read (exit 2)", async (flags, shown) => {
+    const h = harness();
+    expect(await runCli(["workspace", "invite", "create", "a@b.com", ...flags], h.deps)).toBe(2);
+    expect(h.err).toEqual([`Error: Invalid value for '--context' / '-c': ${shown} is not a valid context UUID.`]);
+    expect(h.calls).toEqual([]);
+    expect(h.rest.requests).toEqual([]);
+  });
 
   it("reads the response as a WorkspaceInvitation", async () => {
     const h = harness();

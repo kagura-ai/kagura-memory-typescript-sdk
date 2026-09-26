@@ -51,27 +51,31 @@ const UNIFORM_403 = "Insufficient permissions";
 const UUID_HEX_RE = /^[0-9a-f]{32}$/i;
 
 /**
- * Return the canonical UUID string, rejecting non-UUIDs before the URL.
+ * Return the canonical UUID string, rejecting non-UUIDs before any request.
  *
  * Python's `uuid.UUID` tolerates non-canonical spellings (`{braces}`,
- * `urn:uuid:` prefix, dashless 32-hex, uppercase); interpolating the RAW
- * input would send those to the server and surface as a misleading uniform
- * 404 — normalize instead of just validating.
+ * `urn:uuid:` prefix, dashless 32-hex, uppercase); sending the RAW input
+ * would surface as a misleading uniform 404 (or, for an invitation's
+ * context grant, an HTTP 500) — normalize instead of just validating.
  */
-function normalizeWorkspaceId(workspaceId: string): string {
-  const stripped = String(workspaceId)
+function canonicalUuid(value: string, label: string): string {
+  const stripped = String(value)
     .replace(/^urn:/, "")
     .replace(/^uuid:/, "")
     .replace(/^[{}]+|[{}]+$/g, "")
     .replace(/-/g, "");
   if (!UUID_HEX_RE.test(stripped)) {
-    throw new Error(`workspaceId must be a UUID, got ${JSON.stringify(workspaceId)}`);
+    throw new Error(`${label} must be a UUID, got ${JSON.stringify(value)}`);
   }
   const hex = stripped.toLowerCase();
   return (
     `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
     `${hex.slice(16, 20)}-${hex.slice(20)}`
   );
+}
+
+function normalizeWorkspaceId(workspaceId: string): string {
+  return canonicalUuid(workspaceId, "workspaceId");
 }
 
 /**
@@ -137,7 +141,8 @@ export interface CreateInvitationOptions {
   role?: string;
   /**
    * Context grant — required (min 1) for member/viewer invitations,
-   * ignored for admin. Sent on the wire as `allowed_context_ids`.
+   * ignored for admin. Each must be a UUID (an `Error` otherwise, before
+   * any request); sent as `allowed_context_ids` in canonical form.
    */
   allowedContextIds?: string[];
   /**
@@ -276,7 +281,9 @@ export class WorkspaceClient extends KaguraRestClient {
     }
     const body: Record<string, unknown> = { email, role };
     if (allowedContextIds !== undefined) {
-      body.allowed_context_ids = allowedContextIds;
+      // Port of create_invitation's normalize_uuid (python-sdk #285): the
+      // server answers a non-UUID here with an HTTP 500.
+      body.allowed_context_ids = allowedContextIds.map((c) => canonicalUuid(c, "allowedContextIds"));
     }
     if (expiresInDays !== undefined) {
       body.expires_in_days = expiresInDays;

@@ -757,16 +757,15 @@ server left out, and drops any other. A record the model refuses (a
 required field missing, a scalar, list or mapping of the wrong type)
 exits 1 with its `KaguraResponseError` text; timestamps are printed as
 the server wrote them. `--role` matches exactly, as
-click's `Choice` does (`Admin` is refused). Four things differ from the
-Python CLI, each on purpose: a workspace that is not a UUID is refused
-before `member remove` or `revoke-key` asks, where Python asks first;
-each `invite create -c` must be a context UUID (exit 1, `context_id must
-be a UUID, got '…'`), where Python sends it as typed and the server
-answers `HTTP 500`; a user id of `.`, `..` or nothing (`USER_ID` or
-`--user`) is refused (exit 2) before anything is asked or sent, where
-Python sends it and URL resolution turns `member remove ..` into a
-`DELETE` of the workspace's own URL; and an invitation with no email prints `-`, as
-`invite list` does, where Python prints `None`.
+click's `Choice` does (`Admin` is refused). As in the Python CLI (0.41.1+):
+a workspace that is not a UUID is refused before `member remove` or
+`revoke-key` asks, and the question names it in canonical form; each `invite create -c` must be a context UUID (exit 2,
+`Invalid value for '--context' / '-c': 'x' is not a valid context UUID.`,
+before anything is read) and is sent in canonical form; a user id of `.`,
+`..` or nothing (`USER_ID` or `--user`) is refused (exit 2) before
+anything is asked or sent; a `context_id` in `.kagura.json` that is not a
+string reads as absent; and an invitation with no email prints `-`, as
+`invite list` does.
 
 **`measure record` and `measure series`** take the context as their
 first argument, never from `.kagura.json`: an observation recorded in the
@@ -1323,6 +1322,10 @@ URL resolution would send the request elsewhere. The Python SDK sends
 them as typed, but for a workspace user id, which it refuses too from
 0.41.1
 ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/66)).
+`createInvitation` refuses an `allowedContextIds` entry that is not a
+UUID before sending anything (`allowedContextIds must be a UUID, got
+"ctx-1"`), and sends each in canonical form, as the Python SDK does from
+0.41.1.
 
 ## Zero-knowledge secrets
 

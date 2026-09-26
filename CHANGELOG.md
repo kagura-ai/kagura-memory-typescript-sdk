@@ -43,6 +43,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `checkServerVersion` now throws on a version that is not a string, as
   Python does, where it returned the body without comparing.
 
+### Fixed
+
+- **`workspace invite create -c` and `createInvitation`** (python-sdk #285):
+  a `-c` that is not a context UUID is a usage error (exit 2, `Invalid
+  value for '--context' / '-c': 'x' is not a valid context UUID.`) before
+  anything is read, for an admin invitation too, where it was exit 1 after
+  the credential; `WorkspaceClient.createInvitation` refuses such an
+  `allowedContextIds` entry before any request and sends each one in
+  canonical form. `member remove` and `revoke-key` ask about the workspace
+  in canonical form, as the Python CLI 0.41.1 does.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

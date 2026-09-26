@@ -248,7 +248,7 @@ describe("invitations", () => {
     const client = makeClient(server);
 
     const inv = await client.createInvitation(WS, "new@x.com", {
-      allowedContextIds: ["ctx-1"],
+      allowedContextIds: ["22222222-3333-4444-5555-666666666666"],
       expiresInDays: 7,
     });
     const req = server.requests[0]!;
@@ -257,11 +257,40 @@ describe("invitations", () => {
     expect(JSON.parse(req.body!)).toEqual({
       email: "new@x.com",
       role: "member",
-      allowed_context_ids: ["ctx-1"],
+      allowed_context_ids: ["22222222-3333-4444-5555-666666666666"],
       expires_in_days: 7,
     });
     expect(inv.id).toBe(7);
     expect(inv.invitation_url).not.toBeNull();
+  });
+
+  it("createInvitation refuses a context that is no UUID before any request", async () => {
+    // Python's create_invitation raises `allowed_context_ids must be a UUID, got 'ctx-1'`
+    // (python-sdk #285: the server answered a non-UUID with HTTP 500).
+    const server = new FakeRest();
+    const client = makeClient(server);
+    await expect(
+      client.createInvitation(WS, "new@x.com", { allowedContextIds: ["22222222-3333-4444-5555-666666666666", "ctx-1"] }),
+    ).rejects.toThrow('allowedContextIds must be a UUID, got "ctx-1"');
+    await expect(
+      client.createInvitation(WS, "adm@x.com", { role: "admin", allowedContextIds: ["nope"] }),
+    ).rejects.toThrow('allowedContextIds must be a UUID, got "nope"');
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("createInvitation sends each context in canonical form", async () => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify({ id: 3, email: "v@x.com", role: "viewer" });
+    const client = makeClient(server);
+    await client.createInvitation(WS, "v@x.com", {
+      role: "viewer",
+      allowedContextIds: ["{22222222-3333-4444-5555-66666666666A}", "urn:uuid:99999999888877776666555555555555"],
+    });
+    expect(JSON.parse(server.requests[0]!.body!).allowed_context_ids).toEqual([
+      "22222222-3333-4444-5555-66666666666a",
+      "99999999-8888-7777-6666-555555555555",
+    ]);
   });
 
   it("createInvitation for admin sends only email and role", async () => {
