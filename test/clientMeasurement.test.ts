@@ -344,6 +344,27 @@ describe("recordMeasurement (#57)", () => {
         `(tool reply: expected a JSON object, got list). ${HINT}`,
     );
   });
+
+  it("refuses a lone surrogate in measured_at and value, as pydantic does (#69)", async () => {
+    const server = new FakeServer();
+    server.toolResults.record_measurement = {
+      measurement_id: "m",
+      metric: "w",
+      measured_at: "2026-06-01T00:00:00Z\u{dc00}",
+      value: "1\u{d800}",
+    };
+    const error = await makeClient(server)
+      .recordMeasurement({ contextId: "ctx", metric: "w", value: 1 })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    // Recorded from the Python SDK 0.42.0's parse_response (pydantic 2.13.4).
+    expect((error as Error).message).toBe(
+      "record_measurement: unexpected server response for MeasurementResult (measured_at: Input should be " +
+        "a valid string, unable to parse raw data as a unicode string; value: Input should be a valid string, " +
+        "unable to parse raw data as a unicode string). The server may be newer than this SDK; upgrading " +
+        "kagura-memory may help.",
+    );
+  });
 });
 
 describe("recallSeries (#57)", () => {

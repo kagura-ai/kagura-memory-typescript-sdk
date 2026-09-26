@@ -19,9 +19,12 @@ import {
   laxStr,
   nullable,
   responseModelError,
+  boolFromNumberLiteral,
   responseShapeError,
   type Coercer,
 } from "../src/responseShape.js";
+import { pyFloatRepr } from "../src/python.js";
+import { BOOL_NUMBER_CASES, FLOAT_TEXT_CASES, INT_TEXT_CASES } from "./pydanticCases.js";
 
 const HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
 
@@ -358,5 +361,72 @@ describe("the coercers given a number literal (#69)", () => {
     expect(() => r.check()).toThrow(
       "op: unexpected server response for M (count: Unable to parse input string as an integer, exceeded maximum size).",
     );
+  });
+});
+
+const STRING_UNICODE = "Input should be a valid string, unable to parse raw data as a unicode string";
+
+/** A readable name for a case: a long input by its length. */
+function caseLabel(input: string): string {
+  return input.length > 40 ? `${input.length} chars` : JSON.stringify(input);
+}
+
+describe("the lax coercers read strings as pydantic-core does (#69)", () => {
+  it.each(INT_TEXT_CASES.map(([input, expected]) => [caseLabel(input), input, expected] as const))(
+    "int field %s",
+    (_label, input, expected) => {
+      const exact = laxExactInt(input);
+      expect(exact.ok ? { ok: String(exact.value) } : { err: exact.msg }).toEqual(expected);
+      // laxInt holds a number: the nearest double of the same value.
+      const plain = laxInt(input);
+      expect(plain.ok ? { ok: plain.value } : { err: plain.msg }).toEqual(
+        "ok" in expected ? { ok: Number(BigInt(expected.ok)) } : expected,
+      );
+    },
+  );
+
+  it("reads 2^1024 or more as Infinity in laxInt, a documented limit, and exactly in laxExactInt", () => {
+    expect(laxInt("9".repeat(309))).toEqual({ ok: true, value: Infinity });
+    expect(laxExactInt("9".repeat(309))).toEqual({ ok: true, value: BigInt("9".repeat(309)) });
+  });
+
+  it.each(FLOAT_TEXT_CASES.map(([input, expected]) => [caseLabel(input), input, expected] as const))(
+    "float field %s",
+    (_label, input, expected) => {
+      const got = laxFloat(input);
+      expect(got.ok ? { ok: pyFloatRepr(got.value) } : { err: got.msg }).toEqual(expected);
+    },
+  );
+
+  it.each(BOOL_NUMBER_CASES.map(([literal, expected]) => [caseLabel(literal), literal, expected] as const))(
+    "bool field, JSON number %s",
+    (_label, literal, expected) => {
+      const want = "ok" in expected ? { ok: true, value: expected.ok } : { ok: false, msg: expected.err };
+      expect(boolFromNumberLiteral(literal)).toEqual(want);
+      // A JavaScript number cannot tell 2^63 - 1 from 2^63, nor -2^63 read
+      // as an int from -2^63 read as a float: only the literal can (69d).
+      if (literal !== "9223372036854775807" && literal !== "-9223372036854775808") {
+        expect(laxBool(JSON.parse(literal) as number)).toEqual(want);
+      }
+    },
+  );
+
+  it("refuses a lone surrogate in every non-str field with pydantic's string_unicode message", () => {
+    for (const coerce of [laxInt, laxExactInt, laxFloat, laxBool] as Coercer<unknown>[]) {
+      expect(coerce("1\u{d800}")).toEqual({ ok: false, msg: STRING_UNICODE });
+      expect(coerce("\u{dc00}")).toEqual({ ok: false, msg: STRING_UNICODE });
+    }
+    expect(laxStr("1\u{d800}")).toEqual({ ok: true, value: "1\u{d800}" });
+  });
+
+  it("reads a surrogate pair (an emoji) as the character it is", () => {
+    expect(laxBool("\u{1f600}")).toEqual({
+      ok: false,
+      msg: "Input should be a valid boolean, unable to interpret input",
+    });
+    expect(laxInt("1\u{1f600}")).toEqual({
+      ok: false,
+      msg: "Input should be a valid integer, unable to parse string as an integer",
+    });
   });
 });

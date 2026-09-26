@@ -10,7 +10,6 @@ import {
   PY_INT,
   pyBigInt,
   pyFloat,
-  pyFloatAscii,
   pyFloatRepr,
   pyInt,
   pyRepr,
@@ -237,11 +236,5 @@ describe("float() grammar", () => {
     ["\u{85}-2.5\u{a0}", -2.5],
   ])("float(%j) is %s, as Python reads it", (input, expected) => {
     expect(pyFloat(input)).toBe(expected);
-  });
-
-  it("reads ASCII digits only for pydantic's lax float, stripped as float() strips", () => {
-    expect(pyFloatAscii("\u{85}5 ")).toBe(5);
-    expect(pyFloatAscii("\u{661}")).toBeUndefined();
-    expect(pyFloatAscii("\u{feff}5")).toBeUndefined();
   });
 });

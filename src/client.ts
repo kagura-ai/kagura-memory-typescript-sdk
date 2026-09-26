@@ -62,6 +62,7 @@ import type {
 } from "./models.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
+import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
 import { pyRepr, pyTypeName } from "./python.js";
 import {
@@ -692,10 +693,11 @@ function isSet<T>(value: T | null | undefined): value is T {
  * pydantic reads as a Unix time, is refused too, so the field stays the
  * string its type promises.
  */
-const datetimeText: Coercer<string> = (value) =>
-  typeof value === "string"
-    ? { ok: true, value }
-    : { ok: false, msg: "Input should be a valid datetime" };
+const datetimeText: Coercer<string> = (value) => {
+  if (typeof value !== "string") return { ok: false, msg: "Input should be a valid datetime" };
+  // The Python model's datetime field refuses a lone surrogate first (#69).
+  return hasLoneSurrogate(value) ? { ok: false, msg: STRING_UNICODE } : { ok: true, value };
+};
 
 /**
  * Read a `record_measurement` payload as the Python SDK's

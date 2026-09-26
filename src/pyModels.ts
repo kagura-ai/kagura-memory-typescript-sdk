@@ -29,6 +29,7 @@
 
 import { jsonValue, valueAt } from "./losslessJson.js";
 import { pydanticDatetime } from "./pydanticDatetime.js";
+import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import {
   laxBool,
   laxExactInt,
@@ -147,6 +148,10 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
   }
   if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, raw, at);
   if ("literal" in kind) {
+    if (typeof value === "string" && hasLoneSurrogate(value)) {
+      r.issue(at, STRING_UNICODE);
+      return undefined;
+    }
     if (typeof value === "string" && kind.literal.includes(value)) return value;
     r.issue(at, literalMessage(kind.literal));
     return undefined;

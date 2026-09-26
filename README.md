@@ -1439,6 +1439,23 @@ the two. See
 [`docs/design/2026-07-05-typescript-port-design.md`](docs/design/2026-07-05-typescript-port-design.md)
 for the original scope decisions.
 
+**Reading responses.** The SDK reads each field of a response as the
+Python SDK's pydantic model reads it in lax mode, with pydantic's
+messages ([#66](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/66),
+[#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+an int field takes `"0-1"` (-1) and `"0__7"` and refuses a digit run past
+4,300 characters, a float field follows pydantic's `str_as_float` rather
+than Python's `float()`, and a string holding a lone surrogate is refused
+in any field but a `str`. Two limits of JavaScript numbers remain. An int
+field of a typed result (`recallSeries`' `count`, the guardrail caps, a
+member key's or invitation's `id`) holds a `number`, so a value past 2^53
+is the nearest double and one of 2^1024 or more (309 digits) is
+`Infinity`, where Python keeps the exact int; widening those types would
+break callers. And a bool field sent the JSON number 9223372036854775807
+or -9223372036854775808 reads it as the double +/-2^63 and says `Input
+should be a valid boolean`, where pydantic says `…, unable to interpret
+input`. The `resource` and `files` dumps read the literal itself and agree with pydantic.
+
 ## Development
 
 ```bash

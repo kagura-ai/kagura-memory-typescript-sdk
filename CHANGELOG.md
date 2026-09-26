@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Lax number and bool fields read strings as pydantic-core does**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
+  An int field takes `"0-1"` (as -1), `"0__7"` and `" +1"` as pydantic
+  does, and refuses a digit run past 4,300 characters with `Unable to parse
+  input string as an integer, exceeded maximum size`. A float field follows
+  pydantic's `str_as_float`, where it followed Python's `float()`: `"1_.5"`,
+  `"+_1"` and `"1e_10"` read, `" 1_000"` and `"1_000\n"` do not. A bool
+  field sent a whole number of magnitude 2^63 or more says `Input should be
+  a valid boolean`. A string holding a lone surrogate is refused in any
+  field but a `str`, datetimes and `Literal`s included, with `Input should
+  be a valid string, unable to parse raw data as a unicode string`.
 - **REST bodies are read as Python's `json.loads` reads them**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
   The resource and files commands keep the server's key order inside an

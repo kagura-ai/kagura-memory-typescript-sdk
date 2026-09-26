@@ -122,15 +122,6 @@ export function pyFloat(text: string): number | undefined {
 }
 
 /**
- * `float(text)` for ASCII digits only, the way pydantic's lax mode reads a
- * string as a `float`: stripped as `float()` strips it, but `"٣"` is no
- * number there.
- */
-export function pyFloatAscii(text: string): number | undefined {
-  return floatOf(stripNumberSpace(text));
-}
-
-/**
  * The characters `str.isprintable()` rejects, which `repr()` escapes: the
  * "Other" categories (Cc, Cf, Cs, Co, Cn) and the separators (Zl, Zp, Zs),
  * the ASCII space excepted. Unassigned code points (Cn) follow the Unicode

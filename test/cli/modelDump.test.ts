@@ -369,3 +369,16 @@ describe("an untyped mapping read by parseJsonLossless prints as Python read it 
     );
   });
 });
+
+describe("readModel: a lone surrogate in a non-str field (#69)", () => {
+  it("refuses it in a Literal field with pydantic's string_unicode message", () => {
+    const error = failure(() =>
+      readModel({ events: [{ id: 1, op: "\u{d800}", doc_id: "d" }] }, RESOURCE_EVENTS_LIST_RESPONSE, "op"),
+    );
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect(error.message).toBe(
+      "op: unexpected server response for ResourceEventsListResponse (events.0.op: Input should be a " +
+        `valid string, unable to parse raw data as a unicode string). ${HINT}`,
+    );
+  });
+});
