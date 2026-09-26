@@ -12,7 +12,8 @@
  *     an omitted field there means "leave unchanged".
  */
 
-import type { SourceType } from "../../client.js";
+import type { KaguraClient, SourceType } from "../../client.js";
+import { pyTruthy } from "../../python.js";
 import { requireArg, requireOption, rejectExtraArgs, type Command } from "../command.js";
 import {
   CliError,
@@ -314,14 +315,99 @@ const UPDATE_LOCATION: FlagSpec = {
     "replaced whole, label included: re-send 'lat,lon,label' to keep one.",
 };
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The memory's current `details` for `update-memory --merge-details`: the
+ * port of `_current_details_for_merge` (src/kagura_memory/cli.py, 0.42.0).
+ *
+ * `null` or absent details are `{}`. Anything short of the whole object is
+ * refused, because merging onto a partial read would drop the keys that
+ * were not returned: memory-cloud 0.78.0+ bounds a reference reply and puts
+ * `details_omitted` / `details_total_chars` markers in place of a large
+ * `details` (a paging caller gets `details_json` slices instead). A truthy
+ * `details_omitted`, a `details_json` page, or a size without the `details`
+ * key itself can only mean a bounded read.
+ *
+ * An absent key with no marker is read as null details only because
+ * `reference()` sends no `fields` selection; a future one must keep
+ * "details" in it, or this would merge onto `{}`.
+ *
+ * `details_total_chars` is printed when it is an integer. JSON.parse cannot
+ * tell `24000.0` from `24000`, which Python (an `int` check) leaves out.
+ *
+ * @throws CliError (exit 1) when the reply carries no memory object, its
+ *   details were omitted or paged, or they are not a JSON object.
+ */
+export async function currentDetailsForMerge(
+  client: KaguraClient,
+  contextId: string,
+  memoryId: string,
+): Promise<Record<string, unknown>> {
+  const result = await client.reference({ contextId, memoryId });
+  const memory = isPlainObject(result) ? result.memory : undefined;
+  if (!isPlainObject(memory)) {
+    throw new CliError("--merge-details: the reference reply carried no memory object");
+  }
+  if (
+    pyTruthy(memory.details_omitted) ||
+    "details_json" in memory ||
+    (!("details" in memory) && "details_total_chars" in memory)
+  ) {
+    const total = memory.details_total_chars;
+    const size = typeof total === "number" && Number.isInteger(total) ? ` (${total} characters)` : "";
+    throw new CliError(
+      `--merge-details: the memory's current details could not be read in full${size}; ` +
+        "the server bounds a reference reply and this CLI cannot page it yet. Send the " +
+        "complete object with --details and without --merge-details (the MCP reference " +
+        "tool returns the whole object with max_chars up to 100000 or details_offset " +
+        "paging).",
+    );
+  }
+  const current = memory.details;
+  if (current === undefined || current === null) return {};
+  if (!isPlainObject(current)) {
+    throw new CliError("--merge-details: the memory's current details are not a JSON object");
+  }
+  return current;
+}
+
+const MERGE_DETAILS: FlagSpec = {
+  name: "merge-details",
+  type: "switch",
+  help:
+    "Read the memory first (reference) and merge --details/--location over its current details, " +
+    "top-level keys only, so unmentioned keys are kept. Needs --memory-id and one of " +
+    "--details/--location; two calls, not one atomic update.",
+};
+
 const updateMemory: Command = {
   summary: "Update an existing memory or upsert by external ID.",
   description:
     "  Use --memory-id for in-place update, or --external-id for upsert.\n\n" +
+    "  --details REPLACES the memory's details wholesale — the server does not\n" +
+    "  deep-merge — so a bare --location without --merge-details drops every other\n" +
+    "  details key (including the resource_id an --external-id upsert stores there:\n" +
+    "  without it the next upsert of that id creates a new memory instead of\n" +
+    "  replacing this one), and '{}' clears them. --merge-details reads the memory\n" +
+    "  first with reference() and merges the top-level keys of --details/--location\n" +
+    "  over its current details, so unmentioned keys are kept, and it is two calls,\n" +
+    "  not one atomic update (the read is a reference() of the memory and counts in\n" +
+    "  its access stats). It cannot remove a key (for that, send the full object\n" +
+    "  without --merge-details), except '\"tool_trigger\": null', which the server\n" +
+    "  treats as unmark; '\"location\": null' is rejected by the server (422).\n" +
+    "  Coordinates must be JSON numbers, not strings: the server rejects string-\n" +
+    "  typed lat/lon with a 422 by design.\n\n" +
     "  Examples:\n" +
     '    kagura-memory update-memory -m MEM_UUID -s "updated summary"\n' +
     '    kagura-memory update-memory --external-id ext-key -s "summary" --content "..." -t note\n' +
-    "    kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate",
+    "    kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate\n" +
+    "    kagura-memory update-memory -m MEM_UUID \\\n" +
+    "      --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'\n" +
+    "    kagura-memory update-memory -m MEM_UUID --merge-details \\\n" +
+    '      --location "35.68,139.76,Tokyo HQ"',
   spec: {
     flags: [
       CONTEXT_ID,
@@ -341,6 +427,7 @@ const updateMemory: Command = {
       },
       UPDATE_DETAILS,
       UPDATE_LOCATION,
+      MERGE_DETAILS,
     ],
   },
   run: async (deps, args) => {
@@ -348,6 +435,7 @@ const updateMemory: Command = {
     const memoryId = args.values["memory-id"];
     const externalId = args.values["external-id"];
     const dismissSupersedeCandidate = args.flags.has("dismiss-supersede-candidate");
+    const mergeDetails = args.flags.has("merge-details");
     // Click converts `type=float` before the function body runs, so a bad
     // -i is a usage error (exit 2) even when the checks below would fail.
     const importance = optionalFloat(args, IMPORTANCE);
@@ -363,6 +451,11 @@ const updateMemory: Command = {
     if (dismissSupersedeCandidate && externalId !== undefined) {
       throw new CliError("--dismiss-supersede-candidate requires --memory-id (not --external-id)");
     }
+    // Python tests `external_id` for truthiness here, and so does this: an
+    // empty `--external-id=` beside -m goes out as Python sends it.
+    if (mergeDetails && externalId) {
+      throw new CliError("--merge-details requires --memory-id (not --external-id)");
+    }
     const summary = args.values.summary;
     const content = args.values.content;
     const type = args.values.type;
@@ -371,9 +464,18 @@ const updateMemory: Command = {
     // id checks, a usage error (exit 2) before anything is sent; blank is
     // unset (leave details alone), '{}' clears them.
     const details = buildDetails(args.values.details, args.values.location);
+    if (mergeDetails && details === undefined) {
+      throw new CliError("--merge-details needs --details or --location");
+    }
 
-    return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
-      client.updateMemory({
+    return runClientCommand(deps, args.values["context-id"], async (client, contextId) => {
+      let payload = details;
+      if (mergeDetails && payload !== undefined) {
+        // `{**current, **payload}` in Python: a shallow merge into a new
+        // object. The checks above make memoryId a non-empty string here.
+        payload = { ...(await currentDetailsForMerge(client, contextId, memoryId!)), ...payload };
+      }
+      return client.updateMemory({
         contextId,
         // Every field is omitted unless given: an absent key means "leave
         // unchanged", so forwarding undefined defaults would silently
@@ -385,10 +487,10 @@ const updateMemory: Command = {
         ...(type !== undefined ? { type } : {}),
         ...(importance !== undefined ? { importance } : {}),
         ...(tags ? { tags } : {}),
+        ...(payload !== undefined ? { details: payload } : {}),
         ...(dismissSupersedeCandidate ? { dismissSupersedeCandidate } : {}),
-        ...(details !== undefined ? { details } : {}),
-      }),
-    );
+      });
+    });
   },
 };
 

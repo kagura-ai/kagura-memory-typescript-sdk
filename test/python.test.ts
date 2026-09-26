@@ -14,6 +14,7 @@ import {
   pyFloatRepr,
   pyInt,
   pyRepr,
+  pyTruthy,
   pyTypeName,
 } from "../src/python.js";
 
@@ -243,5 +244,25 @@ describe("float() grammar", () => {
     expect(pyFloatAscii("\u{85}5 ")).toBe(5);
     expect(pyFloatAscii("\u{661}")).toBeUndefined();
     expect(pyFloatAscii("\u{feff}5")).toBeUndefined();
+  });
+});
+
+describe("pyTruthy", () => {
+  it.each([
+    [null, false],
+    [undefined, false],
+    [false, false],
+    [0, false],
+    ["", false],
+    [[], false],
+    [{}, false],
+    [true, true],
+    [1, true],
+    [-0.5, true],
+    ["x", true],
+    [[0], true],
+    [{ a: null }, true],
+  ])("reads %j as Python's bool() does", (value, expected) => {
+    expect(pyTruthy(value)).toBe(expected);
   });
 });

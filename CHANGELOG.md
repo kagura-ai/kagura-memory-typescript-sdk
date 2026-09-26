@@ -15,6 +15,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--location` drops every other key and `--details '{}'` clears them; a
   blank value leaves them alone. `remember --help` now says so, and shows
   Python's examples.
+- **`update-memory --merge-details`** (python-sdk #247): reads the memory
+  with `reference()` first and merges `--details`/`--location` over its
+  current details, top-level keys only, so the keys you leave out are kept.
+  It needs `--memory-id` and one of `--details`/`--location`, both checked
+  before anything is sent. It is two calls, not one atomic update, and it
+  cannot remove a key. When the read is not the whole object (memory-cloud
+  0.78.0+ leaves a large `details` out of a `reference` reply), it stops
+  without writing and asks for the complete object with `--details`, in
+  the Python CLI's words.
 
 ## [0.13.0] - 2026-09-25
 

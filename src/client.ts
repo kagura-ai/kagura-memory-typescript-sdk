@@ -287,6 +287,8 @@ export interface UpdateMemoryOptions {
    * Structured details JSON. **Replaces `details` wholesale** — the server
    * does not deep-merge. Round-trip any keys you want to keep (notably
    * `location`, see {@link MemoryLocation}) or they are silently dropped.
+   * The CLI's `update-memory --merge-details` does that round-trip for
+   * top-level keys.
    *
    * That includes `tool_trigger` ({@link ToolTrigger}): leaving it out of
    * `updateMemory({ details })` turns the memory's guardrail off. The key
