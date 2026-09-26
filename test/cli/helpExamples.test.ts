@@ -4,8 +4,7 @@
  * recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
  * `kagura <command> --help`, with `kagura ` written `kagura-memory `.
  *
- * Not here: `ingest`, which this bin does not have, and `update-memory`,
- * whose examples plan 70a records with its --details flags.
+ * Not here: `ingest`, which this bin does not have.
  */
 
 import { describe, expect, it } from "vitest";
@@ -260,6 +259,16 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID",
     "    kagura-memory setup openclaw --profile default --force",
   ]],
+  ["update-memory", [
+    "  Examples:",
+    "    kagura-memory update-memory -m MEM_UUID -s \"updated summary\"",
+    "    kagura-memory update-memory --external-id ext-key -s \"summary\" --content \"...\" -t note",
+    "    kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate",
+    "    kagura-memory update-memory -m MEM_UUID \\",
+    "      --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'",
+    "    kagura-memory update-memory -m MEM_UUID --merge-details \\",
+    "      --location \"35.68,139.76,Tokyo HQ\"",
+  ]],
   ["workspace invite create", [
     "  Example:",
     "    kagura-memory workspace invite create new@example.com --role member -c <context-uuid>",
@@ -289,9 +298,6 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory workspace member set-role google_1234 --role admin",
   ]],
 ];
-
-/** Commands with an Examples block that this table leaves to another plan, or aliases. */
-const NOT_IN_TABLE: ReadonlySet<string> = new Set(["update-memory", "contexts"]);
 
 function commandPaths(entries: Record<string, Command | CommandGroup>, prefix: string[] = []): string[][] {
   return Object.entries(entries).flatMap(([name, entry]) =>
@@ -325,7 +331,7 @@ describe("--help examples (python-sdk #285)", () => {
     const missing: string[] = [];
     for (const argv of commandPaths(ROOT_COMMANDS)) {
       const name = argv.join(" ");
-      if (exampleBlock(await help(argv)).length > 0 && !table.has(name) && !NOT_IN_TABLE.has(name)) {
+      if (exampleBlock(await help(argv)).length > 0 && !table.has(name)) {
         missing.push(name);
       }
     }
