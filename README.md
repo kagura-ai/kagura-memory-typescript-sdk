@@ -290,7 +290,7 @@ it, a missing credential stops setup (exit 1).
 |---|---|---|
 | `setup claude` | `.mcp.json` (`--scope project`, the default), or `claude mcp add-json --scope user …` | `--scope project`: in `.mcp.json`; `--scope user`: `KAGURA_MCP_API_KEY`, exported where Claude Code starts |
 | `setup codex` | `codex mcp add … --bearer-token-env-var KAGURA_API_KEY` | `export KAGURA_API_KEY=…` in the shell profile that starts Codex |
-| `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` is interactive, and this port never prompts | `MCP_KAGURA_MEMORY_API_KEY=…` (`MCP_<NAME>_API_KEY` with `--name`) in the `.env` beside `config.yaml`, added with an editor |
+| `setup hermes` | the `config.yaml` block is printed; `hermes mcp add` is interactive, and this port never prompts (with `--oauth`: `hermes mcp add … --auth oauth`, attached, when there is a terminal) | `MCP_KAGURA_MEMORY_API_KEY=…` (`MCP_<NAME>_API_KEY` with `--name`) in the `.env` beside `config.yaml`, added with an editor |
 | `setup openclaw` | `openclaw mcp add … --transport streamable-http --no-probe`, or `openclaw mcp set` to replace an entry | `KAGURA_API_KEY=…` in `$OPENCLAW_STATE_DIR/.env` (default `~/.openclaw/.env`), added with an editor |
 
 `--api-key-env VAR` renames `KAGURA_API_KEY` for Codex and OpenClaw
@@ -316,6 +316,49 @@ harness's command line after `--url`. A configured `mcp_url` gets the same
 checks, and exits 1 saying to pass `--mcp-url`. `$OPENCLAW_STATE_DIR`,
 `$OPENCLAW_CONFIG_PATH` and `$OPENCLAW_WORKSPACE_DIR` are read as OpenClaw
 reads them: stripped, with a leading `~` expanded.
+
+**The OAuth URL form** (memory-cloud 0.77.0+). From 0.77.0 memory-cloud's
+dynamic client registration accepts the three harnesses' own OAuth clients
+on a loopback redirect
+([memory-cloud#1657](https://github.com/kagura-ai/memory-cloud/issues/1657)),
+so `--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>`
+writes a URL entry with no key, no header and no key variable: the harness
+registers its own client, signs in itself and keeps the token in its own
+store. Setup never sees the token, never runs a harness `login`, and never
+picks this form on its own. Before it reads, runs or writes anything, a
+real run sends one unauthenticated `GET /api/v1/system/info` to the
+`--mcp-url` server and stops (exit 1) unless it reports 0.77.0 or later; a
+version setup cannot read (no answer, not a 200, unparseable) stops it
+too. `--dry-run` sends no request. `--oauth` needs `--url-form` and
+`--mcp-url` and refuses `--api-key-env` (exit 2).
+
+```bash
+npx kagura-memory setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>
+```
+
+| | The entry | Written with | Sign in | The harness keeps the token in |
+|---|---|---|---|---|
+| Codex | `url` only (Codex's `auth` defaults to OAuth) | `codex mcp add <name> --url <url>`, which saves the entry and then starts Codex's browser sign-in, so setup runs it attached to your terminal (its output on stderr), only with a terminal on stdin and without `-y`; otherwise it prints the table and edits nothing (`--force`: the same add, which signs in again) | `codex mcp login <name>` (`--no-browser` when the browser cannot reach the callback) | the OS keyring (`Codex MCP Credentials`; on Windows, Codex's encrypted secrets store in `~/.codex`), else `~/.codex/.credentials.json` (`$CODEX_HOME`), keyed on the entry's URL |
+| Hermes Agent | `url` + `auth: oauth` | `hermes mcp add <name> --url <url> --auth oauth --connect-timeout 315`, attached, with a terminal and without `-y`: its probe runs the browser sign-in, which its default 30 s bound would cut short. Setup then reads the entry back with `hermes config get mcp_servers.<name> --json`: an entry Hermes kept, saved without `auth: oauth`, or saved disabled (`enabled: false`, after the sign-in did not finish) stops setup (exit 1) with the command that fixes it, and skips the `AGENTS.md` export | `hermes mcp login <name>` (the browser flow), or on memory-cloud 0.78.0+ `hermes mcp login <name> --flow device` (a code entered at the server's `/device` page; no loopback callback, [memory-cloud#1671](https://github.com/kagura-ai/memory-cloud/issues/1671)) | `~/.hermes/mcp-tokens/<name>.json` (`$HERMES_HOME`, or the active Hermes profile's) |
+| OpenClaw | `url`, `transport: "streamable-http"`, `auth: "oauth"` | `openclaw mcp add <name> --url <url> --transport streamable-http --auth oauth`, which saves an OAuth entry without probing (`--force`: `openclaw mcp set`) | `openclaw mcp login <name>` (`--code <code>` when the browser cannot reach the callback), then `openclaw mcp doctor <name> --probe` | its state database, `~/.openclaw/state/openclaw.sqlite` (`$OPENCLAW_STATE_DIR/state/`) |
+
+memory-cloud's consent screen shows the client name the harness sends,
+which nothing verifies: approve only a sign-in you started. For Codex,
+`-c` or `--guardrails` goes on the URL as `?guardrails=`; Codex keys its
+token on the URL, so changing it later means signing in again. With the
+plugin's hooks on, an `--oauth` entry does not get `?guardrails=off` (the
+hooks cannot read it), and setup says so. The `--guardrails` preview runs
+on this CLI's own credential when that is on the `--mcp-url` server;
+otherwise it names the stored profiles there and runs on the first, or,
+when there is none, names the `kagura-memory auth login --server` to run
+first. What Codex receives depends on the account it signed in with.
+
+What has been checked (python-sdk#284): on 2026-09-25 each harness signed
+in end to end on a `/mcp/w/<workspace-id>` URL against memory-cloud
+0.78.0, through entries the Python CLI's `setup … --url-form --oauth`
+wrote, and reached `tools/list`: Codex 0.157.0, Hermes Agent v2026.9.24
+(the browser sign-in and `hermes mcp login --flow device`) and OpenClaw
+2026.9.6. This bin writes the same entries with the same harness commands.
 
 This package has no TOML, YAML or JSON5 parser, so it never rewrites those
 files. When the harness's CLI is not on `PATH`, the block is printed on
@@ -540,25 +583,29 @@ with `--url-form` too.
 the Python CLI in these ways, each on purpose:
 
 - Every entry here is the URL form, so `--url-form` is accepted and
-  changes nothing, and `--mcp-url` falls back to the configured URL where
-  Python requires it. Only that fallback needs the configuration: without
+  changes nothing by itself (`--oauth` needs it, as in Python), and
+  `--mcp-url` falls back to the configured URL where Python requires it
+  (not with `--oauth`). Only that fallback needs the configuration: without
   `--mcp-url`, a `.kagura.json` that cannot be loaded stops setup (exit 1);
   with it, setup goes on with a note, as Python never reads that file.
 - `-c` must be a context UUID with `--url-form --profile` too (exit 2),
   where Python looks a name up through the profile.
-- `setup hermes` never runs `hermes mcp add`, which prompts; it prints the
-  block, as Python does under `-y`.
-- So nothing is read back with `hermes config get` either: the Python
-  CLI 0.41.1's stops after the add (an entry Hermes kept in place of the
-  one asked for, an entry saved disabled, which points to `hermes mcp
-  test`) and its warning for a URL entry saved without an `Authorization`
-  header cannot arise for the printed block.
+- `setup hermes` never runs `hermes mcp add` for the API-key form, which
+  prompts for the key; it prints the block, as Python does under `-y`.
+  With `--oauth` it runs it attached, as Python does.
+- So nothing is read back with `hermes config get` for that form either:
+  the Python CLI 0.41.1's stops after the add (an entry Hermes kept in
+  place of the one asked for, an entry saved disabled, which points to
+  `hermes mcp test`) and its warning for a URL entry saved without an
+  `Authorization` header cannot arise for the printed block.
 - An existing entry is found by scanning the file, and not described by
   kind. A readable but malformed `config.toml` does not stop
   `setup codex`.
 - On Codex, a `?guardrails=` already in the MCP URL (`--mcp-url` or the
   configured `mcp_url`) beats the hooks and `-c` defaults.
-- Nothing prompts, so `--agents-md` always needs a context, and the
+- Nothing prompts here (setup only hands the terminal to an `--oauth`
+  `codex mcp add` or `hermes mcp add`), so `--agents-md` always needs a
+  context, and the
   export is never offered: a dry run of Hermes or OpenClaw says "not
   offered: this port never prompts" (or "not offered with -y").
 - When the export credential is for another server, the message
@@ -569,6 +616,17 @@ the Python CLI in these ways, each on purpose:
 - Output is one JSON document on stdout, with Python's sentences in
   `notes` and the block on stderr. A non-ASCII URL is written as UTF-8
   where Python writes `\uXXXX` escapes; both are valid.
+- `--oauth`: a harness CLI run attached writes its output to stderr, so
+  stdout stays one JSON document. The server-check refusal ends "Use
+  --url-form with an API key instead (no --oauth).", where Python also
+  offers its stdio entry, which this bin cannot write. The Codex hooks
+  warning appears only when the plugin's hooks are on for the entry (this
+  bin does not read an existing entry's bearer), and setup does not ask
+  "Write the --oauth entry anyway?": it warns and goes on, as Python does
+  under `-y`. The `--guardrails` preview never names `--profile`, which is
+  inert here, and also names a `.kagura.json` that is JSON but not an
+  object, which every command of this bin refuses (Python's loader takes
+  one). Sentences Python wraps at 78 columns are one line here.
 
 Some small divergences run the other way: this CLI refuses what click
 would accept.

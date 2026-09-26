@@ -832,3 +832,56 @@ describe("setup hermes --oauth", () => {
     );
   });
 });
+
+describe.each([
+  ["codex", "codex mcp login NAME"],
+  ["hermes", "hermes mcp login NAME"],
+  ["openclaw", "openclaw mcp login NAME"],
+] as const)("setup %s --help", (name, login) => {
+  it("documents the OAuth form, its server floor and its login", async () => {
+    const h = oauthHarness();
+    expect(await runCli(["setup", name, "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n").replace(/\s+/g, " ");
+    expect(text).toContain("--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID");
+    expect(text).toContain("memory-cloud 0.77.0+");
+    expect(text).toContain("client registration");
+    expect(text).toContain(login);
+    expect(text).not.toContain("not verified");
+  });
+});
+
+describe("no key and no key marker reach an --oauth run", () => {
+  const KEY = "kagura_SECRET_api_key_value";
+  const MARKERS = ["Authorization", "bearer_token_env_var", "bearer-token-env-var", "${", "headers"];
+
+  it.each([
+    ["codex", "-y"],
+    ["codex", "tty"],
+    ["hermes", "-y"],
+    ["hermes", "tty"],
+    ["openclaw", "-y"],
+  ] as const)("setup %s (%s)", async (name, mode) => {
+    process.env.KAGURA_API_KEY = KEY;
+    const fake = new FakeHermes();
+    const h = oauthHarness({
+      onPath: { [name]: `/usr/bin/${name}` },
+      tty: mode === "tty",
+      exec: fake.exec,
+      attached: fake.attached,
+      auth: ON_SERVER,
+    });
+    const flags = mode === "-y" ? ["-y"] : [];
+    expect(
+      await runCli(["setup", name, "--api-key", KEY, ...OAUTH, "--context-id", CONTEXT, "--agents-md", ...flags], h.deps),
+    ).toBe(0);
+    const output = [...h.out, ...h.err].join("\n");
+    const argvs = [...h.runs, ...h.attached].map((a) => a.join(" "));
+    expect(output).not.toContain(KEY);
+    expect(argvs.join("\n")).not.toContain(KEY);
+    for (const file of filesUnder(sandbox)) expect(fs.readFileSync(file, "utf-8")).not.toContain(KEY);
+    for (const marker of MARKERS) {
+      expect(output).not.toContain(marker);
+      for (const argv of argvs) expect(argv).not.toContain(marker);
+    }
+  });
+});

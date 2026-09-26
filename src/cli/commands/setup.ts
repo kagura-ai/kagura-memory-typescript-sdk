@@ -3189,6 +3189,15 @@ const codex: Command = {
     "  the context's export block into ~/.codex/AGENTS.md, fetched with the\n" +
     "  usual credential (KAGURA_API_KEY, the OAuth profile, .kagura.json),\n" +
     "  which must be for the entry's server.\n\n" +
+    "  With --url-form --oauth (memory-cloud 0.77.0+, whose client registration\n" +
+    "  accepts Codex; setup checks the version first), the entry is a bare URL\n" +
+    "  and Codex then signs in itself: `codex mcp add` starts the browser\n" +
+    "  sign-in, so setup runs it attached to this terminal (its output on\n" +
+    "  stderr) only with a terminal on stdin and without -y, and otherwise\n" +
+    "  prints the table for you to add and sign in with `codex mcp login\n" +
+    "  NAME`. Codex keeps the token in its own store, keyed on the URL. The\n" +
+    "  API-key URL form stays the default.\n\n" +
+    "  kagura-memory setup codex --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID\n\n" +
     `${MCP_URL_RULE}\n\n` +
     GUARDRAILS_ADVICE +
     "\n\n" +
@@ -3249,6 +3258,19 @@ const hermes: Command = {
     "  only Cursor rules, name a file with --agents-md PATH. --guardrails off\n" +
     "  is refused, and a context id, from the flag or the URL, is not written;\n" +
     "  a first ?guardrails=off in the URL is kept, alone, with a warning.\n\n" +
+    "  With --url-form --oauth (memory-cloud 0.77.0+, whose client registration\n" +
+    "  accepts Hermes Agent; setup checks the version first), the entry is a\n" +
+    "  URL with `auth: oauth`. With a terminal on stdin and without -y, setup\n" +
+    "  runs `hermes mcp add NAME --url URL --auth oauth --connect-timeout 315`\n" +
+    "  attached to this terminal (its output on stderr): Hermes signs in when\n" +
+    "  it probes the server, within the bound `hermes mcp login` uses, which\n" +
+    "  it keeps as the entry's connect_timeout. Setup then reads the entry\n" +
+    "  back with `hermes config get` and stops (exit 1) when Hermes kept\n" +
+    "  another entry, saved one without auth: oauth, or saved it disabled.\n" +
+    "  Otherwise it prints the block. Sign in later with `hermes mcp login\n" +
+    "  NAME` (the browser flow), or on memory-cloud 0.78.0+ with `hermes mcp\n" +
+    "  login NAME --flow device`, which needs no loopback callback.\n\n" +
+    "  kagura-memory setup hermes --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID\n\n" +
     MCP_URL_RULE +
     "\n\n" +
     examples(
@@ -3303,6 +3325,13 @@ const openclaw: Command = {
     "  --guardrails off is refused, and a context id, from the flag or the\n" +
     "  URL, is not written; a first ?guardrails=off in the URL is kept, alone,\n" +
     "  with a warning.\n\n" +
+    "  With --url-form --oauth (memory-cloud 0.77.0+, whose client registration\n" +
+    "  accepts OpenClaw; setup checks the version first), the entry is a URL\n" +
+    '  with `auth: "oauth"` and no header, which OpenClaw saves without\n' +
+    "  probing: sign in with `openclaw mcp login NAME`, then check it with\n" +
+    "  `openclaw mcp doctor NAME --probe`. The API-key URL form stays the\n" +
+    "  default.\n\n" +
+    "  kagura-memory setup openclaw --url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/WS_ID\n\n" +
     MCP_URL_RULE +
     "\n\n" +
     examples(

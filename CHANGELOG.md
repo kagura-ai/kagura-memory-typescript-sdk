@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`setup codex|hermes|openclaw --url-form --oauth --mcp-url URL`**
+  (memory-cloud v0.77.0+; the Python SDK 0.41.0's harness OAuth URL form,
+  python-sdk#282, verified end to end in 0.41.2, #284): an entry with no
+  key, no header and no key variable, which the harness signs in to
+  itself. Setup first sends one unauthenticated `GET /api/v1/system/info`
+  and stops (exit 1), having run and written nothing, when the server is
+  older than 0.77.0 or its version cannot be confirmed; `--dry-run` sends
+  no request. `--oauth` needs `--url-form` and `--mcp-url` and refuses
+  `--api-key-env` (exit 2). Codex: `codex mcp add NAME --url URL` runs
+  attached (it signs in) only with a terminal and without `-y`, else the
+  table is printed with `codex mcp login NAME`. Hermes:
+  `hermes mcp add NAME --url URL --auth oauth --connect-timeout 315`,
+  then the entry is read back with `hermes config get`, and a kept entry,
+  one without `auth: oauth`, or one saved disabled stops setup with the
+  command that fixes it (`hermes mcp login NAME [--flow device]`,
+  `hermes config set mcp_servers.NAME.enabled true`). OpenClaw:
+  `openclaw mcp add NAME … --auth oauth` (`mcp set` with `--force`), then
+  `openclaw mcp login NAME` and `openclaw mcp doctor NAME --probe`. A
+  sign-in note replaces the key note; setup never runs the login or sees
+  the token.
 - **`update-memory --details` and `--location`**, as the Python CLI 0.42.0
   takes them (python-sdk #247): the same JSON object and `lat,lon[,label]`
   shorthand as `remember`, with the same usage errors, sent as `details`.
