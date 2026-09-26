@@ -31,6 +31,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Python CLI 0.42.0 does (python-sdk #277): `Server answered, but the
   SDK could not read /api/v1/system/info: …`, with the failing fields,
   where it said `Server unreachable: Invalid response format: …`.
+- **`getServerInfo`, `checkServerVersion`, `getEmbeddingStatus`,
+  `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`** check a
+  2xx body against the Python SDK's model and throw `KaguraResponseError`
+  (`operation` `KaguraClient.<method>`, `KaguraClient.get_server_info` for
+  `checkServerVersion`) when it does not match, naming the fields and never
+  their values, as the Python SDK 0.42.0 does (python-sdk #277). They used
+  to return such a body unchecked. The body they return is still the one
+  the server sent. A network failure, a body that is not JSON and a non-2xx
+  status other than 401/429 still throw `KaguraConnectionError`.
+  `checkServerVersion` now throws on a version that is not a string, as
+  Python does, where it returned the body without comparing.
 
 ## [0.13.0] - 2026-09-25
 

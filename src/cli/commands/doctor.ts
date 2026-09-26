@@ -26,7 +26,6 @@ import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import type { ServerInfo } from "../../models.js";
-import { readModel, SERVER_INFO } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
 import { meetsMinimum, requireVersion } from "../../versionCheck.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
@@ -455,10 +454,10 @@ function serverUnreadable(e: KaguraResponseError): DoctorCheck {
  * `checkServerVersion`'s, from the same comparison, so the two cannot
  * disagree.
  *
- * The body is read as Python's `get_server_info` reads it, through its
- * `ServerInfo` model. One the model refuses fails as Python 0.42.0's
- * doctor fails it (python-sdk #277): the server answered, so it is "could
- * not read", not "unreachable". A credential that does not
+ * The client reads the body through Python's `ServerInfo` model, as
+ * Python's `get_server_info` does. One the model refuses fails as Python
+ * 0.42.0's doctor fails it (python-sdk #277): the server answered, so it
+ * is "could not read", not "unreachable". A credential that does not
  * resolve fails the auth section, as Python's `_check_auth` reports it,
  * and skips this check, as Python's doctor has no client to check with.
  *
@@ -487,7 +486,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     }
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
-  let info: unknown;
+  let info: ServerInfo;
   try {
     info = await client.getServerInfo();
   } catch (e) {
@@ -507,13 +506,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     await client.close();
   }
 
-  try {
-    readModel(info, SERVER_INFO, "KaguraClient.get_server_info");
-  } catch (e) {
-    if (!(e instanceof KaguraResponseError)) throw e;
-    return [serverUnreadable(e)];
-  }
-  const version: unknown = (info as ServerInfo).version;
+  const version: unknown = info.version;
   warnBelowMinimum(version);
 
   const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];

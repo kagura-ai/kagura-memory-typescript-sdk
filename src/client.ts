@@ -61,6 +61,15 @@ import type {
   UsageInfo,
 } from "./models.js";
 import { pathSegment } from "./pathSegment.js";
+import {
+  DUPLICATES_RESPONSE,
+  EMBEDDING_MODELS_RESPONSE,
+  EMBEDDING_STATUS,
+  MEMORY_STATS_RESPONSE,
+  readModel,
+  SERVER_INFO,
+  type Model,
+} from "./pyModels.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
 import { pyRepr, pyTypeName } from "./python.js";
 import {
@@ -1080,6 +1089,24 @@ export class KaguraClient {
     } catch (e) {
       throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, { cause: e });
     }
+  }
+
+  /**
+   * {@link restGet}, then the body checked against the Python SDK's model
+   * for it, as its `_rest_get` parses it (python-sdk #277): a 2xx body the
+   * model refuses throws {@link KaguraResponseError} with `operation`
+   * (`KaguraClient.<method>`) and the failing fields, never their values.
+   * The body is returned as the server sent it: checked, not converted.
+   */
+  private async restGetChecked<T>(
+    path: string,
+    model: Model,
+    operation: string,
+    params?: Record<string, unknown>,
+  ): Promise<T> {
+    const body = await this.restGet<unknown>(path, params);
+    readModel(body, model, operation);
+    return body as T;
   }
 
   /**
@@ -2601,34 +2628,52 @@ export class KaguraClient {
   /**
    * Get server name, version, environment, feature flags, and (server
    * v0.69.0+) the reranker defaults new contexts start with.
+   *
+   * @throws KaguraResponseError when the body is not a `ServerInfo` as the
+   *   Python SDK reads it (operation `KaguraClient.get_server_info`).
    */
   async getServerInfo(): Promise<ServerInfo> {
-    return this.restGet<ServerInfo>("/api/v1/system/info");
+    return this.restGetChecked<ServerInfo>("/api/v1/system/info", SERVER_INFO, "KaguraClient.get_server_info");
   }
 
   /**
    * Check the connected server's version against the SDK's tested
-   * minimum. Advisory only — logs a warning, never throws on mismatch.
+   * minimum. Advisory only: logs a warning and never throws on an old
+   * version.
    *
    * A `v` prefix, build metadata and pre-release suffixes are read, so
    * `"v0.74.0"` and `"0.75.0-rc1"` (a pre-release of the minimum) both
    * warn. A version with no `MAJOR.MINOR.PATCH` at its start, such as
-   * `"0.75"` or `"main-abc123"`, or one that is not a string, cannot be
-   * compared and does not warn. The Python SDK reads it the same way.
+   * `"0.75"` or `"main-abc123"`, cannot be compared and does not warn. The
+   * Python SDK reads it the same way.
+   *
+   * @throws KaguraResponseError, as {@link getServerInfo} does, when the
+   *   body is not a `ServerInfo` (a version that is not a string included).
    */
   async checkServerVersion(): Promise<ServerInfo> {
     const info = await this.getServerInfo();
-    // A body that is no object has no version to compare, not a TypeError.
-    warnBelowMinimum(typeof info === "object" && info !== null ? info.version : undefined);
+    warnBelowMinimum(info.version);
     return info;
   }
 
-  /** Get embedding queue status for the workspace. */
+  /**
+   * Get embedding queue status for the workspace.
+   *
+   * @throws KaguraResponseError on a body the Python SDK's model refuses.
+   */
   async getEmbeddingStatus(): Promise<EmbeddingStatus> {
-    return this.restGet<EmbeddingStatus>("/api/v1/workspace/embedding-status");
+    return this.restGetChecked<EmbeddingStatus>(
+      "/api/v1/workspace/embedding-status",
+      EMBEDDING_STATUS,
+      "KaguraClient.get_embedding_status",
+    );
   }
 
-  /** Get per-memory usage statistics for a context. */
+  /**
+   * Get per-memory usage statistics for a context.
+   *
+   * @throws KaguraResponseError on a body the Python SDK's model refuses.
+   */
   async getMemoryStats(options: {
     contextId: string;
     /**
@@ -2643,8 +2688,10 @@ export class KaguraClient {
     limit?: number;
     offset?: number;
   }): Promise<MemoryStatsResponse> {
-    return this.restGet<MemoryStatsResponse>(
+    return this.restGetChecked<MemoryStatsResponse>(
       `/api/v1/contexts/${contextSegment(options.contextId)}/memory-stats`,
+      MEMORY_STATS_RESPONSE,
+      "KaguraClient.get_memory_stats",
       {
         sort_by: options.sortBy ?? "access_count",
         sort_order: options.sortOrder ?? "desc",
@@ -2654,7 +2701,11 @@ export class KaguraClient {
     );
   }
 
-  /** Find duplicate memory pairs in a context. */
+  /**
+   * Find duplicate memory pairs in a context.
+   *
+   * @throws KaguraResponseError on a body the Python SDK's model refuses.
+   */
   async findDuplicates(options: {
     contextId: string;
     /** Similarity threshold (0.5-1.0, default 0.90). */
@@ -2662,10 +2713,12 @@ export class KaguraClient {
     /** Maximum pairs (1-200, default 50). */
     limit?: number;
   }): Promise<DuplicatesResponse> {
-    return this.restGet<DuplicatesResponse>(`/api/v1/contexts/${contextSegment(options.contextId)}/duplicates`, {
-      threshold: options.threshold ?? 0.9,
-      limit: options.limit ?? 50,
-    });
+    return this.restGetChecked<DuplicatesResponse>(
+      `/api/v1/contexts/${contextSegment(options.contextId)}/duplicates`,
+      DUPLICATES_RESPONSE,
+      "KaguraClient.find_duplicates",
+      { threshold: options.threshold ?? 0.9, limit: options.limit ?? 50 },
+    );
   }
 
   /**
@@ -2807,9 +2860,17 @@ export class KaguraClient {
     return result as unknown as RollbackResult;
   }
 
-  /** List available embedding models with provider info and availability. */
+  /**
+   * List available embedding models with provider info and availability.
+   *
+   * @throws KaguraResponseError on a body the Python SDK's model refuses.
+   */
   async listEmbeddingModels(): Promise<EmbeddingModelsResponse> {
-    return this.restGet<EmbeddingModelsResponse>("/api/v1/system/embedding/models");
+    return this.restGetChecked<EmbeddingModelsResponse>(
+      "/api/v1/system/embedding/models",
+      EMBEDDING_MODELS_RESPONSE,
+      "KaguraClient.list_embedding_models",
+    );
   }
 
   /** Release resources. (fetch has no persistent connection to close; kept for API parity.) */
