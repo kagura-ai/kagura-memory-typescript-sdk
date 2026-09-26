@@ -30,7 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { KaguraAuthExpiredError } from "../errors.js";
-import { pyStr } from "../python.js";
+import { pyStr, pyTruthy } from "../python.js";
 import { refreshAccessToken } from "./deviceFlow.js";
 import { withFileLock } from "./filelock.js";
 import type { AuthProvider } from "./types.js";
@@ -164,13 +164,6 @@ function requirePresent(d: Record<string, unknown>, key: string): unknown {
     throw new Error(`credentials profile missing required field '${key}'`);
   }
   return d[key];
-}
-
-/** Python's truthiness of a JSON value. */
-function pyTruthy(value: unknown): boolean {
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "object" && value !== null) return Object.keys(value).length > 0;
-  return Boolean(value);
 }
 
 function stringOr(value: unknown, fallback: string): string {
