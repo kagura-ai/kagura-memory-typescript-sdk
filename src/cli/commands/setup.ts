@@ -1589,8 +1589,8 @@ function parseKeyEnv(raw: string | undefined, harness: HarnessName, name: string
 
 /**
  * Read `--agents-md`: undefined when absent, `""` for the harness's
- * default file, else the path. A path of only whitespace is refused,
- * where Python takes it and creates a file named `" "`.
+ * default file, else the path. A path of only whitespace is refused in
+ * the words of Python's `_agents_md_option` (0.41.1+, python-sdk #285).
  */
 function parseAgentsMd(raw: string | undefined): string | undefined {
   if (raw === undefined || raw === "") return raw;
@@ -1748,7 +1748,9 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
  * `input.notes`; a dry run sends no request and says so instead.
  *
  * @throws CliError (exit 1) when the server is older than 0.77.0 or its
- *   version cannot be confirmed; nothing has been read, run or written.
+ *   version cannot be confirmed; nothing has been detected, run or written
+ *   (`.kagura.json` has been read by then, for the context fallback and
+ *   the export credential, as in Python).
  */
 async function checkOauthServerFirst(deps: CliDeps, input: HarnessInput): Promise<void> {
   if (!input.oauth) return;

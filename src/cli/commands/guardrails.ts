@@ -169,8 +169,10 @@ const digest: Command = {
     ],
   },
   run: async (deps, args) => {
-    // Option conversions first, in declaration order, then extra
-    // arguments, then the combination checks: click's order.
+    // Option conversions first, then extra arguments, then the
+    // combination checks, as click orders them. The conversions run in
+    // declaration order, where click converts options as they come on
+    // argv, so with two bad options the one named can differ.
     const rawTarget = args.values.target;
     const target = rawTarget === undefined ? "export" : parseChoice(TARGET, rawTarget, TARGETS);
     const rawOut = args.values.out;

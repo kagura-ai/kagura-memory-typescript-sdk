@@ -78,8 +78,9 @@ import type { FlagSpec } from "../parseArgs.js";
  * canonical form, as Python's `_run_workspace_command` does from 0.41.1
  * (python-sdk #285).
  *
- * @param question The confirmation to ask, given the workspace as
- *   resolved; none for a command that does not ask, or under `--yes`.
+ * @param question The confirmation to ask, given the workspace in
+ *   canonical form; none for a command that does not ask, or under
+ *   `--yes`.
  */
 async function runWorkspaceCommand(
   deps: CommandDeps,
