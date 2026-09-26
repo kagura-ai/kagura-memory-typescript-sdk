@@ -834,11 +834,22 @@ describe("setup hermes --oauth", () => {
 });
 
 describe.each([
-  ["codex", "codex mcp login NAME"],
-  ["hermes", "hermes mcp login NAME"],
-  ["openclaw", "openclaw mcp login NAME"],
-] as const)("setup %s --help", (name, login) => {
-  it("documents the OAuth form, its server floor and its login", async () => {
+  [
+    "codex",
+    "codex mcp login NAME",
+    "Codex keeps the token in its own store, keyed on the URL.",
+    // The two flag-help sentences the Python CLI 0.42.0 --help carries.
+    ["Not with --oauth.", "With --oauth, changing it later means `codex mcp login` again."],
+  ],
+  [
+    "hermes",
+    "hermes mcp login NAME",
+    "Setup then reads the entry back with `hermes config get`",
+    ["With -y or without a terminal, it prints the block instead.", "The API-key URL form stays the default."],
+  ],
+  ["openclaw", "openclaw mcp login NAME", "which OpenClaw saves without probing", ["Not with --oauth."]],
+] as const)("setup %s --help", (name, login, paragraph, sentences) => {
+  it("documents the OAuth form, its server floor and its login, in its own paragraph", async () => {
     const h = oauthHarness();
     expect(await runCli(["setup", name, "--help"], h.deps)).toBe(0);
     const text = h.out.join("\n").replace(/\s+/g, " ");
@@ -846,7 +857,11 @@ describe.each([
     expect(text).toContain("memory-cloud 0.77.0+");
     expect(text).toContain("client registration");
     expect(text).toContain(login);
+    expect(text).toContain(paragraph);
+    for (const sentence of sentences) expect(text).toContain(sentence);
     expect(text).not.toContain("not verified");
+    // The Hermes opener's "never prompts" is true of the API-key form only.
+    if (name === "hermes") expect(text).toContain("for the API-key form, changes nothing there");
   });
 });
 

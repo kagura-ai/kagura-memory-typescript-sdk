@@ -239,7 +239,8 @@ const CODEX_GUARDRAILS: FlagSpec = {
     "carry that context's tool guardrail digest. Defaults to --context-id, or to 'off' while the " +
     "kagura-memory plugin's guardrail hooks are on, unless the MCP URL (--mcp-url or the " +
     "configured mcp_url) already sets it. Use a context whose editor list you control. 'off' " +
-    "also removes the guardrails block from get_context_info.",
+    "also removes the guardrails block from get_context_info. With --oauth, changing it later means " +
+    "`codex mcp login` again.",
 };
 /**
  * Hermes and OpenClaw take the flag so a script can pass it to every
@@ -3224,7 +3225,7 @@ const codex: Command = {
       ...HARNESS_TAIL,
       apiKeyEnv(
         "The variable Codex reads the API key from (bearer_token_env_var; default KAGURA_API_KEY, " +
-          "which every kagura-memory command also ranks above OAuth profiles)",
+          "which every kagura-memory command also ranks above OAuth profiles). Not with --oauth.",
       ),
       oauthFlag(
         "With --url-form: a URL entry with no key. memory-cloud 0.77.0+ (setup checks first) accepts Codex's client " +
@@ -3244,9 +3245,10 @@ const hermes: Command = {
     "  Prints the mcp_servers block and the config.yaml to add it to\n" +
     "  ($HERMES_HOME, or the active Hermes profile's:\n" +
     "  ~/.hermes/profiles/<name> when ~/.hermes/active_profile names one,\n" +
-    "  else ~/.hermes), and changes nothing there: `hermes mcp add` is\n" +
-    "  interactive and this port never prompts. When config.yaml already has\n" +
-    "  an mcp_servers key, the entry alone is printed, to go under it. The\n" +
+    "  else ~/.hermes) and, for the API-key form, changes nothing there:\n" +
+    "  `hermes mcp add` asks for the key, and this port never prompts. When\n" +
+    "  config.yaml already has an mcp_servers key, the entry alone is\n" +
+    "  printed, to go under it. The\n" +
     "  entry reads the API key from MCP_<NAME>_API_KEY (MCP_KAGURA_MEMORY_API_KEY\n" +
     "  by default), the variable `hermes mcp add` derives from --name, in the\n" +
     "  .env beside config.yaml: add the key there yourself; setup never sees\n" +
@@ -3269,9 +3271,10 @@ const hermes: Command = {
     "  it keeps as the entry's connect_timeout. Setup then reads the entry\n" +
     "  back with `hermes config get` and stops (exit 1) when Hermes kept\n" +
     "  another entry, saved one without auth: oauth, or saved it disabled.\n" +
-    "  Otherwise it prints the block. Sign in later with `hermes mcp login\n" +
-    "  NAME` (the browser flow), or on memory-cloud 0.78.0+ with `hermes mcp\n" +
-    "  login NAME --flow device`, which needs no loopback callback.\n\n" +
+    "  With -y or without a terminal, it prints the block instead. Sign in\n" +
+    "  later with `hermes mcp login NAME` (the browser flow), or on\n" +
+    "  memory-cloud 0.78.0+ with `hermes mcp login NAME --flow device`, which\n" +
+    "  needs no loopback callback. The API-key URL form stays the default.\n\n" +
     MCP_URL_RULE +
     "\n\n" +
     examples(
@@ -3356,7 +3359,7 @@ const openclaw: Command = {
       ...HARNESS_TAIL,
       apiKeyEnv(
         "The variable the Authorization header references, kept in OpenClaw's .env " +
-          "($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY)",
+          "($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY). Not with --oauth.",
       ),
       oauthFlag(
         "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ (setup checks first) " +
