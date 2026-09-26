@@ -66,6 +66,8 @@ import {
   normalizeUrl,
   openclawBlock,
   openclawEntry,
+  openclawOauthBlock,
+  openclawOauthEntry,
   pluginServerUrl,
   queryParam,
   shellCommand,
@@ -76,6 +78,7 @@ import {
   yamlServersIndent,
   yamlServersInline,
 } from "./harnessConfig.js";
+import { checkOauthServer, oauthLoginNote } from "./harnessOauth.js";
 
 /**
  * The entry's name on every harness. The Codex plugin's hooks look it up
@@ -184,15 +187,28 @@ const URL_FORM: FlagSpec = {
   name: "url-form",
   type: "switch",
   help:
-    "Accepted for compatibility; every entry this port writes is the URL form, which sends a " +
-    "long-lived API key from an environment variable",
+    "Every entry this port writes is the URL form, so this changes nothing alone; --oauth needs it. The entry " +
+    "sends a long-lived API key from an environment variable, which setup never sees; with --oauth it holds no " +
+    "key, and the harness signs in itself.",
 };
 const HARNESS_MCP_URL: FlagSpec = {
   ...MCP_URL,
   help:
-    "The MCP URL your API key works with (…/mcp/w/<workspace>); default: the configured " +
-    `mcp_url, else ${DEFAULT_MCP_URL}`,
+    "The MCP URL your API key works with, or that the harness signs in to with --oauth (…/mcp/w/<workspace>); " +
+    `default: the configured mcp_url, else ${DEFAULT_MCP_URL} (--oauth needs it given)`,
 };
+/** Python's `--oauth`, worded per harness (`_HARNESS_OAUTH_HELP`). */
+function oauthFlag(help: string): FlagSpec {
+  return { name: "oauth", type: "switch", help };
+}
+
+/** Python's two `--oauth` usage errors (`_check_flags`). */
+const OAUTH_NEEDS_URL =
+  "--oauth needs --url-form and --mcp-url: the URL the harness signs in to, e.g. " +
+  "--url-form --oauth --mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>.";
+const OAUTH_EXCLUDES_KEY_ENV =
+  "--oauth and --api-key-env exclude each other: an --oauth entry has no key variable, since the harness signs " +
+  "in itself.";
 const INERT_API_KEY: FlagSpec = {
   ...API_KEY,
   help: "Accepted for compatibility; not stored or used: the entry reads the key from an environment variable",
@@ -1494,6 +1510,12 @@ interface HarnessInput {
   config: KaguraConfig | null;
   /** The variable the entry reads the key from. */
   keyEnv: string;
+  /**
+   * `--oauth`: the entry holds no key and the harness signs in itself
+   * (python-sdk#282). Implies `--url-form` and `--mcp-url`, so `baseUrl`
+   * is the flag's URL.
+   */
+  oauth: boolean;
   /** Every key this process knows of ({@link knownKeys}), cut out of whatever a harness CLI prints. */
   secrets: string[];
   force: boolean;
@@ -1603,6 +1625,9 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
   // harness might keep.
   const rawUrl = args.values["mcp-url"];
   const urlArg = rawUrl === undefined ? undefined : normalizeUrl(rawUrl);
+  const oauth = args.flags.has("oauth");
+  if (oauth && (!args.flags.has("url-form") || !urlArg)) throw new CliUsageError(OAUTH_NEEDS_URL);
+  if (oauth && args.values["api-key-env"] !== undefined) throw new CliUsageError(OAUTH_EXCLUDES_KEY_ENV);
   if (urlArg !== undefined) requireMcpUrl(urlArg, true);
   const keyEnv = parseKeyEnv(args.values["api-key-env"], harness, name);
   refuseProfileWithKey(args);
@@ -1655,8 +1680,10 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
   const apiKey = args.values["api-key"];
   if (apiKey !== undefined) {
     notes.push(
-      `Note: --api-key is not stored or used: the ${label} entry reads the key from $${keyEnv}, ` +
-        "and setup never handles the key.",
+      oauth
+        ? `Note: --api-key is not stored or used: the ${label} entry holds no key, since ${label} signs in itself.`
+        : `Note: --api-key is not stored or used: the ${label} entry reads the key from $${keyEnv}, ` +
+            "and setup never handles the key.",
     );
   }
   if (args.values["project-dir"] !== undefined) {
@@ -1690,12 +1717,34 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
     exportContext: flagContext ?? (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
     config,
     keyEnv,
+    oauth,
     secrets: knownKeys(apiKey, config?.api_key, process.env[keyEnv]),
     force: args.flags.has("force"),
     dryRun: args.flags.has("dry-run"),
     nonInteractive: args.flags.has("non-interactive"),
     notes,
   };
+}
+
+/**
+ * With `--oauth`, the server check before anything else runs — Python's
+ * `_check_oauth_server`, called before detection. The note goes on
+ * `input.notes`; a dry run sends no request and says so instead.
+ *
+ * @throws CliError (exit 1) when the server is older than 0.77.0 or its
+ *   version cannot be confirmed; nothing has been read, run or written.
+ */
+async function checkOauthServerFirst(deps: CliDeps, input: HarnessInput): Promise<void> {
+  if (!input.oauth) return;
+  const server = deployment(input.baseUrl);
+  if (input.dryRun) {
+    input.notes.push(
+      `The real run first checks that ${server} runs memory-cloud 0.77.0+ (GET /api/v1/system/info); this dry ` +
+        "run sends no request.",
+    );
+    return;
+  }
+  input.notes.push(await checkOauthServer({ title: LABEL[input.harness], deployment: server, fetch: deps.fetch }));
 }
 
 // --- the AGENTS.md export (--agents-md) -----------------------------------
@@ -2333,6 +2382,9 @@ function codexDigestNotes(context: string, url: string, keyEnv: string): string[
 
 async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "codex");
+  await checkOauthServerFirst(deps, input);
+  // Tasks 4 (Codex) and 6 (Hermes) of the --oauth plan replace this line.
+  if (input.oauth) throw new CliError(`--oauth is not wired for ${LABEL[input.harness]} yet.`);
   const { name, keyEnv } = input;
   const home = codexHome();
   const configPath = pathlibJoin(home, "config.toml");
@@ -2494,6 +2546,9 @@ function readHermesConfig(target: string): { text: string; unread: string | null
 
 async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "hermes");
+  await checkOauthServerFirst(deps, input);
+  // Tasks 4 (Codex) and 6 (Hermes) of the --oauth plan replace this line.
+  if (input.oauth) throw new CliError(`--oauth is not wired for ${LABEL[input.harness]} yet.`);
   const { name, keyEnv } = input;
   const home = hermesHome();
   const configPath = pathlibJoin(home, "config.yaml");
@@ -2578,6 +2633,7 @@ function openclawWorkspaceDir(): string {
 
 async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "openclaw");
+  await checkOauthServerFirst(deps, input);
   const { name, keyEnv } = input;
   const stateDir = openclawStateDir();
   const configPath = openclawEnvPath("OPENCLAW_CONFIG_PATH") ?? pathlibJoin(stateDir, "openclaw.json");
@@ -2587,10 +2643,15 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
 
   // `add` refuses a name that exists, so replacing one goes through `set`,
   // as in Python; so does any --force run, since the scan could miss an
-  // entry OpenClaw has, and `set` adds one too. --no-probe: the key is not
-  // in the .env yet.
-  const argv =
-    found || input.force
+  // entry OpenClaw has. An --oauth entry is never probed by `add` (it waits
+  // for `openclaw mcp login`); the API-key form skips the probe with
+  // --no-probe, since the key is not in the .env yet.
+  const replace = found || input.force;
+  const argv = input.oauth
+    ? replace
+      ? ["mcp", "set", name, JSON.stringify(openclawOauthEntry(url))]
+      : ["mcp", "add", name, "--url", url, "--transport", "streamable-http", "--auth", "oauth"]
+    : replace
       ? ["mcp", "set", name, JSON.stringify(openclawEntry(url, keyEnv))]
       : [
           "mcp",
@@ -2606,13 +2667,25 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
         ];
 
   const openclaw = deps.which("openclaw");
+  const keyNote = input.oauth
+    ? oauthLoginNote(
+        "openclaw",
+        name,
+        openclaw !== null,
+        `its state database (${pathLabel(pathlibJoin(stateDir, "state", "openclaw.sqlite"))})`,
+      )
+    : // The .env is in the state directory, even when OPENCLAW_CONFIG_PATH
+      // puts the config elsewhere.
+      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(stateDir, ".env"))} with an editor: ` +
+      `the entry sends \${${keyEnv}} (mcp.servers headers take no SecretRef), and setup never sees ` +
+      "the key.";
   return applyPlan(deps, {
     input,
     url,
     configPath,
     found,
     stops: openclaw !== null,
-    block: openclawBlock(name, url, keyEnv),
+    block: input.oauth ? openclawOauthBlock(name, url) : openclawBlock(name, url, keyEnv),
     blockTarget: "it",
     cli:
       openclaw === null
@@ -2620,11 +2693,7 @@ async function runOpenclaw(deps: CliDeps, args: ParsedArgs): Promise<number> {
         : { program: "openclaw", file: openclaw, argv },
     notes,
     after: [
-      // The .env is in the state directory, even when OPENCLAW_CONFIG_PATH
-      // puts the config elsewhere.
-      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(stateDir, ".env"))} with an editor: ` +
-        `the entry sends \${${keyEnv}} (mcp.servers headers take no SecretRef), and setup never sees ` +
-        "the key.",
+      keyNote,
       "The Gateway hot-reloads the file. MCP tools appear in OpenClaw's coding and messaging tool " +
         "profiles, not in minimal.",
       `Check it with: ${shellCommand(["openclaw", "mcp", "doctor", name, "--probe"])}`,
@@ -2723,6 +2792,12 @@ const codex: Command = {
         "The variable Codex reads the API key from (bearer_token_env_var; default KAGURA_API_KEY, " +
           "which every kagura-memory command also ranks above OAuth profiles)",
       ),
+      oauthFlag(
+        "With --url-form: a URL entry with no key. memory-cloud 0.77.0+ (setup checks first) accepts Codex's client " +
+          "registration, and Codex then signs in itself: `codex mcp add` starts the browser sign-in, so it runs only " +
+          "with a terminal and without -y; otherwise setup prints the table, and you sign in with `codex mcp login " +
+          "NAME` (--no-browser when the browser cannot reach Codex's loopback callback).",
+      ),
       ...HARNESS_END,
     ],
   },
@@ -2773,6 +2848,12 @@ const hermes: Command = {
       ),
       ...HARNESS_TAIL,
       apiKeyEnv("Not accepted: Hermes names the variable MCP_<NAME>_API_KEY"),
+      oauthFlag(
+        "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ (setup checks first) " +
+          "accepts Hermes's client registration, and Hermes then signs in itself when `hermes mcp add` probes it " +
+          "(given --connect-timeout 315, which Hermes keeps), or later with `hermes mcp login NAME`; on memory-cloud " +
+          "0.78.0+, `hermes mcp login NAME --flow device` signs in with a code and needs no loopback callback.",
+      ),
       ...HARNESS_END,
     ],
   },
@@ -2822,6 +2903,11 @@ const openclaw: Command = {
       apiKeyEnv(
         "The variable the Authorization header references, kept in OpenClaw's .env " +
           "($OPENCLAW_STATE_DIR, else ~/.openclaw; default KAGURA_API_KEY)",
+      ),
+      oauthFlag(
+        "With --url-form: a URL entry with `auth: oauth` and no key. memory-cloud 0.77.0+ (setup checks first) " +
+          "accepts OpenClaw's client registration. OpenClaw saves the entry without probing; sign in with `openclaw " +
+          "mcp login NAME`, then run `openclaw mcp doctor NAME --probe`.",
       ),
       ...HARNESS_END,
     ],
