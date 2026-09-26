@@ -513,6 +513,7 @@ describe("the workspace a command targets", () => {
       ["workspace", "member", "list"],
       ["auth", "list-keys", "-u", "google_2"],
       ["auth", "create-key", "-u", "google_2", "-n", "ci", "--expires-days", "90"],
+      ["auth", "revoke-key", "42", "-u", "google_2", "--yes"],
     ]) {
       const h = harness({ config: { api_key: "k", context_id: value } as unknown as KaguraConfig });
       expect(await runCli(argv, h.deps), argv.join(" ")).toBe(1);
