@@ -388,6 +388,12 @@ describe("an untyped mapping read by parseJsonLossless prints as Python read it 
     expect(formatDumpsJson(parseJsonLossless('{"b": 1, "2": 2}'))).toBe('{\n  "b": 1,\n  "2": 2\n}');
   });
 
+  it("prints a duplicate key once, at its first place with its last value, as a Python dict holds it", () => {
+    const read = readModel(parseJsonLossless('{"d": {"a": 1, "b": 2, "a": 3}}'), DICT, "op");
+    expect(formatModelJson(read)).toBe('{\n  "d": {\n    "a": 3,\n    "b": 2\n  }\n}');
+    expect(formatDumpsJson(parseJsonLossless('{"2": 1, "b": 2, "2": 3.0}'))).toBe('{\n  "2": 3.0,\n  "b": 2\n}');
+  });
+
   it("prints a value changed since it was read as it now is", () => {
     const body = parseJsonLossless('{"a": 1.0, "b": 2}') as Record<string, unknown>;
     body.b = 2.5;

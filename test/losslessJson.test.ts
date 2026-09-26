@@ -83,6 +83,17 @@ const DECODE_ERRORS: ReadonlyArray<[body: string, message: string]> = [
   ["\"\ud83d\ude00\" x", "Extra data: line 1 column 5 (char 4)"],
   // fetch's text() drops one UTF-8 BOM, as json.loads(bytes) does; a second is text.
   ["\ufeff[]", "Expecting value: line 1 column 1 (char 0)"],
+  // Only JSON's four whitespace characters are skipped: a vertical tab, a
+  // form feed or a no-break space is a value that is not there, or extra data.
+  ["\v[1]", "Expecting value: line 1 column 1 (char 0)"],
+  ["\f[]", "Expecting value: line 1 column 1 (char 0)"],
+  ["\u{a0}[1]", "Expecting value: line 1 column 1 (char 0)"],
+  ["\v", "Expecting value: line 1 column 1 (char 0)"],
+  ["[1]\f", "Extra data: line 1 column 4 (char 3)"],
+  ["[1]\u{a0}", "Extra data: line 1 column 4 (char 3)"],
+  ["[\"a\",\v1]", "Expecting value: line 1 column 6 (char 5)"],
+  ["[1,\v2]", "Expecting value: line 1 column 4 (char 3)"],
+  ["{\"a\"\v:1}", "Expecting ':' delimiter: line 1 column 5 (char 4)"],
   ["<html>maintenance</html>", "Expecting value: line 1 column 1 (char 0)"],
 ];
 
