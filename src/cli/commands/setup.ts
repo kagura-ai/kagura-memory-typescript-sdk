@@ -47,6 +47,7 @@ import { hasGuardrailBlock, writeGuardrailBlock, type GuardrailBlockStatus } fro
 import { baseUrlFromMcp, validateHttpsUrl } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
+import { pyRepr, pyTruthy } from "../../python.js";
 import { isUuid, parseUuid } from "../../uuid.js";
 import { examples, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import type { ExecOptions } from "../exec.js";
@@ -62,6 +63,7 @@ import {
   codexTomlOauthBlock,
   hermesEnvVar,
   hermesYamlBlock,
+  hermesYamlOauthBlock,
   isHttpUrl,
   json5HasServer,
   mcpUrlWithQuery,
@@ -80,7 +82,7 @@ import {
   yamlServersIndent,
   yamlServersInline,
 } from "./harnessConfig.js";
-import { checkOauthServer, oauthLoginNote } from "./harnessOauth.js";
+import { HERMES_OAUTH_CONNECT_TIMEOUT_S, checkOauthServer, oauthLoginNote } from "./harnessOauth.js";
 import { strerror } from "./importFormats.js";
 
 /**
@@ -2206,6 +2208,12 @@ interface HarnessPlan {
         attached?: boolean;
         /** Appended to the failure message of an attached run (Python's `add_failure_note`). */
         failureNote?: string;
+        /**
+         * After the add exited 0: why the entry is not saved as asked, or
+         * null — Python's `not_saved`. A harness that exits 0 on a cancel
+         * (Hermes) can only be judged by the entry it has now.
+         */
+        notSaved?: () => Promise<string | null>;
       }
     | { program: null; reason: string };
   /** Notes for before the command, where Python prints them. */
@@ -2306,6 +2314,12 @@ async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
         await runAttachedHarness(deps, file, program, argv, plan.cli.failureNote ?? "");
       } else {
         await runHarnessCommand(deps, file, program, argv, input.secrets);
+      }
+      if (plan.cli.notSaved !== undefined) {
+        const problem = await plan.cli.notSaved();
+        if (problem !== null) {
+          throw new CliError(`${problem}${exp !== null ? "; setup skipped the AGENTS.md export" : ""}.`);
+        }
       }
       appliedWith = display;
       notes.push(`Done: ${program} wrote ${input.name} to ${where}.`);
@@ -2770,11 +2784,160 @@ function readHermesConfig(target: string): { text: string; unread: string | null
   }
 }
 
+/**
+ * What setup keeps of a Hermes `mcp_servers.<name>` entry — Python's
+ * `_HermesEntry`: never a header value, the env or any other key, which
+ * can hold a secret. Nothing here is echoed; {@link hermesEntryKind}
+ * describes it.
+ */
+interface HermesEntry {
+  command: string | null;
+  args: string[];
+  url: string | null;
+  oauth: boolean;
+  /** `headers` has an `Authorization` key, in any case. */
+  authorization: boolean;
+  enabled: boolean;
+}
+
+function hermesEntryFrom(value: unknown): HermesEntry {
+  const entry = isObject(value) ? value : {};
+  // As `hermes mcp list` reads it: a string counts only as true/1/yes.
+  let enabled: unknown = Object.hasOwn(entry, "enabled") ? entry.enabled : true;
+  if (typeof enabled === "string") enabled = ["true", "1", "yes"].includes(enabled.toLowerCase());
+  const headers = entry.headers;
+  return {
+    command: typeof entry.command === "string" ? entry.command : null,
+    args: Array.isArray(entry.args) ? entry.args.map((a) => (typeof a === "string" ? a : pyRepr(a))) : [],
+    url: typeof entry.url === "string" ? entry.url : null,
+    oauth: entry.auth === "oauth",
+    authorization: isObject(headers) && Object.keys(headers).some((k) => k.toLowerCase() === "authorization"),
+    enabled: pyTruthy(enabled),
+  };
+}
+
+/** Python's `_HermesEntry.kind`: a url wins over a command, as in `hermes mcp list`. */
+function hermesEntryKind(entry: HermesEntry): string {
+  if (entry.url !== null) {
+    if (entry.oauth) return "URL with OAuth";
+    if (entry.authorization) return "URL with an Authorization header";
+    return "URL with no credential";
+  }
+  if (entry.command !== null) {
+    return runsProxy({ command: entry.command, args: entry.args }) ? "stdio (kagura-mcp)" : "stdio (another command)";
+  }
+  return "an entry setup does not recognise";
+}
+
+/**
+ * `mcp_servers.<name>` from `hermes config get … --json` — Python's
+ * `_config_get` + `_read_entry`. `entry` is null when Hermes has no such
+ * entry ("Config key not set", exit 1, or a JSON null); `read` is false when
+ * the command failed otherwise (an older Hermes).
+ */
+async function readHermesEntry(
+  deps: CliDeps,
+  file: string,
+  name: string,
+): Promise<{ read: boolean; entry: HermesEntry | null }> {
+  const r = await deps.execFile(file, ["config", "get", `mcp_servers.${name}`, "--json"], HARNESS_EXEC);
+  if (!r.timedOut && r.code === 1 && r.stderr.includes("Config key not set")) return { read: true, entry: null };
+  const out = pyStrip(r.stdout);
+  if (r.timedOut || r.code !== 0 || !out) return { read: false, entry: null };
+  try {
+    const value: unknown = JSON.parse(out.split(/\r\n|\r|\n/).pop()!);
+    return { read: true, entry: value === null ? null : hermesEntryFrom(value) };
+  } catch {
+    return { read: false, entry: null };
+  }
+}
+
+/** The form `hermes mcp list` shows for `name` — Python's `_list_detect`, for a Hermes whose `config get` failed. */
+async function hermesListForm(deps: CliDeps, file: string, name: string): Promise<"URL" | "stdio" | null> {
+  const r = await deps.execFile(file, ["mcp", "list"], HARNESS_EXEC);
+  if (r.timedOut || r.code !== 0) return null;
+  for (const line of r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split(/\r\n|\r|\n/)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 2 && parts[0] === name) return /^https?:\/\//.test(parts[1]!) ? "URL" : "stdio";
+  }
+  return null;
+}
+
+/** Python's 0.41.3 message for an entry Hermes kept (python-sdk#287). */
+function hermesKeptEntry(name: string, kind: string): string {
+  return (
+    `Hermes's ${name} entry is still the existing one (${kind}): Hermes keeps the existing entry when its ` +
+    "overwrite prompt is declined, or when the add stops before saving, so nothing was saved. Re-run with " +
+    "--force and accept Hermes's overwrite prompt"
+  );
+}
+
+/**
+ * After an --oauth `hermes mcp add` exited 0: why the entry is not saved as
+ * asked, or null — Python's `_Hermes.not_saved` with `entry.oauth`. Hermes
+ * exits 0 when the user cancels an overwrite, declines to save after a
+ * failed probe, or continues without authentication; only the entry read
+ * back tells.
+ *
+ * @param replaced An entry of this name existed before the add (--force).
+ */
+async function hermesOauthNotSaved(
+  deps: CliDeps,
+  file: string,
+  name: string,
+  url: string,
+  replaced: boolean,
+): Promise<string | null> {
+  const { read, entry } = await readHermesEntry(deps, file, name);
+  if (!read) {
+    if ((await hermesListForm(deps, file, name)) !== "URL") {
+      return (
+        `\`hermes mcp list\` shows no new ${name} entry: \`hermes mcp add\` was\n` +
+        "  cancelled or failed there, so nothing was saved"
+      );
+    }
+    return (
+      `Setup could not read back Hermes's ${name} entry (\`hermes config get mcp_servers.${name}\` failed), so ` +
+      "it cannot tell whether Hermes saved an OAuth entry it can sign in with: check it with that command or " +
+      "`hermes mcp list`"
+    );
+  }
+  if (entry === null) {
+    return `Hermes has no ${name} entry: \`hermes mcp add\` was cancelled or failed\n  there, so nothing was saved`;
+  }
+  // `--auth header` never writes `auth`, so for an OAuth entry the url alone tells.
+  if (entry.url !== url) {
+    return replaced
+      ? hermesKeptEntry(name, hermesEntryKind(entry))
+      : `Hermes's ${name} entry (${hermesEntryKind(entry)}) is not the one setup asked for, so nothing was saved`;
+  }
+  if (!entry.oauth) {
+    // Hermes writes `auth` only as `oauth`. When it cannot set up OAuth it
+    // asks "Continue without authentication?" (default yes) and saves no
+    // `auth`; when its overwrite prompt is declined it keeps the old entry.
+    const noOauth = `Hermes's ${name} entry has no auth: oauth, so it cannot sign in to Kagura: `;
+    return replaced
+      ? `${noOauth}Hermes keeps the existing entry when its overwrite prompt is declined, and continues without ` +
+          "authentication when it cannot set up OAuth. Re-run with --force and accept Hermes's overwrite prompt"
+      : `${noOauth}Hermes continues without authentication when it cannot set up OAuth. Re-run with --force to ` +
+          "replace it";
+  }
+  if (!entry.enabled) {
+    // "Save config anyway?" after a failed probe saves `enabled: false`,
+    // which `hermes mcp login` does not turn back on.
+    return (
+      `Hermes saved ${name} disabled, since its sign-in or connection check did not finish, and it never ` +
+      `connects to a disabled entry. Sign in with \`hermes mcp login ${name}\` (add --flow device on ` +
+      "memory-cloud 0.78.0+ when the browser cannot reach this host), then turn the entry on with " +
+      `\`hermes config set mcp_servers.${name}.enabled true\``
+    );
+  }
+  return null;
+}
+
 async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "hermes");
   await checkOauthServerFirst(deps, input);
-  // Tasks 4 (Codex) and 6 (Hermes) of the --oauth plan replace this line.
-  if (input.oauth) throw new CliError(`--oauth is not wired for ${LABEL[input.harness]} yet.`);
   const { name, keyEnv } = input;
   const home = hermesHome();
   const configPath = pathlibJoin(home, "config.yaml");
@@ -2788,45 +2951,79 @@ async function runHermes(deps: CliDeps, args: ParsedArgs): Promise<number> {
   // last: the servers under the first would be gone without an error.
   const { text, unread } = readHermesConfig(configPath);
   const indent = yamlServersIndent(text);
-  if (unread !== null) {
-    notes.push(
-      `Setup could not read ${where} (${unread}): if it already has a top-level mcp_servers: key, ` +
-        `put only the ${name} entry under it.`,
-    );
-  } else if (indent !== null) {
-    notes.push(
-      `${where} already has a top-level mcp_servers: key, so only the entry is printed: a second one ` +
-        "would replace the first and every server under it.",
-    );
-    if (yamlServersInline(text)) {
+  const hermes = deps.which("hermes");
+  const found = yamlHasServer(text, name);
+  // A function, so the closure gets a plain string rather than a narrowed `string | null`.
+  const oauthAdd = (file: string): HarnessPlan["cli"] => ({
+    program: "hermes",
+    file,
+    argv: [
+      ...["mcp", "add", name, "--url", url, "--auth", "oauth"],
+      ...["--connect-timeout", String(HERMES_OAUTH_CONNECT_TIMEOUT_S)],
+    ],
+    attached: true,
+    notSaved: () => hermesOauthNotSaved(deps, file, name, url, found),
+  });
+  // The API-key form is never run: `hermes mcp add` prompts for the key and
+  // the tools to enable, and this port never hands a CLI the terminal for
+  // it (Python's -y). The --oauth add signs in at its probe, so it runs
+  // attached with a terminal and without -y, as in Python.
+  const cli: HarnessPlan["cli"] = !input.oauth
+    ? {
+        program: null,
+        reason:
+          hermes === null ? notOnPath("hermes") : "`hermes mcp add` is interactive and this port never prompts",
+      }
+    : hermes === null
+      ? { program: null, reason: notOnPath("hermes") }
+      : !input.interactive
+        ? { program: null, reason: oauthPrintReason(input, "is interactive") }
+        : oauthAdd(hermes);
+  // The config.yaml notes only go with a printed block (Python's `show_block`).
+  if (cli.program === null || input.dryRun) {
+    if (unread !== null) {
       notes.push(
-        "Its mcp_servers value is written inline (flow style or null): rewrite it as a block mapping, " +
-          `one server per indented key, before adding ${name}.`,
+        `Setup could not read ${where} (${unread}): if it already has a top-level mcp_servers: key, ` +
+          `put only the ${name} entry under it.`,
       );
+    } else if (indent !== null) {
+      notes.push(
+        `${where} already has a top-level mcp_servers: key, so only the entry is printed: a second one ` +
+          "would replace the first and every server under it.",
+      );
+      if (yamlServersInline(text)) {
+        notes.push(
+          "Its mcp_servers value is written inline (flow style or null): rewrite it as a block mapping, " +
+            `one server per indented key, before adding ${name}.`,
+        );
+      }
     }
   }
 
-  const hermes = deps.which("hermes");
   return applyPlan(deps, {
     input,
     url,
     configPath,
-    found: yamlHasServer(text, name),
+    found,
     stops: hermes !== null,
-    block: hermesYamlBlock(name, url, keyEnv, indent ?? undefined),
+    block: input.oauth
+      ? hermesYamlOauthBlock(name, url, indent ?? undefined)
+      : hermesYamlBlock(name, url, keyEnv, indent ?? undefined),
     blockTarget: indent === null ? "it" : "its mcp_servers: mapping",
-    // Never run: `hermes mcp add` prompts for the key and the tools to
-    // enable, and this port never hands a CLI the terminal. Python's -y.
-    cli: {
-      program: null,
-      reason: hermes === null ? notOnPath("hermes") : "`hermes mcp add` is interactive and this port never prompts",
-    },
+    cli,
     notes,
-    // Hermes resolves ${VAR} in config.yaml from its environment and from
-    // the .env beside it.
     after: [
-      `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(home, ".env"))} with an editor: the ` +
-        "entry reads it from there, and setup never sees the key.",
+      input.oauth
+        ? oauthLoginNote(
+            "hermes",
+            name,
+            cli.program !== null,
+            pathLabel(pathlibJoin(home, "mcp-tokens", `${name}.json`)),
+          )
+        : // Hermes resolves ${VAR} in config.yaml from its environment and
+          // from the .env beside it.
+          `Add \`${keyEnv}=<your-api-key>\` to ${pathLabel(pathlibJoin(home, ".env"))} with an editor: the ` +
+          "entry reads it from there, and setup never sees the key.",
       `Check it with: ${shellCommand(["hermes", "mcp", "test", name])}`,
     ],
   });

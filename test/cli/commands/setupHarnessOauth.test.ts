@@ -620,3 +620,215 @@ describe("setup codex --oauth: the guardrails preview (Python's _preview_command
     expect(digestNotes(off)).toEqual([]);
   });
 });
+
+/** `hermes`: `config get` answers from `entries`; the attached `mcp add` saves as Hermes does. */
+class FakeHermes {
+  entries: Record<string, Record<string, unknown>> = {};
+  /** False: the add exits 0 without saving (a declined overwrite, a cancel). */
+  saves = true;
+  /** False: Hermes cannot set up OAuth and saves the entry with no `auth`. */
+  oauthOk = true;
+  /** False: the sign-in did not finish, and "Save config anyway?" saves it disabled. */
+  probeOk = true;
+  configGetFails = false;
+
+  exec = (_file: string, argv: readonly string[]): ExecResult => {
+    if (argv[0] === "config" && argv[1] === "get") {
+      if (this.configGetFails) return { code: 2, stdout: "", stderr: "boom" };
+      const entry = this.entries[argv[2]!.slice("mcp_servers.".length)];
+      return entry === undefined
+        ? { code: 1, stdout: "", stderr: `Config key not set: ${argv[2]}` }
+        : { code: 0, stdout: `${JSON.stringify(entry)}\n`, stderr: "" };
+    }
+    if (argv[0] === "mcp" && argv[1] === "list") {
+      const rows = Object.entries(this.entries).map(([n, e]) => `  ${n}    ${String(e.url ?? e.command)}   all\n`);
+      return { code: 0, stdout: rows.join(""), stderr: "" };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  attached = (_file: string, argv: readonly string[]): number => {
+    if (argv[0] === "mcp" && argv[1] === "add" && this.saves) {
+      const entry: Record<string, unknown> = { url: argv[argv.indexOf("--url") + 1] };
+      if (argv[argv.indexOf("--auth") + 1] === "oauth" && this.oauthOk) entry.auth = "oauth";
+      if (!this.probeOk) entry.enabled = false;
+      this.entries[argv[2]!] = entry;
+    }
+    return 0;
+  };
+}
+
+describe("setup hermes --oauth", () => {
+  const ADD = [
+    "/usr/bin/hermes",
+    ...["mcp", "add", "kagura-memory", "--url", U, "--auth", "oauth", "--connect-timeout", "315"],
+  ];
+  const GET = ["/usr/bin/hermes", "config", "get", "mcp_servers.kagura-memory", "--json"];
+  const HERMES_LOGIN_RAN =
+    "Hermes signs in itself: `hermes mcp add` above started its sign-in when it probed the server, with --connect-timeout 315 (the bound `hermes mcp login` uses), which Hermes keeps as the entry's connect_timeout. If it did not log in, run `hermes mcp login kagura-memory` (the browser flow). The sign-in redirects the browser to Hermes's loopback callback on this host; when the browser cannot reach it (a remote host), paste the redirect URL at Hermes's prompt, or (memory-cloud 0.78.0+) run `hermes mcp login kagura-memory --flow device`, which signs in with a code at the server's /device page. memory-cloud's consent screen shows the client name Hermes Agent sends, which nothing verifies: approve only a sign-in you started. Hermes Agent keeps the token in ~/.hermes/mcp-tokens/kagura-memory.json; setup never sees it.";
+  const HERMES_LOGIN_PRINTED =
+    "Once the entry is in config.yaml, sign in with `hermes mcp login kagura-memory` (the browser flow). The sign-in redirects the browser to Hermes's loopback callback on this host; when the browser cannot reach it (a remote host), paste the redirect URL at Hermes's prompt, or (memory-cloud 0.78.0+) run `hermes mcp login kagura-memory --flow device`, which signs in with a code at the server's /device page. memory-cloud's consent screen shows the client name Hermes Agent sends, which nothing verifies: approve only a sign-in you started. Hermes Agent keeps the token in ~/.hermes/mcp-tokens/kagura-memory.json; setup never sees it.";
+  const OLD = "http://127.0.0.1:47701/mcp/w/ws-OLD";
+  const withHermes = (fake: FakeHermes, extra: Options = {}) =>
+    oauthHarness({ onPath: { hermes: "/usr/bin/hermes" }, tty: true, exec: fake.exec, attached: fake.attached, ...extra });
+  /** An entry of this name in config.yaml, which this bin's scan finds. */
+  const existingYaml = (url: string) => {
+    fs.mkdirSync(path.join(home, ".hermes"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".hermes", "config.yaml"),
+      `mcp_servers:\n  kagura-memory:\n    url: "${url}"\n`,
+    );
+  };
+
+  it("with a terminal, runs the add attached with --connect-timeout 315 and reads the entry back", async () => {
+    const fake = new FakeHermes();
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(0);
+    expect(h.attached).toEqual([ADD]);
+    expect(h.runs).toContainEqual(GET);
+    expect(notes(h).slice(0, 4)).toEqual([
+      serverOk("Hermes Agent"),
+      "Done: hermes wrote kagura-memory to ~/.hermes/config.yaml.",
+      HERMES_LOGIN_RAN,
+      "Check it with: hermes mcp test kagura-memory",
+    ]);
+    expect(h.out.join("\n")).not.toContain("MCP_KAGURA_MEMORY_API_KEY");
+  });
+
+  it.each([
+    ["-y", true, ["-y"], "-y was given"],
+    ["no terminal", false, [], "stdin is not a terminal"],
+  ])("with %s, prints the auth oauth block and runs nothing", async (_case, tty, flags, why) => {
+    const fake = new FakeHermes();
+    const h = withHermes(fake, { tty });
+    expect(await runCli(["setup", "hermes", ...OAUTH, ...flags], h.deps)).toBe(0);
+    expect(h.attached).toEqual([]);
+    const reason = `Setup does not edit ~/.hermes/config.yaml itself (\`hermes mcp add\` is interactive and ${why}).`;
+    expect(h.err).toEqual([
+      `${reason}\nAdd this kagura-memory entry to it:`,
+      "",
+      `mcp_servers:\n  kagura-memory:\n    url: "${U}"\n    auth: oauth`,
+      "",
+    ]);
+    expect(notes(h)).toContain(HERMES_LOGIN_PRINTED);
+    expect(h.err.join("\n")).not.toContain("headers");
+  });
+
+  it("prints the entry alone under an mcp_servers key config.yaml already has", async () => {
+    fs.mkdirSync(path.join(home, ".hermes"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".hermes", "config.yaml"), "mcp_servers:\n  other:\n    command: foo\n");
+    const h = oauthHarness();
+    expect(await runCli(["setup", "hermes", ...OAUTH, "-y"], h.deps)).toBe(0);
+    expect(h.err.join("\n")).toContain(`  kagura-memory:\n    url: "${U}"\n    auth: oauth`);
+  });
+
+  it("an entry saved without auth: oauth is not saved, and the export is skipped", async () => {
+    const fake = new FakeHermes();
+    fake.oauthOk = false;
+    const h = withHermes(fake, { auth: ON_SERVER });
+    expect(await runCli(["setup", "hermes", ...OAUTH, "--context-id", CONTEXT, "--agents-md"], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Hermes's kagura-memory entry has no auth: oauth, so it cannot sign in to Kagura: Hermes continues without authentication when it cannot set up OAuth. Re-run with --force to replace it; setup skipped the AGENTS.md export.",
+    );
+    expect(h.events).not.toContain("fetch digest");
+    expect(h.out).toEqual([]);
+  });
+
+  it("an entry saved disabled after a failed sign-in stops with the commands that fix it", async () => {
+    const fake = new FakeHermes();
+    fake.probeOk = false;
+    const h = withHermes(fake, { auth: ON_SERVER });
+    expect(await runCli(["setup", "hermes", ...OAUTH, "--context-id", CONTEXT, "--agents-md"], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Hermes saved kagura-memory disabled, since its sign-in or connection check did not finish, and it never connects to a disabled entry. Sign in with `hermes mcp login kagura-memory` (add --flow device on memory-cloud 0.78.0+ when the browser cannot reach this host), then turn the entry on with `hermes config set mcp_servers.kagura-memory.enabled true`; setup skipped the AGENTS.md export.",
+    );
+    expect(h.events).not.toContain("fetch digest");
+  });
+
+  it("a cancelled add is no entry", async () => {
+    const fake = new FakeHermes();
+    fake.saves = false;
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Hermes has no kagura-memory entry: `hermes mcp add` was cancelled or failed\n  there, so nothing was saved.",
+    );
+  });
+
+  it("an entry config get cannot read is not called saved, nor called missing auth", async () => {
+    const fake = new FakeHermes();
+    fake.configGetFails = true;
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Setup could not read back Hermes's kagura-memory entry (`hermes config get mcp_servers.kagura-memory` failed), so it cannot tell whether Hermes saved an OAuth entry it can sign in with: check it with that command or `hermes mcp list`.",
+    );
+  });
+
+  it("with config get failing and no entry in mcp list, nothing was saved", async () => {
+    const fake = new FakeHermes();
+    fake.configGetFails = true;
+    fake.saves = false;
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: `hermes mcp list` shows no new kagura-memory entry: `hermes mcp add` was\n  cancelled or failed there, so nothing was saved.",
+    );
+  });
+
+  it("--force over a header entry whose overwrite was declined: no auth: oauth, with the overwrite advice", async () => {
+    existingYaml(U);
+    const fake = new FakeHermes();
+    fake.entries["kagura-memory"] = { url: U, headers: { Authorization: "Bearer ${MCP_KAGURA_MEMORY_API_KEY}" } };
+    fake.saves = false;
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH, "--force"], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Hermes's kagura-memory entry has no auth: oauth, so it cannot sign in to Kagura: Hermes keeps the existing entry when its overwrite prompt is declined, and continues without authentication when it cannot set up OAuth. Re-run with --force and accept Hermes's overwrite prompt.",
+    );
+  });
+
+  it("--force over an OAuth entry for another URL whose overwrite was declined is still the existing one (0.41.3)", async () => {
+    existingYaml(OLD);
+    const fake = new FakeHermes();
+    fake.entries["kagura-memory"] = { url: OLD, auth: "oauth" };
+    fake.saves = false;
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH, "--force"], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Hermes's kagura-memory entry is still the existing one (URL with OAuth): Hermes keeps the existing entry when its overwrite prompt is declined, or when the add stops before saving, so nothing was saved. Re-run with --force and accept Hermes's overwrite prompt.",
+    );
+    expect(h.err.join("\n")).not.toContain(OLD);
+  });
+
+  it("--force over an OAuth entry that Hermes replaced is done", async () => {
+    existingYaml(OLD);
+    const fake = new FakeHermes();
+    fake.entries["kagura-memory"] = { url: OLD, auth: "oauth" };
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH, "--force"], h.deps)).toBe(0);
+    expect(fake.entries["kagura-memory"]!.url).toBe(U);
+    expect(notes(h)).toContain("Done: hermes wrote kagura-memory to ~/.hermes/config.yaml.");
+  });
+
+  it("an entry for another URL that setup did not replace is not the one it asked for", async () => {
+    const fake = new FakeHermes();
+    fake.saves = false;
+    fake.entries["kagura-memory"] = { url: OLD, auth: "oauth" };
+    const h = withHermes(fake);
+    expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: Hermes's kagura-memory entry (URL with OAuth) is not the one setup asked for, so nothing was saved.",
+    );
+  });
+
+  it("--dry-run with a terminal says it would run the add, and runs and sends nothing", async () => {
+    const h = withHermes(new FakeHermes());
+    expect(await runCli(["setup", "hermes", ...OAUTH, "--dry-run"], h.deps)).toBe(0);
+    expect(h.server.requests).toEqual([]);
+    expect(h.attached).toEqual([]);
+    expect(notes(h)).toContain(
+      `Would run: hermes mcp add kagura-memory --url ${U} --auth oauth --connect-timeout 315`,
+    );
+  });
+});
