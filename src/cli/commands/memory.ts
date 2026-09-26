@@ -99,6 +99,18 @@ function intOr(args: ParsedArgs, flag: FlagSpec, fallback: number): number {
 
 const remember: Command = {
   summary: "Store a memory directly (without AI analysis).",
+  description:
+    "  Coordinates in --details must be JSON numbers, not strings: the server\n" +
+    "  rejects string-typed lat/lon with a 422 by design. Updating a memory\n" +
+    "  replaces details wholesale; `kagura-memory update-memory --merge-details`\n" +
+    "  revises location while keeping the other keys (or re-send them yourself).\n\n" +
+    "  Examples:\n" +
+    '    kagura-memory remember -s "FastAPI DI pattern" --content "Use Depends()..."\n' +
+    '    kagura-memory remember -c dev -s "OAuth2 setup" --content "..." --tags "auth,oauth"\n' +
+    '    kagura-memory remember -s "Spec" --content "$(cat spec.md)" \\\n' +
+    "      --source-uri file:///spec.md --source-type file\n" +
+    '    kagura-memory remember -s "Coffee with Sato" --content "..." \\\n' +
+    '      --location "35.68,139.76,Tokyo HQ"',
   spec: {
     flags: [
       CONTEXT_ID,
@@ -126,7 +138,9 @@ const remember: Command = {
       {
         name: "details",
         type: "value",
-        help: "Structured details as an inline JSON object",
+        help:
+          "Structured details as an inline JSON object. Coordinates live under the 'location' key " +
+          "and must be JSON numbers, not strings: '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}}'",
       },
       {
         name: "location",
@@ -279,6 +293,27 @@ const forget: Command = {
   },
 };
 
+/**
+ * `update-memory --details`, with Python 0.42.0's help (python-sdk #247):
+ * without --merge-details the payload replaces the memory's details.
+ */
+const UPDATE_DETAILS: FlagSpec = {
+  name: "details",
+  type: "value",
+  help:
+    "Structured details as an inline JSON object. Coordinates live under the 'location' key and " +
+    "must be JSON numbers, not strings: '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}}'. " +
+    "Without --merge-details this REPLACES the memory's details wholesale ('{}' clears them).",
+};
+const UPDATE_LOCATION: FlagSpec = {
+  name: "location",
+  type: "value",
+  help:
+    "Shorthand for details.location: 'lat,lon' or 'lat,lon,label'. Without --merge-details this " +
+    "replaces the memory's details with just the location. The location object is always " +
+    "replaced whole, label included: re-send 'lat,lon,label' to keep one.",
+};
+
 const updateMemory: Command = {
   summary: "Update an existing memory or upsert by external ID.",
   description:
@@ -304,6 +339,8 @@ const updateMemory: Command = {
           "Reject this memory's supersede_candidate suggestion (needs --memory-id; " +
           "server v0.65.0+, older servers drop it silently)",
       },
+      UPDATE_DETAILS,
+      UPDATE_LOCATION,
     ],
   },
   run: async (deps, args) => {
@@ -330,6 +367,10 @@ const updateMemory: Command = {
     const content = args.values.content;
     const type = args.values.type;
     const tags = parseTags(args.values.tags);
+    // Port of `_build_details` as update_memory calls it (cli.py): after the
+    // id checks, a usage error (exit 2) before anything is sent; blank is
+    // unset (leave details alone), '{}' clears them.
+    const details = buildDetails(args.values.details, args.values.location);
 
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
       client.updateMemory({
@@ -345,6 +386,7 @@ const updateMemory: Command = {
         ...(importance !== undefined ? { importance } : {}),
         ...(tags ? { tags } : {}),
         ...(dismissSupersedeCandidate ? { dismissSupersedeCandidate } : {}),
+        ...(details !== undefined ? { details } : {}),
       }),
     );
   },

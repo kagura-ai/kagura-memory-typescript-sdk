@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`update-memory --details` and `--location`**, as the Python CLI 0.42.0
+  takes them (python-sdk #247): the same JSON object and `lat,lon[,label]`
+  shorthand as `remember`, with the same usage errors, sent as `details`.
+  The server replaces the memory's details wholesale, so a bare
+  `--location` drops every other key and `--details '{}'` clears them; a
+  blank value leaves them alone. `remember --help` now says so, and shows
+  Python's examples.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added
