@@ -712,13 +712,20 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
     return { docId, op: "upsert" as const, version, payload: row };
   });
 
-  // The config is read before the first progress event, so a malformed
-  // .kagura.json emits none. From the start event on, the stream ends
-  // with exactly one success or error — the credential and the client
-  // included, which Python builds outside its guard (and so can end the
-  // stream with no terminal event).
+  // The config, the credential and the client come before the first
+  // progress event, as Python 0.41.1 emits `import_start` inside its
+  // `op(client)` (python-sdk #285): a failure there is a plain error with no
+  // stream at all, and from the start event on the stream ends with exactly
+  // one success or error.
   const { config } = resolveConfig(deps, undefined, false);
   const onProgress = resolveProgress(args.counts.verbose ?? 0, progress, deps.writeError);
+  const client = (() => {
+    try {
+      return deps.makeResourceClient(resolveCliAuth(deps, config));
+    } catch (e) {
+      throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));
+    }
+  })();
   emitProgress(onProgress, {
     stage: "import_start",
     kind: "action",
@@ -730,7 +737,6 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
   let failed = 0;
   const errors: unknown[] = [];
   try {
-    const client = deps.makeResourceClient(resolveCliAuth(deps, config));
     // The endpoint takes 1-100 events; Python chunks at 100 and this must
     // too, or any import over 100 rows is rejected wholesale.
     const batchCount = Math.ceil(events_.length / BATCH_SIZE);

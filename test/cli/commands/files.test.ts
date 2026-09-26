@@ -510,6 +510,23 @@ describe("files upload", () => {
       });
     });
 
+    // Python 0.41.1 (python-sdk #285): the upload's success is held until the memory is
+    // written, so a failed write's stream is `action`… then one `error`, no `success`.
+    it("never puts a success event in a stream that ends in the memory write's error", async () => {
+      const h = harness({
+        makeClient: (() => ({
+          remember: async () => {
+            throw new Error("boom");
+          },
+          close: async () => {},
+        })) as unknown as CliDeps["makeClient"],
+      });
+      expect(await runCli(["files", "upload", file, "--remember", "--progress", "json"], h.deps)).toBe(1);
+      const kinds = events(h.err).map((e) => e.kind);
+      expect(kinds.filter((k) => k === "success")).toEqual([]);
+      expect(kinds.at(-1)).toBe("error");
+    });
+
     it("keeps a quota refusal's reset time and plan under the wrapped message", async () => {
       const h = harness({
         makeClient: (() => ({

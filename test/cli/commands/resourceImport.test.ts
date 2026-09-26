@@ -282,6 +282,23 @@ describe("resource import: reading and batching", () => {
     expect(h.err).toEqual(["Error: Row 2: more fields than the header has columns."]);
     expect(h.ingest.batches).toEqual([]);
   });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+  it("refuses a doc_id past 255 characters, naming the row, before any event", async () => {
+    const h = harness();
+    const file = write("long.csv", `id,name\n${"x".repeat(256)},a\n`);
+    expect(await runCli([...IMPORT, "-f", file, "--id-column", "id", "--progress", "json"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: Row 1: doc_id from column 'id' must be 1-255 characters, got 256."]);
+    expect(h.ingest.batches).toEqual([]);
+  });
+
+  it("refuses a row with cells past the header before any event", async () => {
+    const h = harness();
+    const file = write("extra.csv", "id,name\n1,a\n2,b,EXTRA\n");
+    expect(await runCli([...IMPORT, "-f", file, "--progress", "json"], h.deps)).toBe(1);
+    expect(h.err).toEqual(["Error: Row 2: more fields than the header has columns."]);
+    expect(h.ingest.batches).toEqual([]);
+  });
 });
 
 describe("resource import: errors in Python's words", () => {
@@ -431,20 +448,25 @@ describe("resource import: -v and --progress", () => {
     expect(h.err[h.err.length - 1]).toMatch(/^Error: /);
   });
 
-  it("ends the stream with an error when the credential fails, which Python leaves open", async () => {
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4): with no
+  // credential, `resource import … --progress json` prints the error alone, no
+  // event: the stream starts only once the client is built (python-sdk #285).
+  it("starts no stream when the credential fails", async () => {
     const h = harness({ stdin: jsonl(2), auth: new KaguraAuthError("No credentials found.") });
     expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
-    expect(events(h.err)).toEqual([
-      { v: 1, stage: "import_start", kind: "action", msg: "Importing events", detail: { desc: "2 event(s)" } },
-      {
-        v: 1,
-        stage: "complete",
-        kind: "error",
-        msg: "Import failed: No credentials found.",
-        detail: { created_so_far: 0, failed_so_far: 0, total_events: 2 },
-      },
-    ]);
-    expect(h.err[h.err.length - 1]).toBe("Error: No credentials found.");
+    expect(events(h.err)).toEqual([]);
+    expect(h.err).toEqual(["Error: No credentials found."]);
+    expect(h.ingest.batches).toEqual([]);
+  });
+
+  it("starts no stream when building the client fails", async () => {
+    const h = harness({ stdin: jsonl(2) });
+    h.deps.makeResourceClient = (() => {
+      throw new Error("boom");
+    }) as unknown as CliDeps["makeResourceClient"];
+    expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
+    expect(events(h.err)).toEqual([]);
+    expect(h.err).toEqual(["Error: boom"]);
   });
 
   describe("NaN and Infinity, which json.loads reads and httpx refuses to send", () => {

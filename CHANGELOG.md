@@ -76,6 +76,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **An empty `AGENTS.md` export removes an earlier block**, on every
   `setup` harness, as `guardrails digest --out` does and as the Python CLI
   0.41.1 does, instead of keeping it with a note.
+- **`resource import --progress`** starts its stream only once the client
+  is built, as the Python CLI 0.41.1 does (python-sdk #285): a credential
+  that fails prints the error alone, where the stream began with
+  `import_start` and ended with `error`.
 
 ## [0.13.0] - 2026-09-25
 

@@ -248,13 +248,15 @@ line per event, so stdout carries the same result either way.
 last event is the operation's single `success` or `error`; `-v`, or
 `--progress rich`, writes the lines the Python CLI shows
 (`→ Reserving upload report.pdf (1234 bytes)`, `✓ Upload complete`,
-`✗ Upload failed: …`); `--progress none` is silent even with `-v`. Two
-streams end more reliably than Python's: `files upload --remember`
-reports success only once the linked memory is written (a failed write
-ends the stream with that error), and `resource import` ends with an
-error when the credential fails after its start event. A stderr closed
-early (`2>&1 | head -1`) does not stop the upload or the import. Ctrl-C
-ends the process without a final event.
+`✗ Upload failed: …`); `--progress none` is silent even with `-v`.
+As in the Python CLI (0.41.1+), `files upload --remember` reports success
+only once the linked memory is written (a failed write ends the stream
+with that error), and `resource import` starts its stream only once its
+client is built, so a credential that fails prints the error alone. A
+stderr closed early (`2>&1 | head -1`) does not stop the upload or the
+import. Ctrl-C ends the process without a final event (Node's default
+SIGINT handling exits at once), where the Python CLI catches the
+interrupt and ends the stream with `error`.
 
 **Connecting a harness.** Each `setup` subcommand sets up an MCP entry
 named `kagura-memory`: the URL plus a Bearer header. The key is never
