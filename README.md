@@ -34,7 +34,9 @@ the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
 
-Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`).
+Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`) and is checked
+against memory-cloud up to **v0.77.0**, as the Python SDK 0.42.0 is (whose
+own `MIN_SERVER_VERSION` stays at an advisory 0.17.1).
 `checkServerVersion()` warns, and never throws, on an older server, which
 still answers: it ignores options it predates, leaves out fields it
 predates, and reports a tool it predates as not found. A pre-release of
@@ -127,7 +129,8 @@ negative VALUE), so `secret exec --help --bogus` prints the help; without
 `--help`, `secret exec` still refuses an unknown option before the child
 command rather than running it as that command. The one command not
 ported, the few options only this bin has, and the deliberate
-differences are listed below.
+differences are listed below. The parity target is the Python CLI
+**0.42.0**.
 
 Values are read as click reads them. A choice matches exactly, as click's
 `Choice` does, except where the Python CLI declares one case-insensitive
@@ -460,8 +463,14 @@ the zero-dependency promise; use the Python CLI for it. The Claude Code
 extras of `kagura setup claude` are not ported either: its SessionStart
 and PostToolUse hooks and its `/kagura-recall` and `/kagura-remember`
 commands. `setup claude` here writes `.kagura.json` and the MCP entry
-only, and takes their flags as inert (see above). Every other command of
-the Python CLI is here as of 0.12.0
+only, and takes their flags as inert (see above).
+
+Nor are the skills of the Python CLI's Claude Code plugin, such as the
+`memory` skill of 0.42.0 (python-sdk #248), which walks an agent through
+`remember`, `recall`, `reference`, `update-memory` and `forget` and their
+`--details`/`--location` rules: this package ships no Claude Code plugin.
+
+Every other command of the Python CLI is here as of 0.12.0
 ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
 with the differences in options and output this section lists.
 
@@ -600,6 +609,32 @@ would accept.
   percent-encoded as one segment, so a `/`, `?` or `#` in it stays in the
   id rather than reaching another route or replacing the query
   (`files delete 'x?workspace_id=…'`).
+
+**Differences from the Python CLI 0.42.0 in what it added**, each on
+purpose or out of reach:
+
+- `update-memory --details` and `remember --details` refuse text that is
+  not JSON with JavaScript's parser message after `Invalid JSON for
+  --details:`, where Python prints its `json` module's.
+- `update-memory --merge-details` prints the size of a bounded
+  `reference` reply when `details_total_chars` is a whole number sent as a
+  float (`24000.0`), which Python leaves out: JSON.parse cannot tell it
+  from `24000`.
+- `getServerInfo`, `checkServerVersion`, `getEmbeddingStatus`,
+  `getMemoryStats`, `findDuplicates` and `listEmbeddingModels` check the
+  body against the Python model and return it as the server sent it:
+  keys the model does not have stay, and a lax value such as `"3"` for an
+  int is not converted, where Python returns the model.
+- `getMemoryStats` accepts rows without `use_count`, which memory-cloud
+  v0.34.0 and later never send. The Python SDK 0.42.0's model still
+  requires it, so it refuses every non-empty page
+  (`memories.0.use_count: Field required`).
+- `listMemories` returns its body unchecked. The Python SDK has read it
+  through `MemoryListResponse` since 0.40.0.
+- The kept Hermes OAuth entry of 0.41.3 (python-sdk #287) does not arise:
+  `setup hermes` never runs `hermes mcp add`, so there is no overwrite
+  prompt to decline. It prints the entry to put in place of the existing
+  one, as Python does under `-y`.
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
@@ -1394,6 +1429,9 @@ models, the zero-knowledge secret client) and, since 0.8.0, its `kagura`
 CLI as `kagura-memory`: 20 of the 21 top-level commands, counting the
 `contexts` alias. Only `kagura ingest` is not ported (below);
 [Command line](#command-line) lists where the two CLIs still differ.
+
+The parity target is the Python SDK and CLI **0.42.0**, checked against
+memory-cloud up to **v0.77.0**.
 
 One thing is deliberately not ported, because it would cost the
 zero-dependency promise:

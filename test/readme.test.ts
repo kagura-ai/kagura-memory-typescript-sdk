@@ -196,3 +196,13 @@ describe("wording memory-cloud v0.77.0 made stale (python-sdk 0.41.0)", () => {
     expect(readme).toContain("has `with_tags` only from server v0.77.0");
   });
 });
+
+describe("README parity target", () => {
+  it("names the Python CLI 0.42.0 and memory-cloud v0.77.0", () => {
+    // Line breaks fall anywhere in prose, so compare with whitespace folded.
+    const flat = readme.split(/\s+/).join(" ");
+    expect(flat).toContain("parity target is the Python CLI **0.42.0**");
+    expect(flat).toContain("checked against memory-cloud up to **v0.77.0**");
+    expect(flat).toContain("**Differences from the Python CLI 0.42.0");
+  });
+});
