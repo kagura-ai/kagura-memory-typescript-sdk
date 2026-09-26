@@ -1728,17 +1728,141 @@ function isFile(target: string): boolean {
   }
 }
 
-/** The project context files Hermes looks for, in order; it loads only the first. */
-const HERMES_CONTEXT_FILES = [".hermes.md", "HERMES.md", "AGENTS.override.md", "AGENTS.md", "CLAUDE.md"];
+/** The names of each project context file type Hermes looks for, in its order. */
+const HERMES_OWN_FILES = [".hermes.md", "HERMES.md"];
+const HERMES_AGENTS_FILES = ["AGENTS.override.md", "AGENTS.md", "agents.md"];
+const HERMES_CLAUDE_FILES = ["CLAUDE.md", "claude.md"];
 
-/** The context file Hermes loads in `directory`, else its AGENTS.md — Python's `hermes_context_file`. */
-function hermesContextFile(directory: string): string {
-  const found = HERMES_CONTEXT_FILES.find((name) => isFile(path.join(directory, name)));
-  return path.join(directory, found ?? "AGENTS.md");
+/**
+ * A file with something left after `strip()`, read as Hermes reads it —
+ * Python's `_has_text`: UTF-8 with bad bytes replaced, a BOM kept (Python's
+ * `strip()` keeps U+FEFF), and an unreadable file counted as empty.
+ */
+function hasText(target: string): boolean {
+  try {
+    if (!fs.statSync(target).isFile()) return false;
+    return pyStrip(new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(target))) !== "";
+  } catch {
+    return false;
+  }
 }
 
-/** The file the export goes to without a PATH — Python's `agents_md_path`. */
-function agentsMdDefault(harness: HarnessName): string {
+/** The first of `names` in `directory` with text — Python's `_first_with_text`. */
+function firstWithText(directory: string, names: readonly string[]): string | null {
+  for (const name of names) {
+    const target = path.join(directory, name);
+    if (hasText(target)) return target;
+  }
+  return null;
+}
+
+/**
+ * The Cursor rules file Hermes loads in `directory`: `.cursorrules`, else
+ * the first `.cursor/rules/*.mdc` with text by name — Python's
+ * `hermes_cursor_rules`. (Python sorts by code point, JavaScript by UTF-16
+ * unit; they differ only for names past U+FFFF.)
+ */
+function hermesCursorRules(directory: string): string | null {
+  const rulesDir = path.join(directory, ".cursor", "rules");
+  let rules: string[] = [];
+  try {
+    rules = fs
+      .readdirSync(rulesDir)
+      .filter((name) => name.endsWith(".mdc"))
+      .sort()
+      .map((name) => path.join(rulesDir, name));
+  } catch {
+    rules = [];
+  }
+  return [path.join(directory, ".cursorrules"), ...rules].find(hasText) ?? null;
+}
+
+/**
+ * The file the export goes into so that Hermes, run in `directory`, loads
+ * it — port of Python's `hermes_context_file` (python-sdk #278). Hermes
+ * loads only the first of these types that has a file with text:
+ *
+ * 1. `.hermes.md` / `HERMES.md`: the nearest that exists, from `directory`
+ *    up to the git root (`directory` alone outside a repository); an empty
+ *    one ends that search.
+ * 2. `AGENTS.override.md` / `AGENTS.md` / `agents.md`, in every directory
+ *    from the git root down to `directory`.
+ * 3. `CLAUDE.md` / `claude.md` in `directory`.
+ * 4. `.cursorrules` / `.cursor/rules/*.mdc` in `directory`.
+ *
+ * The export goes into the loaded `.hermes.md` / `HERMES.md` (even a
+ * parent's), into `directory`'s AGENTS file that loads (a new `AGENTS.md`
+ * there when only a parent's does), or into the loaded `CLAUDE.md`; with
+ * nothing loaded, a new `AGENTS.md`. Null when only Cursor rules load,
+ * which a new `AGENTS.md` would stop loading.
+ */
+function hermesContextFile(directory: string): string | null {
+  const walk: string[] = [];
+  for (let d = directory; ; d = path.dirname(d)) {
+    walk.push(d);
+    if (path.dirname(d) === d) break;
+  }
+  const root = walk.findIndex((d) => fs.existsSync(path.join(d, ".git")));
+  const chain = root === -1 ? walk.slice(0, 1) : walk.slice(0, root + 1);
+  for (const d of chain) {
+    const own = HERMES_OWN_FILES.map((name) => path.join(d, name)).find(isFile);
+    if (own !== undefined) {
+      if (hasText(own)) return own;
+      break; // an empty one ends the lookup: Hermes moves on to the next type
+    }
+  }
+  const local = firstWithText(directory, HERMES_AGENTS_FILES);
+  if (local !== null) return local;
+  if (chain.slice(1).some((d) => firstWithText(d, HERMES_AGENTS_FILES) !== null)) {
+    return path.join(directory, "AGENTS.md");
+  }
+  const claude = firstWithText(directory, HERMES_CLAUDE_FILES);
+  if (claude !== null) return claude;
+  if (hermesCursorRules(directory) !== null) return null;
+  return path.join(directory, "AGENTS.md");
+}
+
+/**
+ * Why Hermes has no default export file here, naming the file a new
+ * `AGENTS.md` would displace — Python's `_Hermes.no_agents_md_reason`,
+ * unwrapped (a note keeps it on one line; an error wraps it with {@link pyWrap}).
+ */
+function hermesNoDefaultReason(): string {
+  const rules = hermesCursorRules(process.cwd());
+  const label = rules !== null ? pathLabel(rules) : "Cursor rules";
+  return (
+    `Hermes loads only ${label} here, and it loads the first context file type it finds: a new ` +
+    "AGENTS.md would stop it loading that file. Name the file with --agents-md PATH"
+  );
+}
+
+/**
+ * `text` wrapped to follow a two-space indent at 78 columns, never
+ * breaking a `command` — port of Python's `_wrap` (`textwrap.wrap(held,
+ * 78, break_on_hyphens=False, break_long_words=False)`): greedy, a word
+ * longer than the width alone on its line, lengths in code points.
+ */
+function pyWrap(text: string): string {
+  const held = text.replace(/`[^`]*`/g, (span) => span.replace(/ /g, "\0"));
+  const lines: string[] = [];
+  let line = "";
+  for (const word of held.split(/\s+/).filter(Boolean)) {
+    if (line && [...line].length + 1 + [...word].length > 78) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.join("\n  ").replace(/\0/g, " ");
+}
+
+/**
+ * The file the export goes to without a PATH — Python's `agents_md_path`;
+ * null only for Hermes when only Cursor rules load.
+ */
+function agentsMdDefault(harness: HarnessName): string | null {
   if (harness === "codex") {
     // Codex reads the global AGENTS.override.md in place of AGENTS.md.
     const override = pathlibJoin(codexHome(), "AGENTS.override.md");
@@ -1787,9 +1911,19 @@ function absolutePath(target: string): string {
   return path.isAbsolute(target) ? target : pathlibJoin(process.cwd(), target);
 }
 
-/** Where the export goes: `--agents-md PATH` (a leading `~` expanded), else the harness's default file. */
+/**
+ * Where the export goes: `--agents-md PATH` (a leading `~` expanded), else
+ * the harness's default file. With no default (Hermes with only Cursor
+ * rules), setup stops before anything runs, as Python's
+ * `run_setup_harness` does (python-sdk #278).
+ *
+ * @throws CliError (exit 1) with Python's wrapped reason.
+ */
 function agentsMdTarget(input: HarnessInput): string {
-  return input.agentsMd ? pathlibString(expandUser(input.agentsMd)) : agentsMdDefault(input.harness);
+  if (input.agentsMd) return pathlibString(expandUser(input.agentsMd));
+  const target = agentsMdDefault(input.harness);
+  if (target === null) throw new CliError(`Nothing was written: ${pyWrap(hermesNoDefaultReason())}.`);
+  return target;
 }
 
 /**
@@ -1921,18 +2055,25 @@ async function writeExport(
   }
 
   if (!pyStrip(digest.text)) {
-    notes.push(
-      `Context ${contextId} has no tool guardrails this credential can see (none marked, or the ` +
-        `context is not trusted-tier): nothing was written to ${label}.`,
-    );
-    // Setup never removes a block; `guardrails digest --out` does.
-    let stale = false;
+    // Port of `_write_export`'s empty branch (python-sdk #278): as
+    // `guardrails digest --out` does, an earlier block goes, so the harness
+    // stops loading guardrails the server no longer serves. Without a
+    // block, neither the file nor its directory is created.
+    let removed: GuardrailBlockStatus;
     try {
-      stale = hasGuardrailBlock(readTextUniversal(target));
-    } catch {
-      stale = false;
+      removed = writeGuardrailBlock(target, "");
+    } catch (e) {
+      throw new CliError(`${failed}: ${label}: ${excMessage(e)}; left unchanged`);
     }
-    if (stale) notes.push(`It still has an earlier block; remove it with: ${refresh}`);
+    const none =
+      `Context ${contextId} has no tool guardrails this credential can see (none marked, or the ` +
+      "context is not trusted-tier)";
+    if (removed === "removed") {
+      notes.push(`${none}: removed the earlier guardrail block from ${label}.`);
+      wrote.push(absolutePath(target));
+    } else {
+      notes.push(`${none}: nothing was written to ${label}.`);
+    }
     return;
   }
 
@@ -2080,17 +2221,27 @@ async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
           `(the guardrail block for context ${exp.contextId})`,
       );
     } else if (noInstructions) {
-      // Python offers the export at a prompt; this port never prompts.
-      const when = input.nonInteractive ? "not offered with -y" : "not offered: this port never prompts";
-      notes.push(`AGENTS.md: ${pathLabel(agentsMdDefault(input.harness))} (${when}; --agents-md writes it)`);
+      const target = agentsMdDefault(input.harness);
+      if (target === null) {
+        // Python's `_echo_dry_run_export` for a harness with no default file.
+        notes.push(`AGENTS.md: not offered. ${hermesNoDefaultReason()}.`);
+      } else {
+        // Python offers the export at a prompt; this port never prompts.
+        const when = input.nonInteractive ? "not offered with -y" : "not offered: this port never prompts";
+        notes.push(`AGENTS.md: ${pathLabel(target)} (${when}; --agents-md writes it)`);
+      }
     }
   } else {
     notes.push(...plan.after);
     if (exp === null && noInstructions) {
-      notes.push(
-        "Re-run with --agents-md --context-id <id> to put a snapshot of a context's tool guardrails " +
-          `into ${pathLabel(agentsMdDefault(input.harness))}, which ${LABEL[input.harness]} loads every session.`,
-      );
+      // No hint when no default file fits: a new one would displace the user's.
+      const target = agentsMdDefault(input.harness);
+      if (target !== null) {
+        notes.push(
+          "Re-run with --agents-md --context-id <id> to put a snapshot of a context's tool guardrails " +
+            `into ${pathLabel(target)}, which ${LABEL[input.harness]} loads every session.`,
+        );
+      }
     }
   }
 
@@ -2574,12 +2725,14 @@ const hermes: Command = {
     "  .env beside config.yaml: add the key there yourself; setup never sees\n" +
     "  it. Check it with: hermes mcp test kagura-memory.\n\n" +
     "  Hermes does not read MCP instructions: guardrails reach it through\n" +
-    "  get_context_info (on by default) and, if you choose, an AGENTS.md\n" +
-    "  export block (--agents-md with --context-id, or a --guardrails\n" +
-    "  CONTEXT_ID): a snapshot of the context's tool guardrails in the context\n" +
-    "  file Hermes loads in this directory. --guardrails off is refused, and a\n" +
-    "  context id, from the flag or the URL, is not written; a first\n" +
-    "  ?guardrails=off in the URL is kept, alone, with a warning.\n\n" +
+    "  get_context_info (on by default) and, if you choose, an export block\n" +
+    "  (--agents-md with --context-id, or a --guardrails CONTEXT_ID) in the\n" +
+    "  context file Hermes loads from this directory, so a user's own file\n" +
+    "  keeps loading. Hermes loads only the first type it finds\n" +
+    "  (.hermes.md/HERMES.md, AGENTS files, CLAUDE.md, Cursor rules); with\n" +
+    "  only Cursor rules, name a file with --agents-md PATH. --guardrails off\n" +
+    "  is refused, and a context id, from the flag or the URL, is not written;\n" +
+    "  a first ?guardrails=off in the URL is kept, alone, with a warning.\n\n" +
     MCP_URL_RULE,
   spec: {
     flags: [
@@ -2588,9 +2741,10 @@ const hermes: Command = {
       HARNESS_CONTEXT_ID,
       guardrailsNotWritten("Hermes"),
       agentsMd(
-        "Write the context's tool guardrail export block into PATH (default: the context file Hermes " +
-          "loads here, the first of .hermes.md, HERMES.md, AGENTS.override.md, AGENTS.md, CLAUDE.md, " +
-          "else AGENTS.md). Only the marked block changes.",
+        "Write the context's tool guardrail export block into PATH (default: the context file Hermes loads " +
+          "from here: the nearest .hermes.md or HERMES.md up to the git root, else this directory's AGENTS " +
+          "file, else its CLAUDE.md, else a new AGENTS.md; none when only Cursor rules load, which a new " +
+          "AGENTS.md would stop loading). Only the marked block changes; an empty set removes it.",
       ),
       ...HARNESS_TAIL,
       apiKeyEnv("Not accepted: Hermes names the variable MCP_<NAME>_API_KEY"),

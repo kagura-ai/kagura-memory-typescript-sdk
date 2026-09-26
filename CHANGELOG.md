@@ -65,6 +65,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Python's words (`fetched block does not have exactly one begin and one
   end marker line, in that order`), by `setup` and by `guardrails digest
   --out`.
+- **`setup hermes --agents-md`** (python-sdk #278) writes the context file
+  Hermes loads, found as Hermes finds it: the nearest `.hermes.md` /
+  `HERMES.md` up to the git root, then the `AGENTS` chain, then
+  `CLAUDE.md`, only files with text counting. Before, the first of five
+  names that existed here was used even when Hermes loaded another, so
+  the export could displace the user's own file. With only Cursor rules
+  there is no default file (exit 1 without a PATH, no hint, and a dry run
+  says why).
+- **An empty `AGENTS.md` export removes an earlier block**, on every
+  `setup` harness, as `guardrails digest --out` does and as the Python CLI
+  0.41.1 does, instead of keeping it with a note.
 
 ## [0.13.0] - 2026-09-25
 

@@ -393,9 +393,16 @@ and splices it into a file the harness loads every session, between its
 place, an unchanged set rewrites nothing, and the rest of the file is
 kept, line endings and a symlink included. Without PATH the file is the
 harness's own: `$CODEX_HOME/AGENTS.md` (`AGENTS.override.md` when that
-exists); for Hermes the first of `.hermes.md`, `HERMES.md`,
-`AGENTS.override.md`, `AGENTS.md` and `CLAUDE.md` in the current
-directory, else `AGENTS.md`; for OpenClaw `AGENTS.md` in its workspace,
+exists); for Hermes the file Hermes loads from the current directory, found as
+Hermes finds it: the nearest `.hermes.md` or `HERMES.md` up to the git
+root (an empty one ends that search), else this directory's
+`AGENTS.override.md`, `AGENTS.md` or `agents.md` (a new `AGENTS.md` when
+only a parent directory's loads), else its `CLAUDE.md` or `claude.md`,
+else a new `AGENTS.md`, so your own file keeps loading. With only Cursor
+rules (`.cursorrules`, `.cursor/rules/*.mdc`) there is no default, since a
+new `AGENTS.md` would stop Hermes loading them: `--agents-md` then needs a
+PATH (exit 1, nothing run), and a dry run says the export is not offered;
+for OpenClaw `AGENTS.md` in its workspace,
 `$OPENCLAW_WORKSPACE_DIR`, else `workspace/` in the state directory. A
 leading `~` or `~/` in PATH is expanded to your home directory (a
 `~user` is left as written, as in the Python CLI), and missing
@@ -410,13 +417,15 @@ nothing run. The export comes after the entry is applied or printed.
 `wrote` lists the file, and the notes carry Python's lines: the refresh
 command (`kagura-memory guardrails digest <ctx> --out <file>`), a warning
 past the 32 KiB Codex reads or the 20,000 characters OpenClaw reads, and
-Hermes's prompt-injection note. An empty digest writes nothing and says
-so; setup never removes a block, which `guardrails digest --out` does. A
-failed export prints the report, then the error (exit 1). `--dry-run`
+Hermes's prompt-injection note. An empty digest removes an earlier block,
+as `guardrails digest --out` does, and otherwise writes nothing, creating
+no file or directory. A failed export prints the report, then the error
+(exit 1). `--dry-run`
 names what the export would do to the file (create it, append the block,
 replace the block, or update a file it cannot read). On Hermes and
 OpenClaw a run without the export ends with Python's "Re-run with
---agents-md --context-id <id> …" hint.
+--agents-md --context-id <id> …" hint, except where Hermes has no default
+file.
 
 Claude Code uses the `kagura-memory` entry from the strongest scope
 (local > project > user). It keys local scope by the git repository root
@@ -537,6 +546,11 @@ the Python CLI in these ways, each on purpose:
   where Python looks a name up through the profile.
 - `setup hermes` never runs `hermes mcp add`, which prompts; it prints the
   block, as Python does under `-y`.
+- So nothing is read back with `hermes config get` either: the Python
+  CLI 0.41.1's stops after the add (an entry Hermes kept in place of the
+  one asked for, an entry saved disabled, which points to `hermes mcp
+  test`) and its warning for a URL entry saved without an `Authorization`
+  header cannot arise for the printed block.
 - An existing entry is found by scanning the file, and not described by
   kind. A readable but malformed `config.toml` does not stop
   `setup codex`.
