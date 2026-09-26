@@ -149,9 +149,12 @@ export function pydanticIntText(text: string): IntText {
 /**
  * Rust's `f64::from_str`: a sign, then `inf`, `infinity` or `nan` in any
  * case, or digits with an optional `.` (`1.`, `.5`) and exponent. No
- * whitespace, no `_`.
+ * whitespace, no `_`. The fraction is `(?:\.\d*)?`, never `\.?\d*`: with
+ * the latter a long digit run followed by a stray character backtracks
+ * quadratically (seconds at 100k digits), and a float field in a REST or
+ * MCP body is unbounded server input.
  */
-const RUST_FLOAT = /^[+-]?(?:inf|infinity|nan|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)$/i;
+const RUST_FLOAT = /^[+-]?(?:inf|infinity|nan|(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)$/i;
 
 function rustF64(s: string): number | undefined {
   if (!RUST_FLOAT.test(s)) return undefined;

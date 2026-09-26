@@ -47,6 +47,16 @@ describe("pydanticFloatText: a string in a float field (#69)", () => {
   );
 });
 
+describe("pydanticFloatText: a long digit run is refused in linear time (#69)", () => {
+  it("200k digits plus a trailing x return in well under a second", () => {
+    const text = `${"9".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(pydanticFloatText(text)).toBeUndefined();
+    expect(pydanticFloatText(`1_${text}`)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
 describe("hasLoneSurrogate", () => {
   it("finds a surrogate with no partner, never a pair", () => {
     expect(hasLoneSurrogate("a\u{d800}")).toBe(true);
