@@ -207,6 +207,14 @@ export interface CliDeps extends CommandDeps {
   which: (name: string) => string | null;
   /** Run a program with no shell and no stdin; never rejects. */
   execFile: (file: string, argv: readonly string[], options?: ExecOptions) => Promise<ExecResult>;
+  /**
+   * True when stdin is a terminal — Python's `_stdin_is_tty`. Only then,
+   * and without -y, does `setup` hand the terminal to a harness CLI
+   * (`--oauth`). Absent means no terminal.
+   */
+  stdinIsTty?: () => boolean;
+  /** Run a program attached to the terminal (see `execAttached` in `cli/exec.ts`); absent means `setup` never does. */
+  execAttached?: (file: string, argv: readonly string[]) => Promise<number>;
   login: typeof login;
   refresh: typeof refresh;
   /** Overrides for tests; production passes nothing. */

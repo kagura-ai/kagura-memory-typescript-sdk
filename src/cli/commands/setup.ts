@@ -58,6 +58,7 @@ import { resolveConfig } from "../runClientCommand.js";
 import {
   KEY_ENV_VAR,
   codexTomlBlock,
+  codexTomlOauthBlock,
   hermesEnvVar,
   hermesYamlBlock,
   isHttpUrl,
@@ -265,7 +266,11 @@ function agentsMd(help: string): FlagSpec {
 
 /** The ones after the harness's own, in the Python CLI's order. */
 const HARNESS_TAIL = [URL_FORM, HARNESS_MCP_URL];
-const HARNESS_END = [FORCE, NON_INTERACTIVE, DRY_RUN, INERT_API_KEY, INERT_PROJECT_DIR];
+const HARNESS_NON_INTERACTIVE: FlagSpec = {
+  ...NON_INTERACTIVE,
+  help: "Never hands the terminal to a harness CLI (--oauth); nothing else here prompts",
+};
+const HARNESS_END = [FORCE, HARNESS_NON_INTERACTIVE, DRY_RUN, INERT_API_KEY, INERT_PROJECT_DIR];
 
 const GUARDRAILS_ADVICE =
   "  Pass --guardrails a context id only for a context whose editor list you\n" +
@@ -1516,6 +1521,11 @@ interface HarnessInput {
    * is the flag's URL.
    */
   oauth: boolean;
+  /**
+   * Python's `interactive`: no -y, a terminal on stdin, and a way to hand
+   * it over. Only an --oauth add ever uses it here.
+   */
+  interactive: boolean;
   /** Every key this process knows of ({@link knownKeys}), cut out of whatever a harness CLI prints. */
   secrets: string[];
   force: boolean;
@@ -1611,7 +1621,7 @@ function parseContextFlag(raw: string, profile: string | undefined): string {
   }
 }
 
-function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: HarnessName): HarnessInput {
+function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessName): HarnessInput {
   // The name first: a usage error, as click reports before it runs anything.
   const name = parseName(args);
   rejectExtraArgs(args);
@@ -1718,6 +1728,8 @@ function resolveHarnessInput(deps: CommandDeps, args: ParsedArgs, harness: Harne
     config,
     keyEnv,
     oauth,
+    interactive:
+      !args.flags.has("non-interactive") && deps.stdinIsTty?.() === true && deps.execAttached !== undefined,
     secrets: knownKeys(apiKey, config?.api_key, process.env[keyEnv]),
     force: args.flags.has("force"),
     dryRun: args.flags.has("dry-run"),
@@ -2183,7 +2195,17 @@ interface HarnessPlan {
   /** Where in configPath the block goes: "it", or a part of it. */
   blockTarget: string;
   /** The harness CLI that applies the entry, or why setup prints the block instead. */
-  cli: { program: string; file: string; argv: string[] } | { program: null; reason: string };
+  cli:
+    | {
+        program: string;
+        file: string;
+        argv: string[];
+        /** Run attached to the terminal (it signs in or prompts), with no timeout. */
+        attached?: boolean;
+        /** Appended to the failure message of an attached run (Python's `add_failure_note`). */
+        failureNote?: string;
+      }
+    | { program: null; reason: string };
   /** Notes for before the command, where Python prints them. */
   notes: string[];
   /** Python's closing notes: after a real run or the printed block, not a dry run. */
@@ -2211,6 +2233,33 @@ async function runHarnessCommand(
   if (result.code === 0) return;
   const detail = redactKeys(result.stderr.trim() || result.stdout.trim(), secrets);
   throw new CliError(`${command} failed: ${detail || `exit code ${result.code}`}`);
+}
+
+/**
+ * Run a harness CLI attached to the terminal — Python's `_run_or_fail`
+ * with `attached=True`: its output went to the terminal, so a failure
+ * names only the exit code, then `note`.
+ */
+async function runAttachedHarness(
+  deps: CliDeps,
+  file: string,
+  program: string,
+  argv: string[],
+  note: string,
+): Promise<void> {
+  const code = await deps.execAttached!(file, argv);
+  if (code === 0) return;
+  throw new CliError(`\`${[program, ...argv.slice(0, 2)].join(" ")}\` failed: exit code ${code}${note}`);
+}
+
+/**
+ * Python's `_print_reason` for an add that runs attached: why setup prints
+ * the block instead. `what`: `starts the sign-in` (Codex) or `is
+ * interactive` (Hermes).
+ */
+function oauthPrintReason(input: HarnessInput, what: string): string {
+  const why = input.nonInteractive ? "-y was given" : "stdin is not a terminal";
+  return `\`${input.harness} mcp add\` ${what} and ${why}`;
 }
 
 /**
@@ -2251,7 +2300,11 @@ async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
       notes.push(`${stops ? "With --force, would run" : "Would run"}: ${display}`);
       printBlock(deps, `Would configure ${where}:`, plan.block);
     } else {
-      await runHarnessCommand(deps, file, program, argv, input.secrets);
+      if (plan.cli.attached === true) {
+        await runAttachedHarness(deps, file, program, argv, plan.cli.failureNote ?? "");
+      } else {
+        await runHarnessCommand(deps, file, program, argv, input.secrets);
+      }
       appliedWith = display;
       notes.push(`Done: ${program} wrote ${input.name} to ${where}.`);
     }
@@ -2383,20 +2436,29 @@ function codexDigestNotes(context: string, url: string, keyEnv: string): string[
 async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveHarnessInput(deps, args, "codex");
   await checkOauthServerFirst(deps, input);
-  // Tasks 4 (Codex) and 6 (Hermes) of the --oauth plan replace this line.
-  if (input.oauth) throw new CliError(`--oauth is not wired for ${LABEL[input.harness]} yet.`);
   const { name, keyEnv } = input;
   const home = codexHome();
   const configPath = pathlibJoin(home, "config.toml");
   const found = tomlHasServer(readText(configPath), name);
+  const hooksOn = codexHooksEnabled(home, name);
 
   // Codex reads the server's instructions, so guardrails take effect
   // here. A value already in the URL, from --mcp-url or the configured
   // mcp_url, is kept as written.
   const notes: string[] = [];
+  if (input.oauth && hooksOn) {
+    notes.push(
+      "Warning: the kagura-memory Codex plugin's guardrail hooks read their credential only from a URL entry " +
+        "with a bearer (bearer_token_env_var, env_http_headers or http_headers), so with an --oauth entry they " +
+        "do nothing.",
+      `They are turned on here for the ${name} entry (a config.json under ` +
+        `${pathLabel(pathlibJoin(home, "plugins", "data"))}/kagura-memory-*/): to keep them, re-run with ` +
+        "--url-form and an API key (no --oauth).",
+    );
+  }
   let guardrails = input.guardrails;
   if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
-    if (codexHooksEnabled(home, name)) {
+    if (hooksOn && !input.oauth) {
       // The plugin's hooks read this same table and deliver the
       // guardrails themselves; the server need not repeat them.
       guardrails = "off";
@@ -2412,6 +2474,45 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile));
   const url = mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile });
 
+  const codex = deps.which("codex");
+  if (input.oauth) {
+    // `codex mcp add --url` with no bearer saves the entry and then starts
+    // Codex's browser sign-in, so it runs attached, or not at all.
+    const cli: HarnessPlan["cli"] =
+      codex === null
+        ? { program: null, reason: notOnPath("codex") }
+        : !input.interactive
+          ? { program: null, reason: oauthPrintReason(input, "starts the sign-in") }
+          : {
+              program: "codex",
+              file: codex,
+              argv: ["mcp", "add", name, "--url", url],
+              attached: true,
+              failureNote:
+                "\n  Codex saves the entry before it signs in, so it may be saved already: check with\n" +
+                `  \`codex mcp get ${name}\`, then sign in with \`codex mcp login ${name}\`.`,
+            };
+    const tokenStore =
+      `the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store in ${pathLabel(home)}), ` +
+      `else in ${pathLabel(pathlibJoin(home, ".credentials.json"))}`;
+    return applyPlan(deps, {
+      input,
+      url,
+      configPath,
+      found,
+      stops: true,
+      block: codexTomlOauthBlock(name, url),
+      blockTarget: "it",
+      cli,
+      notes,
+      after: [
+        oauthLoginNote("codex", name, cli.program !== null, tokenStore),
+        "Restart Codex (or start a new session) to load the entry.",
+        `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
+      ],
+    });
+  }
+
   const after = [
     `Codex reads the API key from $${keyEnv} when it connects: set it in the environment that ` +
       `starts Codex, e.g. \`export ${keyEnv}=<your-api-key>\` in your shell profile. ` +
@@ -2424,7 +2525,6 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
   );
 
-  const codex = deps.which("codex");
   return applyPlan(deps, {
     input,
     url,

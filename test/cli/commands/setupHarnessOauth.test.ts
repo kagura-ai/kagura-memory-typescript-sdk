@@ -359,3 +359,130 @@ describe("setup openclaw --oauth", () => {
     expect(notes(h).join("\n")).toContain("its state database (~/oc/state/openclaw.sqlite)");
   });
 });
+
+describe("setup codex --oauth", () => {
+  const codex = { onPath: { codex: "/usr/bin/codex" } };
+  const ADD = ["/usr/bin/codex", "mcp", "add", "kagura-memory", "--url", U];
+  const CODEX_LOGIN_RAN =
+    "Codex signs in itself: `codex mcp add` above started its sign-in if it found OAuth on the server. If it did not log in, run `codex mcp login kagura-memory`. The sign-in redirects the browser to Codex's loopback callback on this host; when the browser cannot reach it (no browser here, or a remote host), add --no-browser: Codex then prints the URL and takes the callback URL pasted back. Codex keys the token on the entry's URL, so changing its ?guardrails= later (another --guardrails or --context-id) means signing in again. memory-cloud's consent screen shows the client name Codex sends, which nothing verifies: approve only a sign-in you started. Codex keeps the token in the OS keyring (\"Codex MCP Credentials\"; on Windows, its encrypted secrets store in ~/.codex), else in ~/.codex/.credentials.json; setup never sees it.";
+  const CODEX_LOGIN_PRINTED = CODEX_LOGIN_RAN.replace(
+    "Codex signs in itself: `codex mcp add` above started its sign-in if it found OAuth on the server. If it did not log in, run `codex mcp login kagura-memory`.",
+    "Once the table is in config.toml, sign in with `codex mcp login kagura-memory`.",
+  );
+  const HOOKS_WARNING = [
+    "Warning: the kagura-memory Codex plugin's guardrail hooks read their credential only from a URL entry with a bearer (bearer_token_env_var, env_http_headers or http_headers), so with an --oauth entry they do nothing.",
+    "They are turned on here for the kagura-memory entry (a config.json under ~/.codex/plugins/data/kagura-memory-*/): to keep them, re-run with --url-form and an API key (no --oauth).",
+  ];
+  const turnOnHooks = () => {
+    const dir = path.join(home, ".codex", "plugins", "data", "kagura-memory-x");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "config.json"), "{}");
+  };
+
+  it("with a terminal, runs the bare-URL add attached, and ends with Python's sign-in note", async () => {
+    const h = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH], h.deps)).toBe(0);
+    expect(h.attached).toEqual([ADD]);
+    expect(h.runs).toEqual([]);
+    expect(notes(h)).toEqual([
+      serverOk("Codex"),
+      "Done: codex wrote kagura-memory to ~/.codex/config.toml.",
+      CODEX_LOGIN_RAN,
+      "Restart Codex (or start a new session) to load the entry.",
+      "Check it with: codex mcp get kagura-memory",
+    ]);
+    expect(report(h).applied_with).toBe(`codex mcp add kagura-memory --url ${U}`);
+    expect(h.out.join("\n")).not.toContain("export KAGURA_API_KEY");
+  });
+
+  it.each([
+    ["-y", true, ["-y"], "-y was given"],
+    ["no terminal", false, [], "stdin is not a terminal"],
+  ])("with %s, prints the table and the login note, and runs nothing", async (_case, tty, flags, why) => {
+    const h = oauthHarness({ ...codex, tty });
+    expect(await runCli(["setup", "codex", ...OAUTH, ...flags], h.deps)).toBe(0);
+    expect(h.attached).toEqual([]);
+    expect(h.runs).toEqual([]);
+    const reason = `Setup does not edit ~/.codex/config.toml itself (\`codex mcp add\` starts the sign-in and ${why}).`;
+    expect(h.err).toEqual([
+      `${reason}\nAdd this kagura-memory entry to it:`,
+      "",
+      `[mcp_servers.kagura-memory]\nurl = "${U}"`,
+      "",
+    ]);
+    expect(notes(h)).toContain(`${reason} Add the kagura-memory entry printed on stderr to it.`);
+    expect(notes(h)).toContain(CODEX_LOGIN_PRINTED);
+    expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
+  });
+
+  it("without codex on PATH, prints the url-only table", async () => {
+    const h = oauthHarness({ tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH, "-y"], h.deps)).toBe(0);
+    expect(h.err.join("\n")).toContain(`[mcp_servers.kagura-memory]\nurl = "${U}"`);
+    expect(h.err.join("\n")).not.toContain("bearer_token_env_var");
+  });
+
+  it("an existing entry stops the run after the server check, with nothing run", async () => {
+    fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), '[mcp_servers.kagura-memory]\nurl = "https://x/mcp"\n');
+    const h = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH], h.deps)).toBe(1);
+    expect(h.server.requests).toHaveLength(1);
+    expect(h.attached).toEqual([]);
+    // This bin's existing-entry stop (70a may have reworded its tail).
+    expect(h.err.join("\n")).toMatch(/^Error: Nothing was written: a kagura-memory entry already exists/m);
+  });
+
+  it("--force runs the same add", async () => {
+    fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".codex", "config.toml"),
+      '[mcp_servers.kagura-memory]\nurl = "https://x/mcp"\nbearer_token_env_var = "K"\n',
+    );
+    const h = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH, "--force"], h.deps)).toBe(0);
+    expect(h.attached).toEqual([ADD]);
+  });
+
+  it("a failed add says the entry may be saved already, in Python's layout", async () => {
+    const h = oauthHarness({ ...codex, tty: true, attached: () => 1 });
+    expect(await runCli(["setup", "codex", ...OAUTH], h.deps)).toBe(1);
+    expect(h.err).toContain(
+      "Error: `codex mcp add` failed: exit code 1\n" +
+        "  Codex saves the entry before it signs in, so it may be saved already: check with\n" +
+        "  `codex mcp get kagura-memory`, then sign in with `codex mcp login kagura-memory`.",
+    );
+    expect(h.out).toEqual([]);
+  });
+
+  it("puts --context-id and --guardrails off on the URL", async () => {
+    const withContext = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH, "--context-id", CONTEXT], withContext.deps)).toBe(0);
+    expect(withContext.attached[0]!.at(-1)).toBe(`${U}?guardrails=${CONTEXT}`);
+
+    const off = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH, "--guardrails", "off"], off.deps)).toBe(0);
+    expect(off.attached[0]!.at(-1)).toBe(`${U}?guardrails=off`);
+  });
+
+  it.each([
+    ["no context", [], U],
+    ["a context", ["--context-id", CONTEXT], `${U}?guardrails=${CONTEXT}`],
+  ])("with the plugin's hooks on and %s, neither turns guardrails off nor stays silent", async (_case, flags, url) => {
+    turnOnHooks();
+    const h = oauthHarness(codex);
+    expect(await runCli(["setup", "codex", ...OAUTH, ...flags, "-y"], h.deps)).toBe(0);
+    expect(h.err.join("\n")).toContain(`url = "${url}"`);
+    expect(h.out.join("\n")).not.toContain("guardrails=off");
+    const all = notes(h);
+    expect(all.slice(all.indexOf(HOOKS_WARNING[0]!), all.indexOf(HOOKS_WARNING[0]!) + 2)).toEqual(HOOKS_WARNING);
+  });
+
+  it("--dry-run with a terminal says it would run the add, and runs and sends nothing", async () => {
+    const h = oauthHarness({ ...codex, tty: true });
+    expect(await runCli(["setup", "codex", ...OAUTH, "--dry-run"], h.deps)).toBe(0);
+    expect(h.server.requests).toEqual([]);
+    expect(h.attached).toEqual([]);
+    expect(notes(h)).toContain(`Would run: codex mcp add kagura-memory --url ${U}`);
+  });
+});
