@@ -62,6 +62,49 @@ describe("formatModelJson: model_dump_json(indent=2)", () => {
   });
 });
 
+describe("formatModelJson: a lone surrogate, which pydantic cannot write as UTF-8 (#69)", () => {
+  // Measured on pydantic 2.13.4: a string value holding a lone surrogate
+  // fails the dump with CPython's UnicodeEncodeError text, the position a
+  // code-point index, a run of them as `S-E`; a key is converted lossily.
+  const refused = (where: string) =>
+    `Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode ${where}: surrogates not allowed`;
+
+  it.each([
+    ["a high surrogate first", "\ud800", "character '\\ud800' in position 0"],
+    ["a low surrogate third", "ab\udfff", "character '\\udfff' in position 2"],
+    ["counted in code points: an astral character is one", "😀\ud800", "character '\\ud800' in position 1"],
+    ["a run of lone surrogates as a range", "😀x\udc00\udc00y", "characters in position 2-3"],
+    ["only the first run", "\ud800a\udc00", "character '\\ud800' in position 0"],
+    ["a high surrogate at the end", "abc\udbff", "character '\\udbff' in position 3"],
+  ])("refuses a string value holding %s", (_name, text, where) => {
+    expect(failure(() => formatModelJson({ s: text })).message).toBe(refused(where));
+    expect(failure(() => formatModelJson({ l: ["ok", text] })).message).toBe(refused(where));
+    expect(failure(() => formatModelJson(parseJsonLossless(JSON.stringify({ p: { s: text } })))).message).toBe(
+      refused(where),
+    );
+  });
+
+  it("keeps a surrogate pair, one code point", () => {
+    expect(formatModelJson({ s: "😀" })).toBe('{\n  "s": "😀"\n}');
+  });
+
+  it("writes a lone surrogate in a key as pydantic's lossy conversion does, three U+FFFD each", () => {
+    expect(formatModelJson({ "\ud800": 1, "a\udfff\udc00b": 2 })).toBe(
+      '{\n  "���": 1,\n  "a������b": 2\n}',
+    );
+  });
+
+  it("refuses the value after converting the key, in pydantic's order", () => {
+    expect(failure(() => formatModelJson({ "\ud800": "a\udfff" })).message).toBe(
+      refused("character '\\udfff' in position 1"),
+    );
+  });
+
+  it("json.dumps has no such refusal: the string is written as JSON.stringify escapes it", () => {
+    expect(formatDumpsJson({ "\ud800": "a\udfff" })).toBe('{\n  "\\ud800": "a\\udfff"\n}');
+  });
+});
+
 describe("readModel: a payload as the Python model reads it", () => {
   it("fills defaults, drops unknown keys and keeps the model's order", () => {
     const page = readModel(

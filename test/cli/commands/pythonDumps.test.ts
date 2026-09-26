@@ -225,8 +225,9 @@ const CASES: Case[] = [
  * #69: what the lossless reader keeps, recorded from the Python CLI 0.42.0
  * (click 8.3.3, pydantic 2.13.4) against a fake server sending these exact
  * bytes: key order in untyped mappings, number literals in typed and
- * untyped fields, NaN and Infinity, duplicate keys, and the nesting depth
- * past which Python's `json.loads` fails.
+ * untyped fields, NaN and Infinity, duplicate keys, the nesting depth
+ * past which Python's `json.loads` fails, and a lone surrogate, which
+ * pydantic's dump refuses in a string and writes lossily in a key.
  */
 const LOSSLESS_CASES: Case[] = [
   {
@@ -389,6 +390,46 @@ const LOSSLESS_CASES: Case[] = [
     code: 1,
     stdout: "",
     stderr: "Error: maximum recursion depth exceeded while decoding a JSON array from a unicode string\n",
+  },
+  {
+    name: "events lone surrogate",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"s\": \"\\ud800\"}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate in a typed str field",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"\\udfff\"}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\udfff' in position 0: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate run after an astral character",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"s\": \"\\ud83d\\ude00x\\udc00\\udc00y\"}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode characters in position 2-3: surrogates not allowed\n",
+  },
+  {
+    name: "events lone surrogate key",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"\\ud800\": 1}}]}"}},
+    code: 0,
+    stdout: "{\n  \"events\": [\n    {\n      \"id\": 1,\n      \"op\": \"upsert\",\n      \"doc_id\": \"d\",\n      \"version\": null,\n      \"idempotency_key\": null,\n      \"importance\": null,\n      \"created_at\": null,\n      \"payload\": {\n        \"\ufffd\ufffd\ufffd\": 1\n      },\n      \"event_metadata\": {},\n      \"payload_bytes\": null,\n      \"payload_truncated\": false\n    }\n  ],\n  \"next_cursor\": null\n}\n",
+    stderr: "",
+  },
+  {
+    name: "events lone surrogate key then value",
+    argv: ["resource","events","products"],
+    routes: {"GET /api/v1/resources/products/events":{"status":200,"raw":"{\"events\": [{\"id\": 1, \"op\": \"upsert\", \"doc_id\": \"d\", \"payload\": {\"\\ud800\": \"a\\udfff\"}}]}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode character '\\udfff' in position 1: surrogates not allowed\n",
   },
 ];
 

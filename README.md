@@ -222,7 +222,11 @@ integer past 2^53 exactly). `NaN` and `Infinity` are read, and print
 makes the body non-JSON, as Python's `int()` limit does; and a body
 nested deeper than 973 containers exits 1 with Python's `maximum
 recursion depth exceeded while decoding a JSON array from a unicode
-string`. Three differences remain. Python's depth is its recursion limit
+string`. A string value holding a lone surrogate (`"\ud800"`) exits 1
+with pydantic's `Error serializing to JSON: UnicodeEncodeError: 'utf-8'
+codec can't encode character '\ud800' in position 0: surrogates not
+allowed`, and an untyped key holding one prints as three U+FFFD, as
+pydantic converts it. Three differences remain. Python's depth is its recursion limit
 less the stack in use: 973 is what these commands reach, and `doctor`
 given such a `/api/v1/system/info` body reports a failed server check
 where Python stops with a traceback. A body that is not valid UTF-8 is

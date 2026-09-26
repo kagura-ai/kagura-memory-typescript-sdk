@@ -20,8 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with Python's `maximum recursion depth exceeded while decoding a JSON
   array from a unicode string`; and `KaguraClient`'s REST methods word an
   unreadable body as Python does (`Invalid response format: Expecting
-  value: line 1 column 1 (char 0)`). The values the SDK returns are
-  unchanged.
+  value: line 1 column 1 (char 0)`). A string value holding a lone
+  surrogate fails as pydantic's dump does (`Error serializing to JSON:
+  UnicodeEncodeError: 'utf-8' codec can't encode character '\ud800' in
+  position 0: surrogates not allowed`) instead of printing the `\ud800`
+  escape, and an untyped key holding one prints as three U+FFFD. The
+  values the SDK returns are unchanged.
 
 ## [0.13.0] - 2026-09-25
 

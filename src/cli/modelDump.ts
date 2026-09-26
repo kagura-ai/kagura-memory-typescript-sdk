@@ -14,6 +14,10 @@
  * {@link formatDumpsJson} writes the same values as Python's `json.dumps`
  * does, for the one result the Python CLI prints that way from a model's
  * values, `resource import`'s summary.
+ *
+ * pydantic writes UTF-8, so a string value holding a lone surrogate (a
+ * `"\ud800"` in the body) fails its dump with CPython's `UnicodeEncodeError`
+ * text, while a key holding one is converted lossily (three U+FFFD each).
  */
 
 import { JsonNumber, orderedEntries, valueAt } from "../losslessJson.js";
@@ -29,12 +33,23 @@ import { CliError } from "./parse.js";
 const MAX_UNTYPED_DEPTH = 255;
 const DEPTH_EXCEEDED = "Error serializing to JSON: ValueError: Circular reference detected (depth exceeded)";
 
+/** A UTF-16 surrogate with no partner: one code point, which Python's UTF-8 codec refuses. */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+/** What pydantic-core's lossy conversion makes of a lone surrogate's three WTF-8 bytes. */
+const LOSSY_SURROGATE = "\ufffd\ufffd\ufffd";
+
 /** What differs between pydantic's JSON and `json.dumps`'s. */
 interface Style {
   /** A float's text. */
   float(value: number): string;
   /** Whether an untyped value nested past {@link MAX_UNTYPED_DEPTH} fails, as pydantic's serializer does. */
   limitDepth: boolean;
+  /**
+   * Whether strings are written as UTF-8, as pydantic's serializer does: a
+   * lone surrogate fails a value (see {@link loneSurrogateError}) and is
+   * {@link LOSSY_SURROGATE} in a key. `json.dumps` keeps the code unit.
+   */
+  utf8: boolean;
 }
 
 /**
@@ -73,8 +88,59 @@ export function dumpsFloat(value: number): string {
   return pyFloatRepr(value);
 }
 
-const PYDANTIC: Style = { float: pydanticFloat, limitDepth: true };
-const JSON_DUMPS: Style = { float: dumpsFloat, limitDepth: false };
+const PYDANTIC: Style = { float: pydanticFloat, limitDepth: true, utf8: true };
+const JSON_DUMPS: Style = { float: dumpsFloat, limitDepth: false, utf8: false };
+
+/**
+ * pydantic's failure on a string value it cannot encode, or `null` when
+ * `text` has no lone surrogate: CPython's UTF-8 codec names the first
+ * offending code point and its position counted in code points (an astral
+ * character is one), or the run's `S-E` when the next code points are lone
+ * surrogates too. Measured on pydantic 2.13.4 (pydantic-core 2.46.4).
+ *
+ *   "ab\udfff" -> character '\udfff' in position 2
+ *   "\ud83d\ude00x\udc00\udc00y" -> characters in position 2-3
+ */
+function loneSurrogateError(text: string): CliError | null {
+  let position = 0;
+  let start = -1;
+  let end = -1;
+  let first = "";
+  // The string iterator yields code points; a lone surrogate is one of them.
+  for (const point of text) {
+    const code = point.codePointAt(0) as number;
+    if (code >= 0xd800 && code <= 0xdfff) {
+      if (start < 0) {
+        start = position;
+        first = code.toString(16);
+      }
+      end = position;
+    } else if (start >= 0) {
+      break;
+    }
+    position += 1;
+  }
+  if (start < 0) return null;
+  const where =
+    start === end ? `character '\\u${first}' in position ${start}` : `characters in position ${start}-${end}`;
+  return new CliError(
+    `Error serializing to JSON: UnicodeEncodeError: 'utf-8' codec can't encode ${where}: surrogates not allowed`,
+  );
+}
+
+/** A string as `style` writes it: {@link JSON.stringify}'s escapes, which are pydantic's too. */
+function string(value: string, style: Style): string {
+  if (style.utf8) {
+    const error = loneSurrogateError(value);
+    if (error !== null) throw error;
+  }
+  return JSON.stringify(value);
+}
+
+/** A mapping key as `style` writes it. */
+function key(value: string, style: Style): string {
+  return JSON.stringify(style.utf8 ? value.replace(LONE_SURROGATE, LOSSY_SURROGATE) : value);
+}
 
 /** A JSON number of an untyped value, its literal unknown: an integer as its digits, else a float. */
 function anyNumber(value: number, style: Style): string {
@@ -97,7 +163,8 @@ function literal(value: JsonNumber, style: Style): string {
  * body in its keys' order with its number literals (see the header).
  *
  * @throws CliError with pydantic's message when an untyped value nests
- *   deeper than pydantic writes (see {@link MAX_UNTYPED_DEPTH}).
+ *   deeper than pydantic writes (see {@link MAX_UNTYPED_DEPTH}), or a
+ *   string value holds a lone surrogate (see {@link loneSurrogateError}).
  */
 export function formatModelJson(value: unknown): string {
   return write(value, "", null, PYDANTIC);
@@ -106,7 +173,8 @@ export function formatModelJson(value: unknown): string {
 /**
  * `value` as `json.dumps(value, indent=2, ensure_ascii=False)` writes it:
  * {@link formatModelJson}'s layout and strings, a float as Python's
- * `repr` (`1e-07`, `NaN`), and no depth limit of its own.
+ * `repr` (`1e-07`, `NaN`), no depth limit of its own and no refusal of a
+ * lone surrogate (`json.dumps` keeps the code unit).
  */
 export function formatDumpsJson(value: unknown): string {
   return write(value, "", null, JSON_DUMPS);
@@ -126,7 +194,7 @@ function write(value: unknown, indent: string, depth: number | null, style: Styl
   if (value instanceof JsonNumber) return literal(value, style);
   switch (typeof value) {
     case "string":
-      return JSON.stringify(value);
+      return string(value, style);
     case "boolean":
       return value ? "true" : "false";
     case "bigint":
@@ -150,7 +218,7 @@ function write(value: unknown, indent: string, depth: number | null, style: Styl
   if (entries.length === 0) return "{}";
   const next = enter(outer);
   const lines = entries.map(
-    ([key]) => `${inner}${JSON.stringify(key)}: ${write(valueAt(value, key), inner, next, style)}`,
+    ([name]) => `${inner}${key(name, style)}: ${write(valueAt(value, name), inner, next, style)}`,
   );
   return `{\n${lines.join(",\n")}\n${indent}}`;
 }
