@@ -41,7 +41,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shadows still fails, as `setup claude` refuses it (README, `doctor`).
   `--profile missing`
   no longer fails when `KAGURA_API_KEY` is set, and `--profile ''` means
-  the default profile. A `.kagura.json` that does not parse fails the
+  the default profile. A selected profile that does not exist is reported
+  once, by the resolution's `Authentication could not be resolved: …`,
+  no longer also as `no profile named …`; an expired profile that
+  `KAGURA_API_KEY` shadows is no failure, as Python only warns; and with
+  no `.kagura.json` the auth section no longer says `.kagura.json carries
+  an api_key` for the key the environment supplied. A `.kagura.json`
+  that does not parse fails the
   check with the message naming it, never as `No credentials found`.
 - **An OAuth refresh failure on a `KaguraClient` REST read is a
   `KaguraAuthExpiredError`** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),

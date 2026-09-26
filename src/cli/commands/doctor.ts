@@ -100,8 +100,13 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
         const creds = profileNamed(file, target);
         if (creds === undefined) {
           // Python resolves KAGURA_API_KEY before any profile, so a missing
-          // one is no failure then.
-          if (!envKeySet) {
+          // one is no failure then; a selected one (--profile,
+          // KAGURA_PROFILE) that is missing fails the resolution, which
+          // checkServer reports in Python's words (`Authentication could
+          // not be resolved: Profile 'x' … not found`), the one FAIL line
+          // Python 0.42.0 prints. Only a default_profile the file itself
+          // names and lacks is reported here.
+          if (!envKeySet && selected === undefined) {
             checks.push({
               section: "auth",
               status: "fail",
@@ -121,7 +126,10 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
             status: "warn",
             message: `profile '${target}' has expired but can refresh`,
           });
-        } else {
+        } else if (!envKeySet) {
+          // With KAGURA_API_KEY set the profile is not used, so its state
+          // is no failure: Python 0.42.0 prints only `WARN OAuth profile is
+          // shadowed by KAGURA_API_KEY` (the precedence warning below).
           checks.push({
             section: "auth",
             status: "fail",
@@ -152,8 +160,12 @@ function checkAuth(deps: CommandDeps, profile: string | undefined): DoctorCheck[
     });
   }
 
+  // Python's `_configured_api_key` reads the file alone: a config built
+  // from the environment (no `.kagura.json`) carries KAGURA_API_KEY, which
+  // is the env key already reported, not a key any file carries.
   const config = safeConfig(deps);
-  if (typeof config?.api_key === "string" && config.api_key.trim()) {
+  const fromFile = config !== null && !isEnvFallbackConfig(config as unknown as KaguraConfig);
+  if (fromFile && typeof config.api_key === "string" && config.api_key.trim()) {
     checks.push({
       section: "auth",
       status: "info",

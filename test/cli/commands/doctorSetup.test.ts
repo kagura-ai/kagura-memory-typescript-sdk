@@ -964,10 +964,68 @@ describe("kagura-memory doctor", () => {
       writeCredentials(profiles);
       const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
       const code = await runCli(["doctor"], h.deps);
-      expect(h.out).toContain(line);
+      // Python's one FAIL line for the cause: no `no profile named` beside it.
+      expect(h.out.filter((l) => l.startsWith("FAIL"))).toEqual([line]);
       expect(h.out).toContain("INFO Server connectivity check skipped because auth resolution failed");
       expect(h.server.requests).toEqual([]);
       expect(code).toBe(1);
+    });
+
+    it("fails --profile missing once, in Python's words, when no KAGURA_API_KEY is set (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python 0.42.0: the auth section's one FAIL is the resolution's;
+      // its `_check_auth` has no line of its own for the missing profile.
+      writeCredentials({ default: profileJson() });
+      const h = harness();
+      const code = await runCli(["doctor", "--profile", "missing"], h.deps);
+      expect(h.out.filter((l) => l.startsWith("FAIL"))).toEqual([
+        "FAIL Authentication could not be resolved: Profile 'missing' (from profile argument) not found in " +
+          "credentials.json.\n  Run: kagura auth login --profile missing\n" +
+          "  Or inspect ~/.kagura/credentials.json to see which profiles exist.",
+      ]);
+      expect(h.out.join("\n")).not.toContain("no profile named");
+      expect(h.out).toContain("INFO Server connectivity check skipped because auth resolution failed");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(1);
+    });
+
+    it("still fails a default_profile the credentials file names and lacks", async () => {
+      // The SDK's own diagnostic for a broken file; no selection in play.
+      writeCredentials({ other: profileJson() }, "default");
+      const h = harness();
+      await runCli(["doctor"], h.deps);
+      expect(h.out).toContain("FAIL no profile named 'default'; available: other");
+    });
+
+    it("does not fail an expired profile that KAGURA_API_KEY shadows (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python 0.42.0: `WARN OAuth profile is shadowed by KAGURA_API_KEY;
+      // auto-refresh will not be used`, no FAIL; exit 1 only when the
+      // server is unreachable.
+      writeCredentials({ default: profileJson({ expires_at: "2020-01-01T00:00:00Z", refresh_token: "" }) });
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out).toContain("WARN KAGURA_API_KEY is set and takes precedence over any OAuth profile");
+      expect(h.out.filter((l) => l.startsWith("FAIL"))).toEqual([]);
+      expect(h.out.join("\n")).not.toContain("has expired");
+      expect(code).toBe(0);
+    });
+
+    it("does not report a .kagura.json api_key when there is no .kagura.json (#69)", async () => {
+      process.chdir(sandbox); // no .kagura.json here, none in $HOME
+      // The real loadConfig falls back to the environment; Python's
+      // `_configured_api_key` reads the file alone: `.kagura.json api_key
+      // is not set`.
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      const h = harness();
+      h.deps.loadConfig = loadConfig;
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out.join("\n")).not.toContain(".kagura.json carries an api_key");
+      expect(h.out).toContain("WARN KAGURA_API_KEY is set and takes precedence over any OAuth profile");
+      expect(code).toBe(0);
     });
 
     it("skips the server check for a --profile whose MCP URL is insecure, as Python's _check_https does (#69)", async () => {
