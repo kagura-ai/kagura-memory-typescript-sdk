@@ -770,6 +770,22 @@ describe("a hand-edited profile, read as Python's from_dict reads it (#69)", () 
     expect(creds.refreshToken).toBe(refreshToken);
   });
 
+  // The documented difference: the file is read with JSON.parse, so a
+  // number literal is rendered from the JavaScript number. Python 0.42.0
+  // (`kagura auth token`) prints the literal: `1.0`, `-0.0`, `1e+16`.
+  it.each([
+    ["1.0", "1"],
+    ["-0.0", "0"],
+    ["1e16", "10000000000000000"],
+  ])("renders a number token %s from the JavaScript number (README: Hand-edited credentials)", (literal, accessToken) => {
+    const p = path.join(dir, "creds.json");
+    fs.writeFileSync(
+      p,
+      `{"version": 1, "default_profile": "n", "profiles": {"n": ${JSON.stringify(base).replace('"at"', literal)}}}`,
+    );
+    expect(getProfile(loadCredentialsFile(p), "n")?.accessToken).toBe(accessToken);
+  });
+
   it("still refuses a profile without the keys, as Python's KeyError does", () => {
     const { access_token: _access, ...noAccess } = base;
     expect(() => credentialsFromDict(noAccess)).toThrow("credentials profile missing required field 'access_token'");
