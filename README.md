@@ -229,14 +229,19 @@ with pydantic's `Error serializing to JSON: UnicodeEncodeError: 'utf-8'
 codec can't encode character '\ud800' in position 0: surrogates not
 allowed`; a key of the untyped mapping itself holding one prints as
 three U+FFFD, as pydantic converts it, and a key of a mapping nested
-inside it exits 1 like a value. Three differences remain. Python's depth is its recursion limit
-less the stack in use: 973 is what these commands reach, and `doctor`
-given such a `/api/v1/system/info` body reports a failed server check
-where Python stops with a traceback. A body that is not valid UTF-8 is
-read with U+FFFD in place of the bad bytes, where Python calls it
-non-JSON. And only REST bodies are read this way: the MCP commands
-(`recall`, `remember`, …) still print a whole float as `1` and list an
-object's integer keys first.
+inside it exits 1 like a value. Three differences remain. Python's depth
+is its recursion limit less the stack in use: 973 is what these commands
+reach, and `doctor` given such a `/api/v1/system/info` body reports a
+failed server check where Python stops with a traceback. The body is
+decoded as UTF-8, as `fetch` decodes every body: one that is not valid
+UTF-8 is read with U+FFFD in place of the bad bytes, where Python calls
+it non-JSON, or, for a lone surrogate sent as its three raw bytes
+(`ED A0 80`), reads it and then refuses the dump; and a UTF-16 or UTF-32
+body, with or without a BOM, which Python's `json.loads` detects and
+reads, is non-JSON here (`Server returned a non-JSON body (HTTP 200)
+…`). No memory-cloud server sends either. And only REST bodies are read
+this way: the MCP commands (`recall`, `remember`, …) still print a whole
+float as `1` and list an object's integer keys first.
 
 **Files and imports.** The `files` commands take their workspace from the
 credential's own source, as the Python CLI does (its #115): `-c` when
@@ -266,9 +271,10 @@ Python sends it. The summary prints as Python's `json.dumps` prints it
 the server's key order and numbers (`1.0`, `1e+16`, `NaN`); a lone
 surrogate in an error's string or key prints as `?` (one per code unit,
 `"😀???x"`), as the Python CLI's UTF-8 stdout with `errors="replace"`
-writes what `json.dumps` kept. The progress
-events' counts (`-v`) are still JavaScript numbers, so past 2^53 they
-are rounded where Python's are exact.
+writes what `json.dumps` kept. The counts in
+`--progress json`'s events (`detail.created_so_far`, the success event's
+`detail.created`) are still JavaScript numbers, so past 2^53 they are
+rounded where Python's are exact; `-v` prints no counts.
 
 **Progress.** `files upload` and `resource import` take `-v/--verbose`
 (repeatable) and `--progress rich|json|none`. Progress goes to stderr, one
@@ -683,9 +689,13 @@ that does not resolve fails the auth section with Python's
 (`info`), as in Python. The credential is resolved as a bare client
 resolves it, as in Python: `KAGURA_API_KEY`, then the OAuth profile
 (`--profile NAME`, `KAGURA_PROFILE` or the default; an empty `--profile`
-is the default), then `.kagura.json`. A resolved MCP URL that is not HTTPS
-is a warning and the server is not contacted (`Server connectivity check
-skipped because the MCP URL is insecure`), whichever source it came from:
+is the default), then `.kagura.json`. A selected profile that does not
+exist fails the auth section once, with the resolution's message, and
+with `KAGURA_API_KEY` set an expired or missing profile is no failure, as
+in Python, whose warning is that the key shadows the profile. A resolved
+MCP URL that is not HTTPS is a warning and the server is not contacted
+(`Server connectivity check skipped because the MCP URL is insecure`),
+whichever source it came from:
 an OAuth profile's URL, `KAGURA_MCP_URL`, or the `mcp_url` of the
 `.kagura.json` the credential resolved from (exit 0, as in Python). One
 remaining difference: a plain-HTTP `.kagura.json` `mcp_url` that the
@@ -1470,28 +1480,43 @@ int field of a typed result (`recallSeries`' `count`, the guardrail caps,
 a member key's or invitation's `id`) holds a `number`, so a value past
 2^53 is the nearest double and one of 2^1024 or more (309 digits) is
 `Infinity`, where Python keeps the exact int; widening those types would
-break callers. An int field of an MCP tool result (`recallSeries`'
-`count`, a bucket's `count`) sent a whole float literal of 2^63 or more
-(`1e20`, `9223372036854775808.0`) reads it as that double, where pydantic
-refuses it with `Unable to parse input string as an integer, exceeded
-maximum size`: the tool text is read with `JSON.parse`, which cannot tell
-`1e20` from `100000000000000000000` (which pydantic accepts exactly). And
-a bool field sent the JSON number 9223372036854775807 or
--9223372036854775808 reads it as the double +/-2^63 and says `Input
-should be a valid boolean`, where pydantic says `…, unable to interpret
-input`. The `resource` and `files` dumps read the literal itself and agree with pydantic.
+break callers. The other two hold only where a body is read with
+`JSON.parse`, which cannot tell `1e20` from `100000000000000000000` or
+`9223372036854775807` from 2^63: the text of an MCP tool result
+(`recallSeries`' `count`, a bucket's `count`,
+`ResourceClient.setupResource`'s `token_id`). Every REST reader
+(`ResourceClient`, `FilesClient`, `MemoryClient`, `WorkspaceClient`,
+`KaguraClient`'s REST methods, so the `resource` and `files` dumps too)
+keeps the literal and agrees with pydantic. In a tool result, an int
+field sent a whole float literal of 2^63 or more (`1e20`,
+`9223372036854775808.0`) reads it as that double, where pydantic refuses
+it with `Unable to parse input string as an integer, exceeded maximum
+size` and accepts the int literal exactly. And a bool field sent the JSON number
+9223372036854775807 or -9223372036854775808 would read it as the double
++/-2^63 and say `Input should be a valid boolean`, where pydantic says
+`…, unable to interpret input`; no MCP tool result has a bool field
+today, so this is the coercer's limit rather than any field's.
 
 **The MCP envelope.** A JSON-RPC or tool error is rendered as the Python
 SDK renders it, with Python's `str()` of whatever the server sent
 (`MCP error: {'code': -32603}`, `t failed (None): …`), and a `null`
-JSON-RPC body reads as no result. Two differences remain. A JSON-RPC
-`error` that is no object (`{"error": "boom"}`) reads `MCP error: boom`,
-where the Python SDK stops with an `AttributeError`. And a number literal
-in a code or message is rendered from the JavaScript number (`1.0` reads
-`1`, `1e2` `100`, `-0.0` `0`, an int past 2^53 its nearest double) and an
-object's integer-like keys print first, where Python prints the literal
-and keeps the key order: the JSON-RPC body and the tool text are read with
-`JSON.parse`.
+JSON-RPC body reads as no result. Three differences remain. A JSON-RPC
+`error` that is no object (`{"error": "boom"}`, `null`, `[1]`) reads
+`MCP error: boom` (`None`, `[1]`), where the Python SDK stops with an
+`AttributeError`; likewise a JSON-RPC body that is no object (`5`, `"x"`,
+`[1]`, an empty body) and a `result` that is no object read as no result
+(`{}`), where the Python SDK stops with a `TypeError`, an
+`AttributeError` or a raw `JSONDecodeError`: Python has no words to port
+there. A number literal in a code or message is rendered from the
+JavaScript number (`1.0` reads `1`, `1e2` `100`, `-0.0` `0`, an int past
+2^53 its nearest double) and an object's integer-like keys print first,
+where Python prints the literal and keeps the key order: the JSON-RPC
+body and the tool text are read with `JSON.parse`. And
+`KaguraPartialRollbackError.summary` is the `rollback_summary` as it
+arrived, once checked against Python's `RollbackSummary` (an
+`edges_deleted` of `"6"` stays the string, an unknown key stays), where
+Python's model holds `6` and drops the key; `rollbackSleepRun`'s success
+result is returned the same way.
 
 **Hand-edited credentials.** A profile in `~/.kagura/credentials.json`
 whose `access_token` is no string, or whose `refresh_token` is `null`, is
@@ -1506,6 +1531,13 @@ read with `JSON.parse`. When this SDK rewrites the file (a refresh, `auth
 use`), it writes those two tokens as strings (`"123"`, `""`) where Python
 writes them back as they were; both SDKs read either form the same way,
 so after a rewrite of a number token Python sends the rendered string too.
+Two more differences are on the Python side of such a file: the Python
+CLI's own `auth status` stops with a `TypeError` on a number token (its
+`_redact_token` takes the token's `len`), where `kagura-memory auth
+status` prints the profile; and `auth token` on a profile whose
+`access_token` is `null` prints an empty line there (`click.echo(None)`)
+and `None` here, the token being rendered when the file is read, while
+the header is `Bearer None` in both.
 
 ## Development
 
