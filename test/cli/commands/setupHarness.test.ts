@@ -864,6 +864,26 @@ describe("setup hermes", () => {
     );
   });
 
+  it("never runs `hermes mcp add` over a kept OAuth entry, so 0.41.3's kept-entry stop cannot arise (python-sdk #287)", async () => {
+    // Python 0.41.3: with Hermes's overwrite prompt declined, an `auth: oauth`
+    // entry at the same URL is the kept one, not "Done". This port never
+    // runs `hermes mcp add`, so there is no prompt: it prints the entry to
+    // put in its place, as Python does under -y, and claims nothing written.
+    fs.mkdirSync(hermesDir(), { recursive: true });
+    const kept = `mcp_servers:\n  kagura-memory:\n    url: "${MCP_URL}"\n    auth: oauth\n`;
+    fs.writeFileSync(configYaml(), kept);
+    const h = harness(hermes);
+    expect(await runCli(setup("hermes", "--url-form", "--force"), h.deps)).toBe(0);
+    expect(h.runs).toEqual([]);
+    expect(notes(h).some((n) => n.startsWith("Done:"))).toBe(false);
+    expect(notes(h)).toContain(
+      "Setup does not edit ~/.hermes/config.yaml itself (`hermes mcp add` is interactive and this port " +
+        "never prompts). Add the kagura-memory entry printed on stderr to its mcp_servers: mapping in place " +
+        "of the existing one.",
+    );
+    expect(fs.readFileSync(configYaml(), "utf-8")).toBe(kept);
+  });
+
   describe("its home", () => {
     function activeProfile(content: string): void {
       fs.mkdirSync(hermesDir(), { recursive: true });

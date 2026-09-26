@@ -186,3 +186,13 @@ describe("README links", () => {
     expect(broken).toEqual([]);
   });
 });
+
+describe("wording memory-cloud v0.77.0 made stale (python-sdk 0.41.0)", () => {
+  it("no longer says the MCP list_tags tool lacks with_tags", () => {
+    // memory-cloud#1669: the tool has with_tags from v0.77.0.
+    expect(readme).not.toContain("ignores `withTags` (through server v0.76.0)");
+    expect(clientSource).not.toContain("has no `with_tags` (through v0.76.0)");
+    expect(clientSource).not.toContain("has no with_tags through server v0.76.0");
+    expect(readme).toContain("has `with_tags` only from server v0.77.0");
+  });
+});

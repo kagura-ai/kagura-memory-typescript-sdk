@@ -440,9 +440,11 @@ export interface ListTagsOptions {
    *
    * A non-empty drill-down is sent to the REST route
    * `GET /api/v1/contexts/{id}/tags`, which has had it since server
-   * v0.17.2: the MCP `list_tags` tool has no `with_tags` (through v0.76.0)
-   * and silently returned the unfiltered vocabulary (#47). The response has
-   * the same shape either way. Its `context_name` is the one the REST route
+   * v0.17.2, on every server: the MCP `list_tags` tool has `with_tags` only
+   * from server v0.77.0 (memory-cloud#1669), and an older one silently
+   * returns the unfiltered vocabulary (#47). The drill-down can move to MCP
+   * once `MIN_SERVER_VERSION` is 0.77.0 or later. The response has the same
+   * shape either way. Its `context_name` is the one the REST route
    * sends from server v0.77.0, which the client keeps. From an older
    * server, or when the name is empty or null, the client looks it up once
    * per context with a one-tag `list_tags` call and keeps it; a plain
@@ -2013,8 +2015,9 @@ export class KaguraClient {
     const sort = options.sort ?? "count";
 
     if (withTags.length > 0) {
-      // MCP list_tags has no with_tags through server v0.76.0 and silently
-      // returns the whole vocabulary instead (#47).
+      // MCP list_tags has with_tags only from server v0.77.0
+      // (memory-cloud#1669); an older one silently returns the whole
+      // vocabulary (#47). REST until MIN_SERVER_VERSION >= 0.77.0.
       return this.listTagsViaRest(options.contextId, {
         limit,
         min_count: minCount,
