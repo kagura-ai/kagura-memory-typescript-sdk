@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`doctor` checks the server the SDK would use**
+  ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
+  Without `--profile` it forced `.kagura.json`'s key and URL; it now
+  resolves as a bare client does, as Python's does: `KAGURA_API_KEY`, then
+  the OAuth profile, then `.kagura.json`, so `KAGURA_REQUIRE_PROFILE` and a
+  missing `KAGURA_PROFILE` fail the auth section and skip the check. An
+  insecure resolved MCP URL is Python's warning, and the check is skipped
+  (`Server connectivity check skipped because the MCP URL is insecure`),
+  where it failed. `--profile missing` no longer fails when
+  `KAGURA_API_KEY` is set, and `--profile ''` means the default profile.
 - **An OAuth refresh failure on a `KaguraClient` REST read is a
   `KaguraAuthExpiredError`** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)),
   as on the MCP path and in the REST clients, where it was a

@@ -58,6 +58,7 @@ function harness(
     login: (() => {}) as unknown as CliDeps["login"],
     refresh: (() => {}) as unknown as CliDeps["refresh"],
     loadConfig: () => config,
+    resolveAuth,
     makeClient: (o: Record<string, unknown>) => makeClient(server, o),
     makeFilesClient: (() => {
       throw new Error("unused");
@@ -103,6 +104,12 @@ beforeEach(() => {
     // The variable a user-scope entry sends: setup says whether this shell
     // has it, and doctor warns when it is unset.
     "KAGURA_MCP_API_KEY",
+    // doctor resolves the credential as a bare client does; the
+    // developer's own profile selection must not leak in.
+    "KAGURA_PROFILE",
+    "KAGURA_REQUIRE_PROFILE",
+    "KAGURA_AGE_IDENTITY",
+    "KAGURA_AGE_IDENTITY_FILE",
   ]) {
     delete process.env[name];
   }
@@ -799,8 +806,150 @@ describe("kagura-memory doctor", () => {
         return { code, checks: report.checks.filter((c) => c.section === "server") };
       })();
       expect(seen).toEqual([{ profile: "other" }]);
-      expect(resolved).toEqual([{ apiKey: null, mcpUrl: null, profile: "other" }]);
+      expect(resolved).toEqual([
+        { apiKey: null, mcpUrl: null, profile: "other", config: { api_key: "k", mcp_url: "https://x.test/mcp" } },
+      ]);
       expect(checks).toMatchObject([{ status: "info" }]);
+    });
+
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4)
+    // against a fake server; each test names its scenario.
+    it("resolves an OAuth profile before .kagura.json's key, as a bare client does (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python: OAuth INFO, exit 0. The client is built with no key forced.
+      writeCredentials({ default: profileJson() });
+      const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
+      const seen: unknown[] = [];
+      h.deps.makeClient = ((o: Record<string, unknown>) => {
+        seen.push(o);
+        return makeClient(h.server, o);
+      }) as CliDeps["makeClient"];
+      h.server.forcedResponse = new Response('{"detail":"Invalid API key"}', { status: 401 });
+      const code = await runCli(["doctor"], h.deps);
+      expect(seen).toEqual([{}]);
+      expect(h.out).toContain(
+        "INFO Could not verify server version over REST with an OAuth profile (expected: REST validates " +
+          "API keys, not OAuth bearers; the MCP connection is unaffected).",
+      );
+      expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    it("checks KAGURA_API_KEY's server, not .kagura.json's (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python: FAIL Server unreachable: Connection failed: …, exit 1.
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      process.env.KAGURA_MCP_URL = "https://dead.test/mcp";
+      const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
+      const hosts: string[] = [];
+      h.deps.makeClient = ((o: KaguraClientOptions) =>
+        new KaguraClient({
+          ...o,
+          fetch: async (input) => {
+            hosts.push(new URL(String(input)).host);
+            throw new TypeError("fetch failed");
+          },
+        })) as CliDeps["makeClient"];
+      const code = await runCli(["doctor"], h.deps);
+      expect(hosts).toEqual(["dead.test"]);
+      expect(h.out).toContain("FAIL Server unreachable: Connection failed: fetch failed");
+      expect(code).toBe(1);
+    });
+
+    it.each([
+      [
+        { KAGURA_REQUIRE_PROFILE: "1" },
+        { default: profileJson(), other: profileJson() },
+        "FAIL Authentication could not be resolved: Multiple profiles configured and none selected; refusing " +
+          "to use the implicit default 'default' because KAGURA_REQUIRE_PROFILE is set.\n" +
+          "  Select one explicitly: kagura auth use <name>, --profile <name>, or KAGURA_PROFILE=<name>\n" +
+          "  Available profiles: default, other",
+      ],
+      [
+        { KAGURA_PROFILE: "nope" },
+        { default: profileJson() },
+        "FAIL Authentication could not be resolved: Profile 'nope' (from KAGURA_PROFILE env) not found in " +
+          "credentials.json.\n  Run: kagura auth login --profile nope\n" +
+          "  Or inspect ~/.kagura/credentials.json to see which profiles exist.",
+      ],
+    ])("fails auth and skips the server with %j, though .kagura.json has a key (#69)", async (env, profiles, line) => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      Object.assign(process.env, env);
+      writeCredentials(profiles);
+      const h = harness({ api_key: "kagura_cfgkey", mcp_url: "https://x.test/mcp" });
+      const code = await runCli(["doctor"], h.deps);
+      expect(h.out).toContain(line);
+      expect(h.out).toContain("INFO Server connectivity check skipped because auth resolution failed");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(1);
+    });
+
+    it("skips the server check for a --profile whose MCP URL is insecure, as Python's _check_https does (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      // Python: WARN <validate_https_url message>, INFO skipped, exit 0.
+      writeCredentials({ default: profileJson(), a: profileJson({ mcp_url: "http://example.invalid/mcp" }) });
+      const h = harness({});
+      const code = await runCli(["doctor", "--profile", "a"], h.deps);
+      expect(h.out).toContain(
+        "WARN MCP URL must use HTTPS for security (got: http://example.invalid/mcp). " +
+          "HTTP is only allowed for localhost development.",
+      );
+      expect(h.out).toContain("INFO Server connectivity check skipped because the MCP URL is insecure");
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    it("skips the server check for KAGURA_API_KEY with an insecure KAGURA_MCP_URL, never sending the key", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      process.env.KAGURA_MCP_URL = "http://example.invalid/mcp";
+      const h = harness();
+      const code = await runCli(["doctor", "--json"], h.deps);
+      const report = JSON.parse(h.out.join("\n")) as {
+        checks: { section: string; status: string; message: string; details: unknown }[];
+      };
+      expect(report.checks.slice(-2)).toEqual([
+        {
+          section: "mcp",
+          status: "warn",
+          message:
+            "MCP URL must use HTTPS for security (got: http://example.invalid/mcp). " +
+            "HTTP is only allowed for localhost development.",
+          details: { mcp_url: "http://example.invalid/mcp" },
+        },
+        {
+          section: "server",
+          status: "info",
+          message: "Server connectivity check skipped because the MCP URL is insecure",
+          details: {},
+        },
+      ]);
+      expect(h.server.requests).toEqual([]);
+      expect(code).toBe(0);
+    });
+
+    it("passes --profile missing when KAGURA_API_KEY is set, as Python's env key wins (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      writeCredentials({ default: profileJson() });
+      process.env.KAGURA_API_KEY = "kagura_envkey";
+      const h = harness();
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor", "--profile", "missing"], h.deps);
+      expect(h.out.join("\n")).not.toContain("no profile named 'missing'");
+      expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(code).toBe(0);
+    });
+
+    it("reads --profile '' as the default profile, as Python's `profile or …` does (#69)", async () => {
+      process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+      writeCredentials({ default: profileJson() });
+      const h = harness({});
+      h.server.restResults[INFO_PATH] = { name: "k", version: "0.78.0" };
+      const code = await runCli(["doctor", "--profile", ""], h.deps);
+      expect(h.out).toContain("PASS profile 'default' is active until 2099-01-01T00:00:00.000Z");
+      expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+      expect(code).toBe(0);
     });
 
     it("prints the two lines as Python does", async () => {

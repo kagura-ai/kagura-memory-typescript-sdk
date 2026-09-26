@@ -678,9 +678,12 @@ unreachable: `Server unreachable: Invalid response format: …`, naming the
 problem in the SDK's words where Python prints pydantic's. A credential
 that does not resolve fails the auth section with Python's
 `Authentication could not be resolved: …` and skips the server check
-(`info`), as in Python. With
-`--profile NAME` the server is checked with that profile, as in Python
-(`KAGURA_API_KEY` still comes first), not with the default. `--json`
+(`info`), as in Python. The credential is resolved as a bare client
+resolves it, as in Python: `KAGURA_API_KEY`, then the OAuth profile
+(`--profile NAME`, `KAGURA_PROFILE` or the default; an empty `--profile`
+is the default), then `.kagura.json`. A resolved MCP URL that is not HTTPS
+is a warning and the server is not contacted (`Server connectivity check
+skipped because the MCP URL is insecure`). `--json`
 prints Python's shape, with `details` on every check (`{}` when there are
 none). Any failed check exits 1.
 
