@@ -979,6 +979,13 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
 | `KaguraError` | any other code | — |
 
+`ResourceClient`'s readers check each 2xx body against the Python SDK's
+model, as Python's `_parse` does, and throw `KaguraResponseError` for one
+it refuses (`ingestEvents` checks only that the body is an object). A body
+the model accepts is returned as it arrived: its extra keys and lax values
+(`"6"` for an int) are kept, where Python returns the model's coerced
+copy.
+
 memory-cloud v0.75.0+ tags every plan and quota refusal with a `gate`
 (`plan`, `quota`, `allowlist` or `deployment`), and the SDK chooses the
 class from it first, falling back to the code for older servers. The

@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`ResourceClient`'s readers refuse a body the Python SDK's model
+  refuses** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
+  `createToken`, `listTokens`, `updateToken`, `setupResource`,
+  `getResourceImpact`, `listResources`, `getIndexerStatus`,
+  `getResourceSchema`, `listResourceEvents` and `ingestEvent` throw
+  `KaguraResponseError` (`ResourceClient.<method>: unexpected server
+  response for <Model> (…)`) where they returned the body unchecked. An
+  accepted body is still returned as it arrived. `KaguraClient`'s REST
+  readers get the same check in #70.
 - **A hand-edited credentials profile is read as the Python SDK reads it**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
   one whose `refresh_token` is `null`, or whose `access_token` is no

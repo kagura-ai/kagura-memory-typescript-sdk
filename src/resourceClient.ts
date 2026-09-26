@@ -36,7 +36,20 @@ import type {
 } from "./models.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
 import { pathSegment } from "./pathSegment.js";
-import { readModel, RESOURCE_SCHEMA_RESPONSE } from "./pyModels.js";
+import {
+  INDEXER_STATUS_RESPONSE,
+  PAGINATED_RESOURCE_TOKENS_RESPONSE,
+  readModel,
+  RESOURCE_EVENT_RESPONSE,
+  RESOURCE_EVENTS_LIST_RESPONSE,
+  RESOURCE_IMPACT_RESPONSE,
+  RESOURCE_LIST_RESPONSE,
+  RESOURCE_SCHEMA_RESPONSE,
+  RESOURCE_SETUP_RESPONSE,
+  RESOURCE_TOKEN_CREATE_RESPONSE,
+  RESOURCE_TOKEN_RESPONSE,
+  type Model,
+} from "./pyModels.js";
 import { ResponseReader } from "./responseShape.js";
 import { KaguraRestClient, requireInt, type RestResponse } from "./restBase.js";
 
@@ -223,6 +236,19 @@ export class ResourceClient extends KaguraRestClient {
     return instance;
   }
 
+  /**
+   * `body` once the Python SDK's `model` accepts it, as `_parse` checks a
+   * 2xx payload (#69); returned as it arrived, its extra keys and lax
+   * values kept.
+   *
+   * @throws KaguraResponseError labelled `ResourceClient.<method>`, in the
+   *   Python SDK's words.
+   */
+  private parsed<T>(body: unknown, model: Model, method: string): T {
+    readModel(body, model, `ResourceClient.${method}`);
+    return body as T;
+  }
+
   // -------------------------------------------------------------------
   // Token CRUD (Bearer auth)
   // -------------------------------------------------------------------
@@ -235,6 +261,8 @@ export class ResourceClient extends KaguraRestClient {
    * @throws KaguraQuotaError at the plan's active-token cap — a 403, not a
    *   429; `limit` is the cap. Revoke a token or upgrade. Server v0.75.0+;
    *   older servers answer 403 `HTTP-403`, a KaguraConnectionError.
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's ResourceTokenCreateResponse (#69).
    */
   async createToken(options: CreateTokenOptions): Promise<ResourceTokenCreateResponse> {
     const body: Record<string, unknown> = { resource_id: options.resourceId };
@@ -244,13 +272,15 @@ export class ResourceClient extends KaguraRestClient {
     body.quota_events_per_hour = options.quotaEventsPerHour ?? 1000;
 
     const response = await this.request("POST", "/api/v1/resource-tokens", { json: body });
-    return this.json(response) as unknown as ResourceTokenCreateResponse;
+    return this.parsed(this.json(response), RESOURCE_TOKEN_CREATE_RESPONSE, "create_token");
   }
 
   /**
    * List resource tokens with optional filtering.
    *
    * @returns Paginated (`limit`/`offset`) list of resource tokens.
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's PaginatedResourceTokensResponse (#69).
    */
   async listTokens(options: ListTokensOptions = {}): Promise<PaginatedResourceTokensResponse> {
     const params: Record<string, unknown> = {
@@ -262,7 +292,7 @@ export class ResourceClient extends KaguraRestClient {
     }
 
     const response = await this.request("GET", "/api/v1/resource-tokens", { params });
-    return this.json(response) as unknown as PaginatedResourceTokensResponse;
+    return this.parsed(this.json(response), PAGINATED_RESOURCE_TOKENS_RESPONSE, "list_tokens");
   }
 
   /**
@@ -273,6 +303,8 @@ export class ResourceClient extends KaguraRestClient {
    *   `Number.MAX_SAFE_INTEGER`; such a `number` (already rounded to
    *   another id) or a fractional one throws before anything is sent.
    * @returns Updated token metadata.
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's ResourceTokenResponse (#69).
    */
   async updateToken(
     tokenId: number | bigint,
@@ -290,7 +322,7 @@ export class ResourceClient extends KaguraRestClient {
     const response = await this.request("PATCH", `/api/v1/resource-tokens/${id}`, {
       json: body,
     });
-    return this.json(response) as unknown as ResourceTokenResponse;
+    return this.parsed(this.json(response), RESOURCE_TOKEN_RESPONSE, "update_token");
   }
 
   /**
@@ -327,6 +359,8 @@ export class ResourceClient extends KaguraRestClient {
    * @throws KaguraFeatureNotAvailableError when the plan lacks the `resources` feature,
    *   and KaguraQuotaError at the context or token cap — see
    *   `KaguraClient.setupResource`.
+   * @throws KaguraResponseError when the tool's reply does not match the
+   *   Python SDK's ResourceSetupResponse (#69).
    *
    * Note: Idempotency for repeated calls with the same `resourceId` is
    * not guaranteed; server-side behavior may evolve. Avoid retrying
@@ -367,7 +401,7 @@ export class ResourceClient extends KaguraRestClient {
         description: options.description,
         quotaEventsPerHour: options.quotaEventsPerHour ?? 1000,
       });
-      return result as unknown as ResourceSetupResponse;
+      return this.parsed(result, RESOURCE_SETUP_RESPONSE, "setup_resource");
     } finally {
       await mcp.close();
     }
@@ -381,10 +415,12 @@ export class ResourceClient extends KaguraRestClient {
    * Get impact statistics for a resource.
    *
    * @returns Resource impact stats (token_count, memory_count, schema version).
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's ResourceImpactResponse (#69).
    */
   async getResourceImpact(resourceId: string): Promise<ResourceImpactResponse> {
     const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/impact`);
-    return this.json(response) as unknown as ResourceImpactResponse;
+    return this.parsed(this.json(response), RESOURCE_IMPACT_RESPONSE, "get_resource_impact");
   }
 
   /**
@@ -396,10 +432,13 @@ export class ResourceClient extends KaguraRestClient {
    * well under 50 resources by design.
    *
    * Workspace owners only — non-owners receive 403.
+   *
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's ResourceListResponse (#69).
    */
   async listResources(): Promise<ResourceListResponse> {
     const response = await this.request("GET", "/api/v1/resources");
-    return this.json(response) as unknown as ResourceListResponse;
+    return this.parsed(this.json(response), RESOURCE_LIST_RESPONSE, "list_resources");
   }
 
   /**
@@ -411,10 +450,12 @@ export class ResourceClient extends KaguraRestClient {
    *
    * @throws KaguraNotFoundError Resource slug does not exist in the
    *   caller's workspace (404; cross-workspace probe protection).
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's IndexerStatusResponse (#69).
    */
   async getIndexerStatus(resourceId: string): Promise<IndexerStatusResponse> {
     const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/indexer-status`);
-    return this.json(response) as unknown as IndexerStatusResponse;
+    return this.parsed(this.json(response), INDEXER_STATUS_RESPONSE, "get_indexer_status");
   }
 
   /**
@@ -424,8 +465,9 @@ export class ResourceClient extends KaguraRestClient {
    *   the latest version.
    * @returns Resource schema with field definitions, or `null` if no
    *   schema is registered for the resource.
-   * @throws KaguraResponseError if the 2xx body is no JSON object, where
-   *   only the route's 404 means no schema (#66).
+   * @throws KaguraResponseError when the 2xx body does not match the
+   *   Python SDK's ResourceSchemaResponse (#66, #69), where only the
+   *   route's 404 means no schema.
    */
   async getResourceSchema(
     resourceId: string,
@@ -444,13 +486,9 @@ export class ResourceClient extends KaguraRestClient {
       }
       throw e;
     }
-    // Only the 404 means none: a 2xx body is the schema, and one that is no
-    // object Python's model refuses, where a `null` would read as none.
-    const body = this.json(response);
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      readModel(body, RESOURCE_SCHEMA_RESPONSE, "ResourceClient.get_resource_schema");
-    }
-    return body as unknown as ResourceSchemaResponse;
+    // Only the 404 means none: a 2xx body is the schema, checked as
+    // Python's model checks it, so a `null` is drift, not "no schema".
+    return this.parsed(this.json(response), RESOURCE_SCHEMA_RESPONSE, "get_resource_schema");
   }
 
   /**
@@ -470,6 +508,8 @@ export class ResourceClient extends KaguraRestClient {
    * @throws KaguraNotFoundError The server returned 404 for this
    *   resource (cross-workspace probe protection); applies only if the
    *   server does respond with 404.
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's ResourceEventsListResponse (#69).
    */
   async listResourceEvents(
     resourceId: string,
@@ -497,7 +537,7 @@ export class ResourceClient extends KaguraRestClient {
     const response = await this.request("GET", `/api/v1/resources/${resourceSegment(resourceId)}/events`, {
       params,
     });
-    return this.json(response) as unknown as ResourceEventsListResponse;
+    return this.parsed(this.json(response), RESOURCE_EVENTS_LIST_RESPONSE, "list_resource_events");
   }
 
   // -------------------------------------------------------------------
@@ -510,6 +550,8 @@ export class ResourceClient extends KaguraRestClient {
    * @param resourceApiKey Resource API key (`X-Resource-API-Key`
    *   header) — sent per-call, never stored on the client.
    * @returns Ingestion result with `event_id`.
+   * @throws KaguraResponseError when the body does not match the Python
+   *   SDK's ResourceEventResponse (#69).
    */
   async ingestEvent(
     resourceId: string,
@@ -520,7 +562,7 @@ export class ResourceClient extends KaguraRestClient {
       json: serializeEvent(event),
       extraHeaders: { "X-Resource-API-Key": resourceApiKey },
     });
-    return this.json(response) as unknown as ResourceEventResponse;
+    return this.parsed(this.json(response), RESOURCE_EVENT_RESPONSE, "ingest_event");
   }
 
   /**
