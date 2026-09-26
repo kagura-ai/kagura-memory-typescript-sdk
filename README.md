@@ -1465,9 +1465,14 @@ input`. The `resource` and `files` dumps read the literal itself and agree with 
 **The MCP envelope.** A JSON-RPC or tool error is rendered as the Python
 SDK renders it, with Python's `str()` of whatever the server sent
 (`MCP error: {'code': -32603}`, `t failed (None): …`), and a `null`
-JSON-RPC body reads as no result. One difference remains: a JSON-RPC
+JSON-RPC body reads as no result. Two differences remain. A JSON-RPC
 `error` that is no object (`{"error": "boom"}`) reads `MCP error: boom`,
-where the Python SDK stops with an `AttributeError`.
+where the Python SDK stops with an `AttributeError`. And a number literal
+in a code or message is rendered from the JavaScript number (`1.0` reads
+`1`, `1e2` `100`, `-0.0` `0`, an int past 2^53 its nearest double) and an
+object's integer-like keys print first, where Python prints the literal
+and keeps the key order: the JSON-RPC body and the tool text are read with
+`JSON.parse`.
 
 ## Development
 

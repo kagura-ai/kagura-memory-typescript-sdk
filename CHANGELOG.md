@@ -16,7 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message likewise (`t failed (None): …`, where it read `unknown` /
   `Unknown error`), and a `partial_rollback` whose `rollback_summary` does
   not match the model says `(rollback_summary could not be read)` with the
-  `KaguraResponseError` as its `cause`.
+  `KaguraResponseError` as its `cause`. A number literal in a code or
+  message still renders from the JavaScript number (`1.0` reads `1`) and
+  an object's integer-like keys print first, where Python prints the
+  literal and keeps the key order (README, "The MCP envelope").
 - **Lax number and bool fields read strings as pydantic-core does**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
   An int field takes `"0-1"` (as -1), `"0__7"` and `" +1"` as pydantic

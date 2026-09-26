@@ -2635,6 +2635,34 @@ describe("the MCP envelope in the Python SDK's words (#69)", () => {
     expect((error as Error).message).toBe(message);
   });
 
+  // The documented difference (README, "The MCP envelope"): the tool text
+  // and the JSON-RPC body are read with JSON.parse, so a number literal
+  // renders from the JavaScript number and integer-like keys print first.
+  // The Python SDK 0.42.0 prints `t failed (x): 1.0`, `t failed (1.0): m`,
+  // `t failed (x): {'b': 1, '1': 2}` and `MCP error: 1.0` here.
+  it.each([
+    ['{"status":"error","error":"x","message":1.0}', "t failed (x): 1"],
+    ['{"status":"error","error":"x","message":1e2}', "t failed (x): 100"],
+    ['{"status":"error","error":"x","message":-0.0}', "t failed (x): 0"],
+    ['{"status":"error","error":1.0,"message":"m"}', "t failed (1): m"],
+    ['{"status":"error","error":"x","message":{"b":1,"1":2}}', "t failed (x): {'1': 2, 'b': 1}"],
+  ])("renders a number literal in the tool text %s from the JavaScript number (documented difference)", async (text, message) => {
+    const server = new FakeServer();
+    server.toolTexts.t = text;
+    const error = await makeClient(server).callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraError);
+    expect((error as Error).message).toBe(message);
+  });
+
+  it("renders a number literal in the JSON-RPC error message from the JavaScript number (documented difference)", async () => {
+    const server = new FakeServer();
+    const client = await openClient(server);
+    server.forcedResponse = new Response('{"jsonrpc":"2.0","id":2,"error":{"message":1.0}}', { status: 200 });
+    const error = await client.callRawTool("t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraConnectionError);
+    expect((error as Error).message).toBe("MCP error: 1");
+  });
+
   it.each([
     [undefined, "Input should be a valid dictionary or instance of RollbackSummary"],
     [{ edges_deleted: "x" }, "edges_deleted: Input should be a valid integer, unable to parse string as an integer"],
