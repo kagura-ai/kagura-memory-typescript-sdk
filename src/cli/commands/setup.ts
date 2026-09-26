@@ -38,7 +38,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { defaultCredentialsPath } from "../../auth/credentials.js";
+import { loadCredentialsFile, type CredentialsFile } from "../../auth/credentials.js";
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
 import { SOURCE_LABEL, type ResolvedAuth } from "../../auth/types.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
@@ -2459,20 +2459,21 @@ function cliChainOn(deps: CliDeps, input: HarnessInput, server: string): boolean
 }
 
 /**
- * The stored profiles on `server`, by name — Python's `_profiles_on`. The
- * file is read raw, never rewritten: a profile whose `mcp_url` is not a
- * string is left out, and a file that cannot be read holds none.
+ * The stored profiles on `server`, by name — Python's `_profiles_on`. It
+ * goes through this CLI's own loader, so it names only profiles that
+ * `KAGURA_PROFILE=<name>` can load: the loader treats a file with any
+ * malformed profile as empty, and it runs after the write, so a file that
+ * cannot be read holds none.
  */
 function profilesOn(deps: CliDeps, server: string): string[] {
-  let data: unknown;
+  let profiles: CredentialsFile["profiles"];
   try {
-    data = JSON.parse(fs.readFileSync(deps.credentialsPath ?? defaultCredentialsPath(), "utf-8"));
+    profiles = loadCredentialsFile(deps.credentialsPath).profiles;
   } catch {
     return [];
   }
-  const profiles = isObject(data) && isObject(data.profiles) ? data.profiles : {};
   return Object.entries(profiles)
-    .filter(([, p]) => isObject(p) && typeof p.mcp_url === "string" && onServer(p.mcp_url, server))
+    .filter(([, creds]) => onServer(creds.mcpUrl, server))
     .map(([name]) => name)
     .sort();
 }
@@ -2501,7 +2502,9 @@ function brokenConfig(deps: CliDeps): string | null {
   const label = isLocal ? pathLabel(absolutePath(".kagura.json")) : "~/.kagura.json";
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(target));
+    // ignoreBOM keeps a leading U+FEFF in `text`, so JSON.parse refuses it as
+    // the loader's did: Python's json.loads names "Unexpected UTF-8 BOM".
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(target));
   } catch (e) {
     return `${label} (${e instanceof TypeError ? "not UTF-8 JSON" : strerror(e)})`;
   }

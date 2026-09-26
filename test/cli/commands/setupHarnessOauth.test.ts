@@ -499,6 +499,15 @@ describe("setup codex --oauth: the guardrails preview (Python's _preview_command
     `\`kagura-memory auth login --server ${D} --profile NAME\`, then preview it (Codex gets what the account it ` +
     "signed in with can read):";
   const EDITORS = "Use a context whose editor list you control: every editor's guardrail summaries reach the model.";
+  /** A stored OAuth profile on `mcpUrl`, complete as `kagura-memory auth login` writes it. */
+  const profile = (mcpUrl: string): Record<string, unknown> => ({
+    server: new URL(mcpUrl).origin,
+    mcp_url: mcpUrl,
+    client_id: "cid",
+    access_token: "at",
+    refresh_token: "rt",
+    expires_at: "2099-01-01T00:00:00+00:00",
+  });
   const writeCredentials = (profiles: Record<string, unknown>) => {
     fs.mkdirSync(path.join(home, ".kagura"), { recursive: true });
     fs.writeFileSync(
@@ -551,10 +560,9 @@ describe("setup codex --oauth: the guardrails preview (Python's _preview_command
 
   it("names the stored profiles on that server, and previews on the first", async () => {
     writeCredentials({
-      zeta: { mcp_url: U },
-      default: { mcp_url: "https://memory.kagura-ai.com/mcp" },
-      work: { mcp_url: `${D}/mcp` },
-      broken: { mcp_url: 5 },
+      zeta: profile(U),
+      default: profile("https://memory.kagura-ai.com/mcp"),
+      work: profile(`${D}/mcp`),
     });
     const h = oauthHarness(codex);
     expect(await run(h)).toBe(0);
@@ -564,8 +572,22 @@ describe("setup codex --oauth: the guardrails preview (Python's _preview_command
     );
   });
 
+  // The loader reads a credentials.json with any malformed profile as empty
+  // (Python's load_credentials_file too), so KAGURA_PROFILE=work could not
+  // load `work` there: the preview names the login, never a profile.
+  it.each([
+    ["a profile whose mcp_url is not a string", { work: profile(`${D}/mcp`), broken: { mcp_url: 5 } }],
+    ["a profile without tokens", { work: profile(`${D}/mcp`), zeta: { mcp_url: U } }],
+  ])("names the login, not a profile, when credentials.json holds %s", async (_case, profiles) => {
+    writeCredentials(profiles);
+    const h = oauthHarness(codex);
+    expect(await run(h)).toBe(0);
+    expect(digestNotes(h)[0]).toBe(`${HEAD} ${NO_PROFILE} KAGURA_PROFILE=NAME ${DIGEST}`);
+  });
+
   it.each([
     ["not JSON", "{not json", "not UTF-8 JSON"],
+    ["BOM-prefixed", '\uFEFF{"api_key": "k"}', "not UTF-8 JSON"],
     ["not an object", "[]", "not a JSON object"],
   ])("names a .kagura.json that is %s, which every command reads first", async (_case, text, why) => {
     fs.writeFileSync(path.join(work, ".kagura.json"), text);
