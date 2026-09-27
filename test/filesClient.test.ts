@@ -10,6 +10,7 @@ import {
   KaguraResponseError,
 } from "../src/errors.js";
 import { FilesClient } from "../src/filesClient.js";
+import { JsonNumber, valueAt } from "../src/losslessJson.js";
 import type { ProgressEvent } from "../src/progress.js";
 
 interface Recorded {
@@ -22,6 +23,8 @@ interface Recorded {
 interface Route {
   status: number;
   body?: unknown;
+  /** The body as sent, for JSON `JSON.stringify` cannot write (`NaN`, big ints). */
+  raw?: string;
   /** Echo the request; used to capture the R2 PUT body. */
   capture?: (rec: Recorded) => void;
 }
@@ -57,7 +60,8 @@ class FakeServer {
     }
     route.capture?.(rec);
     const nullBody = route.status === 204 || route.status === 304;
-    return new Response(nullBody ? null : JSON.stringify(route.body === undefined ? {} : route.body), {
+    const text = route.raw ?? JSON.stringify(route.body === undefined ? {} : route.body);
+    return new Response(nullBody ? null : text, {
       status: route.status,
     });
   };
@@ -302,6 +306,40 @@ describe("upload error paths", () => {
       /^FilesClient\.upload: unexpected server response for FileObject \(filename: Field required; content_type: Field required; size_bytes: Field required \(\+3 more\)\)\./,
     );
     expect(events.map((e) => e.kind)).toEqual(["action", "error"]);
+  });
+
+  // #69: the 409 body is read as Python's response.json() reads it.
+  const dupBody = (sizeLiteral: string, extra = ""): string =>
+    `{"detail": "duplicate"${extra}, "existing_file": {"id": "dup-1", "workspace_id": "${WS}", ` +
+    `"filename": "a.bin", "content_type": "application/octet-stream", "size_bytes": ${sizeLiteral}, ` +
+    `"sha256": "s", "status": "confirmed", "created_at": "2026-01-01T00:00:00Z"}}`;
+
+  it("keeps a 409's size_bytes past 2^53 as the server wrote it", async () => {
+    const server = new FakeServer();
+    server.routes["/api/v1/files/reserve"] = { status: 409, raw: dupBody("9007199254740993") };
+    const result = await makeClient(server).upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" });
+    const size = valueAt(result, "size_bytes");
+    expect(size).toBeInstanceOf(JsonNumber);
+    expect((size as JsonNumber).text).toBe("9007199254740993");
+  });
+
+  it("reads a 409 with NaN in it, as Python does, instead of dropping it", async () => {
+    // Elsewhere in the body: the dedup answer stands.
+    const ok = new FakeServer();
+    ok.routes["/api/v1/files/reserve"] = { status: 409, raw: dupBody("1", ', "score": NaN') };
+    const result = await makeClient(ok).upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" });
+    expect(result.id).toBe("dup-1");
+
+    // In a typed field: the model refuses it (recorded from Python 0.42.0).
+    const bad = new FakeServer();
+    bad.routes["/api/v1/files/reserve"] = { status: 409, raw: dupBody("NaN") };
+    const error = await makeClient(bad)
+      .upload({ contextId: WS, source: new Uint8Array([1]), filename: "a.bin" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toBe(
+      `FilesClient.upload: unexpected server response for FileObject (size_bytes: Input should be a finite number). ${HINT}`,
+    );
   });
 
   it("refuses a reserved file id that would leave its path segment, as the server's answer, before any PUT", async () => {
