@@ -1635,13 +1635,12 @@ result is returned the same way.
 **Hand-edited credentials.** A profile in `~/.kagura/credentials.json`
 whose `access_token` is no string, or whose `refresh_token` is `null`, is
 read as the Python SDK reads it: the token is sent as Python's `str()` of
-it (`Bearer 123`) and a falsy refresh token means none. One difference
-remains, the same as for the MCP envelope: a number literal in a token is
-rendered from the JavaScript number (`1.0` sends `Bearer 1` where Python
-sends `Bearer 1.0`, `-0.0` `Bearer 0`, `1e16` `Bearer 10000000000000000`
-where Python sends `Bearer 1e+16`, an int past 2^53 its nearest double)
-and an object token's integer-like keys print first, because the file is
-read with `JSON.parse`. When this SDK rewrites the file (a refresh, `auth
+it (`Bearer 123`) and a falsy refresh token means none. The file is read
+as Python's `json.loads` reads it, so a number literal in a token is
+rendered as Python renders it (`1.0` sends `Bearer 1.0`, `1e16` `Bearer
+1e+16`, an int past 2^53 exactly, `NaN` `Bearer nan`, which is also a
+truthy refresh token) and an object token keeps its key order. When this
+SDK rewrites the file (a refresh, `auth
 use`), it writes those two tokens as strings (`"123"`, `""`) where Python
 writes them back as they were; both SDKs read either form the same way,
 so after a rewrite of a number token Python sends the rendered string too.

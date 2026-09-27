@@ -19,6 +19,7 @@ import {
   pyTypeName,
   reprlibRepr,
 } from "../src/python.js";
+import { parseJsonLossless, valueAt } from "../src/losslessJson.js";
 
 describe("pyRepr of a string", () => {
   it.each([
@@ -274,6 +275,39 @@ describe("pyTruthy", () => {
     [{ a: null }, true],
   ])("reads %j as Python's bool() does", (value, expected) => {
     expect(pyTruthy(value)).toBe(expected);
+  });
+
+  // bool(float('nan')) is True in Python; Boolean(NaN) is false.
+  it.each([
+    [NaN, true],
+    [Infinity, true],
+    [-0, false],
+  ])("reads the number %s as Python's bool() does", (value, expected) => {
+    expect(pyTruthy(value)).toBe(expected);
+  });
+});
+
+describe("a value read by parseJsonLossless", () => {
+  // Vectors printed by CPython 3.12: str(json.loads(text)), bool(...).
+  it.each([
+    ["9007199254740993", "9007199254740993", true],
+    ["-0", "0", false],
+    ["-0.0", "-0.0", false],
+    ["1e16", "1e+16", true],
+    ["NaN", "nan", true],
+    ["[9007199254740993, 1e20]", "[9007199254740993, 1e+20]", true],
+    ['{"b": 1, "2": 2}', "{'b': 1, '2': 2}", true],
+  ])("prints %s as Python's str() and bool() of it", (text, str, truthy) => {
+    const holder = parseJsonLossless(`{"v": ${text}}`) as Record<string, unknown>;
+    const value = valueAt(holder, "v");
+    expect(pyStr(value)).toBe(str);
+    expect(pyTruthy(value)).toBe(truthy);
+  });
+
+  it("names a number literal's Python type", () => {
+    const holder = parseJsonLossless('{"i": 9007199254740993, "f": 1e20}') as Record<string, unknown>;
+    expect(pyTypeName(valueAt(holder, "i"))).toBe("int");
+    expect(pyTypeName(valueAt(holder, "f"))).toBe("float");
   });
 });
 

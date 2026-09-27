@@ -125,10 +125,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
   one whose `refresh_token` is `null`, or whose `access_token` is no
   string, is kept (sent as `Bearer 123`, no refresh) where the whole file
-  was read as empty and every command said no credentials were found. A
-  number token is rendered from the JavaScript number (`1.0` sends
-  `Bearer 1`, Python `Bearer 1.0`): the file is read with `JSON.parse`
-  (README, "Hand-edited credentials").
+  was read as empty and every command said no credentials were found.
+  The file is read as Python's `json.loads` reads it, so a number token is
+  rendered as Python renders it (`1.0` sends `Bearer 1.0`, an int past
+  2^53 exactly) and a file with `NaN` or `Infinity` in it is no longer
+  read as empty (README, "Hand-edited credentials").
 - **`doctor` checks the server the SDK would use**
   ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)).
   Without `--profile` it forced `.kagura.json`'s key and URL; it now

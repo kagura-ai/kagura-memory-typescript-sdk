@@ -777,20 +777,43 @@ describe("a hand-edited profile, read as Python's from_dict reads it (#69)", () 
     expect(creds.refreshToken).toBe(refreshToken);
   });
 
-  // The documented difference: the file is read with JSON.parse, so a
-  // number literal is rendered from the JavaScript number. Python 0.42.0
-  // (`kagura auth token`) prints the literal: `1.0`, `-0.0`, `1e+16`.
+  // The file is read as Python's json.loads reads it, so a number token is
+  // Python's str() of the literal: kagura-memory 0.42.0 sends
+  // f"Bearer {access_token}" and refreshes only when bool(refresh_token).
   it.each([
-    ["1.0", "1"],
-    ["-0.0", "0"],
-    ["1e16", "10000000000000000"],
-  ])("renders a number token %s from the JavaScript number (README: Hand-edited credentials)", (literal, accessToken) => {
+    ["1.0", "1.0"],
+    ["-0.0", "-0.0"],
+    ["-0", "0"],
+    ["1e16", "1e+16"],
+    ["9007199254740993", "9007199254740993"],
+    ["NaN", "nan"],
+    ["Infinity", "inf"],
+    ["-Infinity", "-inf"],
+    ["[9007199254740993, 1e20]", "[9007199254740993, 1e+20]"],
+    ['{"b": 1, "2": 2}', "{'b': 1, '2': 2}"],
+  ])("renders a number token %s as Python's str() of it", (literal, accessToken) => {
     const p = path.join(dir, "creds.json");
     fs.writeFileSync(
       p,
       `{"version": 1, "default_profile": "n", "profiles": {"n": ${JSON.stringify(base).replace('"at"', literal)}}}`,
     );
     expect(getProfile(loadCredentialsFile(p), "n")?.accessToken).toBe(accessToken);
+  });
+
+  // bool(nan) and bool(inf) are True in Python, bool(-0.0) and bool(0) False.
+  it.each([
+    ["NaN", "nan"],
+    ["Infinity", "inf"],
+    ["-0.0", ""],
+    ["0", ""],
+    ["9007199254740993", "9007199254740993"],
+  ])("reads a number refresh token %s by Python's bool()", (literal, refreshToken) => {
+    const p = path.join(dir, "creds.json");
+    fs.writeFileSync(
+      p,
+      `{"version": 1, "default_profile": "n", "profiles": {"n": ${JSON.stringify(base).replace('"rt"', literal)}}}`,
+    );
+    expect(getProfile(loadCredentialsFile(p), "n")?.refreshToken).toBe(refreshToken);
   });
 
   it("still refuses a profile without the keys, as Python's KeyError does", () => {

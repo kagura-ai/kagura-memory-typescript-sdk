@@ -30,6 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { KaguraAuthExpiredError } from "../errors.js";
+import { parseJsonLossless, valueAt } from "../losslessJson.js";
 import { pyStr, pyTruthy } from "../python.js";
 import { refreshAccessToken } from "./deviceFlow.js";
 import { withFileLock } from "./filelock.js";
@@ -163,7 +164,7 @@ function requirePresent(d: Record<string, unknown>, key: string): unknown {
   if (!Object.prototype.hasOwnProperty.call(d, key)) {
     throw new Error(`credentials profile missing required field '${key}'`);
   }
-  return d[key];
+  return valueAt(d, key);
 }
 
 function stringOr(value: unknown, fallback: string): string {
@@ -179,7 +180,9 @@ export function credentialsFromDict(d: Record<string, unknown>): OAuthCredential
     clientId: requireString(d, "client_id"),
     // Python's from_dict reads both untyped (#69): it sends
     // f"Bearer {access_token}", and refreshes only when refresh_token is
-    // truthy -- "" here, which every refresh path treats as none.
+    // truthy -- "" here, which every refresh path treats as none. A number
+    // is read from the file's own literal: 9007199254740993 stays exact,
+    // NaN is "nan" and truthy.
     accessToken: pyStr(requirePresent(d, "access_token")),
     refreshToken: ((value) => (pyTruthy(value) ? pyStr(value) : ""))(requirePresent(d, "refresh_token")),
     tokenType: stringOr(d.token_type, "Bearer"),
@@ -404,7 +407,9 @@ export function loadCredentialsFile(credentialsPath?: string): CredentialsFile {
 
   let data: unknown;
   try {
-    data = JSON.parse(fs.readFileSync(p, "utf-8"));
+    // Read as Python's json.loads reads it (#69): NaN and the infinities
+    // are accepted, and each number literal is kept for the tokens.
+    data = parseJsonLossless(fs.readFileSync(p, "utf-8"));
   } catch {
     return emptyCredentialsFile();
   }
