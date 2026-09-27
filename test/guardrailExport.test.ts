@@ -114,12 +114,16 @@ describe("spliceGuardrailBlock", () => {
     ["no-markers", "- (x) no markers\n"],
     ["two-blocks", EXPORT_BLOCK + EXPORT_BLOCK],
     ["no-end", EXPORT_BLOCK.replace(`${END}\n`, "")],
-    // Python counts the markers only, so it would write this block and
-    // then refuse the file it wrote on the next run (PYBUG).
+    // Python 0.41.1 refuses it too (python-sdk #285).
     ["end-before-begin", `${END}\n- (x) y\n<!-- kagura-memory:guardrails begin x -->\n`],
   ])("rejects a malformed fetched block (%s)", (_id, block) => {
     expect(() => spliceGuardrailBlock("# Project\n", block)).toThrow(GuardrailBlockError);
-    expect(() => spliceGuardrailBlock("# Project\n", block)).toThrow(/marker/);
+    // Recorded from the Python SDK 0.42.0's splice_guardrail_block: one message for every case.
+    expect(() => spliceGuardrailBlock("# Project\n", block)).toThrow(
+      new GuardrailBlockError(
+        "fetched block does not have exactly one begin and one end marker line, in that order",
+      ),
+    );
   });
 
   it.each([

@@ -74,12 +74,13 @@ import type { FlagSpec } from "../parseArgs.js";
  *    source is bound to for its 403 hint;
  * 7. the operation's text is printed, on stdout.
  *
- * Step 4 comes before the prompt here. Python checks the UUID inside the
- * client, after the prompt, so its user confirms "Remove X from workspace
- * not-a-uuid?" and only then hears the id was never valid.
+ * Step 4 comes before the prompt, and the prompt names the workspace in
+ * canonical form, as Python's `_run_workspace_command` does from 0.41.1
+ * (python-sdk #285).
  *
- * @param question The confirmation to ask, given the workspace as
- *   resolved; none for a command that does not ask, or under `--yes`.
+ * @param question The confirmation to ask, given the workspace in
+ *   canonical form; none for a command that does not ask, or under
+ *   `--yes`.
  */
 async function runWorkspaceCommand(
   deps: CommandDeps,
@@ -91,11 +92,10 @@ async function runWorkspaceCommand(
     flag: "--workspace",
     refuseBlankOverride: true,
   });
-  // Python's `workspace_id must be a UUID, got 'x'`. The prompt shows the
-  // workspace as resolved (stripped), the request the canonical form.
+  // Python's `workspace_id must be a UUID, got 'x'`.
   const canonical = normalizeUuid(workspaceId, "workspace_id");
 
-  if (question !== undefined && !(await deps.confirm(question(workspaceId)))) {
+  if (question !== undefined && !(await deps.confirm(question(canonical)))) {
     throw new CliError("Aborted!");
   }
 
@@ -415,6 +415,22 @@ const INVITE_EXPIRES_DAYS: FlagSpec = {
   help: "Expiry preset (server accepts only these; omit = never expires)",
 };
 
+/**
+ * `-c/--context` values as canonical UUIDs, refused as click refuses a
+ * value (exit 2) before anything is read — port of `_context_uuids_param`
+ * (src/kagura_memory/cli.py, python-sdk #285): the server answers a
+ * non-UUID with an HTTP 500.
+ */
+function contextUuids(values: readonly string[]): string[] {
+  return values.map((c) => {
+    try {
+      return normalizeUuid(c, "--context");
+    } catch {
+      throw new CliUsageError(`Invalid value for ${paramLabel(CONTEXT)}: ${pyRepr(c)} is not a valid context UUID.`);
+    }
+  });
+}
+
 const inviteCreate: Command = {
   summary: "Invite a not-yet-registered user by EMAIL.",
   args: "EMAIL",
@@ -427,7 +443,7 @@ const inviteCreate: Command = {
     const email = requireArg(args, 0, "EMAIL");
     const rawRole = args.values.role;
     const role = rawRole === undefined ? "member" : parseChoice(INVITE_ROLE, rawRole, ROLES);
-    const contexts = args.many.context ?? [];
+    const contexts = contextUuids(args.many.context ?? []);
     const rawExpires = args.values["expires-days"];
     const expiresInDays =
       rawExpires === undefined ? undefined : Number(parseChoice(INVITE_EXPIRES_DAYS, rawExpires, INVITE_EXPIRES));
@@ -442,19 +458,16 @@ const inviteCreate: Command = {
     }
 
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
-      // Checked here, where Python's SDK checks its UUIDs, rather than
-      // sent as typed: the server answers a non-UUID with an HTTP 500.
-      const allowedContextIds = contexts.map((c) => normalizeUuid(c, "context_id"));
       const invitation = readInvitation(
         await client.createInvitation(ws, email, {
           role,
-          ...(allowedContextIds.length > 0 ? { allowedContextIds } : {}),
+          ...(contexts.length > 0 ? { allowedContextIds: contexts } : {}),
           ...(expiresInDays !== undefined ? { expiresInDays } : {}),
         }),
         "WorkspaceClient.create_invitation",
       );
       deps.writeError("⚠ The invitation URL below is shown once — treat it as a join credential.");
-      // A missing email reads `-`, as in `invite list`; Python prints `None`.
+      // A missing email reads `-`, as in `invite list` (Python 0.41.1+ too).
       return (
         `Invitation #${invitation.id} → ${invitation.email || "-"} ` +
         `(role=${invitation.role}, expires=${dateOr(invitation.expires_at, "never")})\n` +

@@ -208,3 +208,40 @@ export function execFile(
     }, options.timeoutMs ?? EXEC_TIMEOUT_MS);
   });
 }
+
+/**
+ * Run a program attached to this terminal, for a harness CLI that signs in
+ * or prompts: `codex mcp add` of an `--oauth` entry starts Codex's browser
+ * sign-in, and `hermes mcp add` probes and asks. Python runs these with
+ * `subprocess.run([exe, *args])`: inherited stdio, no timeout (a sign-in
+ * takes as long as the user does). Here the program's stdout goes to this
+ * process's stderr, so `setup`'s stdout stays one JSON document.
+ *
+ * Never rejects: 127 when the program cannot start, 128+n for signal n.
+ */
+export function execAttached(
+  file: string,
+  argv: readonly string[],
+  spawnImpl: SpawnLike = spawn,
+): Promise<number> {
+  return new Promise<number>((resolve) => {
+    let settled = false;
+    const settle = (code: number): void => {
+      if (settled) return;
+      settled = true;
+      resolve(code);
+    };
+    let child: ReturnType<SpawnLike>;
+    try {
+      // No shell: argv reaches the program verbatim.
+      child = spawnImpl(file, [...argv], { stdio: ["inherit", 2, "inherit"], shell: false });
+    } catch {
+      settle(127);
+      return;
+    }
+    child.on("error", () => settle(127));
+    child.on("close", (code, signal) =>
+      settle(code ?? (signal === null ? 1 : 128 + (constants.signals[signal] ?? 0))),
+    );
+  });
+}

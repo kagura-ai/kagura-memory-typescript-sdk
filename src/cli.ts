@@ -15,7 +15,7 @@ import { login } from "./auth/login.js";
 import { refresh } from "./auth/refresh.js";
 import { resolveAuth } from "./auth/resolve.js";
 import type { ResolvedAuth } from "./auth/types.js";
-import { execFile, which } from "./cli/exec.js";
+import { execAttached, execFile, which } from "./cli/exec.js";
 import { openBrowser } from "./cli/openBrowser.js";
 import { runCli } from "./cli/run.js";
 import { KaguraClient } from "./client.js";
@@ -84,6 +84,8 @@ const code = await runCli(process.argv.slice(2), {
   openBrowser,
   which,
   execFile,
+  execAttached: (file, argv) => execAttached(file, argv),
+  stdinIsTty: () => Boolean(process.stdin.isTTY),
   login,
   refresh,
   loadConfig,
