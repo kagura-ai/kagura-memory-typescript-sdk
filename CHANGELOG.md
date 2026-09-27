@@ -116,7 +116,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses** ([#69](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/69)):
   `createToken`, `listTokens`, `updateToken`, `setupResource`,
   `getResourceImpact`, `listResources`, `getIndexerStatus`,
-  `getResourceSchema`, `listResourceEvents` and `ingestEvent` throw
+  `getResourceSchema`, `listResourceEvents`, `ingestEvent` and
+  `ingestEvents` (after its `error` progress event) throw
   `KaguraResponseError` (`ResourceClient.<method>: unexpected server
   response for <Model> (…)`) where they returned the body unchecked. An
   accepted body is still returned as it arrived. `KaguraClient`'s REST

@@ -1107,10 +1107,11 @@ keyed on the error code and the envelope's fields, never on the message:
 
 `ResourceClient`'s readers check each 2xx body against the Python SDK's
 model, as Python's `_parse` does, and throw `KaguraResponseError` for one
-it refuses (`ingestEvents` checks only that the body is an object). A body
-the model accepts is returned as it arrived: its extra keys and lax values
+it refuses (`ingestEvents` after its `error` progress event). A body the
+model accepts is returned as it arrived: its extra keys and lax values
 (`"6"` for an int) are kept, where Python returns the model's coerced
-copy.
+copy. `ingestEvents`'s `success` event carries the model's counts, as
+Python's does (`failed` is `0` when the body has no `failed_count`).
 
 memory-cloud v0.75.0+ tags every plan and quota refusal with a `gate`
 (`plan`, `quota`, `allowlist` or `deployment`), and the SDK chooses the

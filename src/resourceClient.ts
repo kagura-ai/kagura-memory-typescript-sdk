@@ -40,6 +40,7 @@ import {
   INDEXER_STATUS_RESPONSE,
   PAGINATED_RESOURCE_TOKENS_RESPONSE,
   readModel,
+  RESOURCE_EVENT_BATCH_RESPONSE,
   RESOURCE_EVENT_RESPONSE,
   RESOURCE_EVENTS_LIST_RESPONSE,
   RESOURCE_IMPACT_RESPONSE,
@@ -50,7 +51,6 @@ import {
   RESOURCE_TOKEN_RESPONSE,
   type Model,
 } from "./pyModels.js";
-import { ResponseReader } from "./responseShape.js";
 import { KaguraRestClient, requireInt, type RestResponse } from "./restBase.js";
 
 /**
@@ -576,7 +576,9 @@ export class ResourceClient extends KaguraRestClient {
    *   `error` with `{ events_attempted, resource_id }`. See
    *   {@link ProgressEvent}.
    * @returns Batch ingestion result with created/failed counts.
-   * @throws KaguraResponseError The 2xx body is not a JSON object.
+   * @throws KaguraResponseError The 2xx body is one Python's
+   *   `ResourceEventBatchResponse` refuses (no object, no `created_count`,
+   *   a count that is no int), after the `error` terminal event.
    */
   async ingestEvents(
     resourceId: string,
@@ -592,18 +594,19 @@ export class ResourceClient extends KaguraRestClient {
       detail: { desc: `${events.length} event(s) for resource ${resourceId}` },
     });
     let result: ResourceEventBatchResponse;
+    let counts: Record<string, unknown>;
     try {
       const response = await this.request("POST", `/api/v1/resources/${resourceSegment(resourceId)}/events/batch`, {
         json: { events: events.map(serializeEvent) },
         extraHeaders: { "X-Resource-API-Key": resourceApiKey },
       });
-      // Checked inside the guard: a body that is no object (`null`, `[]`)
-      // would otherwise fail on reading its counts below and end the stream
-      // with no terminal event. Python's model check refuses it here too.
-      const reader = new ResponseReader("ResourceClient.ingest_events", "ResourceEventBatchResponse");
-      const body = reader.object(this.json(response));
-      reader.check();
-      result = body as unknown as ResourceEventBatchResponse;
+      // Checked inside the guard, as Python's _parse is: a body its model
+      // refuses ends the stream with the error event, not with none. The
+      // progress counts are the model's (failed_count defaults to 0); the
+      // body is returned as it arrived.
+      const body = this.json(response);
+      counts = readModel(body, RESOURCE_EVENT_BATCH_RESPONSE, "ResourceClient.ingest_events");
+      result = body as ResourceEventBatchResponse;
     } catch (e) {
       emit({
         stage: "complete",
@@ -617,7 +620,7 @@ export class ResourceClient extends KaguraRestClient {
       stage: "complete",
       kind: "success",
       msg: "Batch ingested",
-      detail: { created: result.created_count, failed: result.failed_count },
+      detail: { created: counts.created_count, failed: counts.failed_count },
     });
     return result;
   }
