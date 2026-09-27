@@ -54,6 +54,17 @@ function makeClient(server: FakeRest): ResourceClient {
   });
 }
 
+/** A token as the server sends it: every field ResourceTokenResponse requires. */
+const TOKEN = {
+  id: 7,
+  resource_id: "slack",
+  quota_events_per_hour: 1000,
+  created_at: "2026-06-01T00:00:00Z",
+  is_active: true,
+  status: "active",
+};
+const HINT = "The server may be newer than this SDK; upgrading kagura-memory may help.";
+
 describe("construction", () => {
   it("requires credentials, naming the class and its factory", () => {
     expect(() => new ResourceClient()).toThrow(
@@ -80,7 +91,7 @@ describe("token CRUD", () => {
     const server = new FakeRest();
     server.routes["/api/v1/resource-tokens"] = {
       status: 200,
-      body: { id: 1, resource_id: "slack", token: "kagura_rt_x" },
+      body: { ...TOKEN, id: 1, token: "kagura_rt_x" },
     };
     const client = makeClient(server);
     const result = await client.createToken({ resourceId: "slack" });
@@ -94,6 +105,7 @@ describe("token CRUD", () => {
 
   it("createToken only sends a description when provided", async () => {
     const server = new FakeRest();
+    server.fallback = { status: 200, body: { ...TOKEN, token: "t" } };
     const client = makeClient(server);
     await client.createToken({ resourceId: "r", description: "CI", quotaEventsPerHour: 500 });
     expect(server.last().body).toEqual({
@@ -119,7 +131,7 @@ describe("token CRUD", () => {
 
   it("updateToken sends only the fields set (exclude-none)", async () => {
     const server = new FakeRest();
-    server.routes["/api/v1/resource-tokens/7"] = { status: 200, body: { id: 7 } };
+    server.routes["/api/v1/resource-tokens/7"] = { status: 200, body: TOKEN };
     const client = makeClient(server);
     await client.updateToken(7, { quotaEventsPerHour: 2000 });
     const req = server.last();
@@ -138,7 +150,7 @@ describe("token CRUD", () => {
 
   it("sends a bigint token id exactly, as Python's int is", async () => {
     const server = new FakeRest();
-    server.fallback = { status: 200, body: { id: 1 } };
+    server.fallback = { status: 200, body: TOKEN };
     const client = makeClient(server);
     await client.revokeToken(9007199254740993n);
     expect(new URL(server.last().url).pathname).toBe("/api/v1/resource-tokens/9007199254740993");
@@ -239,7 +251,7 @@ describe("resource stats", () => {
     const server = new FakeRest();
     server.routes["/api/v1/resources/r/schema"] = {
       status: 200,
-      body: { resource_id: "r", schema_version: 3, fields: [] },
+      body: { resource_id: "r", schema_version: 3, field_definitions: [], created_at: "2026-06-01T00:00:00Z" },
     };
     const client = makeClient(server);
     const schema = await client.getResourceSchema("r", 3);
@@ -300,7 +312,7 @@ describe("resource ids in the path (#66)", () => {
     const server = new FakeRest();
     server.fallback = { status: 200, body: { events: [], created_count: 0 } };
     const client = makeClient(server);
-    await call(client, "a/../b?x=1#f %");
+    await call(client, "a/../b?x=1#f %").catch(() => undefined);
     expect(server.last().url).toMatch(/^https:\/\/x\.test\/api\/v1\/resources\/a%2F\.\.%2Fb%3Fx%3D1%23f%20%25\//);
   });
 });
@@ -428,6 +440,14 @@ describe("setupResource", () => {
 
   it("keeps contextName and does not send the deprecated summary (#47)", async () => {
     const server = new FakeServer();
+    server.toolResults.setup_resource = {
+      status: "success",
+      context_id: "c1",
+      context_name: "crm-context",
+      resource_id: "crm",
+      token: "kagura_rt_x",
+      token_id: 3,
+    };
     await mcpClient(server).setupResource({
       resourceId: "crm",
       contextName: "crm-context",
@@ -441,5 +461,57 @@ describe("setupResource", () => {
       description: "d",
       quota_events_per_hour: 50,
     });
+  });
+});
+
+describe("readers check the body as Python's _parse does (#69)", () => {
+  // Messages recorded from the Python SDK 0.42.0's `parse_response`
+  // (pydantic 2.13.4) for the same bodies.
+  const calls: Array<[string, string, (c: ResourceClient) => Promise<unknown>, unknown, string]> = [
+    ["createToken", "/api/v1/resource-tokens", (c) => c.createToken({ resourceId: "r" }), {},
+      "ResourceClient.create_token: unexpected server response for ResourceTokenCreateResponse (id: Field required; resource_id: Field required; quota_events_per_hour: Field required (+4 more))."],
+    ["listTokens", "/api/v1/resource-tokens", (c) => c.listTokens(), {},
+      "ResourceClient.list_tokens: unexpected server response for PaginatedResourceTokensResponse (tokens: Field required; total: Field required; limit: Field required (+1 more))."],
+    ["updateToken", "/api/v1/resource-tokens/7", (c) => c.updateToken(7, { description: "x" }), {},
+      "ResourceClient.update_token: unexpected server response for ResourceTokenResponse (id: Field required; resource_id: Field required; quota_events_per_hour: Field required (+3 more))."],
+    ["getResourceImpact", "/api/v1/resources/r/impact", (c) => c.getResourceImpact("r"), {},
+      "ResourceClient.get_resource_impact: unexpected server response for ResourceImpactResponse (resource_id: Field required; token_count: Field required; memory_count: Field required)."],
+    ["listResources", "/api/v1/resources", (c) => c.listResources(), {},
+      "ResourceClient.list_resources: unexpected server response for ResourceListResponse (resources: Field required; total: Field required)."],
+    ["getIndexerStatus", "/api/v1/resources/r/indexer-status", (c) => c.getIndexerStatus("r"), {},
+      "ResourceClient.get_indexer_status: unexpected server response for IndexerStatusResponse (resource_id: Field required)."],
+    ["getResourceSchema", "/api/v1/resources/r/schema", (c) => c.getResourceSchema("r"), {},
+      "ResourceClient.get_resource_schema: unexpected server response for ResourceSchemaResponse (resource_id: Field required; schema_version: Field required; field_definitions: Field required (+1 more))."],
+    ["listResourceEvents", "/api/v1/resources/r/events", (c) => c.listResourceEvents("r"), null,
+      "ResourceClient.list_resource_events: unexpected server response for ResourceEventsListResponse (Input should be a valid dictionary or instance of ResourceEventsListResponse)."],
+    ["ingestEvent", "/api/v1/resources/r/events", (c) => c.ingestEvent("r", "rk", { op: "upsert", docId: "d" }), {},
+      "ResourceClient.ingest_event: unexpected server response for ResourceEventResponse (event_id: Field required)."],
+  ];
+
+  it.each(calls)("%s throws KaguraResponseError for a body its model refuses", async (_name, route, call, body, message) => {
+    const server = new FakeRest();
+    server.routes[route] = { status: 200, body };
+    const error = await call(makeClient(server)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toBe(`${message} ${HINT}`);
+  });
+
+  it("returns an accepted body as it arrived: extra keys and lax values kept", async () => {
+    const server = new FakeRest();
+    const body = { ...TOKEN, id: "7", token_hash: "zzz" };
+    server.routes["/api/v1/resource-tokens/7"] = { status: 200, body };
+    await expect(makeClient(server).updateToken(7, { description: "x" })).resolves.toEqual(body);
+  });
+
+  it("setupResource checks the tool's reply as ResourceSetupResponse", async () => {
+    const server = new FakeServer();
+    server.toolResults.setup_resource = { status: "success" };
+    const client = ResourceClient.fromMcpUrl({ apiKey: "kagura_test", mcpUrl: "https://x.test/mcp", fetch: server.fetch });
+    const error = await client.setupResource({ resourceId: "crm" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toBe(
+      "ResourceClient.setup_resource: unexpected server response for ResourceSetupResponse (context_id: Field " +
+        `required; context_name: Field required; resource_id: Field required (+2 more)). ${HINT}`,
+    );
   });
 });

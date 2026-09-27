@@ -25,6 +25,7 @@ import {
   KaguraIntegrityError,
 } from "./errors.js";
 import { extractDetail, sanitizeServerDetail, SDK_VERSION } from "./http.js";
+import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import type {
   FileDownloadUrlResponse,
   FileListResponse,
@@ -199,12 +200,12 @@ export class FilesClient extends KaguraRestClient {
         if (existing !== null) {
           // Read as Python reads it: an existing file the model refuses is
           // a KaguraResponseError, and the stream ends with it.
-          readModel(existing, FILE_OBJECT, "FilesClient.upload");
+          const model = readModel(existing, FILE_OBJECT, "FilesClient.upload");
           emit({
             stage: "complete",
             kind: "success",
             msg: "Dedup hit — existing file returned",
-            detail: { file_id: existing.id, deduped: true },
+            detail: { file_id: model.id, deduped: true },
           });
           return existing;
         }
@@ -478,10 +479,15 @@ function extractExistingFile(error: unknown): FileObject | null {
   if (withResponse.responseStatus !== 409 || withResponse.responseText === undefined) {
     return null;
   }
+  // Read as Python's `response.json()` reads it (#69): NaN and the
+  // infinities are numbers, an int past 2^53 stays exact for the model
+  // and the CLI's dump. A body Python cannot decode is no dedup answer; one
+  // nested past its recursion limit is its RecursionError, thrown as it is.
   let body: unknown;
   try {
-    body = JSON.parse(withResponse.responseText);
-  } catch {
+    body = parseJsonLossless(withResponse.responseText);
+  } catch (e) {
+    if (e instanceof JsonNestingError) throw e;
     return null;
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {

@@ -9,6 +9,8 @@
  * library need it, and the library must not import from the bin.
  */
 
+import { JsonNumber, orderedEntries, valueAt } from "./losslessJson.js";
+
 /** Digits with single underscores between them (PEP 515), as `int()` and `float()` take them. */
 const DIGITS = String.raw`\d(?:_?\d)*`;
 
@@ -119,15 +121,6 @@ function floatOf(t: string): number | undefined {
 /** `float(text)`, or `undefined` where Python raises `ValueError`. */
 export function pyFloat(text: string): number | undefined {
   return floatOf(numberText(text));
-}
-
-/**
- * `float(text)` for ASCII digits only, the way pydantic's lax mode reads a
- * string as a `float`: stripped as `float()` strips it, but `"٣"` is no
- * number there.
- */
-export function pyFloatAscii(text: string): number | undefined {
-  return floatOf(stripNumberSpace(text));
 }
 
 /**
@@ -288,7 +281,9 @@ export function pyFloatRepr(value: number): string {
  * Python int (JSON cannot tell `5` from `5.0` apart once parsed, and an
  * int is what Python's `json.loads` makes of `5`), any other number as a
  * float; lists and dicts as Python prints them, `[...]` / `{...}` for one
- * that contains itself.
+ * that contains itself. A value read by `parseJsonLossless` prints as
+ * Python read it: each number literal as written (`9007199254740993`,
+ * `1e20` as `1e+20`) and each dict in the order its keys were written.
  */
 export function pyRepr(value: unknown): string {
   return reprValue(value, []);
@@ -303,25 +298,31 @@ function reprValue(value: unknown, ancestors: object[]): string {
     // BigInt, not String: String(1e21) is "1e+21", Python's int is not.
     return Number.isInteger(value) ? BigInt(value).toString() : pyFloatRepr(value);
   }
+  if (value instanceof JsonNumber) return value.isInt ? value.bigint().toString() : pyFloatRepr(value.value);
   if (typeof value !== "object") return String(value);
 
   if (Array.isArray(value)) {
     if (ancestors.includes(value)) return "[...]";
     const inner = [...ancestors, value];
-    return `[${value.map((item) => reprValue(item, inner)).join(", ")}]`;
+    return `[${value.map((_, i) => reprValue(valueAt(value, i), inner)).join(", ")}]`;
   }
   if (ancestors.includes(value)) return "{...}";
   const inner = [...ancestors, value];
-  const entries = Object.entries(value).map(([k, v]) => `${reprString(k)}: ${reprValue(v, inner)}`);
+  const entries = orderedEntries(value).map(
+    ([k]) => `${reprString(k)}: ${reprValue(valueAt(value, k), inner)}`,
+  );
   return `{${entries.join(", ")}}`;
 }
 
 /**
- * Python's `bool()` of a decoded JSON value: `None`, `False`, `0`, `""`,
- * `[]` and `{}` are false, anything else is true.
+ * Python's `bool()` of a decoded JSON value: `None`, `False`, `0`, `0.0`,
+ * `""`, `[]` and `{}` are false, anything else is true -- `nan` included,
+ * which JavaScript's `Boolean(NaN)` calls false.
  */
 export function pyTruthy(value: unknown): boolean {
   if (value === null || value === undefined) return false;
+  if (typeof value === "number") return value !== 0;
+  if (value instanceof JsonNumber) return value.value !== 0;
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "object") return Object.keys(value).length > 0;
   return Boolean(value);
@@ -333,6 +334,7 @@ export function pyTruthy(value: unknown): boolean {
  */
 export function pyTypeName(value: unknown): string {
   if (value === null || value === undefined) return "NoneType";
+  if (value instanceof JsonNumber) return value.isInt ? "int" : "float";
   if (Array.isArray(value)) return "list";
   switch (typeof value) {
     case "string":
@@ -348,4 +350,9 @@ export function pyTypeName(value: unknown): string {
     default:
       return typeof value;
   }
+}
+
+/** Python's `str()` of a JSON value: a string as it is, anything else its `repr()`. */
+export function pyStr(value: unknown): string {
+  return typeof value === "string" ? value : pyRepr(value);
 }

@@ -469,3 +469,196 @@ export const FLOAT_CASES: ReadonlyArray<[repr: string, json: string]> = [
   ["-8786611448.055605", "-8786611448.055605"],
   ["2.942577090553375e+18", "2.942577090553375e+18"],
 ];
+
+/**
+ * JSON_NUMBER_CASES (#69): a JSON number literal of a body, then what the
+ * Python SDK makes of `json.loads` of it, recorded from pydantic 2.13.4
+ * (pydantic-core 2.46.4) on Python 3.11.9: pydantic's JSON for it in an
+ * `int` field and in a `float` field (`TypeAdapter(int|float).dump_json`)
+ * or the error message; in a `dict[str, Any]` field
+ * (`TypeAdapter(dict[str, Any]).dump_json`); and `json.dumps` of it, which
+ * the Python CLI prints for `resource import`.
+ */
+export const JSON_NUMBER_CASES: ReadonlyArray<
+  [literal: string, int: { ok: string } | { err: string }, float: { ok: string } | { err: string }, untyped: string, dumps: string]
+> = [
+  ["0", { ok: "0" }, { ok: "0.0" }, "0", "0"],
+  ["-0", { ok: "0" }, { ok: "0.0" }, "0", "0"],
+  ["1", { ok: "1" }, { ok: "1.0" }, "1", "1"],
+  ["-1", { ok: "-1" }, { ok: "-1.0" }, "-1", "-1"],
+  ["9007199254740993", { ok: "9007199254740993" }, { ok: "9007199254740992.0" }, "9007199254740993", "9007199254740993"],
+  ["-9007199254740993", { ok: "-9007199254740993" }, { ok: "-9007199254740992.0" }, "-9007199254740993", "-9007199254740993"],
+  ["123456789012345678901", { ok: "123456789012345678901" }, { ok: "1.2345678901234568e+20" }, "123456789012345678901", "123456789012345678901"],
+  ["12345678901234567890", { ok: "12345678901234567890" }, { ok: "1.2345678901234567e+19" }, "12345678901234567890", "12345678901234567890"],
+  ["1".repeat(309), { ok: "1".repeat(309) }, { ok: "1.1111111111111112e+308" }, "1".repeat(309), "1".repeat(309)],
+  ["1".repeat(401), { ok: "1".repeat(401) }, { err: "Input should be a valid number" }, "1".repeat(401), "1".repeat(401)],
+  ["-" + "1".repeat(401), { ok: "-" + "1".repeat(401) }, { err: "Input should be a valid number" }, "-" + "1".repeat(401), "-" + "1".repeat(401)],
+  ["1.0", { ok: "1" }, { ok: "1.0" }, "1.0", "1.0"],
+  ["-0.0", { ok: "0" }, { ok: "-0.0" }, "-0.0", "-0.0"],
+  ["1.5", { err: "Input should be a valid integer, got a number with a fractional part" }, { ok: "1.5" }, "1.5", "1.5"],
+  ["1e18", { ok: "1000000000000000000" }, { ok: "1e+18" }, "1e+18", "1e+18"],
+  ["9.223372036854775e18", { ok: "9223372036854774784" }, { ok: "9.223372036854775e+18" }, "9.223372036854775e+18", "9.223372036854775e+18"],
+  ["9223372036854775807.0", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "9.223372036854776e+18" }, "9.223372036854776e+18", "9.223372036854776e+18"],
+  ["-9223372036854775808.0", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "-9.223372036854776e+18" }, "-9.223372036854776e+18", "-9.223372036854776e+18"],
+  ["1e20", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "1e+20" }, "1e+20", "1e+20"],
+  ["-1e19", { err: "Unable to parse input string as an integer, exceeded maximum size" }, { ok: "-1e+19" }, "-1e+19", "-1e+19"],
+  ["1E2", { ok: "100" }, { ok: "100.0" }, "100.0", "100.0"],
+  ["1.0e2", { ok: "100" }, { ok: "100.0" }, "100.0", "100.0"],
+  ["1e400", { err: "Input should be a finite number" }, { ok: "null" }, "null", "Infinity"],
+  ["-1e400", { err: "Input should be a finite number" }, { ok: "null" }, "null", "-Infinity"],
+  ["NaN", { err: "Input should be a finite number" }, { ok: "null" }, "null", "NaN"],
+  ["Infinity", { err: "Input should be a finite number" }, { ok: "null" }, "null", "Infinity"],
+  ["-Infinity", { err: "Input should be a finite number" }, { ok: "null" }, "null", "-Infinity"],
+  ["1e-7", { err: "Input should be a valid integer, got a number with a fractional part" }, { ok: "1e-7" }, "1e-7", "1e-07"],
+  ["2.5e-5", { err: "Input should be a valid integer, got a number with a fractional part" }, { ok: "0.000025" }, "0.000025", "2.5e-05"],
+];
+
+/**
+ * A string in an `int` or `float` field, and a JSON number in a `bool`
+ * field, recorded from pydantic 2.13.4 (pydantic-core 2.46.4) for
+ * `pydanticNumber.ts` and `responseShape.ts` (#69).
+ *
+ * INT_TEXT_CASES / FLOAT_TEXT_CASES: `TypeAdapter(int|float)
+ * .validate_python(text)`, then `str(int)` / `repr(float)` or the first
+ * error's message. BOOL_NUMBER_CASES: `TypeAdapter(bool).validate_python(
+ * json.loads(literal))`, as the Python SDK validates what `json.loads`
+ * made of a response. While porting, both string rules were compared with
+ * a 53,952-string corpus (every string of up to 3 characters over the
+ * interesting alphabet, 47k random ones, and digit runs around 19, 309
+ * and 4,300 digits) with no mismatch.
+ */
+
+export const INT_TEXT_CASES: ReadonlyArray<[input: string, expected: { ok: string } | { err: string }]> = [
+  ["0-1", { ok: "-1" }],
+  ["00-1", { ok: "-1" }],
+  ["0-12", { ok: "-12" }],
+  ["0-1.00", { ok: "-1" }],
+  ["0-_1", { ok: "-1" }],
+  ["0-1_0", { ok: "-10" }],
+  ["0__7", { ok: "7" }],
+  ["0___7", { ok: "7" }],
+  ["00__7", { ok: "7" }],
+  ["0__0", { ok: "0" }],
+  ["0__", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0_", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["_1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1_", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1__0", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1_2_3", { ok: "123" }],
+  ["+1", { ok: "1" }],
+  [" +1", { ok: "1" }],
+  ["+-1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["-+1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["--1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["-0-1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0--1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0+1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1-1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0 -1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  [" 0-1", { ok: "-1" }],
+  ["0-1 ", { ok: "-1" }],
+  ["0_.0", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0._0", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1.0_0", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1._0", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1.", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["-00.0", { ok: "0" }],
+  ["0-.0", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1e3", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0-1e3", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0x10", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1\u{661}", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1\u{1f600}", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["\u{feff}1", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["1\u{a0}", { ok: "1" }],
+  ["\u{3000}1", { ok: "1" }],
+  ["-", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["+", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  [" ", { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["9223372036854775807", { ok: "9223372036854775807" }],
+  ["9223372036854775808", { ok: "9223372036854775808" }],
+  ["-9223372036854775809", { ok: "-9223372036854775809" }],
+  ["9".repeat(4300), { ok: "9".repeat(4300) }],
+  ["9".repeat(4301), { err: "Unable to parse input string as an integer, exceeded maximum size" }],
+  ["-" + "9".repeat(4300), { err: "Unable to parse input string as an integer, exceeded maximum size" }],
+  ["-" + "9".repeat(4299), { ok: "-" + "9".repeat(4299) }],
+  ["9".repeat(4301) + ".0", { err: "Unable to parse input string as an integer, exceeded maximum size" }],
+  ["9".repeat(4300) + ".0", { ok: "9".repeat(4300) }],
+  ["9".repeat(4301) + "x", { err: "Unable to parse input string as an integer, exceeded maximum size" }],
+  [" " + "9".repeat(4301), { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["00000" + "9".repeat(4301), { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0-" + "9".repeat(4300), { err: "Input should be a valid integer, unable to parse string as an integer" }],
+  ["0".repeat(4301), { ok: "0" }],
+  ["1" + "0".repeat(308), { ok: "1" + "0".repeat(308) }],
+  ["-1" + "0".repeat(400), { ok: "-1" + "0".repeat(400) }],
+  ["1\u{d800}", { err: "Input should be a valid string, unable to parse raw data as a unicode string" }],
+  ["\u{dc00}", { err: "Input should be a valid string, unable to parse raw data as a unicode string" }],
+];
+
+export const FLOAT_TEXT_CASES: ReadonlyArray<[input: string, expected: { ok: string } | { err: string }]> = [
+  ["1_.5", { ok: "1.5" }],
+  ["+_1", { ok: "1.0" }],
+  ["1e_10", { ok: "10000000000.0" }],
+  [" 1_000", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1_000\n", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1_000 ", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["\u{a0}1_0", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1_000", { ok: "1000.0" }],
+  ["1__0", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["_1", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1_", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["in_f", { ok: "inf" }],
+  ["n_an", { ok: "nan" }],
+  ["1.", { ok: "1.0" }],
+  [".5", { ok: "0.5" }],
+  ["+.5e-3", { ok: "0.0005" }],
+  ["1e", { err: "Input should be a valid number, unable to parse string as a number" }],
+  [".", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["e5", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["-0", { ok: "-0.0" }],
+  ["INFINITY", { ok: "inf" }],
+  ["-Inf", { ok: "-inf" }],
+  ["+nan", { ok: "nan" }],
+  [" inf ", { ok: "inf" }],
+  ["1e5_", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["\u{a0}1.5", { ok: "1.5" }],
+  ["\u{feff}1", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["\u{661}", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1\u{1f600}", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1e400", { ok: "inf" }],
+  ["1e-400", { ok: "0.0" }],
+  ["0x10", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1,5", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1_0.5", { ok: "10.5" }],
+  ["1_0e1_0", { ok: "100000000000.0" }],
+  [" 1 ", { ok: "1.0" }],
+  ["1 _0", { err: "Input should be a valid number, unable to parse string as a number" }],
+  ["1\u{d800}", { err: "Input should be a valid string, unable to parse raw data as a unicode string" }],
+];
+
+export const BOOL_NUMBER_CASES: ReadonlyArray<[literal: string, expected: { ok: boolean } | { err: string }]> = [
+  ["0", { ok: false }],
+  ["1", { ok: true }],
+  ["1.0", { ok: true }],
+  ["0.0", { ok: false }],
+  ["-0.0", { ok: false }],
+  ["-0", { ok: false }],
+  ["2", { err: "Input should be a valid boolean, unable to interpret input" }],
+  ["-1", { err: "Input should be a valid boolean, unable to interpret input" }],
+  ["2.0", { err: "Input should be a valid boolean, unable to interpret input" }],
+  ["1.5", { err: "Input should be a valid boolean" }],
+  ["1e0", { ok: true }],
+  ["9007199254740993", { err: "Input should be a valid boolean, unable to interpret input" }],
+  ["9223372036854775807", { err: "Input should be a valid boolean, unable to interpret input" }],
+  ["9223372036854775808", { err: "Input should be a valid boolean" }],
+  ["-9223372036854775808", { err: "Input should be a valid boolean, unable to interpret input" }],
+  ["-9223372036854775809", { err: "Input should be a valid boolean" }],
+  ["9.223372036854775807e18", { err: "Input should be a valid boolean" }],
+  ["9223372036854775807.0", { err: "Input should be a valid boolean" }],
+  ["-9.223372036854775808e18", { err: "Input should be a valid boolean" }],
+  ["1e20", { err: "Input should be a valid boolean" }],
+  ["1e400", { err: "Input should be a valid boolean" }],
+  ["-1e400", { err: "Input should be a valid boolean" }],
+  ["1" + "0".repeat(400), { err: "Input should be a valid boolean" }],
+];

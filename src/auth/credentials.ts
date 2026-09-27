@@ -30,6 +30,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { KaguraAuthExpiredError } from "../errors.js";
+import { parseJsonLossless, valueAt } from "../losslessJson.js";
+import { pyStr, pyTruthy } from "../python.js";
 import { refreshAccessToken } from "./deviceFlow.js";
 import { withFileLock } from "./filelock.js";
 import type { AuthProvider } from "./types.js";
@@ -157,6 +159,14 @@ function requireString(d: Record<string, unknown>, key: string): string {
   return value;
 }
 
+/** `d[key]` whatever its type, as Python's `d[key]` reads it; absent throws. */
+function requirePresent(d: Record<string, unknown>, key: string): unknown {
+  if (!Object.prototype.hasOwnProperty.call(d, key)) {
+    throw new Error(`credentials profile missing required field '${key}'`);
+  }
+  return valueAt(d, key);
+}
+
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === "string" ? value : fallback;
 }
@@ -168,8 +178,13 @@ export function credentialsFromDict(d: Record<string, unknown>): OAuthCredential
     server: requireString(d, "server"),
     mcpUrl: requireString(d, "mcp_url"),
     clientId: requireString(d, "client_id"),
-    accessToken: requireString(d, "access_token"),
-    refreshToken: requireString(d, "refresh_token"),
+    // Python's from_dict reads both untyped (#69): it sends
+    // f"Bearer {access_token}", and refreshes only when refresh_token is
+    // truthy -- "" here, which every refresh path treats as none. A number
+    // is read from the file's own literal: 9007199254740993 stays exact,
+    // NaN is "nan" and truthy.
+    accessToken: pyStr(requirePresent(d, "access_token")),
+    refreshToken: ((value) => (pyTruthy(value) ? pyStr(value) : ""))(requirePresent(d, "refresh_token")),
     tokenType: stringOr(d.token_type, "Bearer"),
     expiresAt: parseIso(requireString(d, "expires_at")),
     scope: stringOr(d.scope, ""),
@@ -392,7 +407,9 @@ export function loadCredentialsFile(credentialsPath?: string): CredentialsFile {
 
   let data: unknown;
   try {
-    data = JSON.parse(fs.readFileSync(p, "utf-8"));
+    // Read as Python's json.loads reads it (#69): NaN and the infinities
+    // are accepted, and each number literal is kept for the tokens.
+    data = parseJsonLossless(fs.readFileSync(p, "utf-8"));
   } catch {
     return emptyCredentialsFile();
   }

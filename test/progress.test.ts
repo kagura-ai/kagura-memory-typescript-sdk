@@ -458,6 +458,46 @@ describe("ResourceClient.ingestEvents(…, { onProgress })", () => {
     ]);
   });
 
+  // Recorded from the Python SDK 0.42.0's parse_response (pydantic 2.13.4).
+  it.each([
+    [{}, "created_count: Field required"],
+    [{ created_count: "x" }, "created_count: Input should be a valid integer, unable to parse string as an integer"],
+    [
+      { created_count: 1, failed_count: null, errors: [1] },
+      "failed_count: Input should be a valid integer; errors.0: Input should be a valid dictionary",
+    ],
+    [{ created_count: 1, event_ids: ["a"] }, "event_ids.0: Input should be a valid integer, unable to parse string as an integer"],
+  ])("ends a batch answered with %j with the error event, as Python's model check does", async (body, problems) => {
+    const { events, onProgress } = recorder();
+    const message = shapeMessage("ResourceClient.ingest_events", "ResourceEventBatchResponse", problems);
+    const error = await resourceClient(200, body)
+      .ingestEvents("res-1", "rk", EVENTS, { onProgress })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toBe(message);
+    expect(events.at(-1)).toEqual({
+      stage: "complete",
+      kind: "error",
+      msg: `Batch ingest failed: ${message}`,
+      detail: { events_attempted: 2, resource_id: "res-1" },
+    });
+  });
+
+  it("reports the model's counts and returns the body as it arrived", async () => {
+    // Python: created=3 (lax "3"), failed=0 (the default).
+    const { events, onProgress } = recorder();
+    const result = await resourceClient(200, { created_count: "3" }).ingestEvents("res-1", "rk", EVENTS, {
+      onProgress,
+    });
+    expect(result).toEqual({ created_count: "3" });
+    expect(events.at(-1)).toEqual({
+      stage: "complete",
+      kind: "success",
+      msg: "Batch ingested",
+      detail: { created: 3, failed: 0 },
+    });
+  });
+
   it("finishes the batch when an async callback rejects, and leaves no rejection unhandled", async () => {
     let created: number | undefined;
     const unhandled = await unhandledDuring(async () => {

@@ -42,6 +42,7 @@ import {
   SDK_VERSION,
   validateHttpsUrl,
 } from "./http.js";
+import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -592,12 +593,18 @@ export class KaguraRestClient {
    * Parse a 2xx body as JSON, mapping garbage to a Kagura error.
    *
    * A proxy/CDN can 200 with an HTML maintenance page; that must not
-   * surface as a raw `SyntaxError`.
+   * surface as a raw `SyntaxError`. The body is read as Python's
+   * `resp.json()` reads it (`parseJsonLossless`, #69): `NaN` and
+   * `Infinity` are numbers, and the key order and number literals are
+   * kept for the typed readers and the CLI's dumps. A body nested past
+   * `MAX_JSON_DEPTH` is Python's `RecursionError`, which `_json` does not
+   * catch: it is thrown as it is.
    */
   protected json(response: RestResponse): unknown {
     try {
-      return JSON.parse(response.text) as unknown;
+      return parseJsonLossless(response.text);
     } catch (e) {
+      if (e instanceof JsonNestingError) throw e;
       throw new KaguraConnectionError(
         `Server returned a non-JSON body (HTTP ${response.status}) for ` +
           `${response.method} ${response.path}.`,

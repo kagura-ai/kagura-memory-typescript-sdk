@@ -744,3 +744,82 @@ describe("KaguraOAuth", () => {
     expect(getProfile(loadCredentialsFile(p))?.accessToken).toBe("forced-new");
   });
 });
+
+describe("a hand-edited profile, read as Python's from_dict reads it (#69)", () => {
+  const base = {
+    server: "https://x.test",
+    mcp_url: "https://x.test/mcp",
+    client_id: "c",
+    access_token: "at",
+    refresh_token: "rt",
+    expires_at: "2099-01-01T00:00:00Z",
+  };
+
+  // Python sends f"Bearer {access_token}" and refreshes only when
+  // refresh_token is truthy: bool([]), bool({}) and bool(0) are False,
+  // bool([0]), bool({'a': 0}) and bool('0') are True (recorded).
+  it.each([
+    [{ refresh_token: null }, "at", ""],
+    [{ refresh_token: false }, "at", ""],
+    [{ refresh_token: [] }, "at", ""],
+    [{ refresh_token: {} }, "at", ""],
+    [{ refresh_token: 0 }, "at", ""],
+    [{ refresh_token: [0] }, "at", "[0]"],
+    [{ refresh_token: { a: 0 } }, "at", "{'a': 0}"],
+    [{ refresh_token: "0" }, "at", "0"],
+    [{ access_token: 123 }, "123", "rt"],
+    [{ access_token: null }, "None", "rt"],
+    [{ access_token: { a: 1 } }, "{'a': 1}", "rt"],
+    [{ access_token: true, refresh_token: 5 }, "True", "5"],
+  ])("keeps %j", (fields, accessToken, refreshToken) => {
+    const creds = credentialsFromDict({ ...base, ...fields });
+    expect(creds.accessToken).toBe(accessToken);
+    expect(creds.refreshToken).toBe(refreshToken);
+  });
+
+  // The file is read as Python's json.loads reads it, so a number token is
+  // Python's str() of the literal: kagura-memory 0.42.0 sends
+  // f"Bearer {access_token}" and refreshes only when bool(refresh_token).
+  it.each([
+    ["1.0", "1.0"],
+    ["-0.0", "-0.0"],
+    ["-0", "0"],
+    ["1e16", "1e+16"],
+    ["9007199254740993", "9007199254740993"],
+    ["NaN", "nan"],
+    ["Infinity", "inf"],
+    ["-Infinity", "-inf"],
+    ["[9007199254740993, 1e20]", "[9007199254740993, 1e+20]"],
+    ['{"b": 1, "2": 2}', "{'b': 1, '2': 2}"],
+  ])("renders a number token %s as Python's str() of it", (literal, accessToken) => {
+    const p = path.join(dir, "creds.json");
+    fs.writeFileSync(
+      p,
+      `{"version": 1, "default_profile": "n", "profiles": {"n": ${JSON.stringify(base).replace('"at"', literal)}}}`,
+    );
+    expect(getProfile(loadCredentialsFile(p), "n")?.accessToken).toBe(accessToken);
+  });
+
+  // bool(nan) and bool(inf) are True in Python, bool(-0.0) and bool(0) False.
+  it.each([
+    ["NaN", "nan"],
+    ["Infinity", "inf"],
+    ["-0.0", ""],
+    ["0", ""],
+    ["9007199254740993", "9007199254740993"],
+  ])("reads a number refresh token %s by Python's bool()", (literal, refreshToken) => {
+    const p = path.join(dir, "creds.json");
+    fs.writeFileSync(
+      p,
+      `{"version": 1, "default_profile": "n", "profiles": {"n": ${JSON.stringify(base).replace('"rt"', literal)}}}`,
+    );
+    expect(getProfile(loadCredentialsFile(p), "n")?.refreshToken).toBe(refreshToken);
+  });
+
+  it("still refuses a profile without the keys, as Python's KeyError does", () => {
+    const { access_token: _access, ...noAccess } = base;
+    expect(() => credentialsFromDict(noAccess)).toThrow("credentials profile missing required field 'access_token'");
+    const { refresh_token: _refresh, ...noRefresh } = base;
+    expect(() => credentialsFromDict(noRefresh)).toThrow("credentials profile missing required field 'refresh_token'");
+  });
+});

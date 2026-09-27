@@ -20,4 +20,11 @@ describe("pydanticDatetime: a datetime field as pydantic reads and writes it (#6
       expect(pydanticDatetime(value)).toEqual({ ok: false, msg: "Input should be a valid datetime" });
     }
   });
+
+  it("refuses a lone surrogate before parsing, as pydantic does (#69)", () => {
+    expect(pydanticDatetime("2026-06-01T00:00:00Z\u{dc00}")).toEqual({
+      ok: false,
+      msg: "Input should be a valid string, unable to parse raw data as a unicode string",
+    });
+  });
 });
