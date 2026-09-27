@@ -23,6 +23,7 @@ import {
   type GuardrailBlockStatus,
 } from "../../guardrailExport.js";
 import { parseGuardrailSet } from "../../memoryClient.js";
+import { pyStrip } from "../../pyCompat.js";
 import type { GuardrailDigest, GuardrailDigestTarget, GuardrailSet } from "../../models.js";
 import { rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
 import { resolveCliAuth } from "../credentialSource.js";
@@ -107,31 +108,34 @@ const OUT: FlagSpec = {
 };
 
 /**
- * Refuse an `--out` path as `click.Path(dir_okay=False)` does while the
- * options are read: an existing directory, or an existing file this user
- * cannot read. A path that does not exist passes; nothing is created here.
- *
- * An empty path is refused too. Click lets it through as `Path("")`, which
- * is the current directory, so the Python CLI fails later, with exit 1, on
- * writing to a directory.
+ * Refuse an `--out` path as the Python CLI does while the options are
+ * read: first as `click.Path(dir_okay=False)` does (an existing directory,
+ * or an existing file this user cannot read; a path that does not exist
+ * passes, and nothing is created here), then as `_nonblank_path_option`
+ * does (src/kagura_memory/cli.py, python-sdk #285): an empty or
+ * whitespace-only path is no file name. That check reads the path as
+ * `pathlib` names it, the form the write goes to: `'./ '`, `' /'` and
+ * `' /.'` are all the file `' '`, and `''` is `.`.
  */
 function checkOutPath(raw: string): void {
   const invalid = (problem: string) => new CliUsageError(`Invalid value for '--out': ${problem}`);
-  if (raw === "") throw invalid("the path is empty.");
-  let stat: fs.Stats;
+  let stat: fs.Stats | undefined;
   try {
     stat = fs.statSync(raw);
   } catch {
-    return;
+    stat = undefined;
   }
-  if (stat.isDirectory()) throw invalid(`File ${pyRepr(raw)} is a directory.`);
-  try {
-    fs.accessSync(raw, fs.constants.R_OK);
-  } catch {
-    throw invalid(`File ${pyRepr(raw)} is not readable.`);
+  if (stat !== undefined) {
+    if (stat.isDirectory()) throw invalid(`File ${pyRepr(raw)} is a directory.`);
+    try {
+      fs.accessSync(raw, fs.constants.R_OK);
+    } catch {
+      throw invalid(`File ${pyRepr(raw)} is not readable.`);
+    }
   }
+  const shown = pathlibString(raw);
+  if (shown === "." || !pyStrip(shown)) throw invalid("the path is blank; name a file");
 }
-
 
 const digest: Command = {
   summary: "Render the tool guardrails for clients without tool hooks.",
@@ -165,8 +169,10 @@ const digest: Command = {
     ],
   },
   run: async (deps, args) => {
-    // Option conversions first, in declaration order, then extra
-    // arguments, then the combination checks: click's order.
+    // Option conversions first, then extra arguments, then the
+    // combination checks, as click orders them. The conversions run in
+    // declaration order, where click converts options as they come on
+    // argv, so with two bad options the one named can differ.
     const rawTarget = args.values.target;
     const target = rawTarget === undefined ? "export" : parseChoice(TARGET, rawTarget, TARGETS);
     const rawOut = args.values.out;

@@ -682,13 +682,42 @@ describe("guardrails digest", () => {
     [["--out", "adir"], "Error: Invalid value for '--out': File 'adir' is a directory."],
     [["--out", "adir/."], "Error: Invalid value for '--out': File 'adir/.' is a directory."],
     [["--out", "adir", "--target", "instructions"], "Error: Invalid value for '--out': File 'adir' is a directory."],
-    [["--out", ""], "Error: Invalid value for '--out': the path is empty."],
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+    // `_nonblank_path_option` runs after click.Path's own checks.
+    [["--out", ""], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out="], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", " "], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "\t"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "", "--target", "instructions"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    // The blank check reads the pathlib form, the name the write would
+    // create: each of these is the file ' '.
+    [["--out", "./ "], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", " /"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", " /."], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "\u3000/"], "Error: Invalid value for '--out': the path is blank; name a file"],
+    [["--out", "."], "Error: Invalid value for '--out': File '.' is a directory."],
+    [["--out", "./"], "Error: Invalid value for '--out': File './' is a directory."],
   ])("refuses %j with exit 2 before anything is sent", async (argv, message) => {
     fs.mkdirSync("adir");
     const h = harness();
     expect(await runCli(["guardrails", "digest", ...argv], h.deps)).toBe(2);
     expect(h.err).toEqual([message]);
     expect(h.rest.requests).toEqual([]);
+  });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4): a
+  // blank LAST segment under a real directory names the file ' ' there,
+  // which is not blank.
+  it("does not take --out 'a/./ ' as blank", async () => {
+    fs.mkdirSync("a");
+    const h = harness();
+    serveDigest(h, EXPORT_BLOCK);
+    expect(await runCli(["guardrails", "digest", CTX, "--out", "a/./ "], h.deps)).toBe(0);
+    expect(h.err).toEqual([]);
+    expect(h.out).toEqual([
+      `{"path": ${JSON.stringify(path.join("a", " "))}, "status": "written", "tool_triggered_version": "${VERSION}"}`,
+    ]);
+    expect(fs.readFileSync(path.join("a", " "), "utf8")).toBe(EXPORT_BLOCK);
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
@@ -872,7 +901,18 @@ describe("guardrails digest --out", () => {
 
   it("refuses a fetched block without its markers, naming the file", async () => {
     expect((await digestOut("NEW.md", "- (x) no markers\n")).err).toEqual([
-      "Error: NEW.md: fetched block does not have exactly one begin and one end marker line; " +
+      "Error: NEW.md: fetched block does not have exactly one begin and one end marker line, in that order; " +
+        "left unchanged",
+    ]);
+    expect(fs.existsSync("NEW.md")).toBe(false);
+  });
+
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+  it("refuses a fetched block whose end marker comes first, naming the file", async () => {
+    const endFirst =
+      "<!-- kagura-memory:guardrails end -->\n" + EXPORT_BLOCK.replace("<!-- kagura-memory:guardrails end -->\n", "");
+    expect((await digestOut("NEW.md", endFirst)).err).toEqual([
+      "Error: NEW.md: fetched block does not have exactly one begin and one end marker line, in that order; " +
         "left unchanged",
     ]);
     expect(fs.existsSync("NEW.md")).toBe(false);

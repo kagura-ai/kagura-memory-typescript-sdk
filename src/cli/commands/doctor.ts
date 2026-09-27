@@ -26,7 +26,6 @@ import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
 import { normalizeUrl, validateHttpsUrl } from "../../http.js";
 import type { ServerInfo } from "../../models.js";
-import { readModel, SERVER_INFO } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
 import { meetsMinimum, requireVersion } from "../../versionCheck.js";
 import { rejectExtraArgs, type Command, type CommandDeps } from "../command.js";
@@ -436,21 +435,34 @@ function resolvesToOAuth(deps: CommandDeps, options: KaguraClientOptions): boole
 }
 
 /**
+ * Python 0.42.0's check for a 2xx `/system/info` body its `ServerInfo`
+ * model refuses (python-sdk #277): the server answered, so not
+ * "unreachable". The message names the fields and suggests the upgrade.
+ */
+function serverUnreadable(e: KaguraResponseError): DoctorCheck {
+  return {
+    section: "server",
+    status: "fail",
+    message: `Server answered, but the SDK could not read /api/v1/system/info: ${e.message}`,
+  };
+}
+
+/**
  * Python's `_check_server`: `Server reachable`, then `Version: …` as
  * pass, fail or info by the shared `meetsMinimum` against the SDK's
  * {@link MIN_SERVER_VERSION} (python-sdk #280). The advisory on stderr is
  * `checkServerVersion`'s, from the same comparison, so the two cannot
  * disagree.
  *
- * The body is read as Python's `get_server_info` reads it, through its
- * `ServerInfo` model, and one the model refuses is unreachable, as
- * Python's `KaguraConnectionError` for it is. A credential that does not
+ * The client reads the body through Python's `ServerInfo` model, as
+ * Python's `get_server_info` does. One the model refuses fails as Python
+ * 0.42.0's doctor fails it (python-sdk #277): the server answered, so it
+ * is "could not read", not "unreachable". A credential that does not
  * resolve fails the auth section, as Python's `_check_auth` reports it,
  * and skips this check, as Python's doctor has no client to check with.
  *
- * A failure other than an auth or connection error (a body that is no
- * JSON, a 429) fails the check with its message, where Python's doctor
- * stops with a traceback.
+ * Any other failure (a 429) fails the check with its message, as Python's
+ * doctor has done since 0.42.0.
  */
 async function checkServer(deps: CommandDeps, profile: string | undefined): Promise<DoctorCheck[]> {
   // With --profile, Python resolves that profile with no key forced over
@@ -474,7 +486,7 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     }
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
-  let info: unknown;
+  let info: ServerInfo;
   try {
     info = await client.getServerInfo();
   } catch (e) {
@@ -488,20 +500,13 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     if (e instanceof KaguraConnectionError) {
       return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
     }
+    if (e instanceof KaguraResponseError) return [serverUnreadable(e)];
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   } finally {
     await client.close();
   }
 
-  try {
-    readModel(info, SERVER_INFO, "KaguraClient.get_server_info");
-  } catch (e) {
-    if (!(e instanceof KaguraResponseError)) throw e;
-    return [
-      { section: "server", status: "fail", message: `Server unreachable: Invalid response format: ${e.message}` },
-    ];
-  }
-  const version: unknown = (info as ServerInfo).version;
+  const version: unknown = info.version;
   warnBelowMinimum(version);
 
   const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];

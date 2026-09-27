@@ -5,7 +5,7 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { execFile, which } from "../../src/cli/exec.js";
+import { execAttached, execFile, which } from "../../src/cli/exec.js";
 
 type FakeStream = EventEmitter & { destroyed: boolean; destroy: () => void };
 type FakeChild = EventEmitter & {
@@ -326,4 +326,43 @@ describe("execFile", () => {
     expect(result.timedOut).toBeUndefined();
   });
 
+});
+
+describe("execAttached", () => {
+  it("inherits stdin and stderr and sends the program's stdout to stderr, with no shell", async () => {
+    const child = fakeChild(42);
+    const calls: { file: string; argv: string[]; options: Record<string, unknown> }[] = [];
+    const spawnImpl = ((file: string, argv: string[], options: Record<string, unknown>) => {
+      calls.push({ file, argv, options });
+      return child;
+    }) as never;
+    const done = execAttached("/usr/bin/codex", ["mcp", "add", "x"], spawnImpl);
+    child.emit("close", 0, null);
+    expect(await done).toBe(0);
+    expect(calls).toEqual([
+      { file: "/usr/bin/codex", argv: ["mcp", "add", "x"], options: { stdio: ["inherit", 2, "inherit"], shell: false } },
+    ]);
+  });
+
+  it("resolves the exit code, 128+n for a signal, and 127 when the program cannot start", async () => {
+    const exited = fakeChild();
+    const p1 = execAttached("c", [], (() => exited) as never);
+    exited.emit("close", 3, null);
+    expect(await p1).toBe(3);
+
+    const killed = fakeChild();
+    const p2 = execAttached("c", [], (() => killed) as never);
+    killed.emit("close", null, "SIGINT");
+    expect(await p2).toBe(130);
+
+    const missing = fakeChild();
+    const p3 = execAttached("c", [], (() => missing) as never);
+    missing.emit("error", new Error("ENOENT"));
+    expect(await p3).toBe(127);
+
+    const throwing = (() => {
+      throw new Error("EACCES");
+    }) as never;
+    expect(await execAttached("c", [], throwing)).toBe(127);
+  });
 });

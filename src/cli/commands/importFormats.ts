@@ -52,7 +52,7 @@ const STRERROR: Record<string, string> = {
   ENAMETOOLONG: "File name too long",
 };
 
-function strerror(e: unknown): string {
+export function strerror(e: unknown): string {
   const code = (e as NodeJS.ErrnoException | null)?.code;
   return (code !== undefined && STRERROR[code]) || excMessage(e);
 }

@@ -6,6 +6,113 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`setup codex|hermes|openclaw --url-form --oauth --mcp-url URL`**
+  (memory-cloud v0.77.0+; the Python SDK 0.41.0's harness OAuth URL form,
+  python-sdk#282, verified end to end in 0.41.2, #284): an entry with no
+  key, no header and no key variable, which the harness signs in to
+  itself. Setup first sends one unauthenticated `GET /api/v1/system/info`
+  and stops (exit 1), having run and written nothing, when the server is
+  older than 0.77.0 or its version cannot be confirmed; `--dry-run` sends
+  no request. `--oauth` needs `--url-form` and `--mcp-url` and refuses
+  `--api-key-env` (exit 2). Codex: `codex mcp add NAME --url URL` runs
+  attached (it signs in) only with a terminal and without `-y`, else the
+  table is printed with `codex mcp login NAME`. Hermes:
+  `hermes mcp add NAME --url URL --auth oauth --connect-timeout 315`,
+  then the entry is read back with `hermes config get`, and a kept entry,
+  one without `auth: oauth`, or one saved disabled stops setup with the
+  command that fixes it (`hermes mcp login NAME [--flow device]`,
+  `hermes config set mcp_servers.NAME.enabled true`). OpenClaw:
+  `openclaw mcp add NAME … --auth oauth` (`mcp set` with `--force`), then
+  `openclaw mcp login NAME` and `openclaw mcp doctor NAME --probe`. A
+  sign-in note replaces the key note; setup never runs the login or sees
+  the token.
+- **`update-memory --details` and `--location`**, as the Python CLI 0.42.0
+  takes them (python-sdk #247): the same JSON object and `lat,lon[,label]`
+  shorthand as `remember`, with the same usage errors, sent as `details`.
+  The server replaces the memory's details wholesale, so a bare
+  `--location` drops every other key and `--details '{}'` clears them; a
+  blank value leaves them alone. `remember --help` now says so, and shows
+  Python's examples.
+- **`update-memory --merge-details`** (python-sdk #247): reads the memory
+  with `reference()` first and merges `--details`/`--location` over its
+  current details, top-level keys only, so the keys you leave out are kept.
+  It needs `--memory-id` and one of `--details`/`--location`, both checked
+  before anything is sent. It is two calls, not one atomic update, and it
+  cannot remove a key. When the read is not the whole object (memory-cloud
+  0.78.0+ leaves a large `details` out of a `reference` reply), it stops
+  without writing and asks for the complete object with `--details`, in
+  the Python CLI's words.
+
+### Changed
+
+- **`doctor`** reports a `/api/v1/system/info` body the SDK cannot read as
+  the Python CLI 0.42.0 does (python-sdk #277): `Server answered, but the
+  SDK could not read /api/v1/system/info: …`, with the failing fields,
+  where it said `Server unreachable: Invalid response format: …`.
+- **`getServerInfo`, `checkServerVersion`, `getEmbeddingStatus`,
+  `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`** check a
+  2xx body against the Python SDK's model and throw `KaguraResponseError`
+  (`operation` `KaguraClient.<method>`, `KaguraClient.get_server_info` for
+  `checkServerVersion`) when it does not match, naming the fields and never
+  their values, as the Python SDK 0.42.0 does (python-sdk #277). They used
+  to return such a body unchecked. The body they return is still the one
+  the server sent. A network failure, a body that is not JSON and a non-2xx
+  status other than 401/429 still throw `KaguraConnectionError`.
+  `checkServerVersion` now throws on a version that is not a string, as
+  Python does, where it returned the body without comparing.
+
+### Fixed
+
+- **`workspace invite create -c` and `createInvitation`** (python-sdk #285):
+  a `-c` that is not a context UUID is a usage error (exit 2, `Invalid
+  value for '--context' / '-c': 'x' is not a valid context UUID.`) before
+  anything is read, for an admin invitation too, where it was exit 1 after
+  the credential; `WorkspaceClient.createInvitation` refuses such an
+  `allowedContextIds` entry before any request and sends each one in
+  canonical form; it and every `WorkspaceClient` workspace id now take
+  the spellings Python's `uuid.UUID` takes (`0x…`, `urn:`/`uuid:`
+  anywhere, padding and underscores in the hex), and the message quotes
+  the value as Python's `repr` does (`got 'ctx-1'`). `member remove` and
+  `revoke-key` ask about the workspace in canonical form, as the Python
+  CLI 0.41.1 does.
+- **`guardrails digest --out`** refuses an empty or whitespace-only path
+  in the Python CLI 0.41.1's words (`Invalid value for '--out': the path
+  is blank; name a file`, exit 2), where `' '` was taken as a file name.
+  `--agents-md`, `--agents-md=VALUE` and the float ranges already behaved
+  as 0.41.1 does, and now have recorded tests.
+- **The `AGENTS.md` export** (python-sdk #285): the OpenClaw size warning
+  counts the characters as written, a CRLF as two, as the Python CLI
+  0.41.1 does, where a CRLF file just over 20,000 got no warning; a
+  fetched block with its markers missing or out of order is refused in
+  Python's words (`fetched block does not have exactly one begin and one
+  end marker line, in that order`), by `setup` and by `guardrails digest
+  --out`.
+- **`setup hermes --agents-md`** (python-sdk #278) writes the context file
+  Hermes loads, found as Hermes finds it: the nearest `.hermes.md` /
+  `HERMES.md` up to the git root, then the `AGENTS` chain, then
+  `CLAUDE.md`, only files with text counting. Before, the first of five
+  names that existed here was used even when Hermes loaded another, so
+  the export could displace the user's own file. With only Cursor rules
+  there is no default file (exit 1 without a PATH, no hint, and a dry run
+  says why).
+- **An empty `AGENTS.md` export removes an earlier block**, on every
+  `setup` harness, as `guardrails digest --out` does and as the Python CLI
+  0.41.1 does, instead of keeping it with a note.
+- **`resource import --progress`** starts its stream only once the client
+  is built, as the Python CLI 0.41.1 does (python-sdk #285): a credential
+  that fails prints the error alone, where the stream began with
+  `import_start` and ended with `error`.
+- **`--help` shows every command's examples**, one per line, as the
+  Python CLI 0.41.1 does (python-sdk #285): the 28 commands whose
+  examples the Python CLI 0.40.1 printed as one run-on line (`auth
+  login|refresh`, `context create|delete|update|search-config`, `edge
+  …`, `explore`, `forget`, `reference`, `resource tokens …`,
+  `resource list|stats|indexer-status|schema|events|ingest|ingest-batch`,
+  `setup claude|codex|hermes|openclaw`) showed none here (`remember`
+  already had its block).
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

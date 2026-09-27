@@ -15,7 +15,14 @@
 import { excMessage } from "../../errors.js";
 import { emitProgress } from "../../progress.js";
 import { pyBigInt, pyRepr } from "../../python.js";
-import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
+import {
+  examples,
+  requireArg,
+  rejectExtraArgs,
+  type Command,
+  type CommandDeps,
+  type CommandGroup,
+} from "../command.js";
 import { resolveCliAuth } from "../credentialSource.js";
 import { cliErrorMessage, formatJson } from "../output.js";
 import {
@@ -163,6 +170,7 @@ const LIMIT: FlagSpec = {
 
 const tokensList: Command = {
   summary: "List resource tokens.",
+  description: examples("resource tokens list", "resource tokens list --resource-id products"),
   spec: { flags: [{ ...RESOURCE_ID, required: false, help: "Filter by resource ID" }, LIMIT] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
@@ -179,6 +187,10 @@ const tokensList: Command = {
 
 const tokensCreate: Command = {
   summary: "Create a resource token.",
+  description: examples(
+    "resource tokens create -r products",
+    'resource tokens create -r slack-messages -d "Slack integration" -q 5000',
+  ),
   spec: {
     flags: [
       { ...RESOURCE_ID, help: "Resource ID to scope the token to" },
@@ -207,6 +219,7 @@ const tokensCreate: Command = {
 const tokensUpdate: Command = {
   summary: "Update a resource token.",
   args: "TOKEN_ID",
+  description: examples('resource tokens update 42 -d "New description"', "resource tokens update 42 -q 2000"),
   spec: { flags: [DESCRIPTION, QUOTA] },
   run: async (deps, args) => {
     const tokenId = parseIdArg("TOKEN_ID", requireArg(args, 0, "TOKEN_ID"));
@@ -231,6 +244,7 @@ const tokensUpdate: Command = {
 const tokensRevoke: Command = {
   summary: "Revoke (soft-delete) a resource token.",
   args: "TOKEN_ID",
+  description: examples("resource tokens revoke 42"),
   spec: { flags: [] },
   run: async (deps, args) => {
     // `@click.argument("token_id", type=int)`: a usage error, not a 422,
@@ -257,6 +271,7 @@ const TOKENS_GROUP: CommandGroup = {
 
 const resourceList: Command = {
   summary: "List all resources in the workspace (owner only).",
+  description: examples("resource list"),
   spec: { flags: [] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
@@ -269,6 +284,7 @@ const resourceList: Command = {
 
 const stats: Command = {
   summary: "Show resource impact statistics.",
+  description: examples("resource stats -r products"),
   spec: { flags: [RESOURCE_ID] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
@@ -282,6 +298,7 @@ const stats: Command = {
 
 const indexerStatus: Command = {
   summary: "Show indexer state and recent ingest events for a resource.",
+  description: examples("resource indexer-status -r products"),
   spec: { flags: [RESOURCE_ID] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
@@ -304,6 +321,7 @@ const SCHEMA_VERSION: FlagSpec = {
 
 const schema: Command = {
   summary: "Show resource field definitions (schema).",
+  description: examples("resource schema -r products", "resource schema -r products -v 2"),
   spec: { flags: [RESOURCE_ID, SCHEMA_VERSION] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
@@ -332,6 +350,12 @@ const EVENTS_LIMIT: FlagSpec = {
 const events: Command = {
   summary: "List ingested events for a resource (cursor-paginated).",
   args: "RESOURCE_ID",
+  description: examples(
+    "resource events products",
+    "resource events products --op upsert --limit 20",
+    "resource events products --since 2026-06-01T00:00:00Z",
+    'resource events products --cursor "eyJ..."',
+  ),
   spec: {
     flags: [
       EVENTS_LIMIT,
@@ -480,6 +504,10 @@ const IMPORTANCE: FlagSpec = {
 
 const ingest: Command = {
   summary: "Ingest a single resource event.",
+  description: examples(
+    "resource ingest -r products -k KEY --doc-id SKU-001 -p '{\"name\":\"Widget\",\"price\":9.99}'",
+    "resource ingest -r products -k KEY --doc-id SKU-999 --op delete",
+  ),
   spec: {
     flags: [
       RESOURCE_ID,
@@ -547,6 +575,7 @@ const FILE: FlagSpec = {
 
 const ingestBatch: Command = {
   summary: "Ingest a batch of resource events from a JSON file.",
+  description: examples("resource ingest-batch -r products -k KEY -f events.json"),
   spec: { flags: [RESOURCE_ID, API_KEY, { ...FILE, required: true }] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
@@ -712,13 +741,20 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
     return { docId, op: "upsert" as const, version, payload: row };
   });
 
-  // The config is read before the first progress event, so a malformed
-  // .kagura.json emits none. From the start event on, the stream ends
-  // with exactly one success or error — the credential and the client
-  // included, which Python builds outside its guard (and so can end the
-  // stream with no terminal event).
+  // The config, the credential and the client come before the first
+  // progress event, as Python 0.41.1 emits `import_start` inside its
+  // `op(client)` (python-sdk #285): a failure there is a plain error with no
+  // stream at all, and from the start event on the stream ends with exactly
+  // one success or error.
   const { config } = resolveConfig(deps, undefined, false);
   const onProgress = resolveProgress(args.counts.verbose ?? 0, progress, deps.writeError);
+  const client = (() => {
+    try {
+      return deps.makeResourceClient(resolveCliAuth(deps, config));
+    } catch (e) {
+      throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));
+    }
+  })();
   emitProgress(onProgress, {
     stage: "import_start",
     kind: "action",
@@ -730,7 +766,6 @@ async function importRows(deps: CommandDeps, args: ParsedArgs, input: ImportInpu
   let failed = 0;
   const errors: unknown[] = [];
   try {
-    const client = deps.makeResourceClient(resolveCliAuth(deps, config));
     // The endpoint takes 1-100 events; Python chunks at 100 and this must
     // too, or any import over 100 rows is rejected wholesale.
     const batchCount = Math.ceil(events_.length / BATCH_SIZE);

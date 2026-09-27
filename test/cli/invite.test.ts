@@ -131,6 +131,7 @@ describe("fetchSystemInfo (#44)", () => {
   it.each([
     ["a 404", serverReporting({ detail: "Not Found" }, 404)],
     ["a 503", serverReporting({ detail: "boom" }, 503)],
+    ["a 302, which is not followed", serverReporting("", 302)],
     ["a success other than 200", serverReporting(systemInfo("0.76.0"), 203)],
     ["a body that is not JSON", serverReporting("<html>gateway</html>")],
     ["a JSON body that is not an object", serverReporting("[1, 2]")],

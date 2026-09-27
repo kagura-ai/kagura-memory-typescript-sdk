@@ -123,6 +123,26 @@ let home: string;
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_CWD = process.cwd();
 
+/**
+ * True when the sandboxes this file creates (all under `os.tmpdir()`) sit on
+ * a case-insensitive filesystem (macOS APFS default, Windows): a file
+ * written under one case is found under any other. Probed once, since the
+ * temp directory's case sensitivity does not change between tests. Where
+ * this is true, `AGENTS.md`/`agents.md` and `CLAUDE.md`/`claude.md` name the
+ * same file, so `hermesContextFile`'s probe order (the upper-case spelling
+ * comes first in each pair) — not the spelling actually on disk — decides
+ * which name the export note prints.
+ */
+const CASE_INSENSITIVE_FS = (() => {
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-case-probe-"));
+  try {
+    fs.writeFileSync(path.join(probe, "case.tmp"), "");
+    return fs.existsSync(path.join(probe, "CASE.TMP"));
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
 beforeEach(() => {
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-setup-"));
   home = path.join(sandbox, "home");
@@ -862,6 +882,26 @@ describe("setup hermes", () => {
     expect(refused.err).toContain(
       "Error: Hermes Agent names the variable itself (MCP_KAGURA_MEMORY_API_KEY); drop --api-key-env.",
     );
+  });
+
+  it("never runs `hermes mcp add` over a kept OAuth entry, so 0.41.3's kept-entry stop cannot arise (python-sdk #287)", async () => {
+    // Python 0.41.3: with Hermes's overwrite prompt declined, an `auth: oauth`
+    // entry at the same URL is the kept one, not "Done". This port never
+    // runs `hermes mcp add`, so there is no prompt: it prints the entry to
+    // put in its place, as Python does under -y, and claims nothing written.
+    fs.mkdirSync(hermesDir(), { recursive: true });
+    const kept = `mcp_servers:\n  kagura-memory:\n    url: "${MCP_URL}"\n    auth: oauth\n`;
+    fs.writeFileSync(configYaml(), kept);
+    const h = harness(hermes);
+    expect(await runCli(setup("hermes", "--url-form", "--force"), h.deps)).toBe(0);
+    expect(h.runs).toEqual([]);
+    expect(notes(h).some((n) => n.startsWith("Done:"))).toBe(false);
+    expect(notes(h)).toContain(
+      "Setup does not edit ~/.hermes/config.yaml itself (`hermes mcp add` is interactive and this port " +
+        "never prompts). Add the kagura-memory entry printed on stderr to its mcp_servers: mapping in place " +
+        "of the existing one.",
+    );
+    expect(fs.readFileSync(configYaml(), "utf-8")).toBe(kept);
   });
 
   describe("its home", () => {
@@ -1794,7 +1834,7 @@ describe("--agents-md", () => {
       },
     );
 
-    it("refuses a PATH of only whitespace (exit 2), where Python creates a file named ' '", async () => {
+    it("refuses a PATH of only whitespace (exit 2), in Python's words", async () => {
       process.chdir(sandbox);
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md= "), h.deps)).toBe(2);
@@ -1805,11 +1845,41 @@ describe("--agents-md", () => {
       expect(filesUnder(sandbox)).toEqual([]);
     });
 
-    it("takes --agents-md=VALUE literally, where click would parse a dash-led VALUE as an option", async () => {
+    it("takes --agents-md=VALUE literally, as Python's _HarnessCommand does", async () => {
       process.chdir(sandbox);
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md=-y"), h.deps)).toBe(0);
       expect(fs.readFileSync(path.join(sandbox, "-y"), "utf-8")).toBe(EXPORT_BLOCK);
+    });
+
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+    it("refuses a whitespace PATH given after a space too", async () => {
+      process.chdir(sandbox);
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "  ", "-y"), h.deps)).toBe(2);
+      expect(h.err).toEqual([
+        "Error: Invalid value for '--agents-md': the path is blank; name a file, or give --agents-md alone " +
+          "for the default one",
+      ]);
+      expect(filesUnder(sandbox)).toEqual([]);
+    });
+
+    it.each(["--dry-run", "-"])("takes --agents-md=%s as the file's name", async (value) => {
+      process.chdir(sandbox);
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "-c", CONTEXT, `--agents-md=${value}`), h.deps)).toBe(0);
+      expect(fs.readFileSync(path.join(sandbox, value), "utf-8")).toBe(EXPORT_BLOCK);
+      expect(fs.existsSync(codexAgents())).toBe(false);
+      expect(notes(h)).not.toContain("Dry run: nothing is written, run or fetched.");
+    });
+
+    it("reads --agents-md= as the default file, and a dash-led word after a space as the next option", async () => {
+      for (const argv of [["--agents-md="], ["--agents-md", "-y"]]) {
+        fs.rmSync(path.join(home, ".codex"), { recursive: true, force: true });
+        const h = harness(codex);
+        expect(await runCli(setup("codex", "-c", CONTEXT, ...argv), h.deps)).toBe(0);
+        expect(fs.readFileSync(codexAgents(), "utf-8")).toBe(EXPORT_BLOCK);
+      }
     });
 
     it("given alone before another option, means the default file", async () => {
@@ -1890,12 +1960,13 @@ describe("--agents-md", () => {
       expect(notes(h)).toContain(`Warning: ~/.codex/AGENTS.md is ${size} bytes; Codex reads only the first 32768.`);
     });
 
-    it("counts the bytes on disk, CRLFs included, which Python's folded count misses", async () => {
+    it("counts the bytes on disk, CRLFs included, as Python 0.41.1 does", async () => {
       fs.mkdirSync(path.dirname(codexAgents()), { recursive: true });
       fs.writeFileSync(codexAgents(), "a\r\n".repeat(11_000)); // 33,000 bytes; 22,000 characters as text
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
-      expect(notes(h).join("\n")).toMatch(/is \d+ bytes; Codex reads only the first 32768\./);
+      const size = fs.statSync(codexAgents()).size;
+      expect(notes(h)).toContain(`Warning: ~/.codex/AGENTS.md is ${size} bytes; Codex reads only the first 32768.`);
     });
 
     it("gives no size warning under the cap", async () => {
@@ -1919,20 +1990,52 @@ describe("--agents-md", () => {
       expect(report(h).wrote).toEqual([]);
     });
 
-    it("keeps an earlier block, and names the command that removes it", async () => {
-      // A lone CR is a line break to Python's read_text, so the block
-      // starts a line there.
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4) against a
+    // digest server answering an empty body: `setup codex --url-form … --agents-md AGENTS.md -y`
+    // turned "# Top\r\n\r\n<block>## Bottom\r\ntext\r\n" into "# Top\r\n## Bottom\r\ntext\r\n".
+    it.each([
+      ["lf", "\n"],
+      ["crlf", "\r\n"],
+    ])("removes an earlier block (%s), as guardrails digest --out does", async (_id, nl) => {
       const target = path.join(sandbox, "AGENTS.md");
-      const text = `# P\r${EXPORT_BLOCK}`;
-      fs.writeFileSync(target, text);
+      const block = EXPORT_BLOCK.split("\n").join(nl);
+      fs.writeFileSync(target, `# Top${nl}${nl}${block}## Bottom${nl}text${nl}`);
+      const h = harness(codex);
+      h.rest.body = "";
+      expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", target), h.deps)).toBe(0);
+      expect(fs.readFileSync(target, "utf-8")).toBe(`# Top${nl}## Bottom${nl}text${nl}`);
+      expect(notes(h).at(-1)).toBe(
+        `Context ${CONTEXT} has no tool guardrails this credential can see (none marked, or the context ` +
+          `is not trusted-tier): removed the earlier guardrail block from ${target}.`,
+      );
+      expect(report(h).wrote).toEqual([target]);
+    });
+
+    it("creates no file or directory without a block", async () => {
+      const target = path.join(sandbox, "new-dir", "AGENTS.md");
       const h = harness(codex);
       h.rest.body = "  \n";
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", target), h.deps)).toBe(0);
       expect(notes(h).at(-1)).toBe(
-        `It still has an earlier block; remove it with: kagura-memory guardrails digest ${CONTEXT} ` +
-          `--out ${shellQuote(target)}`,
+        `Context ${CONTEXT} has no tool guardrails this credential can see (none marked, or the context ` +
+          `is not trusted-tier): nothing was written to ${target}.`,
       );
-      expect(fs.readFileSync(target, "utf-8")).toBe(text);
+      expect(fs.existsSync(path.join(sandbox, "new-dir"))).toBe(false);
+    });
+
+    it.each([
+      ["two-blocks", Buffer.from(`# P\n\n${EXPORT_BLOCK}\n${EXPORT_BLOCK}`)],
+      ["not-utf-8", Buffer.from([0xff, 0xfe, 0x20, 0x6e])],
+    ])("leaves a file it cannot splice unchanged (%s), exit 1", async (_id, content) => {
+      const target = path.join(sandbox, "AGENTS.md");
+      fs.writeFileSync(target, content);
+      const h = harness(codex);
+      h.rest.body = "";
+      expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", target), h.deps)).toBe(1);
+      expect(h.err.at(-1)).toMatch(
+        new RegExp(`^Error: The MCP entry is set up, but the AGENTS\\.md export failed: .*; left unchanged$`),
+      );
+      expect(fs.readFileSync(target)).toEqual(content);
     });
   });
 
@@ -1955,7 +2058,7 @@ describe("--agents-md", () => {
     });
 
     it("says the entry was only printed when no harness CLI applied it", async () => {
-      // Python says "set up" here too.
+      // As Python 0.41.1 says it (python-sdk #285).
       const target = path.join(sandbox, "AGENTS.md");
       for (const name of ["hermes", "codex"]) {
         const h = harness({});
@@ -2259,6 +2362,120 @@ describe("--agents-md", () => {
       );
     });
 
+    /** Files (name → content) under the sandbox, their directories created. */
+    function layout(files: Record<string, string | Buffer>): void {
+      for (const [name, text] of Object.entries(files)) {
+        const target = path.join(sandbox, name);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, text);
+      }
+    }
+
+    // The layouts of python-sdk #278 and the Python SDK 0.42.0's
+    // TestHermesPaths.test_the_export_goes_where_hermes_loads_it, recorded
+    // from its hermes_context_file.
+    it.each([
+      ["root-hermes-md", { ".git/x": "", ".hermes.md": "own", "sub/x": "" }, "sub", ".hermes.md"],
+      ["root-hermes-md-over-sub-agents", { ".git/x": "", ".hermes.md": "own", "sub/AGENTS.md": "agents" }, "sub", ".hermes.md"],
+      ["agents-chain-from-root", { ".git/x": "", "AGENTS.md": "root", "sub/CLAUDE.md": "claude" }, "sub", "sub/AGENTS.md"],
+      ["empty-hermes-md", { ".hermes.md": "", "AGENTS.md": "agents" }, ".", "AGENTS.md"],
+      ["empty-override", { "AGENTS.override.md": " \n", "AGENTS.md": "agents" }, ".", "AGENTS.md"],
+      // On a case-insensitive filesystem, "agents.md"/"claude.md" are the
+      // same file as "AGENTS.md"/"CLAUDE.md", so the probe (which checks the
+      // upper-case spelling first) matches and returns that spelling instead
+      // of the one actually on disk — as Python's `Path.is_file()` does too.
+      ["lower-agents-md", { "agents.md": "agents" }, ".", CASE_INSENSITIVE_FS ? "AGENTS.md" : "agents.md"],
+      ["lower-claude-md", { "claude.md": "claude" }, ".", CASE_INSENSITIVE_FS ? "CLAUDE.md" : "claude.md"],
+      ["hermes-md-above-git-root", { ".hermes.md": "own", "repo/.git/x": "" }, "repo", "repo/AGENTS.md"],
+      ["no-git-cwd-only", { ".hermes.md": "own", "sub/x": "" }, "sub", "sub/AGENTS.md"],
+      ["empty-sub-hermes-md", { ".git/x": "", ".hermes.md": "own", "sub/.hermes.md": "" }, "sub", "sub/AGENTS.md"],
+      ["empty-hermes-md-hides-HERMES-md", { ".hermes.md": "", "HERMES.md": "own" }, ".", "AGENTS.md"],
+      ["bom-only-counts-as-text", { "AGENTS.md": "﻿", "CLAUDE.md": "claude" }, ".", "AGENTS.md"],
+      // A lone 0xff byte: not UTF-8, read with errors="replace" as U+FFFD, which is text.
+      ["not-utf-8-counts-as-text", { "AGENTS.md": Buffer.from([0xff]), "CLAUDE.md": "claude" }, ".", "AGENTS.md"],
+    ])("puts the export where Hermes loads it (%s)", async (_id, files, cwd, expected) => {
+      layout(files as Record<string, string | Buffer>);
+      process.chdir(path.join(sandbox, cwd as string));
+      const h = harness({});
+      expect(await runCli(setup("hermes", "-c", CONTEXT, "--agents-md", "--dry-run"), h.deps)).toBe(0);
+      expect(notes(h).at(-1)).toContain(
+        `${path.join(fs.realpathSync(sandbox), expected as string)} (the guardrail block for context ${CONTEXT})`,
+      );
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+      "counts a file it cannot read as empty",
+      async () => {
+        layout({ "CLAUDE.md": "claude", "AGENTS.md": "agents" });
+        fs.chmodSync(path.join(sandbox, "AGENTS.md"), 0);
+        try {
+          process.chdir(sandbox);
+          const h = harness({});
+          expect(await runCli(setup("hermes", "-c", CONTEXT, "--agents-md", "--dry-run"), h.deps)).toBe(0);
+          expect(notes(h).at(-1)).toContain(path.join(fs.realpathSync(sandbox), "CLAUDE.md"));
+        } finally {
+          fs.chmodSync(path.join(sandbox, "AGENTS.md"), 0o644);
+        }
+      },
+    );
+
+    describe("with only Cursor rules", () => {
+      // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4), run
+      // in $HOME with a .cursorrules: `setup hermes --url-form --mcp-url … --context-id C
+      // --agents-md --dry-run -y` exits 1 with this error.
+      const REASON =
+        "Hermes loads only ~/.cursorrules here, and it loads the first context file type it finds: a new " +
+        "AGENTS.md would stop it loading that file. Name the file with --agents-md PATH";
+
+      beforeEach(() => {
+        // pathLabel names files under the real home; a /tmp behind a link must not hide it.
+        process.env.HOME = fs.realpathSync(home);
+        fs.writeFileSync(path.join(home, ".cursorrules"), "rules");
+        process.chdir(home);
+      });
+
+      it.each([[["--dry-run"]], [[]]])("stops --agents-md without a PATH before anything runs (%j)", async (extra) => {
+        const h = harness({});
+        expect(await runCli(setup("hermes", "-c", CONTEXT, "--agents-md", "-y", ...extra), h.deps)).toBe(1);
+        expect(h.err.join("\n")).toBe(
+          "Error: Nothing was written: Hermes loads only ~/.cursorrules here, and it loads the first context file\n" +
+            "  type it finds: a new AGENTS.md would stop it loading that file. Name the file\n" +
+            "  with --agents-md PATH.",
+        );
+        expect(h.out).toEqual([]);
+        expect(h.rest.requests).toEqual([]);
+        expect(fs.existsSync(path.join(home, "AGENTS.md"))).toBe(false);
+      });
+
+      it("writes a named PATH", async () => {
+        const h = harness({});
+        expect(await runCli(setup("hermes", "-c", CONTEXT, "--agents-md", "RULES.md"), h.deps)).toBe(0);
+        expect(fs.readFileSync(path.join(home, "RULES.md"), "utf-8")).toBe(EXPORT_BLOCK);
+      });
+
+      it("says the export is not offered in a dry run, naming the file", async () => {
+        const h = harness({});
+        expect(await runCli(setup("hermes", "--dry-run"), h.deps)).toBe(0);
+        expect(notes(h).at(-1)).toBe(`AGENTS.md: not offered. ${REASON}.`);
+      });
+
+      it("gives no Re-run hint", async () => {
+        const h = harness({});
+        expect(await runCli(setup("hermes", "-c", CONTEXT), h.deps)).toBe(0);
+        expect(notes(h).join("\n")).not.toContain("Re-run with");
+      });
+
+      it("names a .cursor/rules file when there is no .cursorrules", async () => {
+        fs.rmSync(path.join(home, ".cursorrules"));
+        fs.mkdirSync(path.join(home, ".cursor", "rules"), { recursive: true });
+        fs.writeFileSync(path.join(home, ".cursor", "rules", "b.mdc"), "b");
+        fs.writeFileSync(path.join(home, ".cursor", "rules", "a.mdc"), "a");
+        const h = harness({});
+        expect(await runCli(setup("hermes", "--dry-run"), h.deps)).toBe(0);
+        expect(notes(h).at(-1)).toMatch(/^AGENTS\.md: not offered\. Hermes loads only ~\/\.cursor\/rules\/a\.mdc here,/);
+      });
+    });
+
     it("passes over a directory of a context file's name", async () => {
       process.chdir(sandbox);
       fs.mkdirSync(".hermes.md");
@@ -2332,9 +2549,52 @@ describe("--agents-md", () => {
       expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
       expect(notes(h).join("\n")).not.toContain("reads only the first");
     });
+
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+    it("counts a CRLF as two characters, as Python's read_bytes().decode() does", async () => {
+      // python-sdk #285: 21,000 characters as written, 14,000 once CRLF is folded.
+      fs.mkdirSync(path.dirname(workspace()), { recursive: true });
+      fs.writeFileSync(workspace(), "x\r\n".repeat(7_000));
+      const h = harness(openclaw);
+      expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
+      const size = [...new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(workspace()))].length;
+      expect(size).toBeGreaterThan(20_000);
+      expect(notes(h)).toContain(
+        `Warning: ~/.openclaw/workspace/AGENTS.md is ${size} characters; OpenClaw reads only the first 20000.`,
+      );
+    });
+
+    it("counts a BOM as one character and an astral character as one, as len(str) does", async () => {
+      // 20,002 code points in 80,004 bytes and 40,002 UTF-16 units: Python's
+      // `len(raw.decode("utf-8"))` keeps U+FEFF and counts U+1F600 once. The
+      // count is of the file as written, export block included.
+      fs.mkdirSync(path.dirname(workspace()), { recursive: true });
+      fs.writeFileSync(workspace(), `\ufeff${"\u{1F600}".repeat(20_000)}\n`);
+      const codePoints = () => [...new TextDecoder("utf-8", { ignoreBOM: true }).decode(fs.readFileSync(workspace()))].length;
+      expect(codePoints()).toBe(20_002);
+      const h = harness(openclaw);
+      expect(await runCli(setup("openclaw", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(0);
+      const size = codePoints();
+      expect(size).toBeGreaterThan(20_002);
+      expect(size).toBeLessThan(21_000); // 40,002 and more if UTF-16 units were counted
+      expect(notes(h)).toContain(
+        `Warning: ~/.openclaw/workspace/AGENTS.md is ${size} characters; OpenClaw reads only the first 20000.`,
+      );
+    });
   });
 
   describe("its PATH", () => {
+    it("keeps ~user as written, as a relative path (python-sdk #285)", async () => {
+      process.chdir(sandbox);
+      const h = harness(codex);
+      expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "~no-such-user-285/AGENTS.md"), h.deps)).toBe(0);
+      expect(fs.readFileSync(path.join(sandbox, "~no-such-user-285", "AGENTS.md"), "utf-8")).toBe(EXPORT_BLOCK);
+      // Named as `str(Path(...))` names it: on Windows `/` reads as `\`, so
+      // Python there says `~no-such-user-285\AGENTS.md`.
+      const label = path.join("~no-such-user-285", "AGENTS.md");
+      expect(notes(h)).toContain(`Wrote the guardrail block for context ${CONTEXT} in ${label}`);
+    });
+
     it("expands a leading ~", async () => {
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "~/notes/n.md"), h.deps)).toBe(0);
@@ -2415,8 +2675,9 @@ describe("help (python-sdk#279, #57)", () => {
     [
       "hermes",
       "Write the context's tool guardrail export block into PATH (default: the context file Hermes loads " +
-        "here, the first of .hermes.md, HERMES.md, AGENTS.override.md, AGENTS.md, CLAUDE.md, else " +
-        "AGENTS.md). Only the marked block changes.",
+        "from here: the nearest .hermes.md or HERMES.md up to the git root, else this directory's AGENTS " +
+        "file, else its CLAUDE.md, else a new AGENTS.md; none when only Cursor rules load, which a new " +
+        "AGENTS.md would stop loading). Only the marked block changes; an empty set removes it.",
     ],
     [
       "openclaw",

@@ -414,6 +414,40 @@ export function openclawBlock(name: string, url: string, keyEnv: string = KEY_EN
   return JSON.stringify({ mcp: { servers: { [name]: openclawEntry(url, keyEnv) } } }, null, 2);
 }
 
+/**
+ * The `[mcp_servers.<name>]` table of an `--oauth` entry: `url` alone.
+ * With no bearer named, Codex's `auth` defaults to OAuth — Python's
+ * `_Codex.block` for `entry.oauth`.
+ */
+export function codexTomlOauthBlock(name: string, url: string): string {
+  return [`[mcp_servers.${name}]`, `url = ${JSON.stringify(url)}`].join("\n");
+}
+
+/**
+ * The Hermes `mcp_servers.<name>` block of an `--oauth` entry: `url` and
+ * `auth: oauth`, no headers — whole, or with `entryIndent` the entry alone
+ * (see {@link hermesYamlBlock}).
+ */
+export function hermesYamlOauthBlock(name: string, url: string, entryIndent?: string): string {
+  const entry = [`${name}:`, `  url: ${JSON.stringify(url)}`, "  auth: oauth"];
+  return entryIndent === undefined
+    ? ["mcp_servers:", ...entry.map((line) => `  ${line}`)].join("\n")
+    : entry.map((line) => `${entryIndent}${line}`).join("\n");
+}
+
+/**
+ * The OpenClaw `--oauth` entry: `auth: "oauth"` and no headers, which
+ * OpenClaw ignores with OAuth — Python's `_OpenClaw.server` for `entry.oauth`.
+ */
+export function openclawOauthEntry(url: string): Record<string, unknown> {
+  return { url, transport: "streamable-http", auth: "oauth" };
+}
+
+/** {@link openclawOauthEntry} nested at `mcp.servers.<name>`. */
+export function openclawOauthBlock(name: string, url: string): string {
+  return JSON.stringify({ mcp: { servers: { [name]: openclawOauthEntry(url) } } }, null, 2);
+}
+
 /** POSIX-quote one argument, leaving plain words bare. */
 export function shellQuote(arg: string): string {
   return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;

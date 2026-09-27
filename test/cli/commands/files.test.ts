@@ -195,6 +195,14 @@ const COMPLETE = {
 };
 
 describe("files upload", () => {
+  // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4).
+  it("refuses --importance nan (exit 2), sending nothing", async () => {
+    const h = harness();
+    expect(await runCli(["files", "upload", file, "--remember", "--importance", "nan"], h.deps)).toBe(2);
+    expect(h.err).toEqual(["Error: Invalid value for '--importance': nan is not in the range 0.0<=x<=1.0."]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
   it("uploads into the workspace paired with the credential and prints the file object", async () => {
     const h = harness();
     expect(await runCli(["files", "upload", file], h.deps)).toBe(0);
@@ -401,6 +409,21 @@ describe("files upload", () => {
     });
   });
 
+  describe("a non-string context_id in .kagura.json", () => {
+    // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
+    // `kagura files list` with {"api_key": …, "context_id": 123} prints this (exit 1).
+    it("reads as absent, naming --context-id", async () => {
+      const h = harness({ config: { api_key: "cfg-key", context_id: 123 } as unknown as KaguraConfig });
+      expect(await runCli(["files", "list"], h.deps)).toBe(1);
+      expect(h.err).toEqual([
+        'Error: .kagura.json has api_key but context_id is missing or "auto". Set context_id to the ' +
+          "workspace UUID bound to this api_key, or pass --context-id. (Falling back to the OAuth " +
+          "profile would mix credential sources — see issue #115.)",
+      ]);
+      expect(h.rest.requests).toEqual([]);
+    });
+  });
+
   describe("--remember", () => {
     it("writes one memory linked to the file, with Python's payload", async () => {
       const h = harness();
@@ -485,6 +508,23 @@ describe("files upload", () => {
         msg: message,
         detail: { reserved_file_id: FILE_ID, uploaded: true, confirm_started: true, confirmed: true },
       });
+    });
+
+    // Python 0.41.1 (python-sdk #285): the upload's success is held until the memory is
+    // written, so a failed write's stream is `action`… then one `error`, no `success`.
+    it("never puts a success event in a stream that ends in the memory write's error", async () => {
+      const h = harness({
+        makeClient: (() => ({
+          remember: async () => {
+            throw new Error("boom");
+          },
+          close: async () => {},
+        })) as unknown as CliDeps["makeClient"],
+      });
+      expect(await runCli(["files", "upload", file, "--remember", "--progress", "json"], h.deps)).toBe(1);
+      const kinds = events(h.err).map((e) => e.kind);
+      expect(kinds.filter((k) => k === "success")).toEqual([]);
+      expect(kinds.at(-1)).toBe("error");
     });
 
     it("keeps a quota refusal's reset time and plan under the wrapped message", async () => {

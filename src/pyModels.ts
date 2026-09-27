@@ -66,6 +66,8 @@ export type Kind =
   | "datetime"
   /** `dict[str, Any]`: an object, its contents untouched. */
   | "dict"
+  /** `dict[str, T]`: an object whose every value is read as `T`. */
+  | { dictOf: Kind }
   | { literal: readonly string[] }
   | { list: Kind }
   | { model: Model }
@@ -135,6 +137,15 @@ function readValue(r: ResponseReader, kind: Kind, value: unknown, at: Loc): unkn
       return undefined;
   }
   if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, value, at);
+  if ("dictOf" in kind) {
+    if (!isObject(value)) {
+      r.issue(at, "Input should be a valid dictionary");
+      return undefined;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[key] = readValue(r, kind.dictOf, item, [...at, key]);
+    return out;
+  }
   if ("literal" in kind) {
     if (typeof value === "string" && kind.literal.includes(value)) return value;
     r.issue(at, literalMessage(kind.literal));
@@ -418,7 +429,7 @@ const SERVER_FEATURES: Model = {
 };
 
 /**
- * `/api/v1/system/info`, read here only to check the body as Python's
+ * `/api/v1/system/info`, checked (not converted) as Python's
  * `get_server_info` does: its `ServerFeatures` keeps flags it does not
  * know (`extra="allow"`), which {@link readModel} would drop.
  */
@@ -438,4 +449,93 @@ export const SERVER_INFO: Model = {
 export const FILE_DOWNLOAD_URL_RESPONSE: Model = {
   name: "FileDownloadUrlResponse",
   fields: [required("download_url", "str")],
+};
+
+const FAILED_MEMORY_INFO: Model = {
+  name: "FailedMemoryInfo",
+  fields: [
+    required("id", "str"),
+    required("summary", "str"),
+    optional("embedding_error", nullable("str")),
+    required("created_at", "datetime"),
+    optional("updated_at", nullable("datetime")),
+  ],
+};
+
+/** `/api/v1/workspace/embedding-status`, checked as `get_embedding_status` parses it. */
+export const EMBEDDING_STATUS: Model = {
+  name: "EmbeddingStatus",
+  fields: [
+    required("total", "int"),
+    required("by_status", { dictOf: "int" }),
+    required("failed_memories", listOf({ model: FAILED_MEMORY_INFO })),
+  ],
+};
+
+/**
+ * Python's `MemoryStatItem`, with one deliberate difference: `use_count`
+ * is optional. memory-cloud v0.34.0 (#1046) dropped it, and the Python
+ * SDK 0.42.0 still requires it, so it refuses every non-empty page.
+ */
+const MEMORY_STAT_ITEM: Model = {
+  name: "MemoryStatItem",
+  fields: [
+    required("id", "str"),
+    required("summary", "str"),
+    required("type", "str"),
+    required("importance", "float"),
+    required("scope", "str"),
+    optional("use_count", "int", 0),
+    required("access_count", "int"),
+    optional("last_used_at", nullable("datetime")),
+    required("embedding_status", "str"),
+    required("created_at", "datetime"),
+  ],
+};
+
+/** `/api/v1/contexts/{id}/memory-stats`, checked as `get_memory_stats` parses it. */
+export const MEMORY_STATS_RESPONSE: Model = {
+  name: "MemoryStatsResponse",
+  fields: [
+    required("memories", listOf({ model: MEMORY_STAT_ITEM })),
+    required("total", "int"),
+    required("sort_by", "str"),
+    required("sort_order", "str"),
+  ],
+};
+
+const DUPLICATE_MEMORY_INFO: Model = {
+  name: "DuplicateMemoryInfo",
+  fields: [required("id", "str"), required("summary", "str"), required("type", "str"), required("created_at", "datetime")],
+};
+
+const DUPLICATE_PAIR: Model = {
+  name: "DuplicatePair",
+  fields: [
+    required("memory_a", { model: DUPLICATE_MEMORY_INFO }),
+    required("memory_b", { model: DUPLICATE_MEMORY_INFO }),
+    required("similarity", "float"),
+  ],
+};
+
+/** `/api/v1/contexts/{id}/duplicates`, checked as `find_duplicates` parses it. */
+export const DUPLICATES_RESPONSE: Model = {
+  name: "DuplicatesResponse",
+  fields: [
+    required("pairs", listOf({ model: DUPLICATE_PAIR })),
+    required("total_pairs", "int"),
+    required("threshold", "float"),
+    required("memories_scanned", "int"),
+  ],
+};
+
+const EMBEDDING_MODEL: Model = {
+  name: "EmbeddingModel",
+  fields: [required("name", "str"), required("dimensions", "int"), required("provider", "str"), required("available", "bool")],
+};
+
+/** `/api/v1/system/embedding/models`, checked as `list_embedding_models` parses it. */
+export const EMBEDDING_MODELS_RESPONSE: Model = {
+  name: "EmbeddingModelsResponse",
+  fields: [required("models", listOf({ model: EMBEDDING_MODEL })), required("default_model", "str")],
 };
