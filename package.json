@@ -77,6 +77,15 @@
     "fflate": "0.8.3",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "tsup": {
+      "esbuild": "^0.28.1"
+    },
+    "external-editor": {
+      "tmp": "^0.2.6"
+    }
   }
 }
