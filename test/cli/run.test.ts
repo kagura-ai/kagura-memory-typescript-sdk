@@ -1330,7 +1330,7 @@ describe("cli: list", () => {
   });
 
   it("--json emits Python's keys, one object per profile in file order, and no token", async () => {
-    const expiresAt = new Date("2026-10-01T12:34:56Z");
+    const expiresAt = new Date("2099-10-01T12:34:56Z");
     seed(
       {
         work: creds({ accessToken: "atok-secret", refreshToken: "rtok-secret", expiresAt }),
@@ -1352,7 +1352,7 @@ describe("cli: list", () => {
       expired: false,
       refreshable: true,
       // Python's datetime.isoformat() of the UTC expiry.
-      expires_at: "2026-10-01T12:34:56+00:00",
+      expires_at: "2099-10-01T12:34:56+00:00",
     });
     expect(payload[1]).toMatchObject({ profile: "old", default: false, expired: true, refreshable: false });
     expect(h.out.join("\n")).not.toContain("secret");
