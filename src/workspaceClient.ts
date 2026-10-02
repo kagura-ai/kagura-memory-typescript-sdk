@@ -30,7 +30,7 @@ import {
 } from "./responseShape.js";
 import { pathSegment } from "./pathSegment.js";
 import { normalizeUuid } from "./pyCompat.js";
-import { KaguraRestClient, requireInt } from "./restBase.js";
+import { KaguraRestClient, requireInt, requirePublicId } from "./restBase.js";
 import type { RequestContext, RestResponse } from "./restBase.js";
 
 export const VALID_ASSIGNABLE_ROLES = ["member", "admin", "viewer"] as const;
@@ -296,15 +296,17 @@ export class WorkspaceClient extends KaguraRestClient {
   /**
    * Revoke a pending invitation (server returns 200 `{"success": true}`).
    *
-   * @param invitationId The integer id. Pass a `bigint` for one past
-   *   `Number.MAX_SAFE_INTEGER`: a `number` that large may already be
-   *   rounded to a different id, and is refused.
+   * @param invitationId The invitation's id: an integer on servers before
+   *   memory-cloud v0.89.0, an opaque `winv_…` string from v0.89.0 on.
+   *   Pass a `bigint` for an integer past `Number.MAX_SAFE_INTEGER`: a
+   *   `number` that large may already be rounded to a different id, and is
+   *   refused, as is an empty string.
    */
-  async revokeInvitation(workspaceId: string, invitationId: number | bigint): Promise<void> {
+  async revokeInvitation(workspaceId: string, invitationId: number | bigint | string): Promise<void> {
     const ws = normalizeWorkspaceId(workspaceId);
     await this.request(
       "DELETE",
-      `/api/v1/workspaces/${ws}/invitations/${requireInt(invitationId, "invitationId")}`,
+      `/api/v1/workspaces/${ws}/invitations/${requirePublicId(invitationId, "invitationId")}`,
     );
   }
 
@@ -406,19 +408,21 @@ export class WorkspaceClient extends KaguraRestClient {
    * set, row retained for forensics); success is 200 with a status body,
    * and an already-revoked key surfaces as a uniform 404.
    *
-   * @param keyId The integer id. Pass a `bigint` for one past
-   *   `Number.MAX_SAFE_INTEGER`: a `number` that large may already be
-   *   rounded to a different id, and is refused.
+   * @param keyId The key's id: an integer on servers before memory-cloud
+   *   v0.89.0, an opaque `akey_…` string from v0.89.0 on. Pass a `bigint`
+   *   for an integer past `Number.MAX_SAFE_INTEGER`: a `number` that large
+   *   may already be rounded to a different id, and is refused, as is an
+   *   empty string.
    */
   async revokeMemberKey(
     workspaceId: string,
     userId: string,
-    keyId: number | bigint,
+    keyId: number | bigint | string,
   ): Promise<void> {
     const ws = normalizeWorkspaceId(workspaceId);
     await this.request(
       "DELETE",
-      `${memberPath(ws, userId)}/credentials/api-keys/${requireInt(keyId, "keyId")}`,
+      `${memberPath(ws, userId)}/credentials/api-keys/${requirePublicId(keyId, "keyId")}`,
     );
   }
 

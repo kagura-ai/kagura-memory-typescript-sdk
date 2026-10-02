@@ -295,10 +295,25 @@ describe("kagura-memory resource quota range checks", () => {
 });
 
 describe("kagura-memory resource tokens", () => {
-  it("requires TOKEN_ID to be an integer", async () => {
+  it("requires TOKEN_ID to be an integer or an id", async () => {
     const h = harness();
-    expect(await runCli(["resource", "tokens", "revoke", "abc"], h.deps)).toBe(2);
-    expect(h.err.join("\n")).toContain("Invalid value for 'TOKEN_ID': 'abc' is not a valid integer.");
+    expect(await runCli(["resource", "tokens", "revoke", "7.0"], h.deps)).toBe(2);
+    expect(h.err.join("\n")).toContain("Invalid value for 'TOKEN_ID': '7.0' is not a valid integer or id.");
+  });
+
+  it("revokes and updates a string token id (memory-cloud v0.89.0+) as typed", async () => {
+    const id = "rtok_4hT9xQ2mLp8vZr1sKc3dEf";
+    const revoked = harness();
+    revoked.rest.status = 204;
+    expect(await runCli(["resource", "tokens", "revoke", id], revoked.deps)).toBe(0);
+    expect(revoked.rest.last().method).toBe("DELETE");
+    expect(new URL(revoked.rest.last().url).pathname).toBe(`/api/v1/resource-tokens/${id}`);
+
+    const updated = harness();
+    updated.rest.body = { ...TOKEN, id };
+    expect(await runCli(["resource", "tokens", "update", id, "-d", "x"], updated.deps)).toBe(0);
+    expect(new URL(updated.rest.last().url).pathname).toBe(`/api/v1/resource-tokens/${id}`);
+    expect(JSON.parse(updated.out.join("\n"))).toMatchObject({ id });
   });
 
   it("names the missing required option", async () => {
@@ -616,20 +631,26 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
     expect(r.server.requests).toEqual([]);
   });
 
+  it("keeps a string token_id (memory-cloud v0.89.0+ `rtok_…`) as the string", async () => {
+    const r = await setup(["-r", "res-1"], { ...SETUP_RESULT, token_id: "rtok_4hT9xQ2mLp8vZr1sKc3dEf" });
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out.join("\n"))).toMatchObject({ token_id: "rtok_4hT9xQ2mLp8vZr1sKc3dEf" });
+  });
+
   it("names every field of a result the model rejects, never a value", async () => {
     const r = await setup(["-r", "res-1"], {
       status: "success",
       context_id: CONTEXT_UUID,
       context_name: "res-1",
       resource_id: "res-1",
-      token_id: "twelve",
+      token_id: null,
     });
     expect(r.code).toBe(1);
     expect(r.out).toEqual([]);
     expect(r.err).toEqual([
       "Error: ResourceClient.setup_resource: unexpected server response for ResourceSetupResponse " +
-        "(token: Field required; token_id: Input should be a valid integer, unable to parse string " +
-        "as an integer). The server may be newer than this SDK; upgrading kagura-memory may help.",
+        "(token: Field required; token_id.int: Input should be a valid integer; " +
+        "token_id.str: Input should be a valid string). The server may be newer than this SDK; upgrading kagura-memory may help.",
     ]);
   });
 

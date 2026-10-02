@@ -413,6 +413,32 @@ describe("invitations", () => {
     ]);
   });
 
+  it("sends string ids (memory-cloud v0.89.0+ `winv_…`, `akey_…`) as encoded path segments", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({ success: true });
+    const client = makeClient(server);
+
+    await client.revokeInvitation(WS, "winv_4hT9xQ2mLp8vZr1sKc3dEf");
+    await client.revokeMemberKey(WS, "u2", "akey_4hT9xQ2mLp8vZr1sKc3dEf");
+    await client.revokeMemberKey(WS, "u2", "akey_a?b");
+    expect(server.requests.map((r) => r.url)).toEqual([
+      `https://x.test/api/v1/workspaces/${WS}/invitations/winv_4hT9xQ2mLp8vZr1sKc3dEf`,
+      `https://x.test/api/v1/workspaces/${WS}/members/u2/credentials/api-keys/akey_4hT9xQ2mLp8vZr1sKc3dEf`,
+      `https://x.test/api/v1/workspaces/${WS}/members/u2/credentials/api-keys/akey_a%3Fb`,
+    ]);
+  });
+
+  it("refuses an empty, blank, . or .. string id before anything is sent", async () => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+
+    for (const id of ["", " ", ".", ".."]) {
+      await expect(client.revokeInvitation(WS, id)).rejects.toThrow(/^invitationId must be /);
+      await expect(client.revokeMemberKey(WS, "u2", id)).rejects.toThrow(/^keyId must be /);
+    }
+    expect(server.requests).toHaveLength(0);
+  });
+
   it("refuses a user id of ., .. or nothing, which would address a different endpoint", async () => {
     // Percent-encoding leaves both as they are and URL resolution drops or
     // climbs the segment: removeMember(ws, "..") would DELETE the

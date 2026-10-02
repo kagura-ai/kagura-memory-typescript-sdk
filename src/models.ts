@@ -484,7 +484,8 @@ export interface ResourceTokenUpdate {
 
 /** Resource token metadata (no plaintext token). */
 export interface ResourceTokenResponse {
-  id: number;
+  /** An integer before memory-cloud v0.89.0, an opaque `rtok_…` string from v0.89.0 on. */
+  id: number | string;
   resource_id: string;
   description?: string | null;
   quota_events_per_hour: number;
@@ -522,7 +523,8 @@ export interface ResourceSetupResponse {
   context_name: string;
   resource_id: string;
   token: string;
-  token_id: number;
+  /** An integer before memory-cloud v0.89.0, an opaque `rtok_…` string from v0.89.0 on. */
+  token_id: number | string;
   warning?: string | null;
 }
 
@@ -1168,7 +1170,8 @@ export interface WorkspaceMember {
  * so they are optional here and only populated on create.
  */
 export interface WorkspaceInvitation {
-  id: number;
+  /** An integer before memory-cloud v0.89.0, an opaque `winv_…` string from v0.89.0 on. */
+  id: number | string;
   email?: string | null;
   role: string;
   token?: string | null;
@@ -1187,13 +1190,14 @@ export interface WorkspaceInvitation {
 /**
  * A member API key row (#201, server v0.42.0+).
  *
- * Server shape (`MemberAPIKeyResponse`): `id` is an INTEGER PK and the
+ * Server shape (`MemberAPIKeyResponse`): `id` is an integer before
+ * memory-cloud v0.89.0 and an opaque `akey_…` string from v0.89.0 on; the
  * plaintext field is named `plaintext_key` — non-null ONLY in the mint 201
  * response. Owner-provisioned keys are force-hidden at creation, so no
  * later call ever returns the plaintext.
  */
 export interface MemberAPIKey {
-  id: number;
+  id: number | string;
   name: string;
   key_prefix: string;
   plaintext_key?: string | null;

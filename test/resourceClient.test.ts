@@ -158,6 +158,34 @@ describe("token CRUD", () => {
     expect(new URL(server.last().url).pathname).toBe("/api/v1/resource-tokens/1000000000000000000000");
   });
 
+  it("sends a string token id (memory-cloud v0.89.0+ `rtok_…`) as one encoded path segment", async () => {
+    const server = new FakeRest();
+    server.fallback = { status: 200, body: TOKEN };
+    const client = makeClient(server);
+    await client.revokeToken("rtok_4hT9xQ2mLp8vZr1sKc3dEf");
+    expect(server.last().method).toBe("DELETE");
+    expect(new URL(server.last().url).pathname).toBe("/api/v1/resource-tokens/rtok_4hT9xQ2mLp8vZr1sKc3dEf");
+    await client.updateToken("rtok_a/b", { description: "x" });
+    expect(new URL(server.last().url).pathname).toBe("/api/v1/resource-tokens/rtok_a%2Fb");
+  });
+
+  it.each([[""], ["   "], ["."], [".."]])("refuses the string token id %j before anything is sent", async (id) => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    await expect(client.revokeToken(id)).rejects.toThrow(/^tokenId must be /);
+    await expect(client.updateToken(id, { description: "x" })).rejects.toThrow(/^tokenId must be /);
+    expect(server.requests).toEqual([]);
+  });
+
+  it("refuses a token id that is neither an integer nor a string", async () => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    await expect(client.revokeToken(null as unknown as string)).rejects.toThrow(
+      "tokenId must be an integer or a string id, got null",
+    );
+    expect(server.requests).toEqual([]);
+  });
+
   it.each([
     // Already rounded: 9007199254740993 reads as ...992, another token's id.
     [9007199254740992, /tokenId must be a safe integer or a bigint, got 9007199254740992/],

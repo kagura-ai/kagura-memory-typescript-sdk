@@ -51,7 +51,7 @@ import {
   RESOURCE_TOKEN_RESPONSE,
   type Model,
 } from "./pyModels.js";
-import { KaguraRestClient, requireInt, type RestResponse } from "./restBase.js";
+import { KaguraRestClient, requirePublicId, type RestResponse } from "./restBase.js";
 
 /**
  * A resource id as its path segment: percent-encoded, and refused when it
@@ -299,18 +299,20 @@ export class ResourceClient extends KaguraRestClient {
    * Update a resource token's metadata. Only fields that are set are
    * sent on the wire.
    *
-   * @param tokenId Token database ID. Pass a `bigint` for one past
-   *   `Number.MAX_SAFE_INTEGER`; such a `number` (already rounded to
-   *   another id) or a fractional one throws before anything is sent.
+   * @param tokenId The token's id: an integer on servers before
+   *   memory-cloud v0.89.0, an opaque `rtok_…` string from v0.89.0 on.
+   *   Pass a `bigint` for an integer past `Number.MAX_SAFE_INTEGER`; such
+   *   a `number` (already rounded to another id), a fractional one or an
+   *   empty string throws before anything is sent.
    * @returns Updated token metadata.
    * @throws KaguraResponseError when the body does not match the Python
    *   SDK's ResourceTokenResponse (#69).
    */
   async updateToken(
-    tokenId: number | bigint,
+    tokenId: number | bigint | string,
     options: UpdateTokenOptions = {},
   ): Promise<ResourceTokenResponse> {
-    const id = requireInt(tokenId, "tokenId");
+    const id = requirePublicId(tokenId, "tokenId");
     const body: Record<string, unknown> = {};
     if (options.description !== undefined && options.description !== null) {
       body.description = options.description;
@@ -328,12 +330,14 @@ export class ResourceClient extends KaguraRestClient {
   /**
    * Revoke (soft-delete) a resource token.
    *
-   * @param tokenId Token database ID. Pass a `bigint` for one past
-   *   `Number.MAX_SAFE_INTEGER`; such a `number` (already rounded to
-   *   another id) or a fractional one throws before anything is sent.
+   * @param tokenId The token's id: an integer on servers before
+   *   memory-cloud v0.89.0, an opaque `rtok_…` string from v0.89.0 on.
+   *   Pass a `bigint` for an integer past `Number.MAX_SAFE_INTEGER`; such
+   *   a `number` (already rounded to another id), a fractional one or an
+   *   empty string throws before anything is sent.
    */
-  async revokeToken(tokenId: number | bigint): Promise<void> {
-    await this.request("DELETE", `/api/v1/resource-tokens/${requireInt(tokenId, "tokenId")}`);
+  async revokeToken(tokenId: number | bigint | string): Promise<void> {
+    await this.request("DELETE", `/api/v1/resource-tokens/${requirePublicId(tokenId, "tokenId")}`);
   }
 
   // -------------------------------------------------------------------

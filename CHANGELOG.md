@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **String public ids for resource tokens, invitations and member API keys**
+  (memory-cloud v0.89.0+, memory-cloud#1008): memory-cloud v0.89.0 makes
+  these ids opaque prefixed strings (`rtok_…`, `winv_…`, `akey_…`) and
+  answers an integer path id with HTTP 422. `ResourceClient.updateToken` /
+  `revokeToken`, `WorkspaceClient.revokeInvitation` and `revokeMemberKey`
+  take `number | bigint | string`; a string is sent percent-encoded as one
+  path segment, and an empty, whitespace-only, `.` or `..` one throws
+  before anything is sent. Integer ids work as before against older
+  servers. The `id` / `token_id` of `ResourceTokenResponse`,
+  `ResourceSetupResponse`, `WorkspaceInvitation` and `MemberAPIKey` are
+  `number | string`, and the readers accept either (`"7"` still reads `7`).
+  The CLI's `resource tokens update|revoke TOKEN_ID`,
+  `workspace invite revoke INVITATION_ID` and `auth revoke-key KEY_ID`
+  accept the string id as typed, and their messages print the id without
+  the `#` (`Revoked key akey_… of USER`). Upgrade before the server moves
+  to v0.89.0.
+
 ## [0.14.0] - 2026-09-28
 
 ### Added

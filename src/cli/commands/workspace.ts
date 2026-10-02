@@ -469,7 +469,7 @@ const inviteCreate: Command = {
       deps.writeError("⚠ The invitation URL below is shown once — treat it as a join credential.");
       // A missing email reads `-`, as in `invite list` (Python 0.41.1+ too).
       return (
-        `Invitation #${invitation.id} → ${invitation.email || "-"} ` +
+        `Invitation ${invitation.id} → ${invitation.email || "-"} ` +
         `(role=${invitation.role}, expires=${dateOr(invitation.expires_at, "never")})\n` +
         `${invitation.invitation_url || invitation.token || "(no url returned)"}`
       );
@@ -512,7 +512,7 @@ const inviteList: Command = {
 };
 
 const inviteRevoke: Command = {
-  summary: "Revoke a pending invitation by its integer id (see `invite list`).",
+  summary: "Revoke a pending invitation by its id (see `invite list`).",
   args: "INVITATION_ID",
   description: example("workspace invite revoke 7"),
   spec: { flags: [WORKSPACE] },
@@ -521,8 +521,8 @@ const inviteRevoke: Command = {
     rejectExtraArgs(args, 1);
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
       await client.revokeInvitation(ws, invitationId);
-      // The parsed int, exact: `+7` reads `#7`.
-      return `Revoked invitation #${invitationId}`;
+      // The parsed int, exact (`+7` reads `7`), or the string id as typed.
+      return `Revoked invitation ${invitationId}`;
     });
   },
 };
@@ -594,7 +594,7 @@ const createKey: Command = {
       deps.writeError("⚠ Save this key now — it cannot be shown again.");
       // The user as given, the rest as the server answered.
       return (
-        `Key #${key.id} '${key.name}' for ${userId} ` +
+        `Key ${key.id} '${key.name}' for ${userId} ` +
         `(prefix=${key.key_prefix}, expires=${dateOr(key.expires_at, "never")})\n` +
         `${key.plaintext_key || "(no plaintext returned)"}`
       );
@@ -632,7 +632,7 @@ const listKeys: Command = {
 };
 
 const revokeKey: Command = {
-  summary: "Revoke a member's API key by its integer id (see `list-keys`).",
+  summary: "Revoke a member's API key by its id (see `list-keys`).",
   args: "KEY_ID",
   description:
     "  Server-side this is a soft revoke — the row is kept for audit.\n\n" +
@@ -649,9 +649,9 @@ const revokeKey: Command = {
       args.values.workspace,
       async (client, ws) => {
         await client.revokeMemberKey(ws, userId, keyId);
-        return `Revoked key #${keyId} of ${userId}`;
+        return `Revoked key ${keyId} of ${userId}`;
       },
-      args.flags.has("yes") ? undefined : (ws) => `Revoke key #${keyId} of ${userId} in workspace ${ws}?`,
+      args.flags.has("yes") ? undefined : (ws) => `Revoke key ${keyId} of ${userId} in workspace ${ws}?`,
     );
   },
 };
