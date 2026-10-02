@@ -67,6 +67,13 @@ export class PyFloat {
 export type Kind =
   | "str"
   | "int"
+  /**
+   * `int | str`, tried left to right: whatever reads as an int is one
+   * (`"7"` reads `7`, as the `int` field did), any other string stays the
+   * string. A public id (memory-cloud#1008): an integer before server
+   * v0.89.0, an opaque prefixed string (`rtok_…`) from v0.89.0 on.
+   */
+  | "intOrStr"
   | "float"
   | "bool"
   | "datetime"
@@ -132,6 +139,15 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
       return coerced(r, at, laxStr(value));
     case "int":
       return coerced(r, at, laxExactInt(raw));
+    case "intOrStr": {
+      const asInt = laxExactInt(raw);
+      if (asInt.ok) return asInt.value;
+      if (typeof value === "string") return coerced(r, at, laxStr(value));
+      // Pydantic names each member of the union that refused it.
+      r.issue([...at, "int"], asInt.msg);
+      r.issue([...at, "str"], "Input should be a valid string");
+      return undefined;
+    }
     case "float": {
       const result = laxFloat(raw);
       return coerced(r, at, result.ok ? { ok: true, value: new PyFloat(result.value) } : result);
@@ -226,13 +242,13 @@ export const RESOURCE_SETUP_RESPONSE: Model = {
     required("context_name", "str"),
     required("resource_id", "str"),
     required("token", "str"),
-    required("token_id", "int"),
+    required("token_id", "intOrStr"),
     optional("warning", nullable("str")),
   ],
 };
 
 const TOKEN_FIELDS: readonly Field[] = [
-  required("id", "int"),
+  required("id", "intOrStr"),
   required("resource_id", "str"),
   optional("description", nullable("str")),
   required("quota_events_per_hour", "int"),

@@ -105,17 +105,28 @@ export function parseIntOption(param: Param, raw: string): number {
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
+/** An opaque public id (memory-cloud v0.89.0+): `akey_…`, `rtok_…`, `winv_…`, `skey_…`. */
+const STRING_ID = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
 /**
- * Coerce a `type=int` id argument (`TOKEN_ID`, `INVITATION_ID`, `KEY_ID`)
- * exactly, as Python's `int` holds it: a `number` while it is safe, else a
- * `bigint`. A `number` would round `9007199254740993` to a neighbouring
- * id, and the request would revoke or update that one. Click's message
- * for anything `int()` refuses.
+ * Coerce a public id argument (`TOKEN_ID`, `INVITATION_ID`, `KEY_ID`).
+ *
+ * An integer (the servers before memory-cloud v0.89.0) is read exactly, as
+ * Python's `int` holds it: a `number` while it is safe, else a `bigint`. A
+ * `number` would round `9007199254740993` to a neighbouring id, and the
+ * request would revoke or update that one.
+ *
+ * Anything else is an opaque string id (v0.89.0+, memory-cloud#1008), kept
+ * as typed when it starts with a letter and holds only letters, digits,
+ * `_` and `-`. The rest (`7.0`, `0x10`, `a/b`, an empty value) is refused
+ * in click's words, before anything is read, asked or sent: an integer
+ * mistyped is not sent on as a string.
  */
-export function parseIdArg(param: Param, raw: string): number | bigint {
+export function parseIdArg(param: Param, raw: string): number | bigint | string {
   const value = pyBigInt(raw);
-  if (value === undefined) throw notAnInteger(param, raw);
-  return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : value;
+  if (value !== undefined) return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : value;
+  if (STRING_ID.test(raw)) return raw;
+  throw new CliUsageError(`Invalid value for ${paramLabel(param)}: ${pyRepr(raw)} is not a valid integer or id.`);
 }
 
 /**

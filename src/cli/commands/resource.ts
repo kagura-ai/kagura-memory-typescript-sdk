@@ -248,8 +248,8 @@ const tokensRevoke: Command = {
   description: examples("resource tokens revoke 42"),
   spec: { flags: [] },
   run: async (deps, args) => {
-    // `@click.argument("token_id", type=int)`: a usage error, not a 422,
-    // and the id typed, however large, never a rounded neighbour.
+    // An integer or a `rtok_…` id (memory-cloud v0.89.0+): a usage error,
+    // not a 422, and the id typed, however large, never a rounded neighbour.
     const tokenId = parseIdArg("TOKEN_ID", requireArg(args, 0, "TOKEN_ID"));
     rejectExtraArgs(args, 1);
     const { config } = resolveConfig(deps, undefined, false);

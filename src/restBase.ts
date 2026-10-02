@@ -43,6 +43,7 @@ import {
   validateHttpsUrl,
 } from "./http.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
+import { pathSegment } from "./pathSegment.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -73,6 +74,31 @@ export function requireInt<T extends number | bigint>(value: T, label: string): 
     );
   }
   return value;
+}
+
+/**
+ * A public id as one REST path segment: an integer (the servers before
+ * memory-cloud v0.89.0) or an opaque string (v0.89.0+, `akey_…`, `rtok_…`,
+ * `winv_…`, `skey_…`; memory-cloud#1008).
+ *
+ * An integer goes through {@link requireInt}, so it is still exact. A
+ * string must have something besides whitespace and is percent-encoded
+ * whole by `pathSegment`, which also refuses `.` and `..`. Anything else
+ * throws before a request is sent.
+ *
+ * Internal: the REST clients' id arguments; not exported from the package.
+ */
+export function requirePublicId(value: number | bigint | string, label: string): string {
+  if (typeof value === "string") {
+    if (value.trim() === "") {
+      throw new Error(`${label} must be a non-empty id, got ${JSON.stringify(value)}`);
+    }
+    return pathSegment(value, label, "an id");
+  }
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(requireInt(value, label));
+  }
+  throw new Error(`${label} must be an integer or a string id, got ${JSON.stringify(value)}`);
 }
 
 /** Default REST API origin when no MCP URL or base URL is supplied. */

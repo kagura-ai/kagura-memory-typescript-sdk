@@ -229,7 +229,7 @@ describe("readModel: a payload as the Python model reads it", () => {
         {
           tokens: [
             5,
-            { id: "x", resource_id: 3, quota_events_per_hour: 1.5, created_at: true, is_active: "maybe", status: "on" },
+            { id: null, resource_id: 3, quota_events_per_hour: 1.5, created_at: true, is_active: "maybe", status: "on" },
           ],
           total: 1,
         },
@@ -242,8 +242,8 @@ describe("readModel: a payload as the Python model reads it", () => {
     expect(error.message).toBe(
       "ResourceClient.list_tokens: unexpected server response for PaginatedResourceTokensResponse " +
         "(tokens.0: Input should be a valid dictionary or instance of ResourceTokenResponse; " +
-        "tokens.1.id: Input should be a valid integer, unable to parse string as an integer; " +
-        `tokens.1.resource_id: Input should be a valid string (+6 more)). ${HINT}`,
+        "tokens.1.id.int: Input should be a valid integer; " +
+        `tokens.1.id.str: Input should be a valid string (+7 more)). ${HINT}`,
     );
   });
 

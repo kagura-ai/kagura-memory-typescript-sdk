@@ -156,9 +156,23 @@ describe("parseIdArg", () => {
     expect(parseIdArg("TOKEN_ID", "-9007199254740993")).toBe(-9007199254740993n);
   });
 
-  it.each([["abc"], ["1.0"], [""], ["\u{feff}5"]])("refuses %j in click's words", (raw) => {
-    expect(() => parseIdArg("TOKEN_ID", raw)).toThrow(/^Invalid value for 'TOKEN_ID': .* is not a valid integer\.$/);
+  it.each([
+    ["akey_4hT9xQ2mLp8vZr1sKc3dEf"],
+    ["rtok_4hT9xQ2mLp8vZr1sKc3dEf"],
+    ["winv_x-y"],
+    ["abc"],
+  ])("keeps the string id %j as typed (memory-cloud v0.89.0+)", (raw) => {
+    expect(parseIdArg("TOKEN_ID", raw)).toBe(raw);
   });
+
+  it.each([["1.0"], ["0x10"], [""], [" "], ["."], [".."], ["\u{feff}5"], ["akey_a/b"], [" akey_x"], ["_x"]])(
+    "refuses %j in click's words",
+    (raw) => {
+      expect(() => parseIdArg("TOKEN_ID", raw)).toThrow(
+        /^Invalid value for 'TOKEN_ID': .* is not a valid integer or id\.$/,
+      );
+    },
+  );
 });
 
 describe("parseFloatOption: Python's float() grammar", () => {

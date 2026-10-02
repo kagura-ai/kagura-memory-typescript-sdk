@@ -139,8 +139,9 @@ Values are read as click reads them. A choice matches exactly, as click's
 (`--source-type`, `--progress`), casefolded as click folds it; a number
 is read as Python's `int()` and `float()` read it, `1_000`, any decimal
 digit (`١٢`, `１２`) and the whitespace they skip included (a BOM is no
-whitespace to them); an integer id argument (`TOKEN_ID`,
-`INVITATION_ID`, `KEY_ID`) is sent exactly, however large; and an
+whitespace to them); an id argument (`TOKEN_ID`, `INVITATION_ID`,
+`KEY_ID`) is sent exactly, an integer however large, or a string id
+(`rtok_…`, `winv_…`, `akey_…`, memory-cloud v0.89.0+) as typed; and an
 out-of-range value is echoed as click converted it (`files upload
 --importance 2` is refused as `2.0 is not in the range 0.0<=x<=1.0.`).
 A failure prints `Error: <message>` on stderr, and a quota or plan

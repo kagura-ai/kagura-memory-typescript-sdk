@@ -430,12 +430,12 @@ describe("workspace member remove", () => {
   });
 
   it("asks revoke-key about the workspace in canonical form too", async () => {
-    // Python: "Revoke key #42 of google_2 in workspace 11111111-2222-3333-4444-55555555555a?"
+    // Python: "Revoke key 42 of google_2 in workspace 11111111-2222-3333-4444-55555555555a?"
     // for -w 'urn:uuid:11111111-2222-3333-4444-55555555555A'.
     const h = harness({ confirm: false });
     const upper = "urn:uuid:11111111-2222-3333-4444-55555555555A";
     expect(await runCli(["auth", "revoke-key", "42", "-u", "google_2", "-w", upper], h.deps)).toBe(1);
-    expect(h.questions).toEqual(["Revoke key #42 of google_2 in workspace 11111111-2222-3333-4444-55555555555a?"]);
+    expect(h.questions).toEqual(["Revoke key 42 of google_2 in workspace 11111111-2222-3333-4444-55555555555a?"]);
   });
 
   it("checks a .kagura.json context_id the same way", async () => {
@@ -638,7 +638,7 @@ describe("workspace invite create", () => {
     ).toBe(0);
     expect(h.err).toEqual(["⚠ The invitation URL below is shown once — treat it as a join credential."]);
     expect(h.out).toEqual([
-      "Invitation #7 → new@x.com (role=member, expires=2026-07-10)\nhttps://memory.kagura-ai.com/invite/tok",
+      "Invitation 7 → new@x.com (role=member, expires=2026-07-10)\nhttps://memory.kagura-ai.com/invite/tok",
     ]);
     const req = lastRequest(h);
     expect(req.method).toBe("POST");
@@ -659,7 +659,7 @@ describe("workspace invite create", () => {
     ).toBe(0);
     expect(sentJson(h)).toEqual({ email: "v@x.com", role: "viewer", allowed_context_ids: [CTX, OTHER_WS] });
     // No URL: the token; no expiry: never.
-    expect(h.out).toEqual(["Invitation #8 → v@x.com (role=viewer, expires=never)\ntok_y"]);
+    expect(h.out).toEqual(["Invitation 8 → v@x.com (role=viewer, expires=never)\ntok_y"]);
   });
 
   it("invites an admin without -c, sending no context grant", async () => {
@@ -668,7 +668,7 @@ describe("workspace invite create", () => {
     expect(await runCli(["workspace", "invite", "create", "a@x.com", "--role", "admin"], h.deps)).toBe(0);
     expect(sentJson(h)).toEqual({ email: "a@x.com", role: "admin" });
     // A missing email reads `-` as in `invite list`, as Python 0.41.1+ prints it.
-    expect(h.out).toEqual(["Invitation #9 → - (role=admin, expires=never)\n(no url returned)"]);
+    expect(h.out).toEqual(["Invitation 9 → - (role=admin, expires=never)\n(no url returned)"]);
   });
 
   it.each([[[]], [["--role", "member"]], [["--role", "viewer"]]])(
@@ -836,7 +836,7 @@ describe("workspace invite revoke", () => {
     const h = harness();
     reply(h, { success: true });
     expect(await runCli(["workspace", "invite", "revoke", raw], h.deps)).toBe(0);
-    expect(h.out).toEqual([`Revoked invitation #${id}`]);
+    expect(h.out).toEqual([`Revoked invitation ${id}`]);
     const req = lastRequest(h);
     expect(req.method).toBe("DELETE");
     expect(req.url).toBe(`https://test.com/api/v1/workspaces/${WS}/invitations/${id}`);
@@ -853,13 +853,23 @@ describe("workspace invite revoke", () => {
     reply(h, { success: true });
     expect(await runCli(["workspace", "invite", "revoke", ...argv], h.deps)).toBe(0);
     expect(lastRequest(h).url).toBe(`https://test.com/api/v1/workspaces/${WS}/invitations/${id}`);
-    expect(h.out).toEqual([`Revoked invitation #${id}`]);
+    expect(h.out).toEqual([`Revoked invitation ${id}`]);
   });
 
-  it.each(["abc", "7.0", "0x10"])("refuses INVITATION_ID %j in click's words (exit 2)", async (raw) => {
+  it("revokes a string id (memory-cloud v0.89.0+) as typed", async () => {
+    const h = harness();
+    reply(h, { success: true });
+    expect(await runCli(["workspace", "invite", "revoke", "winv_4hT9xQ2mLp8vZr1sKc3dEf"], h.deps)).toBe(0);
+    expect(h.out).toEqual(["Revoked invitation winv_4hT9xQ2mLp8vZr1sKc3dEf"]);
+    expect(lastRequest(h).url).toBe(
+      `https://test.com/api/v1/workspaces/${WS}/invitations/winv_4hT9xQ2mLp8vZr1sKc3dEf`,
+    );
+  });
+
+  it.each(["7.0", "0x10", "a/b"])("refuses INVITATION_ID %j in click's words (exit 2)", async (raw) => {
     const h = harness();
     expect(await runCli(["workspace", "invite", "revoke", raw], h.deps)).toBe(2);
-    expect(h.err).toEqual([`Error: Invalid value for 'INVITATION_ID': '${raw}' is not a valid integer.`]);
+    expect(h.err).toEqual([`Error: Invalid value for 'INVITATION_ID': '${raw}' is not a valid integer or id.`]);
     expect(h.calls).toEqual([]);
   });
 
@@ -896,7 +906,7 @@ describe("auth create-key", () => {
     ).toBe(0);
     expect(h.err).toEqual(["⚠ Save this key now — it cannot be shown again."]);
     expect(h.out).toEqual([
-      `Key #42 'ci-bot' for google_2 (prefix=kagura_abcdef123, expires=2026-10-01)\n${PLAINTEXT}`,
+      `Key 42 'ci-bot' for google_2 (prefix=kagura_abcdef123, expires=2026-10-01)\n${PLAINTEXT}`,
     ]);
     const req = lastRequest(h);
     expect(req.method).toBe("POST");
@@ -909,7 +919,7 @@ describe("auth create-key", () => {
     const h = harness();
     reply(h, { ...KEY, plaintext_key: null, expires_at: null }, 201);
     expect(await runCli(["auth", "create-key", "-u", "google_2", "-n", "ci-bot", "--expires-days", "7"], h.deps)).toBe(0);
-    expect(h.out).toEqual(["Key #42 'ci-bot' for google_2 (prefix=kagura_abcdef123, expires=never)\n(no plaintext returned)"]);
+    expect(h.out).toEqual(["Key 42 'ci-bot' for google_2 (prefix=kagura_abcdef123, expires=never)\n(no plaintext returned)"]);
   });
 
   it("salvages the plaintext from a mis-shaped response, without the warning (exit 1)", async () => {
@@ -941,7 +951,7 @@ describe("auth create-key", () => {
     reply(h, { id: "42", name: "n", key_prefix: "p", plaintext_key: "kp" }, 201);
     expect(await runCli(["auth", "create-key", "-u", "u", "-n", "n", "--expires-days", "30"], h.deps)).toBe(0);
     expect(h.err).toEqual(["⚠ Save this key now — it cannot be shown again."]);
-    expect(h.out).toEqual(["Key #42 'n' for u (prefix=p, expires=never)\nkp"]);
+    expect(h.out).toEqual(["Key 42 'n' for u (prefix=p, expires=never)\nkp"]);
   });
 
   it("refuses a plaintext_key that is no string, as the model does, rather than print it", async () => {
@@ -1107,7 +1117,7 @@ describe("auth revoke-key", () => {
   it("asks first, naming key, member and workspace, and sends nothing on a decline", async () => {
     const h = harness({ confirm: false });
     expect(await runCli(["auth", "revoke-key", "42", "--user", "google_2"], h.deps)).toBe(1);
-    expect(h.questions).toEqual([`Revoke key #42 of google_2 in workspace ${WS}?`]);
+    expect(h.questions).toEqual([`Revoke key 42 of google_2 in workspace ${WS}?`]);
     expect(h.err).toEqual(["Error: Aborted!"]);
     expect(h.rest.requests).toEqual([]);
   });
@@ -1117,7 +1127,7 @@ describe("auth revoke-key", () => {
     reply(h, { status: "revoked", key_id: 42 });
     expect(await runCli(["auth", "revoke-key", "+42", "-u", "google_2", yes], h.deps)).toBe(0);
     expect(h.questions).toEqual([]);
-    expect(h.out).toEqual(["Revoked key #42 of google_2"]);
+    expect(h.out).toEqual(["Revoked key 42 of google_2"]);
     const req = lastRequest(h);
     expect(req.method).toBe("DELETE");
     expect(req.url).toBe(`https://test.com/api/v1/workspaces/${WS}/members/google_2/credentials/api-keys/42`);
@@ -1127,7 +1137,7 @@ describe("auth revoke-key", () => {
     [[], "Error: Missing argument 'KEY_ID'."],
     [["--user", "google_2"], "Error: Missing argument 'KEY_ID'."],
     [["42"], "Error: Missing option '--user' / '-u'."],
-    [["abc", "-u", "google_2"], "Error: Invalid value for 'KEY_ID': 'abc' is not a valid integer."],
+    [["4.2", "-u", "google_2"], "Error: Invalid value for 'KEY_ID': '4.2' is not a valid integer or id."],
     [["42", "43", "-u", "google_2"], "Error: Got unexpected extra argument (43)"],
   ])("refuses %j in click's words (exit 2)", async (argv, line) => {
     const h = harness();
@@ -1140,7 +1150,7 @@ describe("auth revoke-key", () => {
     // A JS number reads 9007199254740993 as ...992, another key.
     const asked = harness({ confirm: false });
     expect(await runCli(["auth", "revoke-key", "9007199254740993", "-u", "u"], asked.deps)).toBe(1);
-    expect(asked.questions).toEqual([`Revoke key #9007199254740993 of u in workspace ${WS}?`]);
+    expect(asked.questions).toEqual([`Revoke key 9007199254740993 of u in workspace ${WS}?`]);
 
     for (const id of ["9007199254740993", "1000000000000000000000"]) {
       const h = harness();
@@ -1149,8 +1159,21 @@ describe("auth revoke-key", () => {
       expect(lastRequest(h).url).toBe(
         `https://test.com/api/v1/workspaces/${WS}/members/u/credentials/api-keys/${id}`,
       );
-      expect(h.out).toEqual([`Revoked key #${id} of u`]);
+      expect(h.out).toEqual([`Revoked key ${id} of u`]);
     }
+  });
+
+  it("asks about, and revokes, a string key id (memory-cloud v0.89.0+) as typed", async () => {
+    const id = "akey_4hT9xQ2mLp8vZr1sKc3dEf";
+    const asked = harness({ confirm: false });
+    expect(await runCli(["auth", "revoke-key", id, "-u", "u"], asked.deps)).toBe(1);
+    expect(asked.questions).toEqual([`Revoke key ${id} of u in workspace ${WS}?`]);
+
+    const h = harness();
+    reply(h, { status: "revoked" });
+    expect(await runCli(["auth", "revoke-key", id, "-u", "u", "-y"], h.deps)).toBe(0);
+    expect(lastRequest(h).url).toBe(`https://test.com/api/v1/workspaces/${WS}/members/u/credentials/api-keys/${id}`);
+    expect(h.out).toEqual([`Revoked key ${id} of u`]);
   });
 
   it("refuses --invite as every auth subcommand but login does", async () => {
@@ -1251,7 +1274,7 @@ describe("help", () => {
     const text = h.out.join("\n");
     expect(text).toMatch(/^ {2}create-key +Mint an API key for another workspace member \(owner API key required\)\.$/m);
     expect(text).toMatch(/^ {2}list-keys +List a member's API keys — metadata only, never the plaintext\.$/m);
-    expect(text).toMatch(/^ {2}revoke-key +Revoke a member's API key by its integer id \(see `list-keys`\)\.$/m);
+    expect(text).toMatch(/^ {2}revoke-key +Revoke a member's API key by its id \(see `list-keys`\)\.$/m);
   });
 
   it("renders a command's options and one example per line, naming this bin", async () => {
