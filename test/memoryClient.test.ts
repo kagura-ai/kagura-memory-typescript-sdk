@@ -280,7 +280,8 @@ describe("loadGuardrails (REST) response check", () => {
 
   it("returns the model's fields only, in its order, as Python's GuardrailSet dumps them", async () => {
     // Python 0.40.1: extra keys dropped (extra="ignore"), the context block
-    // None, an item's optional fields None when absent.
+    // None, an item's optional fields None when absent; 0.43.0 adds
+    // context_summary_omitted (memory-cloud v0.82.0+), False when absent.
     const result = await load(
       payload((p) => {
         Object.assign(p, { some_future_field: { x: 1 } });
@@ -293,7 +294,7 @@ describe("loadGuardrails (REST) response check", () => {
     expect(Object.keys(result as object)).toEqual([
       "status", "format", "version", "pinned", "tool_triggered", "total_available", "truncated", "cap",
       "pinned_cap", "pinned_total_available", "pinned_truncated", "tool_triggered_total_available",
-      "tool_triggered_truncated", "context_id", "context_name",
+      "tool_triggered_truncated", "context_id", "context_name", "context_summary_omitted",
     ]);
     const set = result as { pinned: Record<string, unknown>[]; context_id: unknown };
     expect(set.context_id).toBeNull();

@@ -750,7 +750,8 @@ purpose or out of reach:
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
 `.kagura.json`. `load` calls the MCP `load_guardrails` tool and prints the
-set as the Python CLI prints it: the model's fifteen keys in its order,
+set as the Python CLI prints it: the model's sixteen keys in its order
+(`context_summary_omitted` last, `false` when the tool sends none),
 without the `context_display_name`, `context_is_private` and
 `context_is_locked` the tool adds, each item's eleven keys, and `null` for
 a `tool_trigger` the Python SDK cannot read (`match: null` is filled in
@@ -776,6 +777,26 @@ the server sent it, where Python reformats it and refuses one it cannot
 parse; and a failed read or write of the `--out` file reads in Node's
 words (`ENOENT: no such file or directory, open '…'`) rather than
 Python's (`[Errno 2] No such file or directory: '…'`).
+
+**`sleep history` and `sleep report`** print what the Python CLI prints:
+`{"reports": […]}` and the report, each read through the Python SDK's
+model (`SleepReport`, `SleepReportDetail`) — its keys in its order, its
+default for a key an older server leaves out (`source: null`,
+`actions_has_more: false`, an action's `details_omitted: false`), a
+timestamp in pydantic's form — and a report the model refuses exits 1
+with its `KaguraResponseError` text. `history --source
+sleep|analysis|all` (memory-cloud v0.138.0+) lists Sleep runs (the
+server's default), the rows Memory Analysis writes for its LLM spend, or
+both. `report --actions-limit N` (1-200; the server's default is 50) and
+`--actions-cursor C` (memory-cloud v0.82.0+) page the audit log: while
+`actions_has_more` is true, pass `actions_next_cursor` as
+`--actions-cursor`. `report`'s `CONTEXT_ID` is kept for compatibility
+and not sent: the server finds the run by `REPORT_ID`.
+
+```bash
+npx kagura-memory sleep history <context-id> --limit 5 --source all
+npx kagura-memory sleep report <context-id> <report-id> --actions-limit 100 --actions-cursor <cursor>
+```
 
 **`doctor`** checks the credentials, the `kagura-memory` entry Claude Code
 uses, the optional `age-encryption` peer and the age identity, then the
@@ -1246,12 +1267,12 @@ when `undefined`.
 
 | Method | What it does |
 |--------|--------------|
-| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. |
+| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. |
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". |
 | `reference` | Full detail for one memory, under `result.memory`. |
-| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. |
+| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. `tags` replaces the list, with `remember`'s caps. |
 | `forget` | Soft-delete by `memoryId` or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
-| `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). |
+| `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). A row carries `observed_at` (v0.127.0+), when the fact held, as the text the server stores: a date `YYYY-MM-DD` or a UTC datetime `YYYY-MM-DDTHH:MM:SSZ`, never parsed (a date sorts and filters as the start of its UTC day). |
 
 ### Deterministic lanes
 
@@ -1261,7 +1282,7 @@ the counterpart to `recall`'s probabilistic search.
 | Method | Axis |
 |--------|------|
 | `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. |
-| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`. |
+| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`; `context_summary_omitted` (v0.82.0+) says the reply passed its budget and the pinned items lost their `context_summary`. |
 | `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. Items carry `trigger`, not `details` (server v0.73.0+); `includeDetails: true` returns the full `details` object instead. |
 | `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. See [the WHERE axis](#the-where-axis--geospatial-memories). |
 | `recordMeasurement` | HOW-MUCH — append one number to a metric's series (server v0.54.0+). Not a memory: never embedded, recalled or consolidated. Append-only, with no delete. See [the HOW-MUCH axis](#the-how-much-axis--measurement-series). |
@@ -1271,9 +1292,9 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | What it does |
 |--------|--------------|
-| `listTags` | Tag vocabulary with counts and recency. `prefix` narrows by spelling; `withTags` is a multi-tag AND drill-down that also excludes those tags from the result — the two compose into server-side faceted browsing with no local index. A drill-down calls the REST tags endpoint on every server, because the MCP tool has `with_tags` only from server v0.77.0 and an older one ignores it; the result has the same shape. Its `context_name` is the one the endpoint sends (server v0.77.0+), else one MCP `list_tags` call names the context, once per client. Its values are trimmed and blank ones dropped, and at most 50 of up to 200 characters each are accepted. |
+| `listTags` | Tag vocabulary with counts and recency. `prefix` narrows by spelling; `withTags` is a multi-tag AND drill-down that also excludes those tags from the result — the two compose into server-side faceted browsing with no local index. A drill-down calls the REST tags endpoint on every server, because the MCP tool has `with_tags` only from server v0.77.0 and an older one ignores it; the result has the same shape. Its `context_name` is the one the endpoint sends (server v0.77.0+), else one MCP `list_tags` call names the context, once per client. Its values are trimmed and blank ones dropped, and at most 50 of up to 200 characters each are accepted. Over MCP a reply holds at most 200 tags whatever the `limit` (v0.82.0+), with `has_more: true` when more matched; there is no cursor, so narrow with `prefix` or `minCount`. |
 | `explore` | Graph traversal from a seed memory (`depth` 1–5, `minWeight`). |
-| `listEdges` | Edges touching a memory, incoming and outgoing, deduplicated. |
+| `listEdges` | Edges touching a memory, incoming and outgoing, deduplicated, heaviest first. Each direction is cut at `limit` (the server's default is 50 from v0.82.0, its maximum 200), and the tool has no cursor: when the server's default or its clamp cut a direction (`outgoing_has_more` / `incoming_has_more`), the client logs a warning (to `console.warn` unless the client's `warn` option routes it); raise `limit` or `minWeight`, or narrow `edgeTypes`. `minWeight` is always sent, `0.0` unless set, so every edge comes back: the server's own default is 0.05 since v0.117.0, which hides weak automatic edges. |
 | `createEdge` / `updateEdge` / `deleteEdge` | Manual edge curation. `(sourceId, targetId)` is the identity; self-loops are rejected. |
 | `findDuplicates` | Near-duplicate pairs above `threshold` (0.5–1.0, default 0.90). |
 | `feedback` | Record whether a recalled memory was useful — an append-only signal in its own lane, not a memory edit. |
@@ -1282,13 +1303,13 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | What it does |
 |--------|--------------|
-| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. |
+| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. From v0.82.0 the directory is paged — 100 contexts a page, 20 with `includeDetails` and no `nameContains` — with `has_more` / `next_cursor`: pass `next_cursor` back as `cursor` for the next page. |
 | `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached: the SDK checks `listContexts()` first, so that error carries `quotaType`, `current` and `limit` but no `gate` or plan fields (`requiredPlan` `null` means unknown). Also throws `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). `resourceId` is deprecated and no longer sent, since the server ignores it: set it with `updateContext`, or use `setupResource`. |
-| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed. |
+| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed; its `provenance` (v0.79.0+) labels the items as notes context editors stored, not operator instructions. `search_config` carries `llm_selector_enabled` / `llm_selector_effective` (v0.115.0+). |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraFeatureNotAvailableError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
-| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only; a context that does not exist, or that the caller cannot see, also throws `KaguraPermissionError`. Returns the whole updated `config`, the only place the reinforce and routing fields come back. |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only; a context that does not exist, or that the caller cannot see, also throws `KaguraPermissionError`. Returns the whole updated `config`, the only place the reinforce and routing fields come back; it also carries the content-chunk state (`content_chunks_enabled`, `_effective`, `_supported`, `_can_change`, `_disabled_reason`, `_in_use`, `_limit`, `_backfill_pending`, and `embedding_provider`; v0.110.0–v0.113.0) and the recall LLM selector's (`llm_selector_*`, v0.115.0+). |
 | `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. The context is named `name`, or `resourceId` when that is omitted. `summary` is deprecated and no longer sent, since the server ignores it: set it afterwards with `updateContext`. Plan-gated: throws `KaguraFeatureNotAvailableError` on a plan without resources. |
 
 ### Agent run-state
@@ -1297,15 +1318,15 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 
 | Method | What it does |
 |--------|--------------|
-| `setState` / `getState` | Key/value at `(contextId, key)`. Omit `key` on read to list all live keys. |
+| `setState` / `getState` | Key/value at `(contextId, key)`. A value takes at most 16,384 characters as compact JSON, measured as the server measures it; a longer one throws before any request, on every server. Omit `key` on read to list the live entries: from v0.82.0 a page at a time in key order, with `has_more` / `next_cursor` (pass it back as `cursor`) and `omitted_keys` for values too large for the page. `cursor` with `key` throws. |
 
 ### Sleep maintenance
 
 | Method | What it does |
 |--------|--------------|
-| `getSleepHistory` | Recent runs, newest first. |
-| `getSleepReport` | One run in detail, including the per-action audit log. |
-| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. |
+| `getSleepHistory` | Recent runs, newest first. Since v0.138.0 the server lists Sleep runs only unless `source` says otherwise (`"analysis"` for the rows Memory Analysis writes for its LLM spend, `"all"` for both), and each row carries `source`; older servers have no filter. |
+| `getSleepReport` | One run in detail, including the per-action audit log. `contextId` is not sent: the server finds the run by `reportId`. From v0.82.0 the log comes a page at a time (`actionsLimit`, default 50, at most 200; `maxChars` 10,000–100,000): while `actions_has_more` is true, pass `actions_next_cursor` as `actionsCursor`. An action too large for its page has `details_omitted` and `details_total_chars` instead of `details`; an analysis report carries a `note` (v0.140.0+). |
+| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. `chunks_requeued` / `points_requeued` (v0.112.0+) count restored memories queued for the embedding sweep to rebuild — not errors. |
 
 `getSleepReport` and `rollbackSleepRun`, and `kagura-memory sleep
 report|rollback`, send `report_id` only. Their `contextId` is ignored and
@@ -1333,17 +1354,40 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 
 | Method | What it does |
 |--------|--------------|
-| `getServerInfo` | Version, deployment feature flags, and (v0.69.0+) the reranker defaults new contexts start with, under `search_defaults`. |
+| `getServerInfo` | Version, deployment feature flags, and (v0.69.0+) the reranker defaults new contexts start with, under `search_defaults` (from v0.112.0 also `content_chunks_enabled`, a new context's chunk setting). `content_chunks_require_plan` (v0.113.0+) and `llm_selector_require_plan` (v0.115.0+) say the deployment gates those features by plan. |
 | `checkServerVersion` | Compare against `MIN_SERVER_VERSION` (0.75.0). Advisory: logs, and never throws on an old version; a body that is not a `ServerInfo` throws `KaguraResponseError`, as in `getServerInfo`. Reads the version as the Python SDK does: `v0.75.0`, `0.75.0+build` and `0.75.0.post1` meet it, a pre-release of it (`0.75.0-rc1`, `0.75.0rc1`, `0.75.0.dev1`) does not, and a version it cannot read (`0.75`, `main-abc123`) is not compared. |
 | `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
-| `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. |
+| `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
 | `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 
+The advisory warnings `checkServerVersion` and `listEdges` log go to
+`console.warn` unless the client is built with a `warn` option:
+`new KaguraClient({ warn: (message) => logger.warn(message) })` routes
+them, and `warn: () => {}` silences them.
+
 Agent Registry and binding methods are covered in
 [Agent control plane](#agent-control-plane-memory-cloud-v0490) below.
+
+### Permission model (memory-cloud v0.126.0+)
+
+The server decides who reaches which context, the same way on every MCP
+tool and REST route. A workspace owner or admin reaches every shared
+context. A member or viewer reaches the contexts its
+`allowed_context_ids` names; with no list, a viewer reaches every shared
+context and a member none. A context outside the list answers as one
+that does not exist, `KaguraNotFoundError`; `KaguraPermissionError` is
+for a context the caller reaches with too low a role. A workspace viewer
+is read-only, even in a private context it created. Resource tokens are
+workspace-scoped (v0.94.0): an owner lists and revokes every token of
+the workspace, whoever minted it, and another workspace's token answers
+404 (v0.97.0). `deleteContext` soft-deletes the context's files with it,
+and `mergeContexts({ deleteSource: true })` moves the source's files to
+the target (v0.101.0). A `supersedes` edge from `createEdge` /
+`updateEdge` needs both memories to be the caller's (v0.132.0), else
+`KaguraPermissionError`.
 
 ## Agent control plane (memory-cloud v0.49.0+)
 
@@ -1355,6 +1399,11 @@ the session-start `getAgentBootstrap` call. Registry and binding methods are
 **owner/admin-gated** server-side; `deleteAgent` is permanent and
 cascades every API key bound to the agent (prefer
 `updateAgent({ status: "retired" })` for operational retirement).
+`listAgents` follows the server's cursor (memory-cloud v0.82.0+, 50
+agents a page) and returns every agent, at most 50 pages; each row's
+`description` is a 200-character preview there, with
+`description_truncated` set when it was cut (`getAgent` returns it
+whole).
 
 ```ts
 // One-time provisioning (owner/admin): register the agent, bind its context

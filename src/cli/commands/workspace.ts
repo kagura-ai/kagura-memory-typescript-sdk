@@ -160,7 +160,8 @@ function mapping(r: ResponseReader, obj: Record<string, unknown>, key: string): 
 
 /**
  * A `WorkspaceMember` row: `user_id, role, user_name, user_email,
- * joined_at, last_login_at, allowed_context_ids, credentials_status`.
+ * joined_at, last_login_at, allowed_context_ids, credentials_status,
+ * seat_paused`.
  */
 function readMember(raw: unknown, operation: string): WorkspaceMember {
   const r = new ResponseReader(operation, "WorkspaceMember");
@@ -174,6 +175,8 @@ function readMember(raw: unknown, operation: string): WorkspaceMember {
     last_login_at: passThrough(obj, "last_login_at") as string | null,
     allowed_context_ids: stringList(r, obj, "allowed_context_ids"),
     credentials_status: mapping(r, obj, "credentials_status"),
+    // memory-cloud v0.100.0+ (#1943).
+    seat_paused: r.field(obj, "seat_paused", laxBool, { default: false }),
   };
   r.check();
   return member;
