@@ -915,7 +915,12 @@ revoke-key` ask first, naming the workspace, unless `--yes` (`-y`).
 once on stdout, after a warning on stderr. `list-keys` and `invite list`
 never show either; their `--json`, like `member list --json`, prints
 the Python model's fields in its order, `null` or `false` for what the
-server left out, and drops any other. A record the model refuses (a
+server left out, and drops any other. A key's or invitation's `id` is
+read as the model's `int | str`, as in `WorkspaceClient.mintMemberKey`:
+the opaque `akey_…` / `winv_…` id of a memory-cloud v0.89.0+ server is
+printed as the string (a numeric string such as `"7"` stays a string),
+an older server's integer as the integer, and the tables widen the ID
+column to the longest id. A record the model refuses (a
 required field missing, a scalar, list or mapping of the wrong type)
 exits 1 with its `KaguraResponseError` text; timestamps are printed as
 the server wrote them. `--role` matches exactly, as
