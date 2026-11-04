@@ -440,9 +440,11 @@ export class ResourceClient extends KaguraRestClient {
    * `null` (server v0.94.0+, kagura-ai/memory-cloud#1863). The server
    * keeps such a row only so its tokens stay reachable: list them with
    * {@link listTokens} and drop the row by revoking the last one with
-   * {@link revokeToken}. The server answers resource-level reads for it
-   * with 404: {@link getResourceImpact} throws {@link KaguraNotFoundError}
-   * and {@link getResourceSchema} returns `null`.
+   * {@link revokeToken}. The server resolves its impact, schema and
+   * indexer-status reads through a live context, so they answer 404:
+   * {@link getResourceImpact} and {@link getIndexerStatus} throw
+   * {@link KaguraNotFoundError} and {@link getResourceSchema} returns
+   * `null`. {@link listResourceEvents} still returns its events.
    *
    * Workspace owners only — non-owners receive 403.
    *

@@ -297,6 +297,19 @@ describe("resource stats", () => {
     await expect(client.getIndexerStatus("ghost")).rejects.toBeInstanceOf(KaguraNotFoundError);
   });
 
+  it("getResourceImpact surfaces a 404 as KaguraNotFoundError (a context-less resource, #80)", async () => {
+    // memory-cloud resolves /impact through a live context, so a resource
+    // whose contexts were all deleted (listed since v0.94.0) answers 404.
+    const server = new FakeRest();
+    server.routes["/api/v1/resources/orphaned/impact"] = {
+      status: 404,
+      body: { detail: "Resource not found" },
+    };
+    const client = makeClient(server);
+    await expect(client.getResourceImpact("orphaned")).rejects.toBeInstanceOf(KaguraNotFoundError);
+    expect(server.last().method).toBe("GET");
+  });
+
   it("listResources returns a context-less row with its context fields null (#80)", async () => {
     // memory-cloud v0.94.0+ (memory-cloud#1863) keeps listing a resource
     // whose contexts were all deleted while it holds active tokens.
