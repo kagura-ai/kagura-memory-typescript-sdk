@@ -2124,6 +2124,8 @@ describe("setup claude --add-tools and --context (#83)", () => {
       "Error: Invalid value for '--add-tools': add_tools accepts at most 100 tool names, got 101",
     ],
     [["--tool-profile=-x"], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
+    // Trimmed, then checked, as Python 0.44.0's `setup claude --tool-profile=' -x '` (exit 2).
+    [["--tool-profile= -x "], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
   ])("refuses %j with exit 2, writing nothing", async (extra, message) => {
     const h = harness({});
     expect(await runCli(claude(...extra), h.deps)).toBe(2);
@@ -2941,6 +2943,64 @@ describe("setup claude re-runs and odd inputs", () => {
     const h = harness({});
     expect(await runCli(claude(), h.deps)).toBe(0);
     expect(notes(h).join("\n")).toContain(`also had --guardrails ${CONTEXT}, which this run left out`);
+  });
+
+  // [the replaced entry's url, this run's --mcp-url and flags, the note]:
+  // each note recorded from Python 0.44.0's _dropped_query_flags and
+  // _echo_plan_notes for the same two entries (python-sdk#311). The old URL
+  // is read as the server reads it: the first value of each key wins, even
+  // a blank one, trimmed; a blank one, and a ?tools= naming no tool, is no
+  // setting to re-run with.
+  const B = "https://x.test/mcp";
+  const also = (had: string, them: boolean, where = " (?tools= on the MCP URL)") =>
+    `Note: the previous project-scope entry also had ${had}, which this run left out; ` +
+    `re-run with ${them ? "them" : "it"}${where} to keep ${them ? "them" : "it"}.`;
+  it.each<[string, string, string[], string | null]>([
+    ["a ?tools= allowlist", `${B}?tools=recall,remember`, [B], also("?tools=recall,remember", false)],
+    [
+      "the allowlist after the flags",
+      `${B}?tools=recall&add_tools=explore&context=${CONTEXT}`,
+      [B],
+      also(`--add-tools explore and --context ${CONTEXT} and ?tools=recall`, true),
+    ],
+    [
+      "all five",
+      `${B}?guardrails=off&profile=full&add_tools=explore&context=${CONTEXT}&tools=recall`,
+      [B],
+      also(
+        `--guardrails off and --tool-profile full and --add-tools explore and --context ${CONTEXT} and ?tools=recall`,
+        true,
+      ),
+    ],
+    ["the first ?tools= value", `${B}?tools=a&tools=b`, [B], also("?tools=a", false)],
+    ["its names as the server reads them", `${B}?tools=%20recall%20,recall,,`, [B], also("?tools=recall", false)],
+    ["a trimmed --guardrails", `${B}?guardrails=%20OFF%20&tools=recall`, [B], also("--guardrails OFF and ?tools=recall", true)],
+    ["no tool named", `${B}?tools=`, [B], null],
+    ["a blank first value", `${B}?tools=&tools=recall`, [B], null],
+    ["a blank first profile", `${B}?profile=&profile=full`, [B], null],
+    ["an allowlist the new URL has too", `${B}?tools=recall`, [`${B}?tools=remember`], null],
+    ["the allowlist, not the profile set again", `${B}?tools=recall&profile=full`, [B, "--tool-profile", "core"], also("?tools=recall", false)],
+  ])("names %s a re-run leaves out, as Python 0.44.0 does", async (_label, old, run, note) => {
+    fs.writeFileSync(mcpJson(), JSON.stringify({ mcpServers: { "kagura-memory": { type: "http", url: old } } }));
+    const h = harness({});
+    expect(await runCli(claude("--mcp-url", ...run), h.deps)).toBe(0);
+    const dropped = notes(h).filter((n) => n.includes("also had"));
+    expect(dropped).toEqual(note === null ? [] : [note]);
+  });
+
+  it("reads a stdio entry's flags, not its --server URL's ?tools=, as Python does", async () => {
+    // Python 0.44.0: only the kagura-mcp flags, so the note has no `(?tools= …)`.
+    fs.writeFileSync(
+      mcpJson(),
+      JSON.stringify({
+        mcpServers: {
+          "kagura-memory": { command: "kagura-mcp", args: ["--server", `${B}?tools=recall`, "--tool-profile", "core"] },
+        },
+      }),
+    );
+    const h = harness({});
+    expect(await runCli(claude("--mcp-url", B), h.deps)).toBe(0);
+    expect(notes(h).filter((n) => n.includes("also had"))).toEqual([also("--tool-profile core", false, "")]);
   });
 
   it("warns that a ?tools= allowlist wins over --tool-profile", async () => {

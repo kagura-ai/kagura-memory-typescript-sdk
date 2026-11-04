@@ -48,14 +48,18 @@ import { hasGuardrailBlock, writeGuardrailBlock, type GuardrailBlockStatus } fro
 import {
   baseUrlFromMcp,
   mcpQueryToolView,
+  mcpUrlGuardrailsOff,
   mcpUrlQueryValues,
   mcpUrlToolView,
   mcpUrlWithQuery,
   normalizeGuardrails,
   normalizeToolProfile,
+  parseMcpUrl,
   queryParam,
   validateHttpsUrl,
-  withoutQueryParam,
+  splitWithoutQueryParam,
+  type McpUrl,
+  type ParsedMcpUrl,
 } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
@@ -1365,13 +1369,24 @@ function refuseShadowedEntry(
 const QUERY_FLAGS = ["--guardrails", "--tool-profile", "--add-tools", "--context"] as const;
 
 /**
- * The query flag values an entry puts on the MCP URL, by flag — Python's
- * `_query_flags`. From the `kagura-mcp` arguments of a stdio entry (which
- * the Python CLI's `--profile` setup writes): the last value of a repeated
- * flag, as the proxy reads it, except `--add-tools`, whose values add up.
- * From an http entry's URL as the server reads it: the first value of a
- * repeated key, trimmed, the tool view by {@link mcpUrlToolView}. A blank
- * value is left out: setup refuses one, so it is no flag to re-run with.
+ * Python's `_TOOLS_KEY`: the key {@link queryFlags} reports an http entry's
+ * `?tools=` allowlist under. No setup flag sets it, so it goes by its query
+ * parameter, and a re-run puts it back on the MCP URL.
+ */
+const TOOLS_KEY = "?tools=";
+
+/**
+ * The query flag values an entry puts on the MCP URL, by flag — Python
+ * 0.44.0's `_query_flags`. From the `kagura-mcp` arguments of a stdio
+ * entry (which the Python CLI's `--profile` setup writes): the last value
+ * of a repeated flag, as the proxy reads it, except `--add-tools`, whose
+ * values add up. From an http entry's URL as the server reads it: the
+ * first value of a repeated key wins, even a blank one, and is trimmed;
+ * the tool view is read by {@link mcpQueryToolView}. A blank value is left
+ * out: setup refuses one, so it is no flag to re-run with. The URL's
+ * `?tools=` allowlist, the view key the server reads first, is reported
+ * too, under {@link TOOLS_KEY}; one naming no tool, which the server
+ * refuses, is left out like a blank value.
  */
 function queryFlags(entry: Record<string, unknown>): Map<string, string> {
   const found = new Map<string, string>();
@@ -1396,6 +1411,7 @@ function queryFlags(entry: Record<string, unknown>): Map<string, string> {
     ["--tool-profile", view.profile ?? ""],
     ["--add-tools", view.addTools.join(",")],
     ["--context", pyStrip(query.get("context") ?? "")],
+    [TOOLS_KEY, (view.tools ?? []).join(",")],
   ];
   for (const [flag, value] of settings) if (value) found.set(flag, value);
   return found;
@@ -1403,9 +1419,11 @@ function queryFlags(entry: Record<string, unknown>): Map<string, string> {
 
 /**
  * The note for the query flag settings the replaced entry had and the new
- * one leaves out — Python's `_dropped_query_flags` and its text.
- * `.kagura.json` keeps `--mcp-url` as given, so a re-run rebuilds the URL
- * from its own flags alone.
+ * one leaves out — Python 0.44.0's `_dropped_query_flags` and its text in
+ * `_echo_plan_notes`. Each is named as the user would give it again:
+ * `--guardrails off`, or `?tools=recall,remember` for an allowlist, which
+ * goes on the MCP URL. `.kagura.json` keeps `--mcp-url` as given, so a
+ * re-run rebuilds the URL from its own flags alone.
  */
 function droppedFlagsNote(
   scope: ClaudeScope,
@@ -1415,22 +1433,24 @@ function droppedFlagsNote(
   const kept = queryFlags(entry);
   const dropped = [...queryFlags(old)]
     .filter(([flag]) => !kept.has(flag))
-    .map(([flag, value]) => `${flag} ${value}`);
+    .map(([flag, value]) => (flag === TOOLS_KEY ? `${flag}${value}` : `${flag} ${value}`));
   if (dropped.length === 0) return [];
   const them = dropped.length > 1 ? "them" : "it";
+  const where = dropped.some((d) => d.startsWith(TOOLS_KEY)) ? ` (${TOOLS_KEY} on the MCP URL)` : "";
   return [
     `Note: the previous ${scope}-scope entry also had ${dropped.join(" and ")}, which this run left out; ` +
-      `re-run with ${them} to keep ${them}.`,
+      `re-run with ${them}${where} to keep ${them}.`,
   ];
 }
 
 /**
  * Python's `_warn_tools_allowlist`: memory-cloud applies a `?tools=`
  * allowlist instead of `profile` and `add_tools`, so `--tool-profile` and
- * `--add-tools` on such a URL do nothing.
+ * `--add-tools` on such a URL do nothing. `url` is the one the caller then
+ * composes, parsed once ({@link parseMcpUrl}).
  */
 function toolsAllowlistWarning(
-  url: string,
+  url: McpUrl,
   toolProfile: string | undefined,
   addTools: readonly string[] | undefined,
 ): string[] {
@@ -1495,7 +1515,9 @@ async function writeUserEntry(
 async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveInput(args);
   const scope = parseChoice(SCOPE, args.values.scope ?? "project", CLAUDE_TARGET_SCOPES);
-  const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile, input.addTools);
+  // Read for the warning and then set: split once.
+  const given = parseMcpUrl(input.baseUrl);
+  const notes = toolsAllowlistWarning(given, input.toolProfile, input.addTools);
   const asked = ASKS_FOR_HOOKS.filter((name) => args.flags.has(name)).map((name) => `--${name}`);
   if (asked.length > 0) {
     notes.push(
@@ -1503,7 +1525,7 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
         "this port installs no hooks or slash commands",
     );
   }
-  const url = mcpUrlWithQuery(input.baseUrl, {
+  const url = mcpUrlWithQuery(given, {
     guardrails: input.guardrails,
     profile: input.toolProfile,
     addTools: input.addTools,
@@ -1614,6 +1636,7 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
   if (current !== undefined) notes.push(...droppedFlagsNote(scope, current.config, entry));
 
   if (pluginId !== null) {
+    const written = parseMcpUrl(url);
     // Python's notes, one per paragraph. Never set on the user's behalf:
     // off also removes the get_context_info block.
     notes.push(
@@ -1622,7 +1645,7 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
     );
     // The URL decides, not the flag alone as in Python: a guardrails=off
     // already in --mcp-url needs no re-run either.
-    if (queryParam(url, "guardrails")?.trim().toLowerCase() !== "off") {
+    if (!mcpUrlGuardrailsOff(written)) {
       notes.push(
         "Then re-run this setup with --guardrails off so the server does not also send a guardrail " +
           "digest. 'off' also removes the guardrails block from get_context_info, so set it only " +
@@ -1632,7 +1655,7 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
     // Python resolves a context always; this bin makes no call to pick one.
     notes.push(
       "Plugin settings (/plugin > kagura-memory > Configure): " +
-        `server_url = ${pluginServerUrl(url)}, ` +
+        `server_url = ${pluginServerUrl(written)}, ` +
         `context_id = ${input.contextId || "(none; pass -c)"}`,
       "The plugin has ONE guardrail context for every project: use this one only if it holds the " +
         "guardrails you want everywhere.",
@@ -2631,7 +2654,7 @@ function codexHooksEnabled(codexHome: string, name: string): boolean {
  * shows. Read by {@link mcpUrlToolView}, as the server reads it; a blank
  * value is left out, and so is a list naming no tool.
  */
-function digestViewArgs(url: string): string[] {
+function digestViewArgs(url: McpUrl): string[] {
   const view = mcpUrlToolView(url);
   const values = [view.profile, (view.tools ?? []).join(","), view.addTools.join(",")];
   return (["--profile", "--tools", "--add-tools"] as const).flatMap((flag, i) =>
@@ -2640,7 +2663,7 @@ function digestViewArgs(url: string): string[] {
 }
 
 /** The `guardrails digest` preview of `context` on the entry `url`'s tool view, in this bin's name. */
-function digestPreview(context: string, url: string): string {
+function digestPreview(context: string, url: McpUrl): string {
   return shellCommand([
     "kagura-memory",
     "guardrails",
@@ -2656,10 +2679,10 @@ function digestPreview(context: string, url: string): string {
  * Python's closing notes on a Codex entry whose URL names a guardrails
  * context, with its preview command in this bin's name.
  */
-function codexDigestNotes(context: string, url: string, keyEnv: string): string[] {
+function codexDigestNotes(context: string, url: ParsedMcpUrl, keyEnv: string): string[] {
   // On the entry's own credential: its key variable, on its server.
   const env = keyEnv === KEY_ENV_VAR ? [] : [`KAGURA_API_KEY="\${${keyEnv}}"`];
-  env.push(`KAGURA_MCP_URL=${shellQuote(url)}`);
+  env.push(`KAGURA_MCP_URL=${shellQuote(url.url)}`);
   const preview = [...env, digestPreview(context, url)];
   return [
     `Codex should get the tool guardrail digest of context ${context} in the MCP instructions when ` +
@@ -2759,8 +2782,8 @@ function brokenConfig(deps: CliDeps): string | null {
  * there; else after a login there. Pinning the server with KAGURA_MCP_URL
  * would send KAGURA_API_KEY, a key for another server, to it.
  */
-function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: string): string[] {
-  const server = deployment(url);
+function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: ParsedMcpUrl): string[] {
+  const server = deployment(url.url);
   const digest = digestPreview(context, url);
   const reads = "(Codex gets what the account it signed in with can read):";
   let preview: string;
@@ -2817,7 +2840,9 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   let guardrails = input.guardrails;
   // Set when `guardrails` is a dry run's placeholder, shown in the URL unencoded.
   let placeholder = false;
-  if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
+  // Read below and then set: split once.
+  const given = parseMcpUrl(input.baseUrl);
+  if (guardrails === undefined && queryParam(given, "guardrails") === undefined) {
     if (hooksOn && !input.oauth) {
       // The plugin's hooks read this same table and deliver the
       // guardrails themselves; the server need not repeat them.
@@ -2834,12 +2859,14 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
       placeholder = guardrails !== input.contextId;
     }
   }
-  notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile, input.addTools));
+  notes.push(...toolsAllowlistWarning(given, input.toolProfile, input.addTools));
   const url = mcpUrlWithQuery(
-    input.baseUrl,
+    given,
     { guardrails, profile: input.toolProfile, addTools: input.addTools },
     { guardrailsAsIs: placeholder },
   );
+  // Read for the guardrails lane and the digest preview: split once.
+  const written = parseMcpUrl(url);
 
   const codex = deps.which("codex");
   if (input.oauth) {
@@ -2862,9 +2889,9 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     const tokenStore =
       `the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store in ${pathLabel(home)}), ` +
       `else in ${pathLabel(pathlibJoin(home, ".credentials.json"))}`;
-    const lane = queryParam(url, "guardrails");
+    const lane = queryParam(written, "guardrails");
     const after = [oauthLoginNote("codex", name, cli.program !== null, tokenStore)];
-    if (lane !== undefined && isUuid(lane)) after.push(...codexOauthDigestNotes(deps, input, parseUuid(lane), url));
+    if (lane !== undefined && isUuid(lane)) after.push(...codexOauthDigestNotes(deps, input, parseUuid(lane), written));
     after.push(
       "Restart Codex (or start a new session) to load the entry.",
       `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
@@ -2888,8 +2915,8 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
       `starts Codex, e.g. \`export ${keyEnv}=<your-api-key>\` in your shell profile. ` +
       "(Codex refuses an inline bearer_token on a URL entry.)",
   ];
-  const lane = queryParam(url, "guardrails");
-  if (lane !== undefined && isUuid(lane)) after.push(...codexDigestNotes(parseUuid(lane), url, keyEnv));
+  const lane = queryParam(written, "guardrails");
+  if (lane !== undefined && isUuid(lane)) after.push(...codexDigestNotes(parseUuid(lane), written, keyEnv));
   after.push(
     "Restart Codex (or start a new session) to load the entry.",
     `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
@@ -2932,22 +2959,25 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
  * that a `?tools=` allowlist overrides it, in Python's order.
  */
 function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
-  notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile, input.addTools));
+  // Split once, for the warnings and the one composer call below.
+  const given = parseMcpUrl(input.baseUrl);
+  notes.push(...toolsAllowlistWarning(given, input.toolProfile, input.addTools));
   const title = LABEL[input.harness];
   // The configured mcp_url (a fallback only this port has) keeps its word.
   const source = input.urlFlag ? "--mcp-url" : "the MCP URL";
   const dropped = input.guardrails !== undefined ? ["--guardrails"] : [];
-  let url = input.baseUrl;
-  const first = queryParam(url, "guardrails");
-  if (first !== undefined && pyStrip(first).toLowerCase() === "off") {
+  let url: McpUrl = given;
+  // `off` is written again as `off`, alone; any other value is dropped.
+  let guardrails: "off" | undefined;
+  if (mcpUrlGuardrailsOff(given)) {
     notes.push(
       `Warning: ${source} has ?guardrails=off, which removes the guardrails block from ` +
         `get_context_info: ${title} then gets no guardrails from Kagura.`,
     );
-    url = mcpUrlWithQuery(url, { guardrails: "off" });
-  } else if (first !== undefined) {
+    guardrails = "off";
+  } else if (queryParam(given, "guardrails") !== undefined) {
     dropped.push(`the ?guardrails= value in ${source}`);
-    url = withoutQueryParam(url, "guardrails");
+    url = splitWithoutQueryParam(given, "guardrails");
   }
   if (dropped.length > 0) {
     const [has, is] = dropped.length > 1 ? ["have", "are"] : ["has", "is"];
@@ -2957,7 +2987,7 @@ function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
         "default) and the AGENTS.md export (--agents-md).",
     );
   }
-  return mcpUrlWithQuery(url, { profile: input.toolProfile, addTools: input.addTools });
+  return mcpUrlWithQuery(url, { guardrails, profile: input.toolProfile, addTools: input.addTools });
 }
 
 /** The full case folds `toLowerCase` lacks that yield ASCII: ß, long s and the Latin ligatures. */
@@ -3375,8 +3405,9 @@ const claude: Command = {
     "  scope is the git repository's (a linked worktree's main working tree),\n" +
     "  and project scope the closest .mcp.json defining kagura-memory, here or\n" +
     "  in a parent directory, as Claude Code reads them. A re-run without\n" +
-    "  --guardrails, --tool-profile, --add-tools or --context drops an\n" +
-    "  earlier value, and says so.\n\n" +
+    "  --guardrails, --tool-profile, --add-tools or --context, or whose\n" +
+    "  --mcp-url lacks the old entry's ?tools= allowlist, drops the earlier\n" +
+    "  value, and says so.\n\n" +
     "  A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) other than a\n" +
     "  dashed UUID is looked up by exact name on every list_contexts page, and\n" +
     "  its id is written; a dashed UUID or no context sends no request.\n\n" +

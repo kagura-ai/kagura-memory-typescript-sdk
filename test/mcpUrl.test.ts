@@ -15,14 +15,19 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_ADD_TOOLS,
   mcpQueryToolView,
+  mcpUrlGuardrailsOff,
   mcpUrlQueryValues,
   mcpUrlToolView,
   mcpUrlWithQuery,
   normalizeAddTools,
   normalizeGuardrails,
   normalizeToolProfile,
+  parseMcpUrl,
   queryParam,
   readAddToolsFlag,
+  splitWithoutQueryParam,
+  withoutQuery,
+  withoutQueryParam,
   type McpUrlQuery,
 } from "../src/http.js";
 
@@ -261,5 +266,116 @@ describe("mcpUrlQueryValues and queryParam", () => {
       `${B}?%EF%BB%BFprofile=x&profile=core`,
     );
     expect(mcpUrlWithQuery(B, { addTools: ["﻿explore"] })).toBe(`${B}?add_tools=%EF%BB%BFexplore`);
+  });
+});
+
+describe("mcpUrlGuardrailsOff", () => {
+  // [query, Python 0.44.0's mcp_url_guardrails_off(B + query)]: the first
+  // value, str.strip()ped (which takes \x1c-\x1f and U+0085 but keeps
+  // U+FEFF, unlike String.prototype.trim), in any case.
+  it.each<[string, boolean]>([
+    ["?guardrails=off", true],
+    ["?guardrails=%20OFF%20", true],
+    ["?guardrails=%1Foff%1C", true],
+    ["?guardrails=%C2%85off", true],
+    ["?guardrails=%E3%80%80off", true],
+    ["?guardrails=%EF%BB%BFoff", false],
+    ["?guardrails=&guardrails=off", false],
+    ["?guardrails=off&guardrails=x", true],
+    ["?guard%72ails=Off", true],
+    ["?guardrails", false],
+    ["", false],
+    ["?guardrails=offx", false],
+  ])("reads %j as Python does", (query, off) => {
+    expect(mcpUrlGuardrailsOff(`${B}${query}`)).toBe(off);
+    expect(mcpUrlGuardrailsOff(parseMcpUrl(`${B}${query}`))).toBe(off);
+  });
+});
+
+describe("parseMcpUrl (one split for the readers and the composer)", () => {
+  it("splits the URL as the server does", () => {
+    const url = `${B}?guard%72ails=off&&profile=+core&profile=full#frag`;
+    const parsed = parseMcpUrl(url);
+    expect(parsed).toEqual({
+      url,
+      base: B,
+      params: ["guard%72ails=off", "profile=+core", "profile=full"],
+      fragment: "#frag",
+      query: mcpUrlQueryValues(url),
+    });
+    expect([...parsed.query]).toEqual([
+      ["guardrails", "off"],
+      ["profile", " core"],
+    ]);
+    // An already parsed URL comes back as it is.
+    expect(parseMcpUrl(parsed)).toBe(parsed);
+  });
+
+  it.each([
+    B,
+    `${B}?tools=recall&profile=full#x`,
+    `${B}?add_tools=a&add%5Ftools=b&keep=1#frag`,
+    `${B}?x=a%2Cb&guardrails=OFF&context=old`,
+    `HTTPS://X.test/mcp?profile=`,
+  ])("reads and composes %s as the URL string does", (url) => {
+    const parsed = parseMcpUrl(url);
+    expect(mcpUrlToolView(parsed)).toEqual(mcpUrlToolView(url));
+    expect(queryParam(parsed, "guardrails")).toBe(queryParam(url, "guardrails"));
+    expect(mcpUrlGuardrailsOff(parsed)).toBe(mcpUrlGuardrailsOff(url));
+    expect(withoutQuery(parsed)).toBe(withoutQuery(url));
+    expect(withoutQueryParam(parsed, "guardrails")).toBe(withoutQueryParam(url, "guardrails"));
+    const updates: McpUrlQuery = { guardrails: "off", profile: "core", addTools: ["explore"], context: U };
+    expect(mcpUrlWithQuery(parsed, updates)).toBe(mcpUrlWithQuery(url, updates));
+  });
+
+  it("gives back the URL as written when nothing is set or dropped", () => {
+    const url = `${B}?x=a%2Cb&&y#f`;
+    expect(mcpUrlWithQuery(parseMcpUrl(url), {})).toBe(url);
+    expect(mcpUrlWithQuery(parseMcpUrl(url), { addTools: [" , "] })).toBe(url);
+    expect(withoutQueryParam(parseMcpUrl(url), "guardrails")).toBe(url);
+  });
+
+  it("decodes the query once, and only for a reader of it", () => {
+    const parsed = parseMcpUrl(`${B}?guard%72ails=off&profile=core`);
+    const query = Object.getOwnPropertyDescriptor(parsed, "query")!;
+    let decodes = 0;
+    Object.defineProperty(parsed, "query", {
+      get: () => {
+        decodes += 1;
+        return query.get!.call(parsed);
+      },
+    });
+    // Rewriting the query reads no value of it.
+    withoutQuery(parsed);
+    withoutQueryParam(parsed, "guardrails");
+    splitWithoutQueryParam(parsed, "profile");
+    mcpUrlWithQuery(parsed, { guardrails: "off", profile: "full" });
+    expect(decodes).toBe(0);
+    // A reader decodes it, once for every later read.
+    const first = parsed.query;
+    expect(first).toEqual(new Map([["guardrails", "off"], ["profile", "core"]]));
+    expect(parsed.query).toBe(first);
+    expect(queryParam(parsed, "guardrails")).toBe("off");
+  });
+
+  it.each([
+    `${B}?guardrails=x&profile=full&keep=a,b#frag`,
+    `${B}?guardrails=a&guard%72ails=off&add_tools=explore`,
+    `HTTPS://X.test/mcp?guardrails=${U}&tools=recall#`,
+    `${B}?guardrails=`,
+    `${B}?keep=1`,
+    B,
+  ])("splitWithoutQueryParam(%s) is withoutQueryParam, still split", (url) => {
+    const split = splitWithoutQueryParam(url, "guardrails");
+    expect(split.url).toBe(withoutQueryParam(url, "guardrails"));
+    // Read and composed as the URL it stands for.
+    const reparsed = parseMcpUrl(split.url);
+    expect(split.params).toEqual(reparsed.params);
+    expect([...split.query]).toEqual([...reparsed.query]);
+    expect(mcpUrlToolView(split)).toEqual(mcpUrlToolView(split.url));
+    expect(withoutQuery(split)).toBe(withoutQuery(split.url));
+    const updates: McpUrlQuery = { guardrails: "off", profile: "core", addTools: ["explore"] };
+    expect(mcpUrlWithQuery(split, updates)).toBe(mcpUrlWithQuery(split.url, updates));
+    expect(mcpUrlWithQuery(split, {})).toBe(split.url);
   });
 });

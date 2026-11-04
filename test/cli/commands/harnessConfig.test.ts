@@ -19,7 +19,7 @@ import {
   yamlServersIndent,
   yamlServersInline,
 } from "../../../src/cli/commands/harnessConfig.js";
-import { mcpUrlWithQuery, queryParam, withoutQuery, withoutQueryParam } from "../../../src/http.js";
+import { mcpUrlWithQuery, parseMcpUrl, queryParam, withoutQuery, withoutQueryParam } from "../../../src/http.js";
 
 const UUID = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
 
@@ -143,6 +143,10 @@ describe("withoutQuery", () => {
     expect(withoutQuery("https://x.test/mcp/w/ws1?profile=core&tools=a,b#f")).toBe("https://x.test/mcp/w/ws1");
     expect(withoutQuery("https://x.test/mcp")).toBe("https://x.test/mcp");
   });
+
+  it("lower-cases the scheme alone, as Python's urlunsplit does", () => {
+    expect(withoutQuery("HTTPS://X.Test/mcp/w/ws1?profile=core#f")).toBe("https://X.Test/mcp/w/ws1");
+  });
 });
 
 describe("queryParam", () => {
@@ -233,6 +237,33 @@ describe("pluginServerUrl", () => {
     );
     // Python strips the value before comparing it.
     expect(pluginServerUrl("https://x.test/mcp?guardrails=+off")).toBe("https://x.test/mcp?guardrails=off");
+  });
+
+  // [query, Python 0.44.0's _plugin_server_url("https://x.test/mcp" + query)]:
+  // the first guardrails value, read by mcp_url_guardrails_off — str.strip(),
+  // which takes \x1c-\x1f and U+0085 and keeps U+FEFF, unlike String.trim.
+  it.each([
+    ["?guardrails=%1Foff%1C&profile=core", "https://x.test/mcp?guardrails=off"],
+    ["?guardrails=%C2%85OFF", "https://x.test/mcp?guardrails=off"],
+    ["?guardrails=%EF%BB%BFoff", "https://x.test/mcp"],
+    ["?guardrails=%E3%80%80off&context=x", "https://x.test/mcp?guardrails=off"],
+    ["?guardrails=&guardrails=off", "https://x.test/mcp"],
+    ["?guardrails=off&guardrails=x#f", "https://x.test/mcp?guardrails=off"],
+  ])("reads %s as Python does", (query, expected) => {
+    expect(pluginServerUrl(`https://x.test/mcp${query}`)).toBe(expected);
+  });
+
+  // [url, Python 0.44.0's _plugin_server_url(url)]: urlsplit lower-cases the
+  // scheme, and only the scheme, as the entry setup rewrites does.
+  it.each([
+    ["HTTPS://X.test/mcp?guardrails=OFF&profile=core", "https://X.test/mcp?guardrails=off"],
+    ["HTTPS://X.test/mcp?profile=core", "https://X.test/mcp"],
+    ["Https://X.Test/mcp/w/ws1#frag", "https://X.Test/mcp/w/ws1"],
+    ["hTTp://localhost:8080/mcp?guardrails=off#f", "http://localhost:8080/mcp?guardrails=off"],
+    ["HTTPS://X.test/mcp", "https://X.test/mcp"],
+  ])("writes %s with the scheme lower-cased, as Python does", (url, expected) => {
+    expect(pluginServerUrl(url)).toBe(expected);
+    expect(pluginServerUrl(parseMcpUrl(url))).toBe(expected);
   });
 });
 

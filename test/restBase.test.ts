@@ -11,11 +11,15 @@ import {
   KaguraNotFoundError,
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
+  KaguraServiceUnavailableError,
+  KaguraVersionConflictError,
 } from "../src/errors.js";
+import { FilesClient } from "../src/filesClient.js";
 import { SDK_VERSION } from "../src/http.js";
 import { JsonNestingError, JsonNumber, orderedEntries, valueAt } from "../src/losslessJson.js";
 import { DEFAULT_REST_BASE_URL, KaguraRestClient, restClientFromAuth } from "../src/restBase.js";
 import { ResourceClient } from "../src/resourceClient.js";
+import { SecretClient } from "../src/secrets/client.js";
 import { WorkspaceClient } from "../src/workspaceClient.js";
 import type {
   HttpMethod,
@@ -723,6 +727,135 @@ describe("status mapping", () => {
     const err = await caught(probe.requestPublic("GET", "/api/v1/things"));
     expect(err).toBeInstanceOf(KaguraConnectionError);
     expect((err as KaguraConnectionError).message).toBe("HTTP 500");
+  });
+});
+
+describe("the error body, decoded once (python-sdk#311)", () => {
+  // Python's ErrorBody: `_request` builds one per error response and every
+  // hook reads it. Here the spine and each hook, the subclasses' included,
+  // read `errorBody(response)`, so JSON.parse sees the body once however
+  // many of them ask for its detail, envelope, fields or retry hint.
+  const ROLE = { error: "HTTP-403", message: "Only the workspace owner can do this.", details: {} };
+  const PLAN = { error: "FEAT-001", message: "Upgrade to Pro.", details: { gate: "plan", feature: "secrets" } };
+  const QUOTA = { error: "QUOTA-001", message: "Daily REST quota exceeded.", details: { gate: "quota", retry_after: 60 } };
+  const RATE = { error: "RATE-001", message: "Event quota exceeded.", details: { retry_after: 3600 } };
+  const SCOPE = { error: "HTTP-403", message: "Insufficient scope", details: {} };
+  const SCOPE_HEADERS = { "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="memory:write"' };
+  const DB = { error: "DB-002", message: "Database connection failed", details: { reason: "deadlock" } };
+  const CONTEXT = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
+  const probeGet = (rest: FakeRest) => makeProbe(rest).requestPublic("GET", "/api/v1/things");
+  const workspace = (rest: FakeRest) =>
+    new WorkspaceClient({ apiKey: "k", baseUrl: "https://x.test", fetch: rest.fetch }).listMembers(CONTEXT);
+  const secrets = (rest: FakeRest) =>
+    new SecretClient({ apiKey: "k", baseUrl: "https://x.test", fetch: rest.fetch }).listSecrets();
+  const files = (rest: FakeRest) =>
+    new FilesClient({ apiKey: "k", baseUrl: "https://x.test", fetch: rest.fetch }).list({ contextId: CONTEXT });
+
+  it.each<[string, number, unknown, Record<string, string>, (rest: FakeRest) => Promise<unknown>, abstract new (...args: never[]) => Error]>([
+    ["a role denial (403)", 403, ROLE, {}, probeGet, KaguraConnectionError],
+    ["a plan refusal (403)", 403, PLAN, {}, probeGet, KaguraFeatureNotAvailableError],
+    ["insufficient_scope (403)", 403, SCOPE, SCOPE_HEADERS, probeGet, KaguraAuthError],
+    ["a 404", 404, { detail: "No such thing" }, {}, probeGet, KaguraNotFoundError],
+    ["a typed quota (429)", 429, QUOTA, {}, probeGet, KaguraQuotaError],
+    ["a RATE-001 (429)", 429, RATE, {}, probeGet, KaguraQuotaError],
+    ["the database down (503)", 503, DB, {}, probeGet, KaguraServiceUnavailableError],
+    ["a 500", 500, { detail: "boom" }, {}, probeGet, KaguraConnectionError],
+    [
+      "a refused expectedVersion (409)",
+      409,
+      { error: "RES-002", message: "Version conflict: memory is at version 4.", details: { reason: "version_conflict", current_version: 4 } },
+      {},
+      probeGet,
+      KaguraVersionConflictError,
+    ],
+    ["WorkspaceClient's 403", 403, ROLE, {}, workspace, KaguraConnectionError],
+    ["WorkspaceClient's 403 plan refusal", 403, PLAN, {}, workspace, KaguraFeatureNotAvailableError],
+    ["WorkspaceClient's 429", 429, { error: "HTTP-429", message: "Member limit reached", details: {} }, {}, workspace, KaguraQuotaError],
+    ["SecretClient's 403", 403, ROLE, {}, secrets, KaguraConnectionError],
+    ["SecretClient's 429", 429, QUOTA, {}, secrets, KaguraConnectionError],
+    ["FilesClient's 403", 403, ROLE, {}, files, KaguraConnectionError],
+    ["FilesClient's 409", 409, { error: "RES-002", message: "Duplicate", details: { existing_file: { id: "f" } } }, {}, files, KaguraConnectionError],
+  ])("decodes %s once", async (_label, status, body, headers, call, expected) => {
+    const rest = new FakeRest();
+    rest.status = status;
+    rest.body = JSON.stringify(body);
+    rest.responseHeaders = headers;
+    const parse = vi.spyOn(JSON, "parse");
+    let err: unknown;
+    let parses: number;
+    try {
+      err = await caught(call(rest));
+      parses = parse.mock.calls.filter(([text]) => text === rest.body).length;
+    } finally {
+      parse.mockRestore();
+    }
+    expect(err).toBeInstanceOf(expected);
+    expect(parses).toBe(1);
+  });
+
+  class BodyProbe extends ProbeClient {
+    bodyOf(response: RestResponse) {
+      return this.errorBody(response);
+    }
+  }
+
+  it("gives each hook the same ErrorBody for a response", () => {
+    const probe = new BodyProbe({ apiKey: "k", baseUrl: "https://x.test" });
+    const response = envelopeOf(JSON.stringify(QUOTA), 429);
+    expect(probe.bodyOf(response)).toBe(probe.bodyOf(response));
+    expect(probe.bodyOf(response).text).toBe(response.text);
+    expect(probe.bodyOf(envelopeOf(response.text, 429))).not.toBe(probe.bodyOf(response));
+  });
+
+  it("carries the ErrorBody on the response: a copy reads the same one, other text a new one", () => {
+    // Python's `_request` hands every hook the `body` it built; here it
+    // rides on the response, so a hook handed `{...response}` decodes
+    // nothing again.
+    const probe = new BodyProbe({ apiKey: "k", baseUrl: "https://x.test" });
+    const response = envelopeOf(JSON.stringify(QUOTA), 429);
+    const body = probe.bodyOf(response);
+    expect(response.errorBody).toBe(body);
+    expect(probe.bodyOf({ ...response })).toBe(body);
+    // Rebuilt with other text, it is read as that text.
+    const other = { ...response, text: JSON.stringify(RATE) };
+    expect(probe.bodyOf(other)).not.toBe(body);
+    expect(probe.bodyOf(other).text).toBe(other.text);
+    expect(probe.bodyOf(other).envelope?.code).toBe("RATE-001");
+    expect(probe.bodyOf(response)).toBe(body);
+  });
+
+  it.each([
+    [403, ROLE, KaguraConnectionError],
+    [403, PLAN, KaguraFeatureNotAvailableError],
+    [429, QUOTA, KaguraQuotaError],
+    [429, RATE, KaguraQuotaError],
+  ] as const)("decodes a %i once when a hook hands a copy of the response on", async (status, body, expected) => {
+    // A subclass hook that rebuilds the response before calling the base
+    // one (`{...response}`): request() set the body on it, so the copy
+    // carries it and the base hooks read it without decoding again.
+    class Spreading extends ProbeClient {
+      protected override error403(response: RestResponse, context: RequestContext): KaguraError {
+        return super.error403({ ...response }, context);
+      }
+      protected override error429(response: RestResponse): KaguraError {
+        return super.error429({ ...response });
+      }
+    }
+    const rest = new FakeRest();
+    rest.status = status;
+    rest.body = JSON.stringify(body);
+    const probe = new Spreading({ apiKey: "k", baseUrl: "https://x.test", fetch: rest.fetch });
+    const parse = vi.spyOn(JSON, "parse");
+    let err: unknown;
+    let parses: number;
+    try {
+      err = await caught(probe.requestPublic("GET", "/api/v1/things"));
+      parses = parse.mock.calls.filter(([text]) => text === rest.body).length;
+    } finally {
+      parse.mockRestore();
+    }
+    expect(err).toBeInstanceOf(expected);
+    expect(parses).toBe(1);
   });
 });
 

@@ -124,14 +124,10 @@ function joinUrl(base: string, params: string[], fragment: string): string {
   return `${scheme}${params.length > 0 ? `?${params.join("&")}` : ""}${fragment.length > 1 ? fragment : ""}`;
 }
 
-/**
- * The first value of each parameter in the URL's query, by decoded name —
- * Python's `mcp_url_query_values`. A blank value is kept: `?profile=` is
- * present (and refused by the server), not absent.
- */
-export function mcpUrlQueryValues(url: string): Map<string, string> {
+/** The first value of each parameter in `params`, by decoded name; see {@link mcpUrlQueryValues}. */
+function firstValues(params: readonly string[]): Map<string, string> {
   const values = new Map<string, string>();
-  for (const param of splitUrl(url).params) {
+  for (const param of params) {
     const name = paramName(param);
     if (!values.has(name)) values.set(name, paramValue(param));
   }
@@ -139,11 +135,83 @@ export function mcpUrlQueryValues(url: string): Map<string, string> {
 }
 
 /**
+ * The first value of each parameter in the URL's query, by decoded name —
+ * Python's `mcp_url_query_values`. A blank value is kept: `?profile=` is
+ * present (and refused by the server), not absent.
+ */
+export function mcpUrlQueryValues(url: string): Map<string, string> {
+  return firstValues(splitUrl(url).params);
+}
+
+/**
+ * An MCP URL split once ({@link parseMcpUrl}). The composer and the
+ * readers below take one in place of the URL, so a command that reads a
+ * URL's query and then sets it splits the URL once.
+ */
+export interface ParsedMcpUrl {
+  /** The URL as given. */
+  readonly url: string;
+  /** The URL before its query and fragment. */
+  readonly base: string;
+  /** The query's `&`-separated parameters as written, empty ones dropped. */
+  readonly params: readonly string[];
+  /** `#` and the fragment; `""` without one. */
+  readonly fragment: string;
+  /**
+   * {@link mcpUrlQueryValues} of the URL: each decoded name's first value.
+   * Decoded the first time it is read, so a caller that only rewrites the
+   * query ({@link withoutQuery}, {@link withoutQueryParam},
+   * {@link mcpUrlWithQuery}) decodes no value.
+   */
+  readonly query: ReadonlyMap<string, string>;
+}
+
+/** An MCP URL, as written or already split by {@link parseMcpUrl}. */
+export type McpUrl = string | ParsedMcpUrl;
+
+/**
+ * The URL split for {@link mcpUrlWithQuery} and the readers, as the server
+ * splits it (see above); an already parsed one comes back as it is.
+ */
+export function parseMcpUrl(url: McpUrl): ParsedMcpUrl {
+  if (typeof url !== "string") return url;
+  const { base, params, fragment } = splitUrl(url);
+  return parsedUrl(url, base, params, fragment);
+}
+
+/** The {@link ParsedMcpUrl} of a URL's parts, its `query` decoded when first read. */
+function parsedUrl(url: string, base: string, params: readonly string[], fragment: string): ParsedMcpUrl {
+  let query: ReadonlyMap<string, string> | undefined;
+  return {
+    url,
+    base,
+    params,
+    fragment,
+    get query(): ReadonlyMap<string, string> {
+      query ??= firstValues(params);
+      return query;
+    },
+  };
+}
+
+/**
  * The decoded value of the first `key` in the URL's query — the one the
  * server reads — or undefined. Names compare decoded.
  */
-export function queryParam(url: string, key: string): string | undefined {
-  return mcpUrlQueryValues(url).get(key);
+export function queryParam(url: McpUrl, key: string): string | undefined {
+  return parseMcpUrl(url).query.get(key);
+}
+
+/**
+ * Whether the URL's first `guardrails` value is `off`, in any case and
+ * trimmed — Python's `mcp_url_guardrails_off`, as memory-cloud's
+ * `select_guardrail_context` reads it. `off` turns off both guardrail
+ * lanes: the server's digest, and the `guardrails` block of
+ * `get_context_info`.
+ */
+export function mcpUrlGuardrailsOff(url: McpUrl): boolean {
+  const first = queryParam(url, "guardrails");
+  return first !== undefined && pyStrip(first).toLowerCase() === "off";
 }
 
 /**
@@ -153,16 +221,30 @@ export function queryParam(url: string, key: string): string | undefined {
  * key comes back as written, and one it rewrites is rebuilt as Python's is
  * ({@link joinUrl}).
  */
-export function withoutQueryParam(url: string, key: string): string {
-  const { base, params, fragment } = splitUrl(url);
-  const kept = params.filter((param) => paramName(param) !== key);
-  if (kept.length === params.length) return url;
-  return joinUrl(base, kept, fragment);
+export function withoutQueryParam(url: McpUrl, key: string): string {
+  return splitWithoutQueryParam(url, key).url;
 }
 
-/** The URL with its query and fragment dropped. */
-export function withoutQuery(url: string): string {
-  return splitUrl(url).base;
+/**
+ * {@link withoutQueryParam}, still split: for a caller that composes the
+ * result next ({@link mcpUrlWithQuery}), so the URL is not split again.
+ * Its `url` is what {@link withoutQueryParam} returns.
+ */
+export function splitWithoutQueryParam(url: McpUrl, key: string): ParsedMcpUrl {
+  const parsed = parseMcpUrl(url);
+  const { base, params, fragment } = parsed;
+  const kept = params.filter((param) => paramName(param) !== key);
+  if (kept.length === params.length) return parsed;
+  return parsedUrl(joinUrl(base, kept, fragment), base, kept, fragment);
+}
+
+/**
+ * The URL with its query and fragment dropped, rebuilt as Python's
+ * `urlunsplit` rebuilds it ({@link joinUrl}): `HTTPS://` is written
+ * `https://`, the rest as written.
+ */
+export function withoutQuery(url: McpUrl): string {
+  return joinUrl(parseMcpUrl(url).base, [], "");
 }
 
 /**
@@ -316,6 +398,9 @@ export interface McpUrlQuery {
  * context VALUE>` placeholder, as the Python CLI shows it. Such a URL is
  * never written or run.
  *
+ * `url` may be one {@link parseMcpUrl} already split, so a caller that has
+ * read its query (a `?tools=` warning, a `guardrails` check) splits it once.
+ *
  * @throws Error `guardrails` is neither `off` nor a context UUID
  *   ({@link normalizeGuardrails}), `profile` is blank or starts with `-`, a
  *   tool name starts with `-` or a list names more than 100, or `context`
@@ -323,7 +408,7 @@ export interface McpUrlQuery {
  * @throws TypeError `tools` / `addTools` is not an array of strings.
  */
 export function mcpUrlWithQuery(
-  url: string,
+  url: McpUrl,
   updates: McpUrlQuery,
   shown: { guardrailsAsIs?: boolean } = {},
 ): string {
@@ -338,9 +423,9 @@ export function mcpUrlWithQuery(
   const added = updates.addTools !== undefined ? normalizeAddTools(updates.addTools) : "";
   if (added) set.push(["add_tools", added]);
   if (updates.context !== undefined) set.push(["context", normalizeUuid(updates.context, "context")]);
-  if (set.length === 0) return url;
+  if (set.length === 0) return typeof url === "string" ? url : url.url;
   const keys = set.map(([key]) => key);
-  const { base, params, fragment } = splitUrl(url);
+  const { base, params, fragment } = parseMcpUrl(url);
   const kept = params.filter((param) => !keys.includes(paramName(param)));
   const encode = (key: string, value: string): string =>
     key === "guardrails" && shown.guardrailsAsIs === true ? value : quotePlus(value);
@@ -368,9 +453,12 @@ export interface McpToolView {
  * comma-separated items, trimmed, blank names dropped, duplicates removed
  * in order. Which parameter wins (`tools` over the other two) is left to
  * the caller.
+ *
+ * `url` may be one {@link parseMcpUrl} already split: the proxy and
+ * `setup` read the view and then compose the same URL.
  */
-export function mcpUrlToolView(url: string): McpToolView {
-  return mcpQueryToolView(mcpUrlQueryValues(url));
+export function mcpUrlToolView(url: McpUrl): McpToolView {
+  return mcpQueryToolView(parseMcpUrl(url).query);
 }
 
 /**
@@ -631,10 +719,12 @@ export function bodyRetryAfter(block: Record<string, unknown>, key: string): num
 /**
  * Seconds to wait before retrying a REST error response: its numeric
  * `Retry-After` header, else the `details.retry_after` of a canonical
- * error body, else `null`.
+ * error body, else `null`. `body` is the response text, or its
+ * {@link ErrorBody} when the caller has one, so the body is not decoded
+ * again.
  */
-export function responseRetryAfter(headers: Headers, bodyText: string): number | null {
-  return envelopeRetryAfter(headers, parseErrorEnvelope(bodyText));
+export function responseRetryAfter(headers: Headers, body: string | ErrorBody): number | null {
+  return envelopeRetryAfter(headers, typeof body === "string" ? parseErrorEnvelope(body) : body.envelope);
 }
 
 /** {@link responseRetryAfter} with the body's envelope already read. */
@@ -1105,7 +1195,7 @@ function statusMessage(status: number, detail: string): string {
 }
 
 /** A canonical REST error body split into its code and details block. */
-interface ErrorEnvelope {
+export interface ErrorEnvelope {
   code: string | null;
   details: Record<string, unknown>;
 }
@@ -1131,6 +1221,79 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
 }
 
 /**
+ * A non-2xx response's body, decoded at most once and read each way the
+ * error mapping needs it — Python's `ErrorBody` (python-sdk#311).
+ *
+ * Nothing is decoded until a reader asks (a 401 never does), and each
+ * reader is computed once. The decoded body is never handed out, and each
+ * reader that returns part of it returns its own deep copy of that part
+ * (Python copies the whole body per reader, `_copy`), so no two readers,
+ * and no reader and the body, share a mutable object — as when every
+ * reader decoded the body itself. A body that is not JSON reads as
+ * nothing in every reader.
+ *
+ * `KaguraRestClient` builds one per error response (its `errorBody`), and
+ * its hooks read that instead of decoding the body again;
+ * {@link throwForKaguraStatus} and {@link responseRetryAfter} take one in
+ * place of the text.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export class ErrorBody {
+  /** The body as received. */
+  readonly text: string;
+  private decodedBody: { value: unknown } | undefined;
+  private detailText: string | undefined;
+  private envelopeBlock: ErrorEnvelope | null | undefined;
+  private errorFields: ServerErrorFields | null | undefined;
+
+  constructor(text: string) {
+    this.text = text;
+  }
+
+  /**
+   * The body decoded as JSON ({@link parseJsonBody}); `undefined` when it
+   * is not JSON. Private, as Python's `_decoded`: the readers below only
+   * read it.
+   */
+  private get decoded(): unknown {
+    this.decodedBody ??= { value: parseJsonBody(this.text) };
+    return this.decodedBody.value;
+  }
+
+  /** {@link extractDetail} of the body: the server's message, or `""`. */
+  get detail(): string {
+    this.detailText ??= detailOf(this.decoded);
+    return this.detailText;
+  }
+
+  /**
+   * {@link parseErrorEnvelope} of the body: its code and `details`, or
+   * `null` for a body that is no JSON object. `details` is this reader's
+   * own copy.
+   */
+  get envelope(): ErrorEnvelope | null {
+    if (this.envelopeBlock === undefined) {
+      const envelope = envelopeOf(this.decoded);
+      this.envelopeBlock = envelope === null ? null : { code: envelope.code, details: structuredClone(envelope.details) };
+    }
+    return this.envelopeBlock;
+  }
+
+  /**
+   * {@link serverErrorFields} of the body: `[code, fields]`, or `null` when
+   * it names no error code. `fields` is this reader's own copy.
+   */
+  get fields(): ServerErrorFields | null {
+    if (this.errorFields === undefined) {
+      const fields = serverErrorFieldsOf(this.decoded);
+      this.errorFields = fields === null ? null : [fields[0], structuredClone(fields[1])];
+    }
+    return this.errorFields;
+  }
+}
+
+/**
  * Translate a non-2xx HTTP response into the matching Kagura error.
  *
  * Maps 401 → KaguraAuthError, a 403 `insufficient_scope` (an OAuth token
@@ -1143,7 +1306,9 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
  * status is never left bare. The error code and fields the body carried
  * (a JSON-RPC error's `data`, the REST `details`, an OAuth body's fields)
  * are kept as the error's `code` / `details`. The body is decoded once,
- * for every reader. This function always throws.
+ * for every reader: `body` is the response text, or the {@link ErrorBody}
+ * a caller that read the body itself already built (Python's `body=`), so
+ * it is decoded at most once between them. This function always throws.
  *
  * A 429 that is a typed quota refusal (the daily call quota) keeps its
  * class, which existing handlers catch, but carries the quota's gate
@@ -1152,24 +1317,24 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
 export function throwForKaguraStatus(
   status: number,
   headers: Headers,
-  bodyText: string,
+  body: string | ErrorBody,
   fallbackMessage?: string,
 ): never {
   if (status === 401) {
     throw new KaguraAuthError("Authentication failed. Check your API key.");
   }
-  const body = parseJsonBody(bodyText);
-  const fields = serverErrorFieldsOf(body);
+  const read = typeof body === "string" ? new ErrorBody(body) : body;
+  const fields = read.fields;
   if (status === 403) {
     const scopeError = insufficientScopeFrom(headers, fields);
     if (scopeError !== null) {
       throw scopeError;
     }
   }
-  const detail = detailOf(body) || fallbackMessage || "";
+  const detail = read.detail || fallbackMessage || "";
   let err: KaguraError;
   if (status === 429) {
-    const envelope = envelopeOf(body);
+    const envelope = read.envelope;
     err = new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       envelopeRetryAfter(headers, envelope),

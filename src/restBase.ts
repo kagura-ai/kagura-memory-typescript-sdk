@@ -34,15 +34,13 @@ import {
 import {
   annotateServerError,
   baseUrlFromMcp,
-  extractDetail,
+  ErrorBody,
   gateError,
   insufficientScopeFrom,
-  parseErrorEnvelope,
   responseRetryAfter,
   REST_GATE_CODES,
   sanitizeServerDetail,
   SDK_VERSION,
-  serverErrorFields,
   serviceUnavailableFrom,
   validateHttpsUrl,
   versionConflictError,
@@ -162,7 +160,8 @@ export interface FromMcpUrlOptions {
 }
 
 /**
- * Envelope returned by {@link KaguraRestClient.request} for 2xx responses.
+ * Envelope returned by {@link KaguraRestClient.request} for 2xx responses,
+ * and handed to the error hooks for any other.
  *
  * Beyond the `{status, headers, text}` triple, it carries the request
  * method and path so {@link KaguraRestClient.json} / `expectList` can name
@@ -180,6 +179,15 @@ export interface RestResponse {
    * `%XX` escapes decoded — `/kagura/api/v1/…/members/a@b/credentials`.
    */
   path: string;
+  /**
+   * A non-2xx response's body, decoded at most once — the `body` Python's
+   * `_request` hands every hook (python-sdk#311). Set by
+   * {@link KaguraRestClient.request} and read through
+   * {@link KaguraRestClient.errorBody}, so a hook handed a copy of the
+   * response (`{...response}`) reads the same decoded body. Absent on a
+   * 2xx response.
+   */
+  errorBody?: ErrorBody;
 }
 
 /**
@@ -303,6 +311,9 @@ function jsonTypeName(value: unknown): string {
  *   error code as `code` and its `details` (the REST envelope's `details`,
  *   or an OAuth-style body's fields) as `details` — set by {@link request},
  *   so every hook's error gets them too
+ *
+ * The error body is decoded once, however many hooks read it: they read
+ * it through {@link errorBody}, never from `response.text`.
  */
 export class KaguraRestClient {
   readonly baseUrl: string;
@@ -510,10 +521,10 @@ export class KaguraRestClient {
       path: requestPath(url, path),
     };
     if (response.status < 200 || response.status >= 300) {
-      // The body's code and fields, read once for the scope and 503 errors
-      // and for the annotation below (the per-status hooks read the body
-      // themselves).
-      const fields = serverErrorFields(envelope.text);
+      // Decoded once, for the scope and 503 errors and the annotation
+      // below, and carried on the response for every hook.
+      envelope.errorBody = new ErrorBody(envelope.text);
+      const fields = envelope.errorBody.fields;
       const err = this.mapStatusError(
         envelope,
         {
@@ -537,6 +548,25 @@ export class KaguraRestClient {
   }
 
   /**
+   * The {@link ErrorBody} of the error `response`: its body decoded at
+   * most once, however many hooks read it — Python's `ErrorBody`, which
+   * `_request` builds and hands to every hook (python-sdk#311). A hook
+   * reads the server's detail, envelope and fields here rather than
+   * decoding `response.text` again.
+   *
+   * {@link request} sets {@link RestResponse.errorBody}, and a copy of the
+   * response carries it along. A response without one, or whose `text` is
+   * not the one it decoded (a hook rebuilt it with other text), gets a new
+   * one, kept on the response for the next reader.
+   */
+  protected errorBody(response: RestResponse): ErrorBody {
+    if (response.errorBody === undefined || response.errorBody.text !== response.text) {
+      response.errorBody = new ErrorBody(response.text);
+    }
+    return response.errorBody;
+  }
+
+  /**
    * Build the Kagura error for a non-2xx response.
    *
    * Hooks RETURN the error rather than throwing it so {@link request}
@@ -546,7 +576,7 @@ export class KaguraRestClient {
   protected mapStatusError(
     response: RestResponse,
     context: RequestContext,
-    fields: ServerErrorFields | null = serverErrorFields(response.text),
+    fields: ServerErrorFields | null = this.errorBody(response).fields,
   ): KaguraError {
     const conflict = this.versionConflictRefusal(response, fields);
     if (conflict !== null) {
@@ -560,13 +590,13 @@ export class KaguraRestClient {
       return insufficientScopeFrom(response.headers, fields) ?? this.error403(response, context);
     }
     if (status === 404) {
-      return new KaguraNotFoundError(extractDetail(response.text) || "Not found");
+      return new KaguraNotFoundError(this.errorBody(response).detail || "Not found");
     }
     if (status === 429) {
       return this.error429(response);
     }
     if (status === 503) {
-      const detail = extractDetail(response.text);
+      const detail = this.errorBody(response).detail;
       return serviceUnavailableFrom(response.headers, detail ? `HTTP 503: ${detail}` : "HTTP 503", fields);
     }
     return this.genericError(response);
@@ -607,13 +637,11 @@ export class KaguraRestClient {
     if (gated instanceof KaguraQuotaError) {
       return gated;
     }
-    const serverMessage =
-      parseErrorEnvelope(response.text)?.code === "RATE-001"
-        ? sanitizeServerDetail(extractDetail(response.text))
-        : null;
+    const body = this.errorBody(response);
+    const serverMessage = body.envelope?.code === "RATE-001" ? sanitizeServerDetail(body.detail) : null;
     return new KaguraQuotaError(
       serverMessage ?? "Quota exceeded. Try again later.",
-      responseRetryAfter(response.headers, response.text),
+      responseRetryAfter(response.headers, body),
     );
   }
 
@@ -639,7 +667,8 @@ export class KaguraRestClient {
    * cap and the plan that lifts it.
    */
   protected gateRefusal(response: RestResponse): KaguraError | null {
-    const envelope = parseErrorEnvelope(response.text);
+    const body = this.errorBody(response);
+    const envelope = body.envelope;
     if (envelope === null) {
       return null;
     }
@@ -647,8 +676,8 @@ export class KaguraRestClient {
       envelope.details,
       envelope.code,
       REST_GATE_CODES,
-      sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
-      responseRetryAfter(response.headers, response.text),
+      sanitizeServerDetail(body.detail) ?? `HTTP ${response.status}`,
+      responseRetryAfter(response.headers, body),
     );
   }
 
@@ -664,7 +693,8 @@ export class KaguraRestClient {
    *
    * @param fields The body's decoded `[code, details]`
    *   ({@link mapStatusError}'s), so any other error returns here without
-   *   reading the body again; only a conflict reads its message.
+   *   reading the body again; only a conflict reads its message, from the
+   *   same decoded body ({@link errorBody}).
    */
   protected versionConflictRefusal(response: RestResponse, fields: ServerErrorFields | null): KaguraError | null {
     if (fields === null || fields[0] !== "RES-002" || fields[1].reason !== "version_conflict") {
@@ -672,14 +702,14 @@ export class KaguraRestClient {
     }
     return versionConflictError(
       fields[0],
-      sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
+      sanitizeServerDetail(this.errorBody(response).detail) ?? `HTTP ${response.status}`,
       fields[1],
     );
   }
 
   /** Any other status → `HTTP <status>: <detail>` connection error. */
   protected genericError(response: RestResponse): KaguraError {
-    const detail = extractDetail(response.text);
+    const detail = this.errorBody(response).detail;
     const msg = detail ? `HTTP ${response.status}: ${detail}` : `HTTP ${response.status}`;
     return new KaguraConnectionError(msg);
   }

@@ -342,6 +342,10 @@ describe("upstream URL query and session id flags (#83)", () => {
     [["--guardrails", "on"], "Invalid value for --guardrails: guardrails must be 'off' or a context UUID, got 'on'"],
     [["--tool-profile="], "Invalid value for --tool-profile: tool_profile must not be empty"],
     [["--tool-profile=-x"], "Invalid value for --tool-profile: tool_profile cannot start with '-': '-x'"],
+    // Trimmed, then checked: Python 0.44.0's kagura-mcp says
+    // `argument --tool-profile: tool_profile must not be empty` / `… '-x'`.
+    [["--tool-profile=  "], "Invalid value for --tool-profile: tool_profile must not be empty"],
+    [["--tool-profile= -x "], "Invalid value for --tool-profile: tool_profile cannot start with '-': '-x'"],
     [["--add-tools", " , "], "Invalid value for --add-tools: must name at least one tool"],
     [["--add-tools", "a", "--add-tools="], "Invalid value for --add-tools: must name at least one tool"],
     [["--add-tools=-x"], "Invalid value for --add-tools: add_tools names cannot start with '-': '-x'"],
