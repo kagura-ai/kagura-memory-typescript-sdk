@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Sleep report and rollback responses now validate against the Python SDK
+  0.44.0 models. `sleep rollback` prints model defaults, preserves exact
+  counters, matches Python's confirmation and cancellation behavior, and
+  prints the partial rollback summary before exiting with an error (#110).
+
 ## [0.15.0] - 2026-11-05
 
 Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud

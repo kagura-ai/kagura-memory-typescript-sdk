@@ -80,7 +80,7 @@ import type {
   UpdateMemoryResult,
   UsageInfo,
 } from "./models.js";
-import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
+import { JsonNestingError, mergeJsonObjects, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
 import { RECALL_FULL_MAX, validateIntRange, validateMaxChars } from "./responseBudget.js";
 import {
@@ -88,6 +88,9 @@ import {
   EMBEDDING_MODELS_RESPONSE,
   EMBEDDING_STATUS,
   MEMORY_STATS_RESPONSE,
+  ROLLBACK_RESULT,
+  ROLLBACK_SUMMARY,
+  SLEEP_REPORT_DETAIL,
   readModel,
   SERVER_INFO,
   type Model,
@@ -1303,19 +1306,6 @@ function readMeasurementResult(data: unknown): MeasurementResult {
   return result!;
 }
 
-const ROLLBACK_COUNTS = [
-  "edges_deleted",
-  "merges_reversed",
-  "merges_unreversible",
-  "importance_restored",
-  "promotions_reversed",
-  "importance_kept",
-  "promotions_kept",
-  "archives_restored",
-  "chunks_requeued",
-  "points_requeued",
-] as const;
-
 /**
  * A partial rollback's `rollback_summary` checked as the Python SDK's
  * `RollbackSummary` model checks it, and returned as it arrived.
@@ -1323,21 +1313,7 @@ const ROLLBACK_COUNTS = [
  * @throws KaguraResponseError in the Python SDK's words.
  */
 function readRollbackSummary(raw: unknown, operation: string): RollbackSummary {
-  const r = new ResponseReader(operation, "RollbackSummary");
-  const obj = r.object(raw);
-  if (obj !== null) {
-    for (const key of ROLLBACK_COUNTS) r.field(obj, key, laxInt, { default: 0 });
-    r.list(
-      obj,
-      "errors",
-      (item, at) => {
-        const checked = laxStr(item);
-        if (!checked.ok) r.refuse(at, checked);
-      },
-      { default: [] },
-    );
-  }
-  r.check();
+  readModel(raw, ROLLBACK_SUMMARY, operation);
   return raw as RollbackSummary;
 }
 
@@ -2652,7 +2628,8 @@ export class KaguraClient {
       const text = typeof first?.text === "string" ? first.text : "{}";
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text);
+        parsed = toolName === "get_sleep_report" || toolName === "rollback_sleep_run"
+          ? parseJsonLossless(text) : JSON.parse(text);
       } catch (e) {
         throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, {
           cause: e,
@@ -4985,10 +4962,13 @@ export class KaguraClient {
     // so SleepReportDetail reads naturally without an extra `.report.`,
     // with the envelope's action page and paging keys where it sent them.
     const report = KaguraClient.expectEnvelope(result, "report", "get_sleep_report");
-    const envelope = SLEEP_REPORT_ENVELOPE_KEYS.filter((key) =>
-      Object.prototype.hasOwnProperty.call(result, key),
-    ).map((key) => [key, result[key]] as const);
-    return { ...report, ...Object.fromEntries(envelope) } as unknown as SleepReportDetail;
+    const envelope = mergeJsonObjects(result);
+    for (const key of Object.keys(envelope)) {
+      if (!(SLEEP_REPORT_ENVELOPE_KEYS as readonly string[]).includes(key)) delete envelope[key];
+    }
+    const detail = mergeJsonObjects(report, envelope);
+    readModel(detail, SLEEP_REPORT_DETAIL, "get_sleep_report");
+    return detail as unknown as SleepReportDetail;
   }
 
   /**
@@ -5038,6 +5018,7 @@ export class KaguraClient {
     const result = await this.callToolChecked("rollback_sleep_run", {
       report_id: options.reportId,
     });
+    readModel(result, ROLLBACK_RESULT, "rollback_sleep_run");
     return result as unknown as RollbackResult;
   }
 

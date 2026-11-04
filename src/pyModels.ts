@@ -728,6 +728,28 @@ export const SLEEP_REPORT_DETAIL: Model = {
   ],
 };
 
+/** Counters for both successful and partial Sleep rollbacks. */
+export const ROLLBACK_SUMMARY: Model = {
+  name: "RollbackSummary",
+  fields: [
+    ...[
+      "edges_deleted", "merges_reversed", "merges_unreversible", "importance_restored",
+      "promotions_reversed", "importance_kept", "promotions_kept", "archives_restored",
+      "chunks_requeued", "points_requeued",
+    ].map((key) => optional(key, "int", 0)),
+    optional("errors", listOf("str"), []),
+  ],
+};
+
+export const ROLLBACK_RESULT: Model = {
+  name: "RollbackResult",
+  fields: [
+    required("report_id", "str"),
+    required("status", "str"),
+    required("rollback_summary", { model: ROLLBACK_SUMMARY }),
+  ],
+};
+
 // Session tools (memory-cloud v0.93.0+, #86): the Python SDK 0.44.0's
 // models for bootstrap, changes_since, list, remember_batch, forget by ids,
 // describe_tools, guide, list_revisions and rollback_session.
