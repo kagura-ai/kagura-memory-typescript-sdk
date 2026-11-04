@@ -18,8 +18,22 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
-const clientSource = fs.readFileSync(path.join(repoRoot, "src", "client.ts"), "utf8");
+
+/**
+ * A text file with LF line endings. A Windows checkout without an eol rule
+ * has CRLF, and the line-anchored regexes here expect a bare `\n`.
+ */
+function readText(file: string): string {
+  return toLf(fs.readFileSync(file, "utf8"));
+}
+
+/** CRLF and lone CR line endings as LF. */
+function toLf(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
+const readme = readText(path.join(repoRoot, "README.md"));
+const clientSource = readText(path.join(repoRoot, "src", "client.ts"));
 
 /**
  * The body of `export class KaguraClient { ... }`, by brace depth.
@@ -240,12 +254,37 @@ describe("README parity target", () => {
   });
 });
 
+/**
+ * The first release section of a compatibility record (LF line endings):
+ * from its `## X.Y.Z` heading to the next `## `, whitespace folded.
+ */
+function firstSection(record: string): { version: string; text: string } {
+  const match = /^## (\d+\.\d+\.\d+)\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(record);
+  if (!match) {
+    throw new Error("docs/compatibility.md has no `## X.Y.Z` release section");
+  }
+  return { version: match[1]!, text: fold(match[2]!) };
+}
+
 describe("versionTriple", () => {
   it("ignores a pre-release or build suffix", () => {
     expect(versionTriple("0.15.0")).toEqual([0, 15, 0]);
     expect(versionTriple("0.15.0-rc.1")).toEqual([0, 15, 0]);
     expect(versionTriple("1.2.3+build.5")).toEqual([1, 2, 3]);
     expect(() => versionTriple("0.15")).toThrow("not a MAJOR.MINOR.PATCH version");
+  });
+});
+
+describe("firstSection", () => {
+  it("reads a CRLF record once its line endings are LF", () => {
+    // A Windows checkout without an eol rule has CRLF; read through toLf.
+    const crlf = "# T\r\n\r\nintro\r\n\r\n## 0.15.0\r\n\r\n**Min** a\r\nb\r\n\r\n## 0.14.1\r\n\r\nold\r\n";
+    expect(() => firstSection(crlf)).toThrow("has no `## X.Y.Z` release section");
+    const first = firstSection(toLf(crlf));
+    expect(first.version).toBe("0.15.0");
+    expect(first.text.trim()).toBe("**Min** a b");
+    // The last section runs to the end of the record.
+    expect(firstSection("## 0.15.0\nonly\n").text.trim()).toBe("only");
   });
 });
 
@@ -261,16 +300,7 @@ describe("docs/compatibility.md (#93)", () => {
     if (!fs.existsSync(compatPath)) {
       throw new Error("docs/compatibility.md is missing (#93)");
     }
-    return fs.readFileSync(compatPath, "utf8");
-  }
-
-  /** The first release section: from its `## X.Y.Z` heading to the next `## `. */
-  function firstSection(): { version: string; text: string } {
-    const match = /^## (\d+\.\d+\.\d+)\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(compat());
-    if (!match) {
-      throw new Error("docs/compatibility.md has no `## X.Y.Z` release section");
-    }
-    return { version: match[1]!, text: fold(match[2]!) };
+    return readText(compatPath);
   }
 
   it("states the MIN_SERVER_VERSION src/client.ts defines", () => {
@@ -285,7 +315,7 @@ describe("docs/compatibility.md (#93)", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
       version: string;
     };
-    const a = versionTriple(firstSection().version);
+    const a = versionTriple(firstSection(compat()).version);
     const b = versionTriple(pkg.version);
     const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
     expect(cmp).toBeGreaterThanOrEqual(0);
@@ -293,7 +323,7 @@ describe("docs/compatibility.md (#93)", () => {
 
   it("gives its first section MIN_SERVER_VERSION and the README's parity target", () => {
     const { python, server } = readmeParity();
-    expect(firstSection().text).toContain(
+    expect(firstSection(compat()).text).toContain(
       `**Min memory-cloud:** ${minServer} — checked against memory-cloud up to **${server}** ` +
         `(parity target: the Python SDK and CLI ${python},`,
     );
