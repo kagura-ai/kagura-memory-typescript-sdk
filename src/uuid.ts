@@ -35,6 +35,17 @@ export function parseUuid(value: string): string {
   );
 }
 
+/**
+ * True when `value` is a UUID in the dashed 8-4-4-4-12 form, either case —
+ * the Python SDK's `is_canonical_uuid`. The other spellings `parseUuid`
+ * takes (dashless, `{braces}`, `urn:uuid:`, padded) are not: `setup`
+ * takes this form as a context id without looking it up by name, since a
+ * dashless 32-hex string can be a context name too.
+ */
+export function isCanonicalUuid(value: string): boolean {
+  return CANONICAL_RE.test(value);
+}
+
 /** True when `value` is any parseable UUID spelling. */
 export function isUuid(value: string): boolean {
   if (CANONICAL_RE.test(value)) {

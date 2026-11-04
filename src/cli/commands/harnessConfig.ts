@@ -154,7 +154,7 @@ function unquotePlus(text: string): string {
  * A value as Python's `urlencode` writes it (`quote_plus`): `+` for a
  * space, and `!'()*`, which `encodeURIComponent` leaves bare, escaped.
  */
-function quotePlus(text: string): string {
+export function quotePlus(text: string): string {
   return encodeURIComponent(text)
     .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
     .replace(/%20/g, "+");

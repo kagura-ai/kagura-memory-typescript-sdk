@@ -42,7 +42,8 @@ import { loadCredentialsFile, type CredentialsFile } from "../../auth/credential
 import { DEFAULT_MCP_URL } from "../../auth/resolve.js";
 import { SOURCE_LABEL, type ResolvedAuth } from "../../auth/types.js";
 import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
-import { KaguraAuthError, KaguraNotFoundError, excMessage } from "../../errors.js";
+import type { KaguraClient } from "../../client.js";
+import { KaguraAuthError, KaguraConnectionError, KaguraNotFoundError, excMessage } from "../../errors.js";
 import { hasGuardrailBlock, writeGuardrailBlock, type GuardrailBlockStatus } from "../../guardrailExport.js";
 import { baseUrlFromMcp, validateHttpsUrl } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
@@ -57,6 +58,13 @@ import { CliError, CliUsageError, parseChoice, quote } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import type { CliDeps } from "../run.js";
 import { resolveConfig } from "../runClientCommand.js";
+import {
+  dryRunContext,
+  lookupContext,
+  showGuardrailsPlaceholder,
+  unknownContextWarning,
+  type ContextLookup,
+} from "./contextLookup.js";
 import {
   KEY_ENV_VAR,
   codexTomlBlock,
@@ -605,9 +613,9 @@ function resolveInput(args: ParsedArgs): SetupInput {
   // The entry and .kagura.json give Claude Code the key for this URL, which
   // sends it with every request. Python's setup claude tests the connection
   // before it writes anything, with a client that refuses plain HTTP to a
-  // host other than localhost; this port makes no connection, so it runs
-  // that check alone, in Python's words and with its exit 1, whichever
-  // source the URL came from.
+  // host other than localhost; this port connects only to look up a
+  // context name (resolveClaudeContext), so it runs that check alone, in
+  // Python's words and with its exit 1, whichever source the URL came from.
   try {
     validateHttpsUrl(baseUrl, "MCP URL");
   } catch (e) {
@@ -625,6 +633,67 @@ function resolveInput(args: ParsedArgs): SetupInput {
     kagura,
     secrets: knownKeys(apiKey, own("api_key")),
   };
+}
+
+/**
+ * `setup claude`'s error for a failed request on the setup key — Python's
+ * `_connection_error` for an API key, naming `server`; null for any other
+ * failure.
+ */
+function connectionError(e: unknown, server: string): CliError | null {
+  if (e instanceof KaguraAuthError) {
+    return new CliError(
+      `Authentication failed: ${excMessage(e)}\n  Check your API key at: Kagura Web UI > Integrations > API Keys`,
+    );
+  }
+  if (e instanceof KaguraConnectionError) {
+    return new CliError(
+      `Cannot connect to ${server}: ${excMessage(e)}\n  Is the server running? Try: docker compose up -d`,
+    );
+  }
+  return null;
+}
+
+/**
+ * The context `setup claude` writes: `input.contextId` (`-c`, else
+ * `.kagura.json`'s, else KAGURA_CONTEXT_ID), trimmed, with a name resolved
+ * to its id on the setup key and URL — Python's `_select_or_create_context`
+ * for a preselected value (python-sdk#309, {@link lookupContext}).
+ *
+ * No value and a dashed UUID send no request. A value no page matches is
+ * still used as given, after Python's stderr warning when it names no
+ * context this credential can see. Python's connection check reads the
+ * first page and its failures get its hints, or `Connection failed: …`;
+ * the later pages' get the same hints, or `Setup failed: …`. Each stops
+ * setup (exit 1) before anything is run or written.
+ */
+async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<string> {
+  const holder: { client?: KaguraClient } = {};
+  // Built on first use, so a value that needs no lookup builds no client.
+  const client = (): KaguraClient =>
+    (holder.client ??= deps.makeClient({ apiKey: input.apiKey, mcpUrl: input.baseUrl }));
+  let found: ContextLookup;
+  try {
+    found = await lookupContext(
+      input.contextId,
+      async () => {
+        try {
+          return await client().listContexts();
+        } catch (e) {
+          throw connectionError(e, input.baseUrl) ?? new CliError(`Connection failed: ${excMessage(e)}`);
+        }
+      },
+      (options) => client().listContexts(options),
+    );
+  } catch (e) {
+    if (e instanceof CliError) throw e;
+    throw connectionError(e, input.baseUrl) ?? new CliError(`Setup failed: ${excMessage(e)}`);
+  } finally {
+    await holder.client?.close();
+  }
+  if (found.context !== null) return String(found.context.id);
+  if (found.unknown) deps.writeError(unknownContextWarning(found.value));
+  return found.value;
 }
 
 /** Merge the key, URL and context into `.kagura.json`; returns its path. */
@@ -1389,6 +1458,9 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
     );
   }
 
+  // A context name, resolved to its id before anything is run or written.
+  input.contextId = await resolveClaudeContext(deps, input);
+
   const pluginId = await detectClaudePlugin(deps, claude, input.projectDir);
 
   const wrote: string[] = [];
@@ -1514,6 +1586,7 @@ interface HarnessInput {
   /**
    * The AGENTS.md export's context: `-c`, else a `--guardrails` UUID.
    * Never the URL's `?guardrails=` and never `.kagura.json`, as in Python.
+   * In a dry run, as Python shows it ({@link dryRunContext}).
    */
   exportContext: string | undefined;
   /** The configuration, for the export's credential; null when it could not be loaded. */
@@ -1729,7 +1802,11 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
     guardrails,
     toolProfile,
     agentsMd,
-    exportContext: flagContext ?? (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
+    // A dry run shows -c in any spelling but the dashed UUID as Python's
+    // `<UUID of context VALUE>` placeholder (_dry_run_context).
+    exportContext:
+      (flagContext !== undefined && args.flags.has("dry-run") ? dryRunContext(rawContext!) : flagContext) ??
+      (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
     config,
     keyEnv,
     oauth,
@@ -2607,12 +2684,16 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
           "setup asks for it; --guardrails overrides).",
       );
     } else if (input.contextFlag) {
-      // A UUID, canonical: resolveHarnessInput refused anything else.
-      guardrails = input.contextId;
+      // A UUID, canonical: resolveHarnessInput refused anything else. A
+      // dry run's placeholder for one in another spelling, as in Python.
+      guardrails = input.exportContext;
     }
   }
   notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile));
-  const url = mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile });
+  const url = showGuardrailsPlaceholder(
+    mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile }),
+    guardrails,
+  );
 
   const codex = deps.which("codex");
   if (input.oauth) {
@@ -3146,6 +3227,9 @@ const claude: Command = {
     "  and project scope the closest .mcp.json defining kagura-memory, here or\n" +
     "  in a parent directory, as Claude Code reads them. A re-run without\n" +
     "  --guardrails or --tool-profile drops an earlier value, and says so.\n\n" +
+    "  A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) other than a\n" +
+    "  dashed UUID is looked up by exact name on every list_contexts page, and\n" +
+    "  its id is written; a dashed UUID or no context sends no request.\n\n" +
     "  This port installs no hooks or slash commands: the Python CLI's flags\n" +
     "  for them, and --no-auto-context, are accepted and change nothing.\n\n" +
     GUARDRAILS_ADVICE +
