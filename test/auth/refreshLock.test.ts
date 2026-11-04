@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as util from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -313,6 +314,41 @@ describe("two processes refreshing one profile (#92)", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("the skew path refreshes a different token on file that is inside the skew window, from the file", async () => {
+    seed({
+      default: creds({ accessToken: "atok-peer", refreshToken: "rtok-peer", expiresAt: new Date(Date.now() + 10_000) }),
+    });
+    const endpoint = singleUseEndpoint({ "rtok-peer": ["atok-2", "rtok-2", 3600] });
+    const result = await refreshProfileLocked("default", {
+      expectedStaleToken: null,
+      fallback: creds({ expiresAt: new Date(Date.now() + 10_000) }),
+      credentialsPath,
+      fetch: endpoint.fetch,
+    });
+    expect(endpoint.sent).toEqual(["rtok-peer"]);
+    expect(result).toEqual({ credentials: expect.objectContaining({ accessToken: "atok-2" }), refreshed: true });
+  });
+
+  // gate1 of #92: a different token on file is another process's rotation
+  // only while it is live. One that expired as well (a file put back from
+  // an older copy, a writer whose clock is behind) is refreshed — from the
+  // refresh token on file, the latest — not reported as "already refreshed".
+  it("the forced path does not adopt a different token on file that has expired too", async () => {
+    seed({
+      default: creds({ accessToken: "atok-old", refreshToken: "rtok-disk", expiresAt: new Date(Date.now() - 1000) }),
+    });
+    const endpoint = singleUseEndpoint({ "rtok-disk": ["atok-2", "rtok-2", 3600] });
+    const result = await refreshProfileLocked("default", {
+      expectedStaleToken: "atok-1",
+      fallback: creds(),
+      credentialsPath,
+      fetch: endpoint.fetch,
+    });
+    expect(endpoint.sent).toEqual(["rtok-disk"]);
+    expect(result).toEqual({ credentials: expect.objectContaining({ accessToken: "atok-2" }), refreshed: true });
+    expect([onDisk()?.accessToken, onDisk()?.refreshToken]).toEqual(["atok-2", "rtok-2"]);
+  });
+
   it("a scope always reaches the server, from the refresh token on file", async () => {
     seed({ default: creds({ accessToken: "atok-peer", refreshToken: "rtok-peer" }) });
     const endpoint = singleUseEndpoint({ "rtok-peer": ["atok-narrow", "rtok-narrow", 3600] });
@@ -333,6 +369,25 @@ describe("two processes refreshing one profile (#92)", () => {
     await refresh({ credentialsPath, profile: "default", fetch: endpoint.fetch });
     const cf = loadCredentialsFile(credentialsPath);
     expect(cf.defaultProfile).toBe("work");
+    expect(cf.profiles.work?.accessToken).toBe("work-token");
+    expect(cf.profiles.default?.accessToken).toBe("atok-2");
+  });
+
+  // The one deliberate difference from Python's refresh_profile_locked: the
+  // file is loaded again before the save, since a Python process's OS lock
+  // does not exclude this package's lock file and may write meanwhile.
+  it("keeps a profile written during the round-trip by a writer that does not see this lock", async () => {
+    seed({ default: creds() });
+    const fetch = (async () => {
+      const cf = loadCredentialsFile(credentialsPath);
+      setProfile(cf, "work", creds({ accessToken: "work-token" }));
+      saveCredentialsFile(cf, credentialsPath);
+      return Response.json({ access_token: "atok-2", refresh_token: "rtok-2", expires_in: 3600 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await refreshProfileLocked("default", { expectedStaleToken: "atok-1", fallback: creds(), credentialsPath, fetch });
+
+    const cf = loadCredentialsFile(credentialsPath);
     expect(cf.profiles.work?.accessToken).toBe("work-token");
     expect(cf.profiles.default?.accessToken).toBe("atok-2");
   });
@@ -385,6 +440,35 @@ describe("a refreshed profile that cannot be saved (#92)", () => {
     expect([onDisk()?.accessToken, onDisk()?.refreshToken]).toEqual(["old", "rtok-old"]);
     // No temporary file is left behind.
     expect(fs.readdirSync(dir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  // It reaches every caller of a client whose refresh could not be saved;
+  // Node's inspect (console.error) and JSON loggers print an error's own
+  // enumerable properties, and its cause's.
+  it("keeps the tokens it carries out of what a logger prints", async () => {
+    seed({ default: creds({ accessToken: "atok-on-file", refreshToken: "rtok-on-file" }) });
+    const state = independentState(creds({ accessToken: "atok-on-file", refreshToken: "rtok-on-file" }));
+    const endpoint = singleUseEndpoint({ "rtok-on-file": ["atok-live-secret", "rtok-live-secret", 3600] });
+    failRename.errors = [erofs()];
+
+    const error = await new KaguraOAuth(state, { fetch: endpoint.fetch }).forceRefresh().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RefreshNotSavedError);
+    const notSavedError = error as RefreshNotSavedError;
+    // Still there for the shared state to keep...
+    expect(notSavedError.credentials.accessToken).toBe("atok-live-secret");
+    expect(notSavedError.usedRefreshToken).toBe("rtok-on-file");
+    // ...but in nothing a logger prints, also as another error's cause.
+    const printed = [
+      util.inspect(notSavedError, { depth: 10 }),
+      util.inspect(new Error("request failed", { cause: notSavedError }), { depth: 10 }),
+      JSON.stringify(notSavedError),
+      notSavedError.message,
+    ];
+    for (const shown of printed) {
+      for (const secret of ["atok-live-secret", "rtok-live-secret", "rtok-on-file", "atok-on-file"]) {
+        expect(shown).not.toContain(secret);
+      }
+    }
   });
 
   it("refresh() throws it too, and the profile on file is left as it was", async () => {

@@ -1084,9 +1084,10 @@ second gets `invalid_grant`. So every refresh — `KaguraOAuth` in a client or
 in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
 `auth token` — takes the lock on `credentials.json` (a sibling
 `credentials.json.lock`), re-reads the profile, and when another process
-already rotated it, uses that profile and sends nothing; otherwise it
-refreshes from the refresh token on file and saves the result before it
-releases the lock. The device flow a widening `--scope` falls back to runs
+already rotated it to a token that has not expired, uses that profile and
+sends nothing; otherwise it refreshes from the refresh token on file and
+saves the result before it releases the lock. (Python 0.44.0 also adopts a
+different token that has expired; this SDK refreshes it instead.) The device flow a widening `--scope` falls back to runs
 after the lock is released, since it waits on the user. The Python SDK
 locks the same `credentials.json.lock` with an OS lock, which Node does not
 have, so the two SDKs' locks do not exclude each other: between them only

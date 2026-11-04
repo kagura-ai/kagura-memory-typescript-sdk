@@ -818,12 +818,20 @@ export class KaguraOAuth implements AuthProvider {
  * `usedRefreshToken` (`null` when the profile was not in the file).
  * Python's `_RefreshNotSavedError`.
  *
+ * Both fields are non-enumerable: this error reaches every caller of a
+ * client whose refresh could not be saved, and `console.error(e)`,
+ * `util.inspect` and JSON loggers print an error's own enumerable
+ * properties (and its `cause`'s) — that would write the live access and
+ * refresh token to the log.
+ *
  * @internal Not exported from the package entry point: catch
  *   `KaguraAuthError`.
  */
 export class RefreshNotSavedError extends CredentialsFileError {
-  readonly credentials: OAuthCredentials;
-  readonly usedRefreshToken: string | null;
+  // `declare`: no class field is emitted (ES2022 would define an
+  // enumerable one); the constructor defines them non-enumerable.
+  declare readonly credentials: OAuthCredentials;
+  declare readonly usedRefreshToken: string | null;
 
   constructor(
     message: string,
@@ -832,8 +840,10 @@ export class RefreshNotSavedError extends CredentialsFileError {
     options?: KaguraErrorOptions,
   ) {
     super(message, options);
-    this.credentials = credentials;
-    this.usedRefreshToken = usedRefreshToken;
+    Object.defineProperties(this, {
+      credentials: { value: credentials, enumerable: false },
+      usedRefreshToken: { value: usedRefreshToken, enumerable: false },
+    });
   }
 }
 
@@ -859,8 +869,8 @@ export interface RefreshProfileLockedOptions {
    * Governs the "already rotated?" check. `null` (skew path) → skip when
    * the on-disk token is outside `REFRESH_SKEW_SEC` of expiry. A token
    * (forced path: an upstream 401, `auth refresh`) → skip only when the
-   * on-disk token differs from it; the same token means nobody has rotated
-   * yet (a 401 is independent of `expiresAt`).
+   * on-disk token differs from it and has not expired; the same token
+   * means nobody has rotated yet (a 401 is independent of `expiresAt`).
    */
   expectedStaleToken: string | null;
   /**
@@ -1006,9 +1016,13 @@ function alreadyRotated(disk: OAuthCredentials, expectedStaleToken: string | nul
     // Skew path: a token outside the skew window is fresh enough.
     return !isExpired(disk, REFRESH_SKEW_SEC);
   }
-  // Forced path: a different token means someone rotated; an identical
-  // token means the stale token is still current and we must refresh.
-  return disk.accessToken !== expectedStaleToken;
+  // Forced path: a different token means someone rotated, unless it has
+  // expired too (a file put back from an older copy, a writer whose clock
+  // is behind): there is nothing fresh to adopt, so refresh, from the
+  // refresh token on file. An identical token means the stale token is
+  // still current and we must refresh. (Python's `_already_rotated` adopts
+  // any different token; the gate1 design of #92 requires a live one.)
+  return disk.accessToken !== expectedStaleToken && !isExpired(disk);
 }
 
 /** Hit `/oauth/token/` with `base`'s refresh token. Caller holds the file lock. */

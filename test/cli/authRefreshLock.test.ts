@@ -183,13 +183,17 @@ function run(argv: string[], fetch: ReturnType<typeof tokenEndpoint>) {
  * file, then waits; holding it, it saves `PEER` (consuming `rtok-1`) and
  * releases. The CLI can only see the rotation by re-reading under the lock.
  */
-async function peerRotatesWhileCliWaits(argv: string[], fetch: ReturnType<typeof tokenEndpoint>) {
+async function peerRotatesWhileCliWaits(
+  argv: string[],
+  fetch: ReturnType<typeof tokenEndpoint>,
+  peer: OAuthCredentials = PEER,
+) {
   const lock = await acquireFileLock(credentialsPath);
   let result: ReturnType<typeof run>;
   try {
     result = run(argv, fetch);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    seed(PEER);
+    seed(peer);
   } finally {
     lock.release();
   }
@@ -204,6 +208,19 @@ describe("auth refresh on the locked path (#92)", () => {
     expect(fetch).not.toHaveBeenCalled();
     const onDisk = getProfile(loadCredentialsFile(credentialsPath));
     expect([onDisk?.accessToken, onDisk?.refreshToken]).toEqual(["atok-peer", "rtok-peer"]);
+  });
+
+  it("does not say 'already refreshed' for a different token on file that has expired too (#92 gate1)", async () => {
+    seed(creds());
+    const fetch = tokenEndpoint();
+    const stalePeer = creds({ accessToken: "atok-peer", refreshToken: "rtok-peer", expiresAt: new Date(Date.now() - 1000) });
+    const result = await peerRotatesWhileCliWaits(["auth", "refresh"], fetch, stalePeer);
+    expect(result.code).toBe(0);
+    expect(result.stdout.startsWith(PYTHON.refreshRefreshed.stdout)).toBe(true);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(new URLSearchParams(String(fetch.mock.calls[0]?.[1]?.body)).get("refresh_token")).toBe("rtok-peer");
+    const onDisk = getProfile(loadCredentialsFile(credentialsPath));
+    expect([onDisk?.accessToken, onDisk?.refreshToken]).toEqual(["atok-2", "rtok-2"]);
   });
 
   it("prints Python's lines after a refresh of its own", async () => {
@@ -266,6 +283,19 @@ describe("auth token on the locked path (#92)", () => {
     // Python also writes its expiry warning to stderr; this bin does not.
     expect({ code: result.code, stdout: result.stdout }).toEqual(PYTHON.tokenAdopted);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  // gate1 of #92: only a live token is adopted. A different one that has
+  // expired as well is refreshed, from the refresh token on file, and the
+  // refreshed token is printed — never the expired one.
+  it("refreshes, from the file, a different token another process saved that has expired too", async () => {
+    seed(EXPIRED);
+    const fetch = tokenEndpoint();
+    const stalePeer = creds({ accessToken: "atok-peer", refreshToken: "rtok-peer", expiresAt: new Date(Date.now() - 1000) });
+    const result = await peerRotatesWhileCliWaits(["auth", "token"], fetch, stalePeer);
+    expect({ code: result.code, stdout: result.stdout }).toEqual({ code: 0, stdout: "atok-2\n" });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(new URLSearchParams(String(fetch.mock.calls[0]?.[1]?.body)).get("refresh_token")).toBe("rtok-peer");
   });
 
   it("exits 1 without the token when the refreshed profile cannot be saved", async () => {
