@@ -7,7 +7,7 @@ on:
 
 jobs:
   minimum-runtime:
-    name: MCPB minimum runtime (Node 18.0.0)
+    name: MCPB minimum runtime (Node 20.19.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
         run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
-          node-version: 18.0.0
+          node-version: 20.19.0
       - name: Exercise extracted bundle on the exact runtime floor
         run: '"${{ steps.harness.outputs.node }}" scripts/smoke-mcpb.mjs "$(command -v node)"'
 
@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-        node: [18, 22]
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,7 +43,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run test:no-webcrypto
       - run: npm run build:mcpb
       - run: npm run test:mcpb
       - name: Reproducible bundle
@@ -59,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -69,13 +68,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      # The same suite with globalThis.crypto removed, i.e. Node 18's world
-      # (#28). age-encryption reaches @noble, which reads
-      # crypto.getRandomValues, so encrypt and keygen broke there while
-      # decrypt kept working — an asymmetry only one leg of this matrix could
-      # see. Running it everywhere means the next such regression fails on
-      # whichever leg finishes first, and reproduces locally.
-      - run: npm run test:no-webcrypto
       - run: npm run build
       - name: Pack and install smoke test
         shell: bash
