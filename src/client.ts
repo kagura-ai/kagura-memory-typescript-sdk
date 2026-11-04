@@ -882,10 +882,10 @@ export interface ListMatchingOptions {
  * One `rememberBatch` item: the server's `remember` arguments by their
  * wire names, as sent — no SDK defaults are added, and an undeclared key
  * fails that item (`invalid_argument`; a whole atomic batch is refused).
- * `summary`, `content` and `type` are required (every item needs
- * `content` since memory-cloud v0.98.1). An item may repeat the batch's
- * `context_id` but name no other; `dedupe`, `tags_normalize` and `verbose`
- * are set on the batch, never on an item.
+ * `summary`, `content` and `type` are required: an item without one fails
+ * (`missing_fields`) on every server since v0.93.0. An item may repeat the
+ * batch's `context_id` but name no other; `dedupe`, `tags_normalize` and
+ * `verbose` are set on the batch, never on an item.
  */
 export interface RememberBatchItem {
   summary: string;
