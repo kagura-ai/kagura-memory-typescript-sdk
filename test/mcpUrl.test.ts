@@ -25,6 +25,7 @@ import {
   parseMcpUrl,
   queryParam,
   readAddToolsFlag,
+  splitWithoutQueryParam,
   withoutQuery,
   withoutQueryParam,
   type McpUrlQuery,
@@ -332,5 +333,49 @@ describe("parseMcpUrl (one split for the readers and the composer)", () => {
     expect(mcpUrlWithQuery(parseMcpUrl(url), {})).toBe(url);
     expect(mcpUrlWithQuery(parseMcpUrl(url), { addTools: [" , "] })).toBe(url);
     expect(withoutQueryParam(parseMcpUrl(url), "guardrails")).toBe(url);
+  });
+
+  it("decodes the query once, and only for a reader of it", () => {
+    const parsed = parseMcpUrl(`${B}?guard%72ails=off&profile=core`);
+    const query = Object.getOwnPropertyDescriptor(parsed, "query")!;
+    let decodes = 0;
+    Object.defineProperty(parsed, "query", {
+      get: () => {
+        decodes += 1;
+        return query.get!.call(parsed);
+      },
+    });
+    // Rewriting the query reads no value of it.
+    withoutQuery(parsed);
+    withoutQueryParam(parsed, "guardrails");
+    splitWithoutQueryParam(parsed, "profile");
+    mcpUrlWithQuery(parsed, { guardrails: "off", profile: "full" });
+    expect(decodes).toBe(0);
+    // A reader decodes it, once for every later read.
+    const first = parsed.query;
+    expect(first).toEqual(new Map([["guardrails", "off"], ["profile", "core"]]));
+    expect(parsed.query).toBe(first);
+    expect(queryParam(parsed, "guardrails")).toBe("off");
+  });
+
+  it.each([
+    `${B}?guardrails=x&profile=full&keep=a,b#frag`,
+    `${B}?guardrails=a&guard%72ails=off&add_tools=explore`,
+    `HTTPS://X.test/mcp?guardrails=${U}&tools=recall#`,
+    `${B}?guardrails=`,
+    `${B}?keep=1`,
+    B,
+  ])("splitWithoutQueryParam(%s) is withoutQueryParam, still split", (url) => {
+    const split = splitWithoutQueryParam(url, "guardrails");
+    expect(split.url).toBe(withoutQueryParam(url, "guardrails"));
+    // Read and composed as the URL it stands for.
+    const reparsed = parseMcpUrl(split.url);
+    expect(split.params).toEqual(reparsed.params);
+    expect([...split.query]).toEqual([...reparsed.query]);
+    expect(mcpUrlToolView(split)).toEqual(mcpUrlToolView(split.url));
+    expect(withoutQuery(split)).toBe(withoutQuery(split.url));
+    const updates: McpUrlQuery = { guardrails: "off", profile: "core", addTools: ["explore"] };
+    expect(mcpUrlWithQuery(split, updates)).toBe(mcpUrlWithQuery(split.url, updates));
+    expect(mcpUrlWithQuery(split, {})).toBe(split.url);
   });
 });

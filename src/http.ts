@@ -156,7 +156,12 @@ export interface ParsedMcpUrl {
   readonly params: readonly string[];
   /** `#` and the fragment; `""` without one. */
   readonly fragment: string;
-  /** {@link mcpUrlQueryValues} of the URL: each decoded name's first value. */
+  /**
+   * {@link mcpUrlQueryValues} of the URL: each decoded name's first value.
+   * Decoded the first time it is read, so a caller that only rewrites the
+   * query ({@link withoutQuery}, {@link withoutQueryParam},
+   * {@link mcpUrlWithQuery}) decodes no value.
+   */
   readonly query: ReadonlyMap<string, string>;
 }
 
@@ -170,7 +175,22 @@ export type McpUrl = string | ParsedMcpUrl;
 export function parseMcpUrl(url: McpUrl): ParsedMcpUrl {
   if (typeof url !== "string") return url;
   const { base, params, fragment } = splitUrl(url);
-  return { url, base, params, fragment, query: firstValues(params) };
+  return parsedUrl(url, base, params, fragment);
+}
+
+/** The {@link ParsedMcpUrl} of a URL's parts, its `query` decoded when first read. */
+function parsedUrl(url: string, base: string, params: readonly string[], fragment: string): ParsedMcpUrl {
+  let query: ReadonlyMap<string, string> | undefined;
+  return {
+    url,
+    base,
+    params,
+    fragment,
+    get query(): ReadonlyMap<string, string> {
+      query ??= firstValues(params);
+      return query;
+    },
+  };
 }
 
 /**
@@ -201,10 +221,20 @@ export function mcpUrlGuardrailsOff(url: McpUrl): boolean {
  * ({@link joinUrl}).
  */
 export function withoutQueryParam(url: McpUrl, key: string): string {
-  const { url: given, base, params, fragment } = parseMcpUrl(url);
+  return splitWithoutQueryParam(url, key).url;
+}
+
+/**
+ * {@link withoutQueryParam}, still split: for a caller that composes the
+ * result next ({@link mcpUrlWithQuery}), so the URL is not split again.
+ * Its `url` is what {@link withoutQueryParam} returns.
+ */
+export function splitWithoutQueryParam(url: McpUrl, key: string): ParsedMcpUrl {
+  const parsed = parseMcpUrl(url);
+  const { base, params, fragment } = parsed;
   const kept = params.filter((param) => paramName(param) !== key);
-  if (kept.length === params.length) return given;
-  return joinUrl(base, kept, fragment);
+  if (kept.length === params.length) return parsed;
+  return parsedUrl(joinUrl(base, kept, fragment), base, kept, fragment);
 }
 
 /**

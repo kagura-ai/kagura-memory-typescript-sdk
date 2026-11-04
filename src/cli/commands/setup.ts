@@ -57,8 +57,9 @@ import {
   parseMcpUrl,
   queryParam,
   validateHttpsUrl,
-  withoutQueryParam,
+  splitWithoutQueryParam,
   type McpUrl,
+  type ParsedMcpUrl,
 } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
@@ -2653,7 +2654,7 @@ function codexHooksEnabled(codexHome: string, name: string): boolean {
  * shows. Read by {@link mcpUrlToolView}, as the server reads it; a blank
  * value is left out, and so is a list naming no tool.
  */
-function digestViewArgs(url: string): string[] {
+function digestViewArgs(url: McpUrl): string[] {
   const view = mcpUrlToolView(url);
   const values = [view.profile, (view.tools ?? []).join(","), view.addTools.join(",")];
   return (["--profile", "--tools", "--add-tools"] as const).flatMap((flag, i) =>
@@ -2662,7 +2663,7 @@ function digestViewArgs(url: string): string[] {
 }
 
 /** The `guardrails digest` preview of `context` on the entry `url`'s tool view, in this bin's name. */
-function digestPreview(context: string, url: string): string {
+function digestPreview(context: string, url: McpUrl): string {
   return shellCommand([
     "kagura-memory",
     "guardrails",
@@ -2678,10 +2679,10 @@ function digestPreview(context: string, url: string): string {
  * Python's closing notes on a Codex entry whose URL names a guardrails
  * context, with its preview command in this bin's name.
  */
-function codexDigestNotes(context: string, url: string, keyEnv: string): string[] {
+function codexDigestNotes(context: string, url: ParsedMcpUrl, keyEnv: string): string[] {
   // On the entry's own credential: its key variable, on its server.
   const env = keyEnv === KEY_ENV_VAR ? [] : [`KAGURA_API_KEY="\${${keyEnv}}"`];
-  env.push(`KAGURA_MCP_URL=${shellQuote(url)}`);
+  env.push(`KAGURA_MCP_URL=${shellQuote(url.url)}`);
   const preview = [...env, digestPreview(context, url)];
   return [
     `Codex should get the tool guardrail digest of context ${context} in the MCP instructions when ` +
@@ -2781,8 +2782,8 @@ function brokenConfig(deps: CliDeps): string | null {
  * there; else after a login there. Pinning the server with KAGURA_MCP_URL
  * would send KAGURA_API_KEY, a key for another server, to it.
  */
-function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: string): string[] {
-  const server = deployment(url);
+function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: ParsedMcpUrl): string[] {
+  const server = deployment(url.url);
   const digest = digestPreview(context, url);
   const reads = "(Codex gets what the account it signed in with can read):";
   let preview: string;
@@ -2864,6 +2865,8 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     { guardrails, profile: input.toolProfile, addTools: input.addTools },
     { guardrailsAsIs: placeholder },
   );
+  // Read for the guardrails lane and the digest preview: split once.
+  const written = parseMcpUrl(url);
 
   const codex = deps.which("codex");
   if (input.oauth) {
@@ -2886,9 +2889,9 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     const tokenStore =
       `the OS keyring ("Codex MCP Credentials"; on Windows, its encrypted secrets store in ${pathLabel(home)}), ` +
       `else in ${pathLabel(pathlibJoin(home, ".credentials.json"))}`;
-    const lane = queryParam(url, "guardrails");
+    const lane = queryParam(written, "guardrails");
     const after = [oauthLoginNote("codex", name, cli.program !== null, tokenStore)];
-    if (lane !== undefined && isUuid(lane)) after.push(...codexOauthDigestNotes(deps, input, parseUuid(lane), url));
+    if (lane !== undefined && isUuid(lane)) after.push(...codexOauthDigestNotes(deps, input, parseUuid(lane), written));
     after.push(
       "Restart Codex (or start a new session) to load the entry.",
       `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
@@ -2912,8 +2915,8 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
       `starts Codex, e.g. \`export ${keyEnv}=<your-api-key>\` in your shell profile. ` +
       "(Codex refuses an inline bearer_token on a URL entry.)",
   ];
-  const lane = queryParam(url, "guardrails");
-  if (lane !== undefined && isUuid(lane)) after.push(...codexDigestNotes(parseUuid(lane), url, keyEnv));
+  const lane = queryParam(written, "guardrails");
+  if (lane !== undefined && isUuid(lane)) after.push(...codexDigestNotes(parseUuid(lane), written, keyEnv));
   after.push(
     "Restart Codex (or start a new session) to load the entry.",
     `Check it with: ${shellCommand(["codex", "mcp", "get", name])}`,
@@ -2956,7 +2959,7 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
  * that a `?tools=` allowlist overrides it, in Python's order.
  */
 function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
-  // Read for the warnings and then rewritten: split once.
+  // Split once, for the warnings and the one composer call below.
   const given = parseMcpUrl(input.baseUrl);
   notes.push(...toolsAllowlistWarning(given, input.toolProfile, input.addTools));
   const title = LABEL[input.harness];
@@ -2964,15 +2967,17 @@ function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
   const source = input.urlFlag ? "--mcp-url" : "the MCP URL";
   const dropped = input.guardrails !== undefined ? ["--guardrails"] : [];
   let url: McpUrl = given;
+  // `off` is written again as `off`, alone; any other value is dropped.
+  let guardrails: "off" | undefined;
   if (mcpUrlGuardrailsOff(given)) {
     notes.push(
       `Warning: ${source} has ?guardrails=off, which removes the guardrails block from ` +
         `get_context_info: ${title} then gets no guardrails from Kagura.`,
     );
-    url = mcpUrlWithQuery(given, { guardrails: "off" });
+    guardrails = "off";
   } else if (queryParam(given, "guardrails") !== undefined) {
     dropped.push(`the ?guardrails= value in ${source}`);
-    url = withoutQueryParam(given, "guardrails");
+    url = splitWithoutQueryParam(given, "guardrails");
   }
   if (dropped.length > 0) {
     const [has, is] = dropped.length > 1 ? ["have", "are"] : ["has", "is"];
@@ -2982,7 +2987,7 @@ function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
         "default) and the AGENTS.md export (--agents-md).",
     );
   }
-  return mcpUrlWithQuery(url, { profile: input.toolProfile, addTools: input.addTools });
+  return mcpUrlWithQuery(url, { guardrails, profile: input.toolProfile, addTools: input.addTools });
 }
 
 /** The full case folds `toLowerCase` lacks that yield ASCII: ß, long s and the Latin ligatures. */

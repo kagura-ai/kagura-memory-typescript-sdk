@@ -2845,6 +2845,24 @@ describe("the tool view on every harness (#83)", () => {
     }
   });
 
+  // [--mcp-url query, the URL Python 0.44.0's `setup hermes|openclaw
+  // --url-form --mcp-url 'HTTPS://x.test/mcp?…' --tool-profile core
+  // --add-tools explore -y --dry-run` writes]: a first ?guardrails=off is
+  // written again as `off`, any other value dropped, and the tool view goes
+  // on after it, in one composer call.
+  it.each([
+    ["guardrails=OFF&profile=full&x=1&add_tools=a&guardrails=y", "https://x.test/mcp?x=1&guardrails=off&profile=core&add_tools=explore"],
+    [`guardrails=${CONTEXT}&profile=full&x=1#f`, "https://x.test/mcp?x=1&profile=core&add_tools=explore#f"],
+    ["x=1&guard%72ails=%20off%20", "https://x.test/mcp?x=1&guardrails=off&profile=core&add_tools=explore"],
+  ])("hermes and openclaw write ?%s with the tool view as Python does", async (query, written) => {
+    for (const name of ["hermes", "openclaw"]) {
+      const h = harness({});
+      const run = setup(name, "--mcp-url", `HTTPS://x.test/mcp?${query}`, "--tool-profile", "core", "--add-tools", "explore", "-y", "--dry-run");
+      expect(await runCli(run, h.deps)).toBe(0);
+      expect(report(h).mcp_url).toBe(written);
+    }
+  });
+
   // Python 0.44.0's dry run writes `…/mcp?profile=core` on all three.
   it.each(["codex", "hermes", "openclaw"])("%s writes a padded --tool-profile trimmed", async (name) => {
     const h = harness({});
