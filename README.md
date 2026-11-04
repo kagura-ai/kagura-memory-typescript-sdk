@@ -1252,10 +1252,10 @@ with `invalid_argument`
 The server finds the run by `report_id` and, from v0.126.0
 ([memory-cloud#2315](https://github.com/kagura-ai/memory-cloud/pull/2315)),
 authorizes against the report's own context: read access for a report,
-the editor or owner role for a rollback (a workspace viewer cannot roll
-back; `KaguraPermissionError`). A report in a context the caller cannot
-read throws `KaguraNotFoundError`, like a missing one. From v0.140.0
-`rollbackSleepRun` refuses a Memory Analysis report (`source:
+the editor or owner role for a rollback (`KaguraPermissionError` without
+it; a workspace viewer cannot roll back). A report in a context the
+caller cannot read throws `KaguraNotFoundError`, like a missing one. From
+v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 "analysis"`), which records LLM spend and has no Sleep actions, with
 `analysis_report`, a plain `KaguraError`
 ([memory-cloud#2547](https://github.com/kagura-ai/memory-cloud/issues/2547)).
