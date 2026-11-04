@@ -2186,7 +2186,9 @@ an int field takes `"0-1"` (-1) and `"0__7"` and refuses a digit run past
 than Python's `float()`, and a string holding a lone surrogate is refused
 in any field but a `str`. Three limits of JavaScript numbers remain. An
 int field of a typed result (`recallSeries`' `count`, the guardrail caps,
-a member key's or invitation's integer `id`) holds a `number`, so a value
+a member key's or invitation's `id` when it is an integer — memory-cloud
+v0.89.0+ sends an `akey_…` / `winv_…` string, which stays the string, as
+does a numeric string such as `"7"`) holds a `number`, so a value
 past 2^53 is the nearest double and one of 2^1024 or more (309 digits) is
 `Infinity`, where Python keeps the exact int; widening those types would
 break callers. The other two hold only where a body is read with

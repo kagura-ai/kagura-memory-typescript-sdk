@@ -12,12 +12,16 @@ in
 
 `MIN_SERVER_VERSION` (exported from the package, defined in
 `src/client.ts`) is **0.75.0**, the floor this SDK is tested against, and
-it is **advisory**: no call checks the server version first.
+it is **advisory**: no SDK method checks the server version before a call.
 `KaguraClient.checkServerVersion()` reads `GET /api/v1/system/info` and,
 for an older server, warns through the client's `warn` option (default
 `console.warn`) and returns; it never throws because a version is old.
-`kagura-memory doctor` is the one place a too-old server fails (`Version:
-0.74.0 is below minimum 0.75.0`, exit 1). The two read a version as the
+Two CLI commands do stop on an old server: `kagura-memory doctor` fails
+one below `MIN_SERVER_VERSION` (`Version: 0.74.0 is below minimum
+0.75.0`, exit 1), and `setup codex|hermes|openclaw --url-form --oauth`
+stops (exit 1, nothing run or written) on a server below the 0.77.0 its
+keyless entry needs, or one whose version it cannot confirm (see 0.14.0
+below). `checkServerVersion()` and `doctor` read a version as the
 Python SDK does: a `v` prefix and `+build` metadata are ignored, a
 pre-release sorts below its release (`0.75.0-rc1` is below 0.75.0), and a
 version that does not start with `MAJOR.MINOR.PATCH` (`0.75`,
@@ -29,11 +33,12 @@ silently; and from 0.82.0
 ([memory-cloud#1742](https://github.com/kagura-ai/memory-cloud/issues/1742))
 a server refuses an argument its tool schema does not declare with
 `invalid_argument` (a `KaguraError` whose `code` is `"invalid_argument"`
-and whose `details.unknown_arguments` names it). Every option added after
-0.75.0 is sent only when set (the one exception, `rollbackSession`'s
-`dry_run`, belongs to a tool that is itself new), so a call that does not
-use one is unaffected; the floors below say which server a call that does
-use one needs. A field a newer server adds to a reply is optional in the
+and whose `details.unknown_arguments` names it). An option a caller can
+set that is newer than 0.75.0 is sent only when the caller sets it, so a
+call that does not use one is unaffected; the floors below say which
+server a call that does use one needs. The few arguments the SDK and CLI
+send unasked are listed below, with why each is safe on an older server.
+A field a newer server adds to a reply is optional in the
 types and read with the Python model's default, so an older server's reply
 still reads.
 
@@ -43,16 +48,32 @@ The Python SDK keeps an advisory 0.17.1; this SDK raised its own to 0.75.0
 in 0.9.0
 ([#43](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/43))
 because its typed plan and quota errors read the `gate` field only 0.75.0
-sends. Nothing in 0.15.0 needs a higher floor for the SDK as a whole. Each
-new method, option, flag, query key and header is used only when the caller
-asks for it, and a server that predates one ignores it (before 0.82.0) or
-refuses that one call (from 0.82.0); the rest of the SDK works on 0.75.0 as
-before. What 0.15.0 sends without being asked is taken or ignored by every
-server: `createContext`'s quota pre-check asks `list_contexts` for `limit:
-1` (declared from 0.82.0, ignored before), `setup claude`'s context-name
-lookup sends `name_contains` and a `cursor` only after a first page that
-says `has_more`, which only a server that declares both sends, `auth
-logout`'s extra revoke request has the form body every server takes, and
+sends. Nothing in 0.15.0 needs a higher floor for the SDK as a whole.
+Apart from the four sends below, each new method, option, flag, query key
+and header is used only when the caller asks for it, and a server that
+predates one ignores it (before 0.82.0) or refuses that one call (from
+0.82.0; a query key or header is always ignored); the rest of the SDK
+works on 0.75.0 as before. The four sends nobody asks for are each safe on
+every server:
+
+- `createContext`'s quota pre-check always asks `list_contexts` for
+  `limit: 1`. `list_contexts` declares `limit` from 0.82.0, the release
+  that starts refusing undeclared arguments, so a server either takes it
+  (one row) or ignores it (every context, as before 0.15.0).
+- `rollbackSession` always sends `dry_run`, `true` unless the caller
+  passes `dryRun: false`. The tool declares it from the release that adds
+  the tool (0.113.0); an older server answers "tool not found" whatever
+  is sent.
+- `setup claude`'s context-name lookup sends `name_contains` (0.73.0) and
+  a `cursor` (0.82.0) only after a first page that says `has_more`, which
+  only 0.82.0 and later send, so both reach only servers that declare
+  them; the first page sends nothing new.
+- `auth logout`, for a profile that holds both tokens, sends a second
+  revoke request (the access token after the refresh token) with the same
+  form body as the first (`token`, `client_id`). It is a REST route, not
+  a tool, and carries no new field: 0.82.0 and later answer it with
+  nothing left to revoke, an older server revokes the access token.
+
 `getSleepReport` / `rollbackSleepRun` now send less (`report_id` alone).
 Raising the floor to the newest surface (0.142.0) would only make
 `checkServerVersion()` warn and `doctor` fail on every server where
@@ -73,10 +94,11 @@ releases are named as such.
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to
 **0.143.0** (parity target: the Python SDK and CLI 0.44.0, checked up to
-0.142.0). Per-surface: 0.78.0 the error envelope of a failed tool (`code`,
-`details`, `help`, `serverCause`, `correlationId`, `retryable`,
-`outcome`), the device-flow refusals and `reference({ contentOffset,
-detailsOffset, contextOffset, fields, maxChars })`; 0.79.0 the scope 403
+0.142.0). Per-surface: 0.78.0 the error envelope of a failed tool (`help`,
+`serverCause`, `correlationId`, `retryable`, `outcome`; `code` and
+`details` are read from every server), the device-flow refusals and
+`reference({ contentOffset, detailsOffset, contextOffset, fields,
+maxChars })`; 0.79.0 the scope 403
 as `KaguraAuthError`; 0.82.0 `maxChars` (`recall`, `loadPinned`,
 `loadGuardrails`, `getAgentBootstrap`, `AgentsClient.bootstrap`,
 `getSleepReport`), `recallNearby({ includeDetails })`, the cursors and
@@ -235,7 +257,7 @@ events carry no `summary` from 0.96.0
 from 0.123.0
 ([memory-cloud#2244](https://github.com/kagura-ai/memory-cloud/issues/2244)),
 and `rollbackSession` the `not_permitted` skip cause from 0.134.0
-([memory-cloud#2432](https://github.com/kagura-ai/memory-cloud/issues/2432)).
+([memory-cloud#2432](https://github.com/kagura-ai/memory-cloud/pull/2432)).
 `rollbackSession` always sends `dry_run`, `true` by default. A partial
 run is a `KaguraPartialSessionRollbackError`, and `session_not_found` a
 `KaguraNotFoundError`. Every option is sent only when set, so a call that
@@ -394,7 +416,7 @@ sends no request, and neither does `setup codex|hermes|openclaw
 **Auth**
 ([#81](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/81),
 [#92](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/92);
-[python-sdk#312](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/312),
+[python-sdk#312](https://github.com/kagura-ai/kagura-memory-python-sdk/pull/312),
 [#313](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/313)).
 `auth logout` revokes the profile's refresh token, then its access token,
 on every server: 0.82.0 and later revoke both with the first request
@@ -414,7 +436,7 @@ a password reset revokes every OAuth token.
 [#102](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/102);
 [python-sdk#296](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/296),
 [#297](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/297),
-[#294](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/294)).
+[#294](https://github.com/kagura-ai/kagura-memory-python-sdk/pull/294)).
 `getSleepReport`, `rollbackSleepRun` and `sleep report|rollback` send
 `report_id` alone. SDKs up to 0.14.1 also sent `context_id`, which no
 release declares there: 0.82.0 and later refused every call, and older

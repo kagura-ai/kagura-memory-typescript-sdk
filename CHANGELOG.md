@@ -10,9 +10,27 @@ Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud
 up to v0.143.0. `MIN_SERVER_VERSION` stays 0.75.0; each surface below names
 the server version it needs, and
 [`docs/compatibility.md`](docs/compatibility.md) lists them per release.
-Every new option and flag is sent only when set: a server before v0.82.0
-ignores one it predates, and a server from v0.82.0 that predates one refuses
-it with `invalid_argument`.
+Apart from four sends listed next, every new option and flag is sent only
+when set. A new tool argument is ignored by a server before v0.82.0 that
+predates it and refused with `invalid_argument` by a server from v0.82.0
+that predates it; a new MCP URL query key or header is ignored by any
+server that predates it. The four sends nobody asks for are safe on every
+server (the reasons are in `docs/compatibility.md`): `createContext`'s
+quota pre-check sends `list_contexts` `limit: 1`, `rollbackSession`
+always sends `dry_run`, `setup claude`'s name lookup sends
+`name_contains` / `cursor` only after a page that says `has_more`, and
+`auth logout` sends a second revoke for the access token.
+
+Breaking for some callers, each entry below says how: Node.js 18 is no
+longer supported
+([#76](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/76)); `kagura-memory list` is the Python CLI's memory
+listing, no longer a hidden spelling of `auth list`; `sleep history`
+prints `{"reports": […]}` instead of a bare list; a 403
+`insufficient_scope` and the REST capacity lock are no longer
+`KaguraConnectionError`s; `recall()`'s return type,
+`ResourceListItem.context_id` / `context_name` and
+`SleepReport.llm_call_failures` are typed differently; and a
+numeric-string id such as `"7"` now stays a string.
 
 ### Added
 
@@ -444,7 +462,9 @@ it with `invalid_argument`.
   ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
   memory-cloud v0.93.0+; python-sdk#301): it lists a context's memories by
   exact filters. It was a hidden v0.7.0 spelling of `auth list`, which is
-  unchanged; the other bare `auth` aliases stay.
+  unchanged; the other bare `auth` aliases stay. A script that ran
+  `kagura-memory list` for the profiles must now run `kagura-memory auth
+  list`.
 - **`forget`'s `-k` has no default of its own**
   ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
   python-sdk#301) in `--help`, and a call without a target says `Either
