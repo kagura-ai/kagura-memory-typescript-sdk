@@ -18,8 +18,22 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
-const clientSource = fs.readFileSync(path.join(repoRoot, "src", "client.ts"), "utf8");
+
+/**
+ * A text file with LF line endings. A Windows checkout without an eol rule
+ * has CRLF, and the line-anchored regexes here expect a bare `\n`.
+ */
+function readText(file: string): string {
+  return toLf(fs.readFileSync(file, "utf8"));
+}
+
+/** CRLF and lone CR line endings as LF. */
+function toLf(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
+const readme = readText(path.join(repoRoot, "README.md"));
+const clientSource = readText(path.join(repoRoot, "src", "client.ts"));
 
 /**
  * The body of `export class KaguraClient { ... }`, by brace depth.
@@ -197,12 +211,125 @@ describe("wording memory-cloud v0.77.0 made stale (python-sdk 0.41.0)", () => {
   });
 });
 
+/** Prose with every run of whitespace folded to one space: line breaks fall anywhere. */
+function fold(text: string): string {
+  return text.split(/\s+/).join(" ");
+}
+
+/**
+ * The parity target the README's "Relationship to the Python SDK" paragraph
+ * names: the Python SDK/CLI version and the memory-cloud version (no `v`).
+ */
+function readmeParity(): { python: string; server: string } {
+  const match =
+    /The parity target is the Python SDK and CLI \*\*(\d+\.\d+\.\d+)\*\*, checked against memory-cloud up to \*\*v(\d+\.\d+\.\d+)\*\*\./.exec(
+      fold(readme),
+    );
+  if (!match) {
+    throw new Error("README is missing its parity paragraph (`The parity target is the Python SDK and CLI **X**, …`)");
+  }
+  return { python: match[1]!, server: match[2]! };
+}
+
+/** MAJOR.MINOR.PATCH of a version; a pre-release or build suffix is ignored. */
+function versionTriple(version: string): [number, number, number] {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!match) {
+    throw new Error(`not a MAJOR.MINOR.PATCH version: ${JSON.stringify(version)}`);
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
 describe("README parity target", () => {
-  it("names the Python CLI 0.42.0 and memory-cloud v0.77.0", () => {
-    // Line breaks fall anywhere in prose, so compare with whitespace folded.
-    const flat = readme.split(/\s+/).join(" ");
-    expect(flat).toContain("parity target is the Python CLI **0.42.0**");
-    expect(flat).toContain("checked against memory-cloud up to **v0.77.0**");
-    expect(flat).toContain("**Differences from the Python CLI 0.42.0");
+  it("names the Python CLI 0.44.0 and memory-cloud v0.143.0 (#93)", () => {
+    const flat = fold(readme);
+    const { python, server } = readmeParity();
+    expect({ python, server }).toEqual({ python: "0.44.0", server: "0.143.0" });
+    // The Command line intro and the Installation paragraph say the same.
+    expect(flat).toContain(`parity target is the Python CLI **${python}**`);
+    expect(flat).toContain(`is checked against memory-cloud up to **v${server}**`);
+    expect(flat).toContain("**Differences from the Python CLI 0.42.0–0.44.0");
+    expect(flat).not.toContain("**0.42.0**");
+    expect(flat).not.toContain("**v0.77.0**");
+  });
+});
+
+/**
+ * The first release section of a compatibility record (LF line endings):
+ * from its `## X.Y.Z` heading to the next `## `, whitespace folded.
+ */
+function firstSection(record: string): { version: string; text: string } {
+  const match = /^## (\d+\.\d+\.\d+)\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(record);
+  if (!match) {
+    throw new Error("docs/compatibility.md has no `## X.Y.Z` release section");
+  }
+  return { version: match[1]!, text: fold(match[2]!) };
+}
+
+describe("versionTriple", () => {
+  it("ignores a pre-release or build suffix", () => {
+    expect(versionTriple("0.15.0")).toEqual([0, 15, 0]);
+    expect(versionTriple("0.15.0-rc.1")).toEqual([0, 15, 0]);
+    expect(versionTriple("1.2.3+build.5")).toEqual([1, 2, 3]);
+    expect(() => versionTriple("0.15")).toThrow("not a MAJOR.MINOR.PATCH version");
+  });
+});
+
+describe("firstSection", () => {
+  it("reads a CRLF record once its line endings are LF", () => {
+    // A Windows checkout without an eol rule has CRLF; read through toLf.
+    const crlf = "# T\r\n\r\nintro\r\n\r\n## 0.15.0\r\n\r\n**Min** a\r\nb\r\n\r\n## 0.14.1\r\n\r\nold\r\n";
+    expect(() => firstSection(crlf)).toThrow("has no `## X.Y.Z` release section");
+    const first = firstSection(toLf(crlf));
+    expect(first.version).toBe("0.15.0");
+    expect(first.text.trim()).toBe("**Min** a b");
+    // The last section runs to the end of the record.
+    expect(firstSection("## 0.15.0\nonly\n").text.trim()).toBe("only");
+  });
+});
+
+describe("docs/compatibility.md (#93)", () => {
+  const compatPath = path.join(repoRoot, "docs", "compatibility.md");
+  const minServer = /export const MIN_SERVER_VERSION = "([^"]+)";/.exec(clientSource)?.[1];
+
+  /**
+   * Read when a test runs, not when the file is collected, so a missing
+   * file fails these tests with a clear message instead of every test here.
+   */
+  function compat(): string {
+    if (!fs.existsSync(compatPath)) {
+      throw new Error("docs/compatibility.md is missing (#93)");
+    }
+    return readText(compatPath);
+  }
+
+  it("states the MIN_SERVER_VERSION src/client.ts defines", () => {
+    expect(minServer).toBeDefined();
+    expect(fold(compat())).toContain(
+      `\`MIN_SERVER_VERSION\` (exported from the package, defined in \`src/client.ts\`) is **${minServer}**`,
+    );
+  });
+
+  it("opens with a section no older than the package version", () => {
+    // A release adds its section at the top; one that forgets fails here.
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+      version: string;
+    };
+    const a = versionTriple(firstSection(compat()).version);
+    const b = versionTriple(pkg.version);
+    const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    expect(cmp).toBeGreaterThanOrEqual(0);
+  });
+
+  it("gives its first section MIN_SERVER_VERSION and the README's parity target", () => {
+    const { python, server } = readmeParity();
+    expect(firstSection(compat()).text).toContain(
+      `**Min memory-cloud:** ${minServer} — checked against memory-cloud up to **${server}** ` +
+        `(parity target: the Python SDK and CLI ${python},`,
+    );
+  });
+
+  it("is linked from the README", () => {
+    expect(readme).toContain("[`docs/compatibility.md`](docs/compatibility.md)");
   });
 });

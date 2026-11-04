@@ -35,14 +35,18 @@ runtime dependencies — the one optional peer dependency, for
 unless you ask for it.
 
 Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`) and is checked
-against memory-cloud up to **v0.77.0**, as the Python SDK 0.42.0 is (whose
-own `MIN_SERVER_VERSION` stays at an advisory 0.17.1).
-`checkServerVersion()` warns, and never throws, on an older server, which
-still answers: it ignores options it predates, leaves out fields it
-predates, and reports a tool it predates as not found. A pre-release of
-the minimum (`0.75.0-rc1`) counts as older, and a version it cannot read
-(`0.75`, `main-abc123`) gets no warning, as in the Python SDK. The method
-notes below say which server version a feature needs.
+against memory-cloud up to **v0.143.0**; the Python SDK 0.44.0, its
+parity target, is checked up to v0.142.0 (v0.143.0 changes nothing a
+client sees), and its own `MIN_SERVER_VERSION` stays at an advisory
+0.17.1. `checkServerVersion()` warns, and never throws, on an older
+server, which still answers: it reports a tool it predates as not found
+and leaves out fields it predates, and an option it predates is ignored
+before v0.82.0 and refused (`invalid_argument`) from v0.82.0. A
+pre-release of the minimum (`0.75.0-rc1`) counts as older, and a version
+it cannot read (`0.75`, `main-abc123`) gets no warning, as in the Python
+SDK. The method notes below say which server version a feature needs, and
+[`docs/compatibility.md`](docs/compatibility.md) lists every floor by
+release.
 
 ## Quick Start
 
@@ -136,7 +140,7 @@ negative VALUE), so `secret exec --help --bogus` prints the help; without
 command rather than running it as that command. The one command not
 ported, the few options only this bin has, and the deliberate
 differences are listed below. The parity target is the Python CLI
-**0.42.0**.
+**0.44.0**.
 
 Values are read as click reads them. A choice matches exactly, as click's
 `Choice` does, except where the Python CLI declares one case-insensitive
@@ -701,9 +705,12 @@ Nor are the skills of the Python CLI's Claude Code plugin, such as the
 `remember`, `recall`, `reference`, `update-memory` and `forget` and their
 `--details`/`--location` rules: this package ships no Claude Code plugin.
 
-Every other command of the Python CLI is here as of 0.12.0
+Every other command of the Python CLI 0.44.0 is here, with the
+differences in options and output this section lists: all but
+`bootstrap`, `changes` and `list` as of 0.12.0
 ([#57](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/57)),
-with the differences in options and output this section lists.
+and those three, which the Python CLI added in 0.44.0, as of 0.15.0
+([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86)).
 
 **Only in this bin.** `secret keygen --reveal`: keygen prints the private
 key (see key custody below) and refuses to print it to a terminal without
@@ -847,8 +854,8 @@ would accept.
   id rather than reaching another route or replacing the query
   (`files delete 'x?workspace_id=…'`).
 
-**Differences from the Python CLI 0.42.0 in what it added**, each on
-purpose or out of reach:
+**Differences from the Python CLI 0.42.0–0.44.0 in what those releases
+added**, each on purpose or out of reach:
 
 - `update-memory --details` and `remember --details` refuse a `NaN` or
   an infinity in the object (`Out of range float values are not JSON
@@ -871,7 +878,7 @@ purpose or out of reach:
   keys the model does not have stay, and a lax value such as `"3"` for an
   int is not converted, where Python returns the model.
 - `getMemoryStats` accepts rows without `use_count`, which memory-cloud
-  v0.34.0 and later never send. The Python SDK 0.42.0's model still
+  v0.34.0 and later never send. The Python SDK's model (0.44.0 too) still
   requires it, so it refuses every non-empty page
   (`memories.0.use_count: Field required`).
 - `listMemories` returns its body unchecked. The Python SDK has read it
@@ -2224,12 +2231,24 @@ Python uses, so a shared backend interoperates.
 
 This package ports the Python SDK's core (client, auth, REST clients,
 models, the zero-knowledge secret client) and, since 0.8.0, its `kagura`
-CLI as `kagura-memory`: 20 of the 21 top-level commands, counting the
-`contexts` alias. Only `kagura ingest` is not ported (below);
-[Command line](#command-line) lists where the two CLIs still differ.
+CLI as `kagura-memory`: 23 of the 24 top-level commands of the Python CLI
+0.44.0, counting the `contexts` alias. Only `kagura ingest` is not ported
+(below); [Command line](#command-line) lists where the two CLIs still
+differ.
 
-The parity target is the Python SDK and CLI **0.42.0**, checked against
-memory-cloud up to **v0.77.0**.
+The parity target is the Python SDK and CLI **0.44.0**, checked against
+memory-cloud up to **v0.143.0**.
+
+**SDK ↔ memory-cloud compatibility.**
+[`docs/compatibility.md`](docs/compatibility.md) records, for each release
+of this package, the memory-cloud release it needs and the newest one it
+was checked against, with the floor of every method, option and flag
+newer than `MIN_SERVER_VERSION` (0.75.0, advisory). A newer option sent to
+an older server is ignored there before v0.82.0 and refused with
+`invalid_argument` from v0.82.0, so the floor is where to look when an
+option seems to do nothing or is refused. The Python SDK keeps the same
+record in its own
+[`docs/compatibility.md`](https://github.com/kagura-ai/kagura-memory-python-sdk/blob/main/docs/compatibility.md).
 
 One thing is deliberately not ported, because it would cost the
 zero-dependency promise:
@@ -2259,8 +2278,10 @@ an int field takes `"0-1"` (-1) and `"0__7"` and refuses a digit run past
 than Python's `float()`, and a string holding a lone surrogate is refused
 in any field but a `str`. Three limits of JavaScript numbers remain. An
 int field of a typed result (`recallSeries`' `count`, the guardrail caps,
-a member key's or invitation's `id`) holds a `number`, so a value past
-2^53 is the nearest double and one of 2^1024 or more (309 digits) is
+a member key's or invitation's `id` when it is an integer — memory-cloud
+v0.89.0+ sends an `akey_…` / `winv_…` string, which stays the string, as
+does a numeric string such as `"7"`) holds a `number`, so a value
+past 2^53 is the nearest double and one of 2^1024 or more (309 digits) is
 `Infinity`, where Python keeps the exact int; widening those types would
 break callers. The other two hold only where a body is read with
 `JSON.parse`, which cannot tell `1e20` from `100000000000000000000` or
