@@ -20,8 +20,9 @@ import { describe, expect, it } from "vitest";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * A text file with LF line endings. A Windows checkout without an eol rule
- * has CRLF, and the line-anchored regexes here expect a bare `\n`.
+ * Git checks out text as LF via .gitattributes. Keep normalization for older
+ * working copies and files rewritten by editors that use CRLF or lone CR.
+ * The line-anchored regexes here expect a bare `\n`.
  */
 function readText(file: string): string {
   return toLf(fs.readFileSync(file, "utf8"));
