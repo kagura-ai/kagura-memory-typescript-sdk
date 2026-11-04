@@ -358,11 +358,9 @@ describe("setup codex", () => {
       fs.writeFileSync(path.join(sandbox, ".kagura.json"), BROKEN);
       const h = harness({ onPath: { [name]: `/usr/bin/${name}` } }, "disk");
       expect(await runCli(["setup", name, "--dry-run"], h.deps)).toBe(1);
-      // The position is optional: V8 on Node 18 reports one here, Node 20+ does not.
-      expect(h.err).toHaveLength(1);
-      expect(h.err[0]).toMatch(
-        /^Error: Invalid JSON or encoding in \.kagura\.json \(expected UTF-8\)(: line \d+ column \d+)?$/,
-      );
+      // No position: V8 on every supported Node (20.19+) words an "Unexpected
+      // token" error without one.
+      expect(h.err).toEqual(["Error: Invalid JSON or encoding in .kagura.json (expected UTF-8)"]);
       expect(h.err.join("\n")).not.toContain("kagura_");
     });
   });
