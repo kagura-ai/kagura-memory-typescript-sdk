@@ -240,7 +240,7 @@ type RecallShape = Pick<RecallOptions, "verbosity" | "full" | "maxChars">;
  * there, never from the message. `undefined` when the error carries no
  * such list (another error, an older server, or `details` that is not an
  * object). Read by name, as Python reads it with `getattr`, so it works on
- * any error object, and on a client that does not keep the envelope yet.
+ * any error object.
  */
 export function unknownArguments(err: unknown): string[] | undefined {
   const details = (err as { details?: unknown } | null | undefined)?.details;
@@ -279,7 +279,7 @@ export function refusedShapeArgs(err: unknown, sent: readonly string[]): string[
  * on stderr naming each dropped flag and its floor. The retry's own error
  * propagates unchanged, and no other error is retried. `KaguraClient.recall`
  * itself never retries. The refusal is recognized by `KaguraError.code`
- * (#84); an error without it is not retried.
+ * (#84), never by the message.
  */
 async function recallWithShapeFallback(
   writeError: (line: string) => void,

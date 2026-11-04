@@ -19,7 +19,6 @@ import { describe, expect, it } from "vitest";
 
 import { refusedShapeArgs, unknownArguments } from "../../../src/cli/commands/memory.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
-import type { KaguraClient } from "../../../src/client.js";
 import { KaguraError } from "../../../src/errors.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
 
@@ -44,30 +43,6 @@ interface Harness {
   server: FakeServer;
 }
 
-/**
- * The envelope fields #84 keeps on `KaguraError` — `code` (the envelope's
- * `error`) and `details` (the envelope without `status` / `error` /
- * `message`, as the Python SDK keeps it) — attached to a recall error
- * that does not carry them yet, so the retry runs through the real client
- * and wire. Once the client keeps the envelope itself, this does nothing.
- */
-function keepEnvelope(client: KaguraClient, server: FakeServer): KaguraClient {
-  const recall = client.recall.bind(client);
-  client.recall = async (options) => {
-    try {
-      return await recall(options);
-    } catch (e) {
-      if (e instanceof KaguraError && !("details" in e)) {
-        const { status: _status, error, message: _message, ...details } = server.toolResults
-          .recall as Record<string, unknown>;
-        Object.assign(e, { code: error, details });
-      }
-      throw e;
-    }
-  };
-  return client;
-}
-
 /** A bin whose server answers each `tools/call recall` with the next of `replies`. */
 function harness(replies: unknown[] = []): Harness {
   const out: string[] = [];
@@ -87,7 +62,7 @@ function harness(replies: unknown[] = []): Harness {
     writeError: (line: string) => void err.push(line),
     confirm: async () => true,
     loadConfig: () => ({ context_id: CTX, api_key: "k" }),
-    makeClient: (options: Record<string, unknown>) => keepEnvelope(makeClient(server, options), server),
+    makeClient: (options: Record<string, unknown>) => makeClient(server, options),
   } as unknown as CliDeps;
   return { deps, out, err, server };
 }
@@ -105,15 +80,12 @@ function stream(lines: string[]): string {
 }
 
 /**
- * Python's stderr as this bin prints it. A usage error prints only click's
- * `Error:` line here (the bin has no `Usage:` / `Try` preamble). Python
- * 0.43.0+ follows a server error with `  Help: <envelope help>` from
- * `KaguraError.help`, which this bin's error rendering does not print yet
- * (python-sdk #299, the error-envelope work in #84); either form passes.
+ * Python's stderr as this bin prints it: exactly, `  Help:` line included,
+ * except that a usage error prints only click's `Error:` line here (the bin
+ * has no `Usage:` / `Try` preamble).
  */
-function pythonStderr(c: PythonCase): string[] {
-  if (c.code === 2) return [stream([c.stderr.trimEnd().split("\n").at(-1)!])];
-  return [c.stderr, c.stderr.replace(/^ {2}Help: .*\n/m, "")];
+function pythonStderr(c: PythonCase): string {
+  return c.code === 2 ? stream([c.stderr.trimEnd().split("\n").at(-1)!]) : c.stderr;
 }
 
 /** Server replies, shaped like memory-cloud v0.143.0's recall (see the file header). */
@@ -443,7 +415,7 @@ describe("kagura-memory recall: the Python CLI 0.44.0's output", () => {
     expect(code).toBe(c.code);
     expect(sentCalls(h.server)).toEqual(c.calls);
     expect(stream(h.out)).toBe(c.stdout);
-    expect(pythonStderr(c)).toContain(stream(h.err));
+    expect(stream(h.err)).toBe(pythonStderr(c));
   });
 });
 
@@ -551,8 +523,22 @@ describe("kagura-memory recall: the retry after an invalid_argument refusal", ()
 });
 
 describe("refusedShapeArgs / unknownArguments", () => {
-  const refusal = (fields: Record<string, unknown>) => Object.assign(new KaguraError("recall failed"), fields);
+  // The error the client throws for a refusal: `code` is the envelope's
+  // `error`, `details` the rest of it (#84).
+  const refusal = (fields: { code?: string; details?: unknown }) =>
+    new KaguraError("recall failed", fields as ConstructorParameters<typeof KaguraError>[1]);
   const SENT = ["verbosity", "full"];
+
+  it("reads the refusal the client throws for a served invalid_argument envelope", async () => {
+    const server = new FakeServer();
+    server.toolResults.recall = REPLIES.REFUSE_113;
+    const client = makeClient(server);
+    const err = await client.recall({ contextId: CTX, query: "q", verbosity: "full", full: 0 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraError);
+    expect((err as KaguraError).code).toBe("invalid_argument");
+    expect(unknownArguments(err)).toEqual(["full"]);
+    expect(refusedShapeArgs(err, SENT)).toEqual(["full"]);
+  });
 
   it("drops only what the refusal lists, in the order sent", () => {
     const err = refusal({ code: "invalid_argument", details: { unknown_arguments: ["full", "verbosity"] } });
