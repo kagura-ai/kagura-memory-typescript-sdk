@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Validate member key and invitation rows in `WorkspaceClient` against the
+  Python SDK 0.44.0 models. Malformed fields raise `KaguraResponseError`
+  with the Python operation name. CLI commands reuse the validated rows,
+  including normalized timestamps and model defaults.
+
 ## [0.15.0] - 2026-11-05
 
 Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud

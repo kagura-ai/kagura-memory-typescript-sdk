@@ -15,8 +15,8 @@
  * is printed: the model's keys in its order, defaults filled, unknown keys
  * dropped, the fields `--json` must never show (a join credential, a
  * key's plaintext) excluded, and a record missing a required field
- * refused with `KaguraResponseError` in Python's words. Timestamps pass
- * through as the server wrote them.
+ * refused with `KaguraResponseError` in Python's words. Invitation and key
+ * rows arrive validated by the SDK, including their timestamps.
  */
 
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "../../models.js";
@@ -24,11 +24,10 @@ import { normalizeUuid } from "../../pyCompat.js";
 import {
   ResponseReader,
   laxBool,
-  laxIntOrStr,
   laxStr,
   nullable,
 } from "../../responseShape.js";
-import { VALID_ASSIGNABLE_ROLES, readMemberKey, type WorkspaceClient } from "../../workspaceClient.js";
+import { VALID_ASSIGNABLE_ROLES, type WorkspaceClient } from "../../workspaceClient.js";
 import {
   rejectExtraArgs,
   requireArg,
@@ -182,29 +181,6 @@ function readMember(raw: unknown, operation: string): WorkspaceMember {
   return member;
 }
 
-/**
- * A `WorkspaceInvitation` row, `token` and `invitation_url` included:
- * {@link invitationJson} drops them.
- */
-function readInvitation(raw: unknown, operation: string): WorkspaceInvitation {
-  const r = new ResponseReader(operation, "WorkspaceInvitation");
-  const obj = modelInput(r, raw);
-  const invitation: WorkspaceInvitation = {
-    id: r.field(obj, "id", laxIntOrStr),
-    email: r.field(obj, "email", nullable(laxStr), { default: null }),
-    role: r.field(obj, "role", laxStr),
-    token: r.field(obj, "token", nullable(laxStr), { default: null }),
-    invitation_url: r.field(obj, "invitation_url", nullable(laxStr), { default: null }),
-    is_accepted: r.field(obj, "is_accepted", laxBool, { default: false }),
-    is_expired: r.field(obj, "is_expired", laxBool, { default: false }),
-    created_at: passThrough(obj, "created_at") as string | null,
-    expires_at: passThrough(obj, "expires_at") as string | null,
-    allowed_context_ids: stringList(r, obj, "allowed_context_ids"),
-  };
-  r.check();
-  return invitation;
-}
-
 /** `model_dump(exclude={"token", "invitation_url"})`: never a join credential. */
 function invitationJson(invitation: WorkspaceInvitation): Record<string, unknown> {
   const { token: _token, invitation_url: _url, ...rest } = invitation;
@@ -212,8 +188,8 @@ function invitationJson(invitation: WorkspaceInvitation): Record<string, unknown
 }
 
 /**
- * `model_dump(exclude={"plaintext_key"})` of a key read by
- * `readMemberKey`: never the secret, even if a server sent one.
+ * `model_dump(exclude={"plaintext_key"})` of an SDK-validated key:
+ * never the secret, even if a server sent one.
  */
 function keyJson(key: MemberAPIKey): Record<string, unknown> {
   const { plaintext_key: _plaintext, ...rest } = key;
@@ -474,14 +450,11 @@ const inviteCreate: Command = {
     }
 
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
-      const invitation = readInvitation(
-        await client.createInvitation(ws, email, {
-          role,
-          ...(contexts.length > 0 ? { allowedContextIds: contexts } : {}),
-          ...(expiresInDays !== undefined ? { expiresInDays } : {}),
-        }),
-        "WorkspaceClient.create_invitation",
-      );
+      const invitation = await client.createInvitation(ws, email, {
+        role,
+        ...(contexts.length > 0 ? { allowedContextIds: contexts } : {}),
+        ...(expiresInDays !== undefined ? { expiresInDays } : {}),
+      });
       deps.writeError("⚠ The invitation URL below is shown once — treat it as a join credential.");
       // A missing email reads `-`, as in `invite list` (Python 0.41.1+ too).
       return (
@@ -510,9 +483,7 @@ const inviteList: Command = {
     rejectExtraArgs(args);
     const includeAccepted = args.flags.has("include-accepted");
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
-      const invitations = (await client.listInvitations(ws, { includeAccepted })).map((i) =>
-        readInvitation(i, "WorkspaceClient.list_invitations"),
-      );
+      const invitations = await client.listInvitations(ws, { includeAccepted });
       if (args.flags.has("json")) return formatJson(invitations.map(invitationJson));
       const w = idColumnWidth(invitations.map((i) => i.id));
       const lines = [`${pad("ID", w)} ${pad("EMAIL", 30)} ${pad("ROLE", 8)} ${pad("STATE", 9)} EXPIRES`];
@@ -629,9 +600,7 @@ const listKeys: Command = {
     const userId = userIdParam(CREATE_USER, requireOption(args, CREATE_USER));
     rejectExtraArgs(args);
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
-      const keys = (await client.listMemberKeys(ws, userId)).map((k) =>
-        readMemberKey(k, "WorkspaceClient.list_member_keys"),
-      );
+      const keys = await client.listMemberKeys(ws, userId);
       if (args.flags.has("json")) return formatJson(keys.map(keyJson));
       const w = idColumnWidth(keys.map((k) => k.id));
       const lines = [

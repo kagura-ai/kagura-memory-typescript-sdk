@@ -234,6 +234,24 @@ describe("invitations", () => {
     expect(server.requests).toHaveLength(0);
   });
 
+  it.each([
+    ["create_invitation", { id: "winv_1", role: 123 }],
+    ["list_invitations", [{ id: "winv_1", role: "member", expires_at: "invalid-date" }]],
+    ["list_member_keys", { api_keys: [{ id: "akey_1", name: "test", key_prefix: 123 }] }],
+  ])("validates %s rows through the Python model", async (operation, body) => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(body);
+    const client = makeClient(server);
+    const call = operation === "create_invitation"
+      ? client.createInvitation(WS, "new@x.com", { role: "admin" })
+      : operation === "list_invitations"
+        ? client.listInvitations(WS)
+        : client.listMemberKeys(WS, "user-1");
+    await expect(call).rejects.toMatchObject({
+      name: "KaguraResponseError", operation: `WorkspaceClient.${operation}`,
+    });
+  });
+
   it("createInvitation POSTs the full snake_case body and returns the token-bearing row", async () => {
     const server = new FakeRest();
     server.status = 201;
@@ -263,6 +281,17 @@ describe("invitations", () => {
     });
     expect(inv.id).toBe(7);
     expect(inv.invitation_url).not.toBeNull();
+  });
+
+  it("returns Python defaults and coerced invitation fields while dropping unknown fields", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify([{ id: "7", role: "admin", is_accepted: "false", created_at: "2026-07-03T00:00:00+00:00", extra: "ignored" }]);
+    const rows = await makeClient(server).listInvitations(WS);
+    expect(rows).toEqual([{
+      id: "7", email: null, role: "admin", token: null, invitation_url: null,
+      is_accepted: false, is_expired: false, created_at: "2026-07-03T00:00:00Z",
+      expires_at: null, allowed_context_ids: null,
+    }]);
   });
 
   it("createInvitation refuses a context that is no UUID before any request", async () => {
