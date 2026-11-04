@@ -5,13 +5,16 @@ import {
   formatJson,
   formatJsonAscii,
   formatJsonLine,
+  pyFormatG,
   pythonIsoformat,
 } from "../../src/cli/output.js";
 import {
+  KaguraCapacityLockedError,
   KaguraError,
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraServiceUnavailableError,
 } from "../../src/errors.js";
 
 describe("formatJson", () => {
@@ -337,5 +340,67 @@ describe("cliErrorMessage", () => {
     expect(
       cliErrorMessage(e, "File uploaded (file_id=f1), but creating the linked memory failed: q"),
     ).toBe("File uploaded (file_id=f1), but creating the linked memory failed: q\n  Required plan: Pro (pro)");
+  });
+
+  // Recorded from the Python CLI 0.44.0's `_cli_error_message` (its #299).
+  it("adds the capacity lock's cleanup page unless help already names it", () => {
+    const url = "https://m.test/workspace/settings/plan";
+    const named = new KaguraCapacityLockedError("remember failed (capacity_locked): locked", {
+      cleanupUrl: url,
+      code: "capacity_locked",
+      details: { gate: "capacity", cleanup_url: url, help: `Remove 250 memories or re-subscribe at ${url}.` },
+    });
+    expect(cliErrorMessage(named)).toBe(
+      `remember failed (capacity_locked): locked\n  Help: Remove 250 memories or re-subscribe at ${url}.`,
+    );
+    const bare = new KaguraCapacityLockedError("locked", {
+      cleanupUrl: "https://m.test/p",
+      details: { gate: "capacity" },
+    });
+    expect(cliErrorMessage(bare)).toBe("locked\n  Clean up or re-subscribe: https://m.test/p");
+    expect(cliErrorMessage(new KaguraCapacityLockedError("locked"))).toBe("locked");
+  });
+
+  it("adds a 503's retry window, as Python's {:g} writes it", () => {
+    const e = new KaguraServiceUnavailableError("HTTP 503: Database connection failed", {
+      retryAfter: 5,
+      reason: "pool_exhausted",
+      code: "DB-002",
+      details: { reason: "pool_exhausted" },
+    });
+    expect(cliErrorMessage(e)).toBe("HTTP 503: Database connection failed\n  Retry after: 5 s");
+    expect(cliErrorMessage(new KaguraServiceUnavailableError("HTTP 503: x", { retryAfter: 1234565 }))).toBe(
+      "HTTP 503: x\n  Retry after: 1.23456e+06 s",
+    );
+    expect(cliErrorMessage(new KaguraServiceUnavailableError("HTTP 503"))).toBe("HTTP 503");
+  });
+
+  it("adds any server error's help and correlation id, under a command's own first line", () => {
+    const e = new KaguraError("remember failed (remember_error): boom", {
+      code: "remember_error",
+      details: { help: "Check with recall.", correlation_id: "abc123", cause: "timeout" },
+    });
+    expect(cliErrorMessage(e, "Saving failed")).toBe(
+      "Saving failed\n  Help: Check with recall.\n  Correlation ID: abc123",
+    );
+  });
+});
+
+describe("pyFormatG", () => {
+  // Python's format(n, "g"), recorded from the Python SDK 0.44.0 venv.
+  it.each([
+    [0, "0"],
+    [5, "5"],
+    [999999, "999999"],
+    [1000000, "1e+06"],
+    [1234565, "1.23456e+06"],
+    [1234575, "1.23458e+06"],
+    [1234566, "1.23457e+06"],
+    [9999995, "1e+07"],
+    [9999994, "9.99999e+06"],
+    [123456789012, "1.23457e+11"],
+    [-5, "-5"],
+  ])("writes %d as %j", (n, expected) => {
+    expect(pyFormatG(n)).toBe(expected);
   });
 });

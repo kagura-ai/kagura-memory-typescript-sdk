@@ -2691,3 +2691,89 @@ describe("credential files are not world-readable", () => {
     expect(fs.statSync(target).mode & 0o077).toBe(0);
   });
 });
+
+describe("doctor: the API key shape (memory-cloud v0.119.0+ bearer routing, #84)", () => {
+  // An OAuth access token configured as the API key: memory-cloud v0.119.0+
+  // (#1994) looks a bearer up by its shape, so this one is a 401.
+  const OAUTH_TOKEN_AS_KEY = "Zx9-oauth-access-token-value-43-characters";
+  const INFO_PATH = "/api/v1/system/info";
+  // Recorded from the Python CLI 0.44.0 (the line came in 0.43.0, python-sdk
+  // #299), run from a scratch cwd holding
+  // {"api_key":"Zx9-oauth-access-token-value-43-characters","mcp_url":"http://10.255.255.1/mcp"}
+  // with an empty HOME and no KAGURA_API_KEY; exit 0. With --json the
+  // check is {"section": "auth", "status": "warn", "message": <the line
+  // without its status>, "details": {"source": "config", "preview": "Zx9-oaut...ters"}}.
+  const LINE =
+    "WARN Unusual API key shape: Zx9-oaut...ters. This value does not look like a Kagura API key " +
+    "(kagura_…); the server routes bearer tokens by shape, so an OAuth token passed as an API key is a 401.";
+
+  it("warns about a static key without the kagura_ prefix, in Python's words", async () => {
+    process.chdir(sandbox);
+    const h = harness({ api_key: OAUTH_TOKEN_AS_KEY, mcp_url: "http://10.255.255.1/mcp" });
+    const code = await runCli(["doctor"], h.deps);
+    expect(h.out).toContain(LINE);
+    expect(h.out.join("\n")).not.toContain(OAUTH_TOKEN_AS_KEY);
+    expect(code).toBe(0);
+  });
+
+  it("reports it in the auth section with --json, in Python's shape", async () => {
+    process.chdir(sandbox);
+    const h = harness({ api_key: OAUTH_TOKEN_AS_KEY, mcp_url: "http://10.255.255.1/mcp" });
+    const code = await runCli(["doctor", "--json"], h.deps);
+    const report = JSON.parse(h.out.join("\n")) as {
+      checks: { section: string; status: string; message: string; details: unknown }[];
+      auth: string;
+      exit_code: number;
+    };
+    expect(report.checks.filter((c) => c.message.startsWith("Unusual API key shape"))).toEqual([
+      {
+        section: "auth",
+        status: "warn",
+        message: LINE.slice("WARN ".length),
+        details: { source: "config", preview: "Zx9-oaut...ters" },
+      },
+    ]);
+    expect(report.auth).toBe("warn");
+    expect(report.exit_code).toBe(0);
+    expect(code).toBe(0);
+  });
+
+  it("names the env key's source, and keeps a reachable server's exit code", async () => {
+    process.chdir(sandbox);
+    process.env.KAGURA_API_KEY = OAUTH_TOKEN_AS_KEY;
+    const h = harness({});
+    h.server.restResults[INFO_PATH] = { name: "memory-cloud", version: MIN_SERVER_VERSION };
+    const code = await runCli(["doctor", "--json"], h.deps);
+    const report = JSON.parse(h.out.join("\n")) as {
+      checks: { message: string; details: Record<string, unknown> }[];
+    };
+    const [shape] = report.checks.filter((c) => c.message.startsWith("Unusual API key shape"));
+    expect(shape?.details).toEqual({ source: "env", preview: "Zx9-oaut...ters" });
+    expect(code).toBe(0);
+  });
+
+  it("redacts a short key whole", async () => {
+    process.chdir(sandbox);
+    const h = harness({ api_key: "k", mcp_url: "http://10.255.255.1/mcp" });
+    await runCli(["doctor"], h.deps);
+    expect(h.out.filter((l) => l.includes("Unusual API key shape"))).toEqual([
+      "WARN Unusual API key shape: <redacted>. This value does not look like a Kagura API key " +
+        "(kagura_…); the server routes bearer tokens by shape, so an OAuth token passed as an API key is a 401.",
+    ]);
+  });
+
+  it("says nothing about a kagura_ key", async () => {
+    process.chdir(sandbox);
+    const h = harness({ api_key: "kagura_secret_0123456789", mcp_url: "http://10.255.255.1/mcp" });
+    await runCli(["doctor"], h.deps);
+    expect(h.out.join("\n")).not.toContain("Unusual API key shape");
+  });
+
+  it("says nothing about an OAuth profile, whose token is no API key", async () => {
+    process.chdir(sandbox);
+    writeCredentials({ default: profileJson({ access_token: OAUTH_TOKEN_AS_KEY }) });
+    const h = harness({ mcp_url: "http://10.255.255.1/mcp" });
+    await runCli(["doctor"], h.deps);
+    expect(h.out.join("\n")).not.toContain("Unusual API key shape");
+  });
+});

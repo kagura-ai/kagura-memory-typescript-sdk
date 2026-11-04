@@ -386,6 +386,52 @@ describe("kagura-memory measure record", () => {
     );
   });
 
+  it("adds the server's help and correlation id, as Python's CLI does (#84)", async () => {
+    // memory-cloud v0.82.0+ (#1742): a write that failed server-side, its
+    // outcome unknown. Python 0.43.0's _cli_error_message adds both lines.
+    const { code, err } = await run(["measure", "record", C, "m", "5"], (h) => {
+      h.server.toolResults.record_measurement = {
+        status: "error",
+        error: "record_measurement_error",
+        message: "record_measurement did not finish within the server's time limit.",
+        cause: "timeout",
+        help: "Check with recall_series before calling it again, so it is not applied twice.",
+        correlation_id: "4bf92f3577b34da6",
+        retryable: false,
+        outcome: "unknown",
+      };
+    });
+    expect(code).toBe(1);
+    expect(err).toBe(
+      "Error: record_measurement failed (record_measurement_error): record_measurement did not " +
+        "finish within the server's time limit.\n" +
+        "  Help: Check with recall_series before calling it again, so it is not applied twice.\n" +
+        "  Correlation ID: 4bf92f3577b34da6",
+    );
+  });
+
+  it("names the capacity lock's cleanup page once, as Python's CLI does (#84)", async () => {
+    const url = "https://memory.kagura-ai.com/workspace/settings/plan";
+    const { code, err } = await run(["measure", "record", C, "m", "5"], (h) => {
+      h.server.toolResults.record_measurement = {
+        status: "error",
+        error: "capacity_locked",
+        message: "This workspace is over the Free plan's capacity (250 memories over).",
+        gate: "capacity",
+        over_memories: 250,
+        over_bytes: 0,
+        cleanup_url: url,
+        help: `Remove 250 memories or re-subscribe at ${url}.`,
+      };
+    });
+    expect(code).toBe(1);
+    // The help names the page, so no `Clean up or re-subscribe:` line.
+    expect(err).toBe(
+      "Error: record_measurement failed (capacity_locked): This workspace is over the Free " +
+        `plan's capacity (250 memories over).\n  Help: Remove 250 memories or re-subscribe at ${url}.`,
+    );
+  });
+
   describe("deliberate differences from the Python CLI", () => {
     // Click names an unknown `--name=value` token whole here, value and
     // all; the rest of the bin names it `--name`, since the value may be a
