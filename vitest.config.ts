@@ -26,7 +26,12 @@ export default defineConfig({
     // everything that did run still reads as passed. The suite takes ~1s
     // of actual test time, so the extra process startup costs little next
     // to re-running by hand every other attempt.
+    //
+    // Vitest 4 (#76) removed `poolOptions`: the cap that was
+    // `poolOptions.forks.maxForks` is the top-level `maxWorkers` now, and
+    // `minForks: 1` has no successor — workers start on demand, so there
+    // is no floor to set.
     pool: "forks",
-    poolOptions: { forks: { maxForks: 4, minForks: 1 } },
+    maxWorkers: 4,
   },
 });

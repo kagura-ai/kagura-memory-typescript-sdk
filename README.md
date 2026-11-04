@@ -29,8 +29,8 @@ package also includes `kagura-memory-mcp`, a transparent stdio/HTTP proxy.
 npm install kagura-memory
 ```
 
-Requires Node.js >= 18 (native `fetch`). Zero runtime dependencies —
-the one optional peer dependency, for
+Requires Node.js >= 20.19.0 (Node 18 support ended with 0.14.x). Zero
+runtime dependencies — the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
 
@@ -1599,14 +1599,13 @@ including the whole REST surface, `fingerprint()`, and the armor codec. Call
 one of those without the package and you get a `KaguraCryptoError` naming
 the install command, not a module-resolution stack trace.
 
-> **On Node 18.** This SDK supports Node 18 and CI exercises the crypto
-> round-trip there on every push. But `age-encryption`'s `@noble/*`
-> dependencies declare `engines.node: ">= 20.19.0"`, so `npm install
-> age-encryption` on Node 18 prints `EBADENGINE` warnings, and an
-> `engine-strict=true` npmrc will refuse the install outright. It works —
-> WebCrypto is not a global before Node 19, so the SDK installs
-> `node:crypto`'s `webcrypto` itself — but if you want the warnings gone,
-> use Node 20.19+.
+> **Node version.** `age-encryption`'s `@noble/*` dependencies declare
+> `engines.node: ">= 20.19.0"`, the same floor as this SDK, so the install
+> is clean on every supported Node, `engine-strict=true` included.
+> Encryption and keygen take their randomness from the `globalThis.crypto`
+> WebCrypto global, which Node has provided since 19; the SDK no longer
+> installs `node:crypto`'s `webcrypto` there itself, as 0.14.x did for
+> Node 18.
 
 Recipients are X25519-only. `age1pq1…` (post-quantum) and plugin
 recipients are rejected even though `age-encryption` would accept them,
@@ -1740,15 +1739,12 @@ the header is `Bearer None` in both.
 
 ```bash
 npm install
-npm test                   # vitest
-npm run test:no-webcrypto  # the same suite with globalThis.crypto deleted
-npm run typecheck          # tsc --noEmit
-npm run build              # tsup → dist/ (ESM + CJS + d.ts)
+npm test           # vitest
+npm run typecheck  # tsc --noEmit
+npm run build      # tsup → dist/ (ESM + CJS + d.ts)
 ```
 
-`test:no-webcrypto` reproduces Node 18, which has no WebCrypto global —
-the crypto path installs `node:crypto`'s `webcrypto` itself, and that used
-to break in CI only. `prepublishOnly` runs all four.
+`prepublishOnly` runs all three.
 
 ## License
 
