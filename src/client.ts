@@ -1904,7 +1904,9 @@ export class KaguraClient {
     cursor?: string;
   }): Promise<ToolResult> {
     if (options.key !== undefined && options.cursor !== undefined) {
-      throw new Error("cursor pages the list of entries; omit key to list them");
+      // The Python SDK 0.44.0's ValueError text (#317 names each list-mode
+      // argument given, `cursor, limit: …`).
+      throw new Error("cursor: list mode only; omit key to list the entries");
     }
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.key !== undefined) {

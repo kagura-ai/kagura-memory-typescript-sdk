@@ -483,10 +483,16 @@ describe("listContexts / getState cursor (v0.82.0+)", () => {
     expect(result.states).toEqual({ b: 2 });
   });
 
-  it("getState refuses a cursor with a key before any request", async () => {
+  it("getState refuses a cursor with a key before any request, in the Python SDK 0.44.0's words", async () => {
     const server = new FakeServer();
+    // Python 0.43.0 said "cursor pages the list of entries; omit key to list
+    // them"; 0.44.0 (#317), the parity target, names the argument.
     await expect(makeClient(server).getState({ contextId: CTX, key: "step", cursor: "a" })).rejects.toThrow(
-      "cursor pages the list of entries; omit key to list them",
+      /^cursor: list mode only; omit key to list the entries$/,
+    );
+    // An empty cursor is still a cursor (Python's `is not None`).
+    await expect(makeClient(server).getState({ contextId: CTX, key: "step", cursor: "" })).rejects.toThrow(
+      /^cursor: list mode only; omit key to list the entries$/,
     );
     expect(server.requests).toEqual([]);
   });
