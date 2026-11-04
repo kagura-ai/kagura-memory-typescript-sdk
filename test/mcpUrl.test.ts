@@ -184,4 +184,19 @@ describe("mcpUrlQueryValues and queryParam", () => {
     expect(queryParam(`${B}?n=%E3%81%82`, "n")).toBe("あ");
     expect(queryParam(`${B}?n=%ff`, "n")).toBe("�");
   });
+
+  // Recorded from the Python SDK 0.44.0 (and the server's parse_qsl reads
+  // them alike): unquote_plus keeps a U+FEFF, which a default TextDecoder
+  // would strip from the start of each escape run.
+  it("keep an escaped U+FEFF, as unquote_plus does", () => {
+    expect(queryParam(`${B}?n=x%EF%BB%BF`, "n")).toBe("x﻿");
+    expect(queryParam(`${B}?n=%EF%BB%BF%EF%BB%BFx`, "n")).toBe("﻿﻿x");
+    expect(mcpUrlToolView(`${B}?profile=%EF%BB%BFcore`).profile).toBe("﻿core");
+    expect(mcpUrlToolView(`${B}?add_tools=a,%EF%BB%BFb`).addTools).toEqual(["a", "﻿b"]);
+    // A name that decodes to U+FEFF + profile is another parameter, kept.
+    expect(mcpUrlWithQuery(`${B}?%EF%BB%BFprofile=x`, { profile: "core" })).toBe(
+      `${B}?%EF%BB%BFprofile=x&profile=core`,
+    );
+    expect(mcpUrlWithQuery(B, { addTools: ["﻿explore"] })).toBe(`${B}?add_tools=%EF%BB%BFexplore`);
+  });
 });

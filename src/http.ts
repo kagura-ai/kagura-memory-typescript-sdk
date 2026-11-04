@@ -68,12 +68,15 @@ function splitUrl(url: string): SplitUrl {
   };
 }
 
-const UTF8 = new TextDecoder("utf-8");
+// `ignoreBOM`: a default TextDecoder drops a U+FEFF at the start of each
+// decode, which Python's UTF-8 codec (and so the server) keeps.
+const UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /**
  * A name or value as Python's `unquote_plus` reads it: `+` is a space, and
  * each run of `%XX` escapes is decoded as UTF-8, an invalid sequence as
- * U+FFFD; a `%` not followed by two hex digits stays as written.
+ * U+FFFD, a U+FEFF kept; a `%` not followed by two hex digits stays as
+ * written.
  */
 function unquotePlus(text: string): string {
   const raw = text.replace(/\+/g, " ");
