@@ -1665,6 +1665,31 @@ describe("cli: logout", () => {
       expect(fs.existsSync(credentialsPath)).toBe(false);
     });
 
+    it("revokes each profile with --all on its own server with its own client_id, past a failure", async () => {
+      // As Python's `_revoke_all_best_effort`: one profile's server failing
+      // does not stop the next revoke, and no profile borrows another's
+      // client_id (memory-cloud v0.82.0+ ignores a token sent with the
+      // wrong one).
+      seed({
+        default: creds({ server: "https://down.test", clientId: "kagura-cli", refreshToken: "rt-a" }),
+        work: creds({ server: "https://api.test/", clientId: "kagura-ide", accessToken: "at-b", refreshToken: "" }),
+      });
+      const requests: { url: string; body: string }[] = [];
+      const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(input), body: String(init?.body) });
+        if (String(input).startsWith("https://down.test/")) throw new TypeError("fetch failed");
+        return new Response(null, { status: 200 });
+      }) as typeof globalThis.fetch;
+      const h = harness({ fetch });
+      expect(await runCli(["auth", "logout", "--all", "--yes"], h.deps)).toBe(0);
+      expect(requests).toEqual([
+        { url: "https://down.test/api/v1/oauth/revoke", body: "token=rt-a&client_id=kagura-cli" },
+        { url: "https://api.test/api/v1/oauth/revoke", body: "token=at-b&client_id=kagura-ide" },
+      ]);
+      expect(h.out).toEqual(["All profiles removed."]);
+      expect(fs.existsSync(credentialsPath)).toBe(false);
+    });
+
     it.each([
       ["the confirmation is declined", ["auth", "logout"]],
       ["the named profile is absent", ["auth", "logout", "--profile", "nope", "--yes"]],
