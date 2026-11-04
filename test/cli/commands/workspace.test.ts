@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ResolvedAuth } from "../../../src/auth/types.js";
+import { idColumnWidth } from "../../../src/cli/commands/workspace.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import type { KaguraConfig } from "../../../src/config.js";
 import { KaguraAuthError } from "../../../src/errors.js";
@@ -1305,5 +1306,22 @@ describe("help", () => {
       "  Example:\n    kagura-memory workspace invite create new@example.com --role member -c <context-uuid>",
     );
     expect(text).not.toContain("--invite");
+  });
+});
+
+describe("idColumnWidth: Python's _id_column_width (python-sdk #294)", () => {
+  it("is 6 at least, else the longest id in code points", () => {
+    expect(idColumnWidth([])).toBe(6);
+    expect(idColumnWidth([7, "42", 123456])).toBe(6);
+    expect(idColumnWidth([7, 1234567])).toBe(7);
+    expect(idColumnWidth(["akey_3fJ0kQ7xWm2Lp9RtZa4bNc", 8])).toBe(27);
+    // `len(str(i))`: one per code point, an astral one included.
+    expect(idColumnWidth(["日本語ID", "𝟘𝟙𝟚𝟛𝟜𝟝𝟞"])).toBe(7);
+  });
+
+  it("measures a list too long to spread as arguments (Math.max(...ids) throws RangeError past ~150k)", () => {
+    const ids = Array.from({ length: 200_000 }, (_, i) => `winv_${i}`);
+    ids.push("winv_4hT9xQ2mLp8vZr1sKc3dEf");
+    expect(idColumnWidth(ids)).toBe(27);
   });
 });

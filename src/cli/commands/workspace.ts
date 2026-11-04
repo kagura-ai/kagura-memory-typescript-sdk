@@ -144,7 +144,7 @@ function stringList(r: ResponseReader, obj: Record<string, unknown>, key: string
   if (value === undefined || value === null) return null;
   return r.list(obj, key, (item, at) => {
     const coerced = laxStr(item);
-    if (!coerced.ok) r.issue(at, coerced.msg);
+    if (!coerced.ok) r.refuse(at, coerced);
     return item as string;
   });
 }
@@ -235,10 +235,14 @@ function pad(value: string, width: number): string {
 /**
  * Python's `_id_column_width`: the ID column 6 code points wide as
  * before, wider for an id that is longer — an opaque `akey_…` / `winv_…`
- * id (memory-cloud v0.89.0+, #1008) is 27 — so every row lines up.
+ * id (memory-cloud v0.89.0+, #1008) is 27 — so every row lines up. A
+ * fold, not `Math.max(...ids)`: spreading a list of 150k ids or more as
+ * arguments throws `RangeError`.
+ *
+ * @internal Exported for its tests.
  */
-function idColumnWidth(ids: readonly (number | string)[]): number {
-  return Math.max(6, ...ids.map((id) => [...String(id)].length));
+export function idColumnWidth(ids: readonly (number | string)[]): number {
+  return ids.reduce<number>((width, id) => Math.max(width, [...String(id)].length), 6);
 }
 
 /**
