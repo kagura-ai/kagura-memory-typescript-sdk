@@ -46,9 +46,9 @@ export function validateIntRange(name: string, value: unknown, lo: number, hi?: 
 
 /**
  * Refuse a response budget the server would refuse: `maxChars` on
- * `recall`, `loadPinned`, `loadGuardrails` and `getAgentBootstrap` /
- * `AgentsClient.bootstrap` is characters of the reply, not tokens, an
- * integer in [10,000, 100,000].
+ * `recall`, `loadPinned`, `loadGuardrails`, `getAgentBootstrap` /
+ * `AgentsClient.bootstrap` and `getState` in list mode is characters of
+ * the reply, not tokens, an integer in [10,000, 100,000].
  *
  * @throws Error if `value` is not an integer in that range.
  */

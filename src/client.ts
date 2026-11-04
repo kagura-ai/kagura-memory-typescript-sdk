@@ -1098,28 +1098,6 @@ const LIST_CONTEXTS_MAX_LIMIT = 200;
 const LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20;
 /** `get_state`'s largest list-mode page (server `STATE_LIST_MAX_LIMIT`). */
 const STATE_LIST_MAX_LIMIT = 200;
-/**
- * `get_state`'s list-mode `max_chars` bounds (server `parse_max_chars`,
- * which every budgeted tool shares).
- */
-const STATE_MAX_CHARS_MIN = 10_000;
-const STATE_MAX_CHARS_MAX = 100_000;
-
-/**
- * Refuse a request integer the server would refuse, before any request —
- * the Python SDK's `_validate_int_range`, with its sentence and the
- * option's TypeScript name. A boolean, a string or a fractional number is
- * not an integer, as on the server (`type(x) is int`); a `bigint` is.
- *
- * @returns The value to send, as a `number`.
- */
-function requireIntInRange(name: string, value: unknown, lo: number, hi: number): number {
-  const number = typeof value === "bigint" ? Number(value) : value;
-  if (typeof number !== "number" || !Number.isInteger(number) || number < lo || number > hi) {
-    throw new Error(`${name} must be an integer between ${lo} and ${hi}, got ${pyRepr(value)}`);
-  }
-  return number;
-}
 
 /**
  * `list_contexts`' `name_contains` as the server reads it — the Python
@@ -2280,10 +2258,10 @@ export class KaguraClient {
       args.cursor = cursor;
     }
     if (limit !== undefined && limit !== null) {
-      args.limit = requireIntInRange("limit", limit, 1, STATE_LIST_MAX_LIMIT);
+      args.limit = validateIntRange("limit", limit, 1, STATE_LIST_MAX_LIMIT);
     }
     if (maxChars !== undefined && maxChars !== null) {
-      args.max_chars = requireIntInRange("maxChars", maxChars, STATE_MAX_CHARS_MIN, STATE_MAX_CHARS_MAX);
+      args.max_chars = validateMaxChars(maxChars);
     }
     return this.callToolChecked("get_state", args);
   }
@@ -2659,7 +2637,7 @@ export class KaguraClient {
     const nameContains = normalizeNameContains(options.nameContains);
     let limit: number | undefined;
     if (options.limit !== undefined && options.limit !== null) {
-      limit = requireIntInRange("limit", options.limit, 1, LIST_CONTEXTS_MAX_LIMIT);
+      limit = validateIntRange("limit", options.limit, 1, LIST_CONTEXTS_MAX_LIMIT);
       if (detailsPageOverCap(options.includeDetails, nameContains, limit)) {
         throw new Error(
           "includeDetails returns full summaries: pass nameContains or a limit of at most " +
