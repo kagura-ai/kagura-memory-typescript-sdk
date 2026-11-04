@@ -834,9 +834,10 @@ current directory and each entry it hides, in the Python CLI's words
 when there is none, with non-ASCII escaped as `\uXXXX`, as Python's
 `json.dumps` default writes it. `auth list` and `auth status` without
 profiles exit 1. `auth logout`
-revokes the profile's refresh token on the server (its access token when
-it has none) before it deletes the profile, as Python 0.43.0+ does; on
-memory-cloud v0.82.0+ that revokes the access token issued with it too
+revokes the profile's refresh token on the server, as Python 0.43.0+
+does, and then its access token, before it deletes the profile; on
+memory-cloud v0.82.0+ revoking the refresh token revokes the access token
+issued with it too
 ([memory-cloud#1741](https://github.com/kagura-ai/memory-cloud/issues/1741)),
 while an older server revokes only the token sent. Up to 0.14.1 it
 revoked only the access token, which left the refresh token valid. The
@@ -846,8 +847,9 @@ Python's warning (with `--all`, silently, as in Python). It notes when
 and `All profiles removed.`, where Python prints `✓ Profile 'NAME'
 removed.` and `✓ All profiles removed; ~/.kagura/credentials.json
 deleted.`, and that note says `kagura-memory commands` where Python's
-says `kagura commands`. Unlike the Python CLI, it asks before removing
-anything unless
+says `kagura commands`. Unlike the Python CLI, it also revokes the
+access token, which Python leaves valid until it expires on a server
+before v0.82.0; it asks before removing anything unless
 `--yes` (`-y`) is given, rather than refusing `--all` without it; a
 logout that names no profile succeeds when nothing is stored, so
 `logout --yes` stays idempotent in setup scripts; and `--all` with
