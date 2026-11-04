@@ -403,6 +403,12 @@ describe("throwForKaguraStatus", () => {
 });
 
 describe("ErrorBody (python-sdk#311)", () => {
+  it("keeps OAuth fields independent from later envelope and field reads", () => {
+    const body = new ErrorBody(JSON.stringify({ error: "E-1", details: { reason: "original" } }));
+    (body.oauth.fields.details as Record<string, unknown>).reason = "changed";
+    expect(body.fields?.[1]).toEqual({ reason: "original" });
+    expect(body.envelope?.details).toEqual({ reason: "original" });
+  });
   it.each([
     JSON.stringify({ error: "QUOTA-001", message: "Over: 3/3.", details: { gate: "quota", nested: { a: [1] }, retry_after: 9 } }),
     JSON.stringify({ detail: [{ loc: ["body", "name"], msg: "field required" }] }),
@@ -429,7 +435,8 @@ describe("ErrorBody (python-sdk#311)", () => {
       const body = new ErrorBody(text);
       void body.text;
       expect(parses()).toBe(0);
-      void [body.detail, body.envelope, body.fields, body.detail, body.envelope, body.fields];
+      void [body.detail, body.envelope, body.fields, body.oauth, body.methodNotFound];
+      expect(mcpSessionExpired(404, body, "session")).toBe(true);
       expect(responseRetryAfter(new Headers(), body)).toBe(3);
       expect(parses()).toBe(1);
     } finally {

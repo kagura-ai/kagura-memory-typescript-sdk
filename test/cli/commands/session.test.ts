@@ -22,6 +22,37 @@ function harness() {
 }
 
 describe("session commands", () => {
+  it.each([false, true])("observes a wrapper's edits to an SDK reply (malformed=%s)", async (malformed) => {
+    const h = harness();
+    h.server.toolResults.list = { memories: [], total: 0, has_more: false };
+    const client = makeClient(h.server);
+    const list = client.listMatching.bind(client);
+    client.listMatching = async (options) => {
+      const reply = await list(options);
+      reply.total = malformed ? "bad" as unknown as number : 99;
+      return reply;
+    };
+    h.deps.makeClient = () => client;
+    expect(await runCli(["list"], h.deps)).toBe(malformed ? 1 : 0);
+    if (malformed) {
+      expect(h.err.join("\n")).toContain("unexpected server response for ListMatchingResponse");
+      expect(h.out).toEqual([]);
+    } else expect(JSON.parse(h.out[0]!).total).toBe(99);
+  });
+  it.each([false, true])("validates an uncached custom client's reply (malformed=%s)", async (malformed) => {
+    const h = harness();
+    const client = makeClient(h.server);
+    const reply = malformed ? { memories: "bad", total: 0 } : { memories: [], total: 0, has_more: false };
+    client.listMatching = async () => reply as unknown as Awaited<ReturnType<typeof client.listMatching>>;
+    h.deps.makeClient = () => client;
+    expect(await runCli(["list"], h.deps)).toBe(malformed ? 1 : 0);
+    if (malformed) {
+      expect(h.err.join("\n")).toContain("unexpected server response for ListMatchingResponse");
+      expect(h.out).toEqual([]);
+    } else {
+      expect(JSON.parse(h.out[0]!)).toMatchObject({ memories: [], total: 0, has_more: false, next_cursor: null });
+    }
+  });
   it("are listed in the root help with the Python CLI's summaries", async () => {
     const h = harness();
     expect(await runCli(["--help"], h.deps)).toBe(0);
