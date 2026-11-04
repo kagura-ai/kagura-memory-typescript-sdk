@@ -212,9 +212,16 @@ const sleepHistory: Command = {
   },
 };
 
+// CONTEXT_ID stays a required positional, as in the Python CLI 0.42.2, so
+// existing scripts keep working; getSleepReport / rollbackSleepRun ignore
+// it, since memory-cloud v0.82.0+ refuses a context_id on these tools (#79).
 const sleepReport: Command = {
   summary: "Get a detailed Sleep Maintenance report including audit log.",
   args: "CONTEXT_ID REPORT_ID",
+  description:
+    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server finds\n" +
+    "  the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the run's\n" +
+    "  own context).",
   spec: { flags: [] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
@@ -235,7 +242,10 @@ const sleepRollback: Command = {
   description:
     "  Reverses edge creation, memory merges and importance updates made by\n" +
     "  the run. Without --yes the report is fetched first so the prompt can\n" +
-    "  say what is about to be undone.",
+    "  say what is about to be undone.\n\n" +
+    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server finds\n" +
+    "  the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner role on\n" +
+    "  the run's own context).",
   spec: { flags: [{ ...YES, help: "Skip confirmation prompt." }] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
