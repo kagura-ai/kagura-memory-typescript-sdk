@@ -1255,6 +1255,28 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 | `getSleepReport` | One run in detail, including the per-action audit log. |
 | `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. |
 
+`getSleepReport` and `rollbackSleepRun`, and `kagura-memory sleep
+report|rollback`, send `report_id` only. Their `contextId` is ignored and
+now optional, so calls that pass it keep compiling; the CLI's
+`CONTEXT_ID` is ignored too and stays a required positional, as in the
+Python CLI, so scripts keep working. No memory-cloud release declares or
+reads a `context_id` on `get_sleep_report` or `rollback_sleep_run`, and from
+v0.82.0 the server refuses an argument a tool does not declare
+([memory-cloud#1742](https://github.com/kagura-ai/memory-cloud/issues/1742)),
+so up to 0.14.1 both methods and both commands failed every call there
+with `invalid_argument`
+([#79](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/79)).
+The server finds the run by `report_id` and, from v0.126.0
+([memory-cloud#2315](https://github.com/kagura-ai/memory-cloud/pull/2315)),
+authorizes against the report's own context: read access for a report,
+the editor or owner role for a rollback (`KaguraPermissionError` without
+it; a workspace viewer cannot roll back). A report in a context the
+caller cannot read throws `KaguraNotFoundError`, like a missing one. From
+v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
+"analysis"`), which records LLM spend and has no Sleep actions, with
+`analysis_report`, a plain `KaguraError`
+([memory-cloud#2547](https://github.com/kagura-ai/memory-cloud/issues/2547)).
+
 ### Workspace and server
 
 | Method | What it does |

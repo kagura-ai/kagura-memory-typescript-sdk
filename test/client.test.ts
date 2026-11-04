@@ -2505,6 +2505,208 @@ describe("sleep maintenance", () => {
       client.getSleepReport({ contextId: "c1", reportId: "nope" }),
     ).rejects.toBeInstanceOf(KaguraNotFoundError);
   });
+
+  // The inputSchema properties of memory-cloud v0.143.0 (unchanged since
+  // the v0.141.0 probe python-sdk#296 recorded). From v0.82.0
+  // (memory-cloud#1742) every tool refuses an argument its schema does not
+  // declare with invalid_argument, and none ever declared context_id (#79).
+  const SLEEP_TOOL_ARGUMENTS: Record<string, string[]> = {
+    get_sleep_report: ["actions_cursor", "actions_limit", "max_chars", "report_id"],
+    rollback_sleep_run: ["report_id"],
+  };
+
+  /** A {@link FakeServer} that refuses an undeclared sleep argument as memory-cloud v0.82.0+ does. */
+  function strictSleepServer(): FakeServer {
+    const server = new FakeServer();
+    server.declaredArguments = SLEEP_TOOL_ARGUMENTS;
+    return server;
+  }
+
+  // The messages memory-cloud v0.143.0's find_unknown_arguments gives for
+  // these calls (the v0.141.0 production probe of python-sdk#296 read the same).
+  it.each([
+    [
+      "get_sleep_report",
+      "get_sleep_report failed (invalid_argument): get_sleep_report does not accept the argument " +
+        "'context_id'. Arguments its inputSchema declares: actions_cursor, actions_limit, max_chars, report_id.",
+    ],
+    [
+      "rollback_sleep_run",
+      "rollback_sleep_run failed (invalid_argument): rollback_sleep_run does not accept the argument " +
+        "'context_id'. Arguments its inputSchema declares: report_id.",
+    ],
+  ])("the strict fake refuses the context_id SDKs up to 0.14.1 sent to %s", async (tool, message) => {
+    const server = strictSleepServer();
+    const err = await makeClient(server)
+      .callRawTool(tool, { context_id: "c1", report_id: "r1" })
+      .catch((e: unknown) => e);
+    expect((err as object).constructor).toBe(KaguraError);
+    expect((err as Error).message).toBe(message);
+  });
+
+  it("getSleepReport sends report_id only and ignores contextId (#79)", async () => {
+    const server = strictSleepServer();
+    server.toolResults.get_sleep_report = {
+      status: "success",
+      report: { report_id: "r1", context_id: "c-of-the-report", status: "completed" },
+      actions: [],
+      action_count: 0,
+    };
+    const detail = await makeClient(server).getSleepReport({ contextId: "c1", reportId: "r1" });
+    expect(server.toolCallArgs()).toEqual({ report_id: "r1" });
+    expect(server.toolCallArgs()).not.toHaveProperty("context_id");
+    expect(detail.report_id).toBe("r1");
+    expect(detail.context_id).toBe("c-of-the-report");
+  });
+
+  it("rollbackSleepRun sends report_id only and ignores contextId (#79)", async () => {
+    const server = strictSleepServer();
+    const rolledBack = {
+      status: "rolled_back",
+      report_id: "r1",
+      rollback_summary: { edges_deleted: 1, errors: [] },
+    };
+    server.toolResults.rollback_sleep_run = rolledBack;
+    const result = await makeClient(server).rollbackSleepRun({ contextId: "c1", reportId: "r1" });
+    expect(server.toolCallArgs()).toEqual({ report_id: "r1" });
+    expect(server.toolCallArgs()).not.toHaveProperty("context_id");
+    expect(result).toEqual(rolledBack);
+  });
+
+  it("getSleepReport and rollbackSleepRun take no contextId at all", async () => {
+    const server = strictSleepServer();
+    server.toolResults.get_sleep_report = { status: "success", report: { report_id: "r1" }, actions: [] };
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1" };
+    const client = makeClient(server);
+    await client.getSleepReport({ reportId: "r1" });
+    await client.rollbackSleepRun({ reportId: "r1" });
+    expect(server.toolCallArgs(0)).toEqual({ report_id: "r1" });
+    expect(server.toolCallArgs(1)).toEqual({ report_id: "r1" });
+  });
+
+  it("rollbackSleepRun: a report the caller cannot reach is KaguraNotFoundError (v0.126.0+)", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "report_not_found",
+      message: "Sleep report r1 not found or not owned by you.",
+    };
+    const err = await makeClient(server)
+      .rollbackSleepRun({ contextId: "c1", reportId: "r1" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraNotFoundError);
+    expect((err as Error).message).toBe("rollback_sleep_run: Sleep report r1 not found or not owned by you.");
+  });
+
+  it("rollbackSleepRun: a reader who cannot edit the report's context is KaguraPermissionError (v0.126.0+)", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "permission_denied",
+      message: "Cannot roll back sleep runs: you need the editor or owner role on this context.",
+      your_role: "viewer",
+      required_role: "editor",
+      help: "Ask a context owner for the editor role.",
+    };
+    const err = await makeClient(server)
+      .rollbackSleepRun({ contextId: "c1", reportId: "r1" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraPermissionError).requiredRole).toBe("editor");
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (permission_denied): " +
+        "Cannot roll back sleep runs: you need the editor or owner role on this context.",
+    );
+  });
+
+  it("rollbackSleepRun: an analysis report is a plain KaguraError (v0.140.0+, memory-cloud#2547)", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "analysis_report",
+      message:
+        "Report r1 is an analysis report: it records the LLM spend of a Memory Analysis run " +
+        "and has no Sleep actions, so there is nothing to roll back.",
+      help: "get_sleep_history lists the context's Sleep runs (source 'sleep', its default); roll back one of those.",
+    };
+    const err = await makeClient(server)
+      .rollbackSleepRun({ contextId: "c1", reportId: "r1" })
+      .catch((e: unknown) => e);
+    expect((err as object).constructor).toBe(KaguraError);
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (analysis_report): Report r1 is an analysis report: it records the " +
+        "LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.",
+    );
+  });
+});
+
+// The shared fake's v0.82.0+ undeclared-argument refusal (memory-cloud#1742).
+// Each expected envelope is what memory-cloud v0.143.0's
+// find_unknown_arguments returned for the same arguments.
+describe("FakeServer.declaredArguments", () => {
+  function strict(): FakeServer {
+    const server = new FakeServer();
+    server.declaredArguments = { rollback_sleep_run: ["report_id"] };
+    return server;
+  }
+
+  it("answers the server's whole envelope, in a result flagged isError", async () => {
+    const response = await strict().fetch("https://x.test/mcp", {
+      method: "POST",
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "rollback_sleep_run", arguments: { context_id: "c", report_id: "r" } },
+      }),
+    });
+    const rpc = (await response.json()) as { result: { isError: boolean; content: Array<{ text: string }> } };
+    expect(rpc.result.isError).toBe(true);
+    expect(JSON.parse(rpc.result.content[0]!.text)).toEqual({
+      status: "error",
+      error: "invalid_argument",
+      message: "rollback_sleep_run does not accept the argument 'context_id'. Arguments its inputSchema declares: report_id.",
+      unknown_arguments: ["context_id"],
+      allowed_arguments: ["report_id"],
+      suggestions: {},
+      help:
+        "Remove the unknown arguments or rename them as suggested, then call the tool again. " +
+        "tools/list shows each tool's inputSchema.",
+    });
+  });
+
+  it("names every unknown argument, sorted, and accepts _meta", async () => {
+    const err = await makeClient(strict())
+      .callRawTool("rollback_sleep_run", { zz: 1, context_id: "c", _meta: {}, report_id: "r" })
+      .catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (invalid_argument): rollback_sleep_run does not accept the arguments " +
+        "'context_id', 'zz'. Arguments its inputSchema declares: report_id.",
+    );
+  });
+
+  it("names ten unknown arguments and counts the rest", async () => {
+    const args = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`a${i + 1}`, i]));
+    const err = await makeClient(strict())
+      .callRawTool("rollback_sleep_run", args)
+      .catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (invalid_argument): rollback_sleep_run does not accept the arguments " +
+        "'a1', 'a10', 'a11', 'a12', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7' and 2 more. " +
+        "Arguments its inputSchema declares: report_id.",
+    );
+  });
+
+  it("lets declared arguments through, and every argument of a tool it does not list", async () => {
+    const server = strict();
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r" };
+    const client = makeClient(server);
+    await expect(client.callRawTool("rollback_sleep_run", { report_id: "r", _meta: {} })).resolves.toEqual({
+      status: "rolled_back",
+      report_id: "r",
+    });
+    await expect(client.callRawTool("recall", { anything: 1 })).resolves.toEqual({ status: "success" });
+  });
 });
 
 describe("tool definitions", () => {
