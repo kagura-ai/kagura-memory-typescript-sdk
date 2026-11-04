@@ -252,6 +252,46 @@ export class KaguraServiceUnavailableError extends KaguraConnectionError {
 /** Requested resource not found (HTTP 404). */
 export class KaguraNotFoundError extends KaguraError {}
 
+/** `details[key]` when it is a whole number (a JSON integer), else `null`. */
+function intDetail(details: Record<string, unknown>, key: string): number | null {
+  const value = details[key];
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+/**
+ * An edit's `expectedVersion` no longer matched the memory (memory-cloud
+ * v0.113.0+, #2043; the Python SDK's class of the same name, its #302).
+ *
+ * `updateMemory({ expectedVersion })` found the memory at another version
+ * because another edit landed first, and wrote nothing: MCP
+ * `version_conflict`, or a REST `409 RES-002` whose `details.reason` is
+ * `"version_conflict"` (`PATCH /api/v1/memory/{id}`). It is not retryable
+ * as is: read the memory again (`KaguraClient.reference` returns its
+ * `version`), then resend with that version, or without `expectedVersion`
+ * to overwrite.
+ *
+ * `code` and `details` keep what the server sent — `code` is
+ * `"version_conflict"` from MCP and `"RES-002"` from REST — and the
+ * getters below read `details`, `null` when a field is missing or is not
+ * of its type.
+ */
+export class KaguraVersionConflictError extends KaguraError {
+  /** The memory's version now, when the server sent it. */
+  get currentVersion(): number | null {
+    return intDetail(this.details, "current_version");
+  }
+
+  /** The `expectedVersion` the refused edit carried. */
+  get expectedVersion(): number | null {
+    return intDetail(this.details, "expected_version");
+  }
+
+  /** The memory's id (the MCP envelope sends it; REST names it in the URL). */
+  get memoryId(): string | null {
+    return strDetail(this.details, "memory_id");
+  }
+}
+
 /**
  * A successful server response did not match what the SDK expects of it
  * (the Python SDK's class of the same name, from its #250).

@@ -292,17 +292,24 @@ const RERANKER: FlagSpec = {
   name: "reranker",
   type: "value",
   metavar: "[voyage|cohere|self_hosted]",
-  help: "Reranker provider",
+  help: "Reranker provider (self_hosted: the deployment's keyless local reranker)",
 };
 
 const searchConfig: Command = {
   summary: "Update search configuration for a context.",
   args: "CONTEXT_ID",
-  description: examples(
-    "context search-config CTX_UUID --semantic 0.5 --bm25 0.5",
-    "context search-config CTX_UUID --rerank --reranker voyage",
-    "context search-config CTX_UUID --rerank --reranker self_hosted",
-  ),
+  description:
+    "  Weights must sum to 1.0. The weights and reranker settings need context\n" +
+    "  editor access; --content-chunks and --llm-selector need the context owner or\n" +
+    "  a workspace owner/admin, and where the deployment gates them by plan, the\n" +
+    "  plan's feature and a free slot.\n\n" +
+    examples(
+      "context search-config CTX_UUID --semantic 0.5 --bm25 0.5",
+      "context search-config CTX_UUID --rerank --reranker voyage",
+      "context search-config CTX_UUID --rerank --reranker self_hosted",
+      "context search-config CTX_UUID --content-chunks",
+      "context search-config CTX_UUID --no-llm-selector",
+    ),
   spec: {
     flags: [
       SEMANTIC,
@@ -312,6 +319,27 @@ const searchConfig: Command = {
       { name: "no-rerank", type: "switch", help: "Disable reranking" },
       RERANKER,
       { name: "reranker-model", type: "value", help: "Reranker model name" },
+      // Python's `--content-chunks/--no-content-chunks` and
+      // `--llm-selector/--no-llm-selector` are one option each with
+      // `default=None`; here two switches each, resolved by `pairedFlag`.
+      {
+        name: "content-chunks",
+        type: "switch",
+        help:
+          "Embed long content as chunk vectors; sends memory content, not only summaries, " +
+          "to the embedding and rerank providers. Context owner or workspace owner/admin only " +
+          "(server v0.110.0+)",
+      },
+      { name: "no-content-chunks", type: "switch", help: "Turn content chunk vectors off (deletes the chunks)" },
+      {
+        name: "llm-selector",
+        type: "switch",
+        help:
+          "Let recall send summaries and content to the deployment's judge model to keep " +
+          "the results that answer the query. Context owner or workspace owner/admin only " +
+          "(server v0.115.0+)",
+      },
+      { name: "no-llm-selector", type: "switch", help: "Turn the recall LLM selector off" },
     ],
   },
   run: async (deps, args) => {
@@ -336,6 +364,16 @@ const searchConfig: Command = {
         ? undefined
         : parseChoice(RERANKER, rawReranker, ["voyage", "cohere", "self_hosted"]);
     const rerankerModel = args.values["reranker-model"];
+    const contentChunksEnabled = pairedFlag(
+      args.flags.has("content-chunks"),
+      args.flags.has("no-content-chunks"),
+      ["--content-chunks", "--no-content-chunks"],
+    );
+    const llmSelectorEnabled = pairedFlag(
+      args.flags.has("llm-selector"),
+      args.flags.has("no-llm-selector"),
+      ["--llm-selector", "--no-llm-selector"],
+    );
 
     const patch = {
       ...(semanticWeight !== undefined ? { semanticWeight } : {}),
@@ -344,6 +382,8 @@ const searchConfig: Command = {
       ...(useRerank !== undefined ? { useRerank } : {}),
       ...(rerankerProvider !== undefined ? { rerankerProvider } : {}),
       ...(rerankerModel !== undefined ? { rerankerModel } : {}),
+      ...(contentChunksEnabled !== undefined ? { contentChunksEnabled } : {}),
+      ...(llmSelectorEnabled !== undefined ? { llmSelectorEnabled } : {}),
     };
     if (Object.keys(patch).length === 0) {
       throw new CliError("At least one option is required");

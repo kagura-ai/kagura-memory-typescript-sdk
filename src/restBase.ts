@@ -45,6 +45,7 @@ import {
   serverErrorFields,
   serviceUnavailableFrom,
   validateHttpsUrl,
+  versionConflictError,
 } from "./http.js";
 import type { ServerErrorFields } from "./http.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
@@ -291,7 +292,12 @@ function jsonTypeName(value: unknown): string {
  * - 503 (`DB-002`, the database unavailable) →
  *   {@link KaguraServiceUnavailableError} with `retryAfter` from
  *   `Retry-After` and `reason` from `details.reason`
- * - other statuses → {@link KaguraConnectionError}
+ * - a refused `expectedVersion` (memory `PATCH`'s `409 RES-002` with
+ *   `details.reason === "version_conflict"`, v0.113.0+, #2043) →
+ *   {@link KaguraVersionConflictError}, whatever the status and before
+ *   every hook
+ * - other statuses → {@link KaguraConnectionError}, e.g. the files API's
+ *   sha256 dedup `409 RES-002` (no `reason`)
  * - transport errors → {@link KaguraConnectionError}
  * - whatever the class, an error built from a response keeps the body's
  *   error code as `code` and its `details` (the REST envelope's `details`,
@@ -542,6 +548,10 @@ export class KaguraRestClient {
     context: RequestContext,
     fields: ServerErrorFields | null = serverErrorFields(response.text),
   ): KaguraError {
+    const conflict = this.versionConflictRefusal(response, fields);
+    if (conflict !== null) {
+      return conflict;
+    }
     const status = response.status;
     if (status === 401) {
       return this.error401(response);
@@ -639,6 +649,31 @@ export class KaguraRestClient {
       REST_GATE_CODES,
       sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
       responseRetryAfter(response.headers, response.text),
+    );
+  }
+
+  /**
+   * A refused `expectedVersion` → {@link KaguraVersionConflictError}; `null`
+   * for any other body (Python's `_version_conflict_error`, its #302).
+   *
+   * Memory `PATCH` answers `409 RES-002` with `details.reason ===
+   * "version_conflict"` (memory-cloud v0.113.0+, #2043). The files API's
+   * dedup `409 RES-002` has no such reason and stays the generic error
+   * `FilesClient.upload` reads its `existing_file` from. The message is the
+   * server's own, scrubbed of credential markers.
+   *
+   * @param fields The body's decoded `[code, details]`
+   *   ({@link mapStatusError}'s), so any other error returns here without
+   *   reading the body again; only a conflict reads its message.
+   */
+  protected versionConflictRefusal(response: RestResponse, fields: ServerErrorFields | null): KaguraError | null {
+    if (fields === null || fields[0] !== "RES-002" || fields[1].reason !== "version_conflict") {
+      return null;
+    }
+    return versionConflictError(
+      fields[0],
+      sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
+      fields[1],
     );
   }
 

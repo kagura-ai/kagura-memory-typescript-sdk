@@ -558,6 +558,24 @@ const CASES: Case[] = [
     stdout: "",
     stderr: "Usage: kagura remember [OPTIONS]\nTry 'kagura remember --help' for help.\n\nError: Invalid JSON for --details: Extra data: line 1 column 4 (char 3)\n",
   },
+  {
+    name: "update-memory details-patch NaN",
+    argv: ["update-memory","-c","11111111-2222-4333-8444-555555555555","-m","aaaaaaaa-0000-4000-8000-000000000001","--details-patch","{\"a\": NaN}"],
+    toolTexts: {"update_memory":"{\"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"version\": 2}"},
+    calls: [],
+    code: 1,
+    stdout: "",
+    stderr: "Error: Out of range float values are not JSON compliant: nan\n",
+  },
+  {
+    name: "update-memory details-patch bad json",
+    argv: ["update-memory","-c","11111111-2222-4333-8444-555555555555","-m","aaaaaaaa-0000-4000-8000-000000000001","--details-patch","{\"a\": }"],
+    toolTexts: {},
+    calls: [],
+    code: 2,
+    stdout: "",
+    stderr: "Usage: kagura update-memory [OPTIONS]\nTry 'kagura update-memory --help' for help.\n\nError: Invalid JSON for --details-patch: Expecting value: line 1 column 7 (char 6)\n",
+  },
 ];
 
 describe("bootstrap / changes / list / forget --ids output, byte for byte the Python CLI's (#86)", () => {

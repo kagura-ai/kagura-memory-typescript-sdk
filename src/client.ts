@@ -16,6 +16,7 @@ import {
   KaguraCapacityLockedError,
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
+  KaguraVersionConflictError,
 } from "./errors.js";
 import {
   annotateServerError,
@@ -33,12 +34,14 @@ import {
   serverErrorFieldsOf,
   throwForKaguraStatus,
   validateHttpsUrl,
+  versionConflictError,
 } from "./http.js";
 import type {
   Agent,
   AgentBinding,
   AgentBootstrapResponse,
   ContextInfo,
+  DedupeMode,
   DuplicatesResponse,
   Edge,
   EmbeddingModelsResponse,
@@ -61,6 +64,9 @@ import type {
   // Referenced only from JSDoc {@link} on the recall options.
   RecallResult,
   RecallVerbosity,
+  ReferenceField,
+  ReferenceResponse,
+  RememberResult,
   RollbackResult,
   RollbackSummary,
   SearchConfig,
@@ -71,6 +77,7 @@ import type {
   TagInfo,
   // Referenced only from JSDoc {@link} on the details options.
   ToolTrigger,
+  UpdateMemoryResult,
   UsageInfo,
 } from "./models.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
@@ -289,6 +296,48 @@ export interface RememberOptions {
    * returns it. Only sent when it differs from the server default.
    */
   deliveryMode?: DeliveryMode;
+  /**
+   * Mark the memory as a tool guardrail (memory-cloud v0.74.0+): sent as
+   * `details.tool_trigger`, merged with any other `details` keys. Same
+   * contract and permissions as a `tool_trigger` in {@link details}; giving
+   * it both ways throws before any request.
+   */
+  toolTrigger?: ToolTrigger | Record<string, unknown>;
+  /**
+   * When the fact held or the event happened — never the write time
+   * (memory-cloud v0.127.0+, #2330). A string `YYYY-MM-DD` or an extended
+   * ISO 8601 datetime (`YYYY-MM-DDTHH:MM:SS`, optional fractional seconds,
+   * optional `Z` / `±HH:MM`; naive means UTC), sent as given; or a `Date`,
+   * sent as its UTC instant `YYYY-MM-DDTHH:MM:SSZ` (fractional seconds
+   * dropped, as the server drops them). The server stores it as
+   * `details.observed_at` (a datetime in UTC); `recall`'s `observedAfter` /
+   * `observedBefore` filter on it. Checked locally as the server checks it:
+   * a basic form (`20240307`), a space separator, a time without seconds,
+   * an impossible day or a `details.observed_at` that disagrees throws
+   * before any request.
+   */
+  observedAt?: string | Date;
+  /**
+   * `true` stores each tag under the context's established spelling when
+   * the two differ only by case, separators, a simple plural or (v0.110.0+)
+   * hiragana / katakana or one word-final `ー`, and reports each mapping in
+   * `lint` as `tag_normalized` (memory-cloud v0.93.0+, #1853). Only `true`
+   * is sent.
+   */
+  tagsNormalize?: boolean;
+  /**
+   * The duplicate check (memory-cloud v0.93.0+, #1853). With `"check"` a
+   * near-duplicate (similarity ≥ 0.85 to a live memory of the context)
+   * writes nothing and the reply is `{ status: "duplicate_candidate",
+   * candidate }` — returned, not thrown: store with `supersedes`, update the
+   * existing memory, or repeat with `"off"`. `"off"` writes and opts this
+   * memory out of supersede suggestions for good (#2024). A check that
+   * could not run throws {@link KaguraError} with `code`
+   * `"dedupe_unavailable"` (nothing written).
+   */
+  dedupe?: DedupeMode;
+  /** `true` keeps `persistence.detail`, the lifecycle prose (memory-cloud v0.93.0+, #1851). Only `true` is sent. */
+  verbose?: boolean;
 }
 
 export interface RecallOptions {
@@ -316,6 +365,8 @@ export interface RecallOptions {
    * - `importance`: `{ gte | lte | gt | lt: 0.0-1.0 }`.
    * - `created_after` / `created_before` / `updated_after` /
    *   `updated_before`: ISO 8601.
+   * - `observed_after` (inclusive) / `observed_before` (exclusive): when
+   *   the fact held (server v0.127.0+); see {@link RecallOptions.observedAfter}.
    * - `source_uri_prefix` (e.g. `"vault://my-vault/"`) and `source_type`.
    * - `trust_tier: "trusted"` excludes external/connector-ingested
    *   memories.
@@ -390,6 +441,22 @@ export interface RecallOptions {
    * (`truncated: true`; `count` is the rows returned).
    */
   maxChars?: number;
+  /**
+   * Keep memories whose fact held at or after this time (inclusive):
+   * `details.observed_at`, set with `remember`'s `observedAt` (server
+   * v0.127.0+, #2330). An ISO 8601 date or datetime; a date means the start
+   * of that UTC day, and a memory without `observed_at` never matches. Sent
+   * as `filters.observed_after`, the same as putting that key in
+   * {@link RecallOptions.filters}; giving both throws before any request.
+   * A server before v0.127.0 ignores the key and does not filter.
+   */
+  observedAfter?: string;
+  /**
+   * Keep memories whose fact held before this time (exclusive), as
+   * {@link RecallOptions.observedAfter} does; sent as
+   * `filters.observed_before`.
+   */
+  observedBefore?: string;
 }
 
 export interface UpdateMemoryOptions {
@@ -404,16 +471,17 @@ export interface UpdateMemoryOptions {
   importance?: number;
   /**
    * Replaces the list; `[]` clears it. At most 50 tags, each at most 100
-   * characters, as for {@link RememberOptions.tags}.
+   * characters, as for {@link RememberOptions.tags}. To change only some
+   * tags, use {@link addTags} / {@link removeTags}.
    */
   tags?: string[];
   contextSummary?: string;
   /**
    * Structured details JSON. **Replaces `details` wholesale** — the server
    * does not deep-merge. Round-trip any keys you want to keep (notably
-   * `location`, see {@link MemoryLocation}) or they are silently dropped.
-   * The CLI's `update-memory --merge-details` does that round-trip for
-   * top-level keys.
+   * `location`, see {@link MemoryLocation}) or they are silently dropped,
+   * or change only some keys with {@link detailsPatch} (memory-cloud
+   * v0.140.0+), which the CLI's `update-memory --merge-details` sends.
    *
    * That includes `tool_trigger` ({@link ToolTrigger}): leaving it out of
    * `updateMemory({ details })` turns the memory's guardrail off. The key
@@ -430,11 +498,120 @@ export interface UpdateMemoryOptions {
    * Reject this memory's current `supersede_candidate` (server v0.65.0+)
    * — for two memories that are deliberately separate, so the suggestion
    * stops resurfacing on recall and reference. Nothing is deleted or
-   * shadowed. To accept a candidate instead, create a `"supersedes"` edge.
+   * shadowed. To accept a candidate instead, pass
+   * {@link acceptSupersedeCandidate}.
    *
    * In-place mode only: requires `memoryId`. Only `true` is sent.
    */
   dismissSupersedeCandidate?: boolean;
+  /**
+   * Mark (or re-mark) the memory as a tool guardrail, as
+   * {@link RememberOptions.toolTrigger} does. It is merged into
+   * {@link detailsPatch} when that is given, which keeps the other stored
+   * keys; otherwise into {@link details}, and because `details` replaces
+   * the stored object, passing only `toolTrigger` sends `details: {
+   * tool_trigger }` and drops every other key. Giving the trigger both
+   * ways throws before any request.
+   */
+  toolTrigger?: ToolTrigger | Record<string, unknown>;
+  /**
+   * When the fact held (memory-cloud v0.127.0+, #2330), in
+   * {@link RememberOptions.observedAt}'s forms. Without `details` it
+   * changes only `details.observed_at` of the stored details (a details
+   * edit, so the version moves); with `details` or `detailsPatch` their
+   * own `observed_at`, if they carry one, must equal it. Clear it by
+   * resending `details` without the key or with `detailsPatch: {
+   * observed_at: null }`.
+   */
+  observedAt?: string | Date;
+  /**
+   * Tags to append to the stored list, each once, in order, after
+   * {@link removeTags} is applied (memory-cloud v0.140.0+, #2585). The 50 ×
+   * 100-character caps of `tags` apply here, and the server applies the
+   * count cap again to the resulting list. In-place mode only, never with
+   * `tags`.
+   */
+  addTags?: string[];
+  /**
+   * Tags to remove from the stored list; one that is not there is ignored
+   * (v0.140.0+, #2585). Not capped: a stored tag longer than today's limit
+   * can still be removed. In-place mode only, never with `tags`.
+   */
+  removeTags?: string[];
+  /**
+   * A shallow merge into the stored details (v0.140.0+, #2585): each key
+   * replaces the stored key, and a `null` value **deletes** it. Stored keys
+   * the patch does not name are kept, so `location` and `tool_trigger`
+   * survive a status flip. The reserved keys keep their validation. In-place
+   * mode only, never with `details`.
+   */
+  detailsPatch?: Record<string, unknown>;
+  /**
+   * Apply the edit only while the memory is still at this version, an
+   * integer ≥ 1 — the `version` that {@link KaguraClient.reference},
+   * `remember` and `updateMemory` return (memory-cloud v0.113.0+, #2043).
+   * Otherwise nothing is written and {@link KaguraVersionConflictError} is
+   * thrown, its `currentVersion` the version to resend with after reading
+   * the memory again. Omit for last writer wins. In-place mode only.
+   */
+  expectedVersion?: number;
+  /**
+   * Accept this memory's current `supersede_candidate`: write the declared
+   * `supersedes` edge from this memory to the candidate, which then leaves
+   * default recall, and clear the suggestion (memory-cloud v0.126.0+,
+   * #2308). The reply names the shadowed memory as
+   * `superseded_memory_id`. A graph action only: it needs `memoryId`, takes
+   * no field edit in the same call (`toolTrigger` and `observedAt`
+   * included) and leaves `version` alone; `expectedVersion` may guard it.
+   * Both memories must be the caller's own. A different declared edge
+   * already linking the pair throws {@link KaguraError} with `code`
+   * `"edge_exists"` and `details.existing_edge`; nothing is written. Check
+   * `supersede_candidate.acceptance` (on `reference`, v0.137.0+) first.
+   * Only `true` is sent.
+   */
+  acceptSupersedeCandidate?: boolean;
+  /** `true` keeps `persistence.detail` (memory-cloud v0.93.0+, #1851). Only `true` is sent. */
+  verbose?: boolean;
+}
+
+/** {@link KaguraClient.reference}'s options; every one but the ids is sent only when set. */
+export interface ReferenceOptions {
+  contextId: string;
+  memoryId: string;
+  /**
+   * Read an earlier version of the memory, an integer ≥ 1 from its revision
+   * log (memory-cloud v0.113.0+, #2043). The reply then carries
+   * `historical: true`, `current_version` and, when the log could not
+   * rebuild some fields, `unavailable_fields`; the links and
+   * `supersede_candidate`, which describe the memory now, are left out. A
+   * version the memory never had throws {@link KaguraError} with `code`
+   * `"validation_error"` and `details.current_version`.
+   */
+  version?: number;
+  /**
+   * Continue `content` from this character, an integer ≥ 0 — the
+   * `content_next_offset` of a cut `recall` row or of the previous reply
+   * (memory-cloud v0.78.0+, #1685). With an offset the server returns that
+   * one field only, unless `fields` names more. An offset past the end
+   * throws {@link KaguraError} with `code` `"invalid_argument"`.
+   */
+  contentOffset?: number;
+  /**
+   * Page `details` as its compact JSON text (`details_json`) from this
+   * character: `0`, then each reply's `details_next_offset` (v0.78.0+).
+   */
+  detailsOffset?: number;
+  /** As {@link detailsOffset}, for `context` (`context_json`). */
+  contextOffset?: number;
+  /**
+   * The heavy fields to return (v0.78.0+): any of `"content"`,
+   * `"details"`, `"context"`, `"links"`; the other fields always come
+   * back. Default all four, or with an offset only that one field. An
+   * offset's own field must be listed.
+   */
+  fields?: ReferenceField[];
+  /** Reply budget in characters, not tokens: 10,000-100,000 (server default 20,000; v0.78.0+). */
+  maxChars?: number;
 }
 
 export interface ListContextsOptions {
@@ -730,6 +907,31 @@ export interface UpdateSearchConfigOptions {
    * `searchMode`. An explicit `searchMode` always wins.
    */
   routingMode?: RoutingMode;
+  /**
+   * Embed long `content` (1,500+ characters) as chunk vectors, so dense
+   * retrieval sees the body, not only the summary (memory-cloud v0.110.0+,
+   * #2015). **On, memory content — not only summaries — is sent to the
+   * embedding and rerank providers.** Turning it on queues the context's
+   * existing long memories for chunking (v0.112.0+), turning it off
+   * deletes the chunks, and sending the stored value is a no-op. Needs the
+   * context owner or a workspace owner/admin. Refused on a LanceDB
+   * deployment (`invalid_search_config`, v0.112.0+) and, where the
+   * deployment gates it by plan (v0.113.0+), without the plan's
+   * `content_chunks` feature ({@link KaguraFeatureNotAvailableError}) or
+   * past its cap ({@link KaguraQuotaError}, `quotaType`
+   * `content_chunk_contexts`). Sent when set — `false` turns it off.
+   */
+  contentChunksEnabled?: boolean;
+  /**
+   * Let an MCP `recall` send the context's summaries and attached content
+   * to the deployment's judge model, which keeps the results that answer
+   * the query and cuts their content to verbatim passages (`selector` /
+   * `spans` in the reply; memory-cloud v0.115.0+, #2144). Same owner rule;
+   * where the deployment gates it by plan, turning it on needs the
+   * `llm_selector` feature and a free slot (`llm_selector_contexts`). Sent
+   * when set.
+   */
+  llmSelectorEnabled?: boolean;
 }
 
 export interface RecordMeasurementOptions {
@@ -926,7 +1128,7 @@ export interface RememberBatchOptions {
    * `"check"` (a near-duplicate comes back as a `duplicate_candidate` row
    * instead of being written) or `"off"`.
    */
-  dedupe?: "suggest" | "check" | "off";
+  dedupe?: DedupeMode;
   /** `true` stores each item's tags under the context's established spelling (reported in `lint`). */
   tagsNormalize?: boolean;
   /** `true` keeps `persistence.detail` on each row. */
@@ -1197,14 +1399,15 @@ const SLEEP_REPORT_ENVELOPE_KEYS = [
  * request: more than 50 tags, or a tag longer than 100 characters. Measured
  * as the server measures it, and as Python's `_validate_memory_tags` does:
  * the list as given (no trimming or deduplication) and each tag's length
- * in code points.
+ * in code points. `updateMemory`'s `addTags` takes the same caps
+ * (memory-cloud v0.140.0, #2585); `name` is the option the message names.
  *
  * @throws Error in the Python SDK's words.
  */
-function validateMemoryTags(tags: readonly unknown[] | undefined): void {
+function validateMemoryTags(tags: readonly unknown[] | null | undefined, name = "tags"): void {
   if (!Array.isArray(tags)) return;
   if (tags.length > MEMORY_TAGS_MAX_COUNT) {
-    throw new Error(`tags accepts at most ${MEMORY_TAGS_MAX_COUNT} tags, got ${tags.length}`);
+    throw new Error(`${name} accepts at most ${MEMORY_TAGS_MAX_COUNT} tags, got ${tags.length}`);
   }
   let longest = 0;
   for (const tag of tags) {
@@ -1213,6 +1416,354 @@ function validateMemoryTags(tags: readonly unknown[] | undefined): void {
   if (longest > MEMORY_TAG_MAX_CHARS) {
     throw new Error(`each tag must be at most ${MEMORY_TAG_MAX_CHARS} characters, got ${longest}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// remember / updateMemory arguments of memory-cloud v0.93.0-v0.140.0 (#87)
+// ---------------------------------------------------------------------------
+
+/**
+ * How a local check names the argument it refuses: `"options"` by this
+ * SDK's option names (`observedAt`, `addTags`), `"wire"` by the server's
+ * (`observed_at`, `add_tags`), which the Python SDK's messages use — and
+ * so the `kagura-memory` CLI, which prints them as the Python CLI does.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export type ArgNames = "options" | "wire";
+
+/** `option` as `names` writes it. */
+function argName(names: ArgNames, option: string): string {
+  return names === "options" ? option : option.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+}
+
+/** The accepted `observed_at` input forms (memory-cloud `utils/observed_at.py`, #2330). */
+const OBSERVED_AT_MAX_CHARS = 40;
+const OBSERVED_DATE = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/;
+const OBSERVED_DATETIME =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(Z|([+-])([0-9]{2}):([0-9]{2}))?$/;
+const OBSERVED_AT_HINT = "must be an ISO 8601 date (2024-03-07) or datetime (2024-03-07T10:00:00Z)";
+
+/** Days since 0001-01-01 of a proleptic Gregorian date. */
+function dayNumber(year: number, month: number, day: number): number {
+  const y = month <= 2 ? year - 1 : year;
+  const m = month <= 2 ? month + 12 : month;
+  return 365 * y + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400) + Math.floor((153 * (m - 3) + 2) / 5) + day - 307;
+}
+
+/** Whether `year-month-day` is a real day of years 1-9999, as `date.fromisoformat` decides. */
+function isCalendarDay(year: number, month: number, day: number): boolean {
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= lengths[month - 1]!;
+}
+
+const FIRST_MINUTE = dayNumber(1, 1, 1) * 1440;
+const LAST_MINUTE = dayNumber(9999, 12, 31) * 1440 + 1439;
+
+/** Whether `text` (stripped) is an `observed_at` the server's parser takes. */
+function isObservedAtText(text: string): boolean {
+  const date = OBSERVED_DATE.exec(text);
+  if (date !== null) {
+    return isCalendarDay(Number(date[1]), Number(date[2]), Number(date[3]));
+  }
+  const at = OBSERVED_DATETIME.exec(text);
+  if (at === null) return false;
+  const [year, month, day, hour, minute, second] = at.slice(1, 7).map(Number) as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  // Python's fromisoformat: hour 0-23 (the server runs 3.11, which also
+  // refuses 24:00:00), no leap second, an offset under 24 hours.
+  if (!isCalendarDay(year, month, day) || hour > 23 || minute > 59 || second > 59) return false;
+  if (at[8] === undefined) return true;
+  // fromisoformat does not range-check the offset's minutes: `+00:60` is
+  // one hour and `+05:99` 6:39 (CPython 3.11, the server's, and 3.14).
+  // Only the whole offset must stay under 24 hours.
+  const offset = Number(at[9]) * 60 + Number(at[10]);
+  if (offset >= 24 * 60) return false;
+  // The conversion to UTC must stay inside years 1-9999 (an OverflowError
+  // on the server).
+  const sign = at[8] === "-" ? -1 : 1;
+  const utc = dayNumber(year, month, day) * 1440 + hour * 60 + minute - sign * offset;
+  return utc >= FIRST_MINUTE && utc <= LAST_MINUTE;
+}
+
+/**
+ * Render an `observedAt` argument and refuse a form the server refuses —
+ * the port of Python's `_observed_at_arg` (0.44.0).
+ *
+ * A `Date` becomes the server's stored form, `YYYY-MM-DDTHH:MM:SSZ`, its
+ * UTC instant with the fractional seconds dropped as the server drops
+ * them. A string is sent as given once it passes the server's own checks
+ * (memory-cloud v0.127.0, #2330): at most 40 characters as sent (in code
+ * points), then, stripped as Python strips, a date `YYYY-MM-DD` or
+ * `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds and an optional
+ * `Z` / `±HH:MM` offset, a real calendar day and time, and an instant in
+ * UTC years 1-9999.
+ *
+ * @throws Error `<name> must be an ISO 8601 date … , got <value>`.
+ */
+function observedAtArg(value: unknown, name: string): string {
+  if (value instanceof Date) {
+    const time = value.getTime();
+    const year = value.getUTCFullYear();
+    if (Number.isNaN(time) || year < 1 || year > 9999) {
+      throw new Error(`${name} ${OBSERVED_AT_HINT}, got ${Number.isNaN(time) ? "an invalid Date" : value.toISOString()}`);
+    }
+    const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+    return (
+      `${pad(year, 4)}-${pad(value.getUTCMonth() + 1)}-${pad(value.getUTCDate())}` +
+      `T${pad(value.getUTCHours())}:${pad(value.getUTCMinutes())}:${pad(value.getUTCSeconds())}Z`
+    );
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${name} ${OBSERVED_AT_HINT}, got ${pyTypeName(value)}`);
+  }
+  const text = pyStrip(value);
+  if (!text || [...value].length > OBSERVED_AT_MAX_CHARS || !isObservedAtText(text)) {
+    throw new Error(`${name} ${OBSERVED_AT_HINT}, got ${pyRepr(value)}`);
+  }
+  return value;
+}
+
+/**
+ * Refuse an `observed_at` that `details` contradicts, as the server does
+ * (Python's `_check_observed_at_agrees`): it folds the argument into
+ * `details.observed_at` and compares the two as sent, so a `detailsPatch`
+ * `observed_at: null` — a key delete — disagrees too.
+ */
+function checkObservedAtAgrees(
+  observed: string,
+  details: Record<string, unknown> | null | undefined,
+  detailsName: string,
+  observedName: string,
+): void {
+  if (isSet(details) && Object.prototype.hasOwnProperty.call(details, "observed_at") && details.observed_at !== observed) {
+    throw new Error(
+      `${detailsName}['observed_at'] and ${observedName} disagree; give one of them ` +
+        "(the server answers validation_error)",
+    );
+  }
+}
+
+/**
+ * Merge a `toolTrigger` option into the details payload (Python's
+ * `_details_with_tool_trigger`): a new object, the caller's never mutated.
+ * Supplying the trigger both ways is refused rather than resolved, so
+ * neither value is quietly dropped. The trigger is forwarded as given for
+ * the server to validate (it refuses `"match": null`).
+ */
+function detailsWithToolTrigger(
+  details: Record<string, unknown> | null | undefined,
+  toolTrigger: unknown,
+  detailsName: string,
+  names: ArgNames,
+): Record<string, unknown> | null | undefined {
+  if (!isSet(toolTrigger)) return details;
+  if (isSet(details) && Object.prototype.hasOwnProperty.call(details, "tool_trigger")) {
+    throw new Error(
+      `Pass the guardrail either as ${argName(names, "toolTrigger")} or as ` +
+        `${detailsName}['tool_trigger'], not both`,
+    );
+  }
+  return { ...(details ?? {}), tool_trigger: toolTrigger };
+}
+
+/** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
+const REFERENCE_FIELDS: readonly ReferenceField[] = ["content", "details", "context", "links"];
+
+/**
+ * Check `reference`'s reply before returning it as the server sent it:
+ * `status` a string and `memory` an object, the two fields
+ * {@link ReferenceResponse} declares required. Nothing else is read or
+ * changed, so every other key passes through. (The Python SDK returns the
+ * dict unchecked; the `kagura-memory` CLI reads the raw reply, as the
+ * Python CLI does.)
+ *
+ * @throws KaguraResponseError naming the tool and the failing fields,
+ *   e.g. `reference: unexpected server response for ReferenceResponse
+ *   (memory: Field required)`.
+ */
+function checkReferenceReply(result: ToolResult): void {
+  const r = new ResponseReader("reference", "ReferenceResponse");
+  r.field(result, "status", laxStr);
+  const memory = Object.prototype.hasOwnProperty.call(result, "memory") ? result.memory : undefined;
+  if (memory === undefined) {
+    r.issue(["memory"], "Field required");
+  } else {
+    r.object(memory, ["memory"], "ReferenceMemory");
+  }
+  r.check();
+}
+
+/** The `remember` arguments {@link checkRememberOptions} prepares. */
+interface RememberPrepared {
+  details: Record<string, unknown> | null | undefined;
+  observed: string | undefined;
+}
+
+/**
+ * Every local check of `remember`, in the Python SDK's order, before any
+ * request: the tag caps, `toolTrigger` beside a `details.tool_trigger`, the
+ * `observedAt` form and its agreement with `details`, and `dedupe`.
+ *
+ * @param names How the messages name the arguments; see {@link ArgNames}.
+ * @returns The details to send (with the trigger merged in) and the
+ *   `observed_at` text.
+ * @throws Error naming the refused argument.
+ * @internal Exported for its tests; the CLI marks its options with
+ *   {@link pythonOptionNames} instead, so the client checks them once,
+ *   in `"wire"` names.
+ */
+export function checkRememberOptions(options: RememberOptions, names: ArgNames = "options"): RememberPrepared {
+  validateMemoryTags(options.tags);
+  const details = detailsWithToolTrigger(options.details, options.toolTrigger, "details", names);
+  const observedName = argName(names, "observedAt");
+  const observed = isSet(options.observedAt) ? observedAtArg(options.observedAt, observedName) : undefined;
+  if (observed !== undefined) checkObservedAtAgrees(observed, details, "details", observedName);
+  const dedupe: unknown = options.dedupe;
+  if (isSet(dedupe) && dedupe !== "suggest" && dedupe !== "check" && dedupe !== "off") {
+    throw new Error(`dedupe must be 'suggest', 'check' or 'off', got ${pyRepr(dedupe)}`);
+  }
+  return { details, observed };
+}
+
+/** The `updateMemory` arguments {@link checkUpdateMemoryOptions} prepares. */
+interface UpdateMemoryPrepared {
+  details: Record<string, unknown> | null | undefined;
+  detailsPatch: Record<string, unknown> | null | undefined;
+  observed: string | undefined;
+  expectedVersion: number | undefined;
+}
+
+/**
+ * Every local check of `updateMemory`, before any request: the port of
+ * Python's (0.44.0), which mirrors the server's `UpdateMemoryRequest`
+ * rules. Exactly one of `memoryId` / `externalId`; with `externalId`, none
+ * of the in-place-only options (the supersede flags, `expectedVersion`,
+ * `addTags`, `removeTags`, `detailsPatch`); not both supersede flags; not
+ * `tags` beside `addTags` / `removeTags`, nor `details` beside
+ * `detailsPatch`; `expectedVersion` an integer ≥ 1; the tag caps on `tags`
+ * and `addTags` (never `removeTags`); `toolTrigger` beside the key it would
+ * be merged into; the `observedAt` form and its agreement with `details` /
+ * `detailsPatch`; and the accept beside any field edit.
+ *
+ * `externalId` is tested for presence, not truthiness — `""` is still sent
+ * and the server counts it as given — where the Python SDK tests its
+ * truthiness.
+ *
+ * @param names How the messages name the arguments; see {@link ArgNames}.
+ * @throws Error naming the refused argument.
+ * @internal Exported for its tests; the CLI marks its options with
+ *   {@link pythonOptionNames} instead, so the client checks them once,
+ *   in `"wire"` names.
+ */
+export function checkUpdateMemoryOptions(
+  options: UpdateMemoryOptions,
+  names: ArgNames = "options",
+): UpdateMemoryPrepared {
+  const n = (option: string) => argName(names, option);
+  if (!options.memoryId && !options.externalId) {
+    throw new Error("Provide exactly one of memoryId or externalId");
+  }
+  if (options.memoryId && options.externalId) {
+    throw new Error("Provide exactly one of memoryId or externalId");
+  }
+  const partial = (["addTags", "removeTags", "detailsPatch"] as const).filter((key) => isSet(options[key]));
+  if (options.externalId !== undefined) {
+    // The upsert replaces the memory under a new id: there is no
+    // suggestion, version, stored list or stored details to act on.
+    if (options.dismissSupersedeCandidate || options.acceptSupersedeCandidate) {
+      const flag = options.dismissSupersedeCandidate ? "dismissSupersedeCandidate" : "acceptSupersedeCandidate";
+      throw new Error(
+        `${n(flag)} requires ${n("memoryId")} (in-place mode); an ${n("externalId")} upsert ` +
+          "replaces the memory and its suggestion.",
+      );
+    }
+    if (isSet(options.expectedVersion)) {
+      throw new Error(
+        `${n("expectedVersion")} requires ${n("memoryId")} (in-place mode); an ${n("externalId")} ` +
+          "upsert replaces the memory under a new id.",
+      );
+    }
+    if (partial.length > 0) {
+      throw new Error(
+        `${partial.map(n).join(", ")} require ${n("memoryId")} (in-place mode); ` +
+          `use tags / details with ${n("externalId")}.`,
+      );
+    }
+  }
+  if (options.acceptSupersedeCandidate && options.dismissSupersedeCandidate) {
+    throw new Error(
+      `${n("acceptSupersedeCandidate")} and ${n("dismissSupersedeCandidate")} cannot ` +
+        "both be true: accept the suggestion or reject it.",
+    );
+  }
+  if (isSet(options.tags) && (isSet(options.addTags) || isSet(options.removeTags))) {
+    throw new Error(
+      `tags replaces the stored list and ${n("addTags")} / ${n("removeTags")} edit it; ` +
+        "give one or the other.",
+    );
+  }
+  if (isSet(options.details) && isSet(options.detailsPatch)) {
+    throw new Error(
+      `details replaces the stored details and ${n("detailsPatch")} merges into them; ` +
+        "give one or the other.",
+    );
+  }
+  const expectedVersion = isSet(options.expectedVersion)
+    ? validateIntRange(n("expectedVersion"), options.expectedVersion, 1)
+    : undefined;
+  validateMemoryTags(options.tags);
+  validateMemoryTags(options.addTags, n("addTags"));
+  let details: Record<string, unknown> | null | undefined = options.details;
+  let detailsPatch: Record<string, unknown> | null | undefined = options.detailsPatch;
+  if (isSet(detailsPatch)) {
+    detailsPatch = detailsWithToolTrigger(detailsPatch, options.toolTrigger, n("detailsPatch"), names);
+  } else {
+    details = detailsWithToolTrigger(details, options.toolTrigger, "details", names);
+  }
+  const observedName = n("observedAt");
+  const observed = isSet(options.observedAt) ? observedAtArg(options.observedAt, observedName) : undefined;
+  if (observed !== undefined) {
+    checkObservedAtAgrees(observed, details, "details", observedName);
+    checkObservedAtAgrees(observed, detailsPatch, n("detailsPatch"), observedName);
+  }
+  if (options.acceptSupersedeCandidate) {
+    // A graph action: an edit in the same call would re-embed and version
+    // the memory it marks as superseding (#2308).
+    const edits = (
+      [
+        ["summary", options.summary],
+        ["content", options.content],
+        ["type", options.type],
+        ["importance", options.importance],
+        ["tags", options.tags],
+        ["contextSummary", options.contextSummary],
+        ["deliveryMode", options.deliveryMode],
+        ["details", details],
+        ["detailsPatch", detailsPatch],
+        ["addTags", options.addTags],
+        ["removeTags", options.removeTags],
+        ["observedAt", observed],
+      ] as const
+    )
+      .filter(([, value]) => isSet(value))
+      .map(([key]) => n(key));
+    if (edits.length > 0) {
+      throw new Error(
+        `${n("acceptSupersedeCandidate")} cannot be combined with field edits (${edits.join(", ")}); ` +
+          `send the edit in a separate ${names === "options" ? "updateMemory" : "update_memory"} call.`,
+      );
+    }
+  }
+  return { details, detailsPatch, observed, expectedVersion };
 }
 
 /** A string's length as Python's `json.dumps(…, ensure_ascii=False)` writes it, quotes included. */
@@ -1441,10 +1992,11 @@ const PYTHON_OPTION_NAMES: unique symbol = Symbol("kagura.pythonOptionNames");
 
 /**
  * `options`, marked so that the method's local refusals name its options
- * as the Python SDK names them (`max_chars`, `memory_ids`) rather than in
- * camelCase. The CLI passes its options through this, so its `Error:`
- * lines are the Python CLI's while the checks, and their order, stay the
- * client's own.
+ * as the Python SDK names them (`max_chars`, `memory_ids`, `observed_at`,
+ * `add_tags`: {@link ArgNames} `"wire"`) rather than in camelCase —
+ * `bootstrap`, `forget`, `remember` and `updateMemory`. The CLI passes its
+ * options through this, so its `Error:` lines are the Python CLI's while
+ * the checks, and their order, stay the client's own, run once.
  *
  * @internal Not exported from the package entry point.
  */
@@ -1452,11 +2004,14 @@ export function pythonOptionNames<T extends object>(options: T): T {
   return { ...options, [PYTHON_OPTION_NAMES]: true };
 }
 
+/** How a method's local refusals name its options: `"wire"` (snake_case) under {@link pythonOptionNames}. */
+function argNamesOf(options: object): ArgNames {
+  return (options as { [PYTHON_OPTION_NAMES]?: true })[PYTHON_OPTION_NAMES] ? "wire" : "options";
+}
+
 /** An option's name for a local refusal: as given, or snake_case under {@link pythonOptionNames}. */
 function optionLabel(options: object, camel: string): string {
-  return (options as { [PYTHON_OPTION_NAMES]?: true })[PYTHON_OPTION_NAMES]
-    ? camel.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
-    : camel;
+  return argName(argNamesOf(options), camel);
 }
 
 /**
@@ -2194,6 +2749,10 @@ export class KaguraClient {
       }
       return new KaguraPartialRollbackError(failure, reportId, summary);
     }
+    const conflict = versionConflictError(code, failure, result);
+    if (conflict !== null) {
+      return conflict;
+    }
     const gated = gateError(
       result,
       code ?? null,
@@ -2215,14 +2774,28 @@ export class KaguraClient {
   }
 
   /**
-   * Store a memory. Returns the API response with `memory_id`.
+   * Store a memory. Returns the API response with `memory_id`, `scope`,
+   * `version` (v0.113.0+) and the context fields, or with `dedupe:
+   * "check"` possibly the `duplicate_candidate` reply instead, with nothing
+   * written: check `status`. See {@link RememberResult}.
    *
-   * @throws Error if `tags` holds more than 50 tags or a tag longer than
-   *   100 characters (the caps memory-cloud v0.82.0+ enforces), before any
-   *   request.
+   * `toolTrigger`, `observedAt`, `tagsNormalize`, `dedupe` and `verbose`
+   * are sent only when set, so a server that predates one never sees it.
+   * From memory-cloud v0.82.0 a server refuses an argument it does not
+   * declare ({@link KaguraError}, code `invalid_argument`); one before
+   * v0.82.0 ignores it.
+   *
+   * @throws Error before any request if `tags` holds more than 50 tags or
+   *   a tag longer than 100 characters (the caps memory-cloud v0.82.0+
+   *   enforces); if `toolTrigger` is given beside a `details.tool_trigger`;
+   *   if `observedAt` is not a form the server accepts or disagrees with
+   *   `details.observed_at` (the server's `validation_error`); or if
+   *   `dedupe` is not `"suggest"` / `"check"` / `"off"`.
+   * @throws KaguraError with `code` `"dedupe_unavailable"` when `dedupe:
+   *   "check"` could not embed the summary (nothing written).
    */
-  async remember(options: RememberOptions): Promise<ToolResult> {
-    validateMemoryTags(options.tags);
+  async remember(options: RememberOptions): Promise<RememberResult> {
+    const { details, observed } = checkRememberOptions(options, argNamesOf(options));
     const args: Record<string, unknown> = {
       context_id: options.contextId,
       summary: options.summary,
@@ -2247,8 +2820,8 @@ export class KaguraClient {
     if (options.contextSummary !== undefined) {
       args.context_summary = options.contextSummary;
     }
-    if (options.details !== undefined) {
-      args.details = options.details;
+    if (details !== undefined) {
+      args.details = details;
     }
     if (options.context !== undefined) {
       args.context = options.context;
@@ -2262,7 +2835,21 @@ export class KaguraClient {
     if (options.supersedes !== undefined) {
       args.supersedes = options.supersedes;
     }
-    return this.callToolChecked("remember", args);
+    if (observed !== undefined) {
+      args.observed_at = observed;
+    }
+    if (options.tagsNormalize) {
+      args.tags_normalize = true;
+    }
+    if (isSet(options.dedupe)) {
+      args.dedupe = options.dedupe;
+    }
+    if (options.verbose) {
+      args.verbose = true;
+    }
+    // The reply as sent, as Python returns its dict: `RememberResult` types
+    // every key optional, since `{}` (an empty tool result) comes back too.
+    return (await this.callToolChecked("remember", args)) as RememberResult;
   }
 
   /**
@@ -2296,9 +2883,10 @@ export class KaguraClient {
    * @throws Error if `query` is empty/whitespace; if neither `contextId`
    *   nor `contextIds` is provided; if `contextIds` has fewer than 2 or
    *   more than 20 IDs; if `searchMode` is invalid; if `verbosity` is not
-   *   `"compact"` / `"full"`; or if `full` (0-100) or `maxChars`
-   *   (10,000-100,000) is not an integer in range. Checked before any
-   *   request.
+   *   `"compact"` / `"full"`; if `full` (0-100) or `maxChars`
+   *   (10,000-100,000) is not an integer in range; or if `observedAfter` /
+   *   `observedBefore` is given beside the same key in `filters`. Checked
+   *   before any request.
    */
   async recall(options: RecallOptions): Promise<RecallResponse> {
     const { query, contextId, contextIds, searchMode } = options;
@@ -2327,8 +2915,22 @@ export class KaguraClient {
     if (options.useRerank !== undefined) {
       args.use_rerank = options.useRerank;
     }
-    if (options.filters && Object.keys(options.filters).length > 0) {
-      args.filters = options.filters;
+    // observedAfter / observedBefore are filter keys (server v0.127.0+),
+    // merged into a copy of `filters`, never beside the same key there.
+    let filters = options.filters;
+    for (const [option, key] of [
+      ["observedAfter", "observed_after"],
+      ["observedBefore", "observed_before"],
+    ] as const) {
+      const value = options[option];
+      if (!isSet(value)) continue;
+      if (filters && Object.prototype.hasOwnProperty.call(filters, key)) {
+        throw new Error(`${option} and filters.${key} are the same filter; give one of them`);
+      }
+      filters = { ...filters, [key]: value };
+    }
+    if (filters && Object.keys(filters).length > 0) {
+      args.filters = filters;
     }
     if (searchMode) {
       if (searchMode !== "hybrid" && searchMode !== "semantic" && searchMode !== "keyword") {
@@ -3381,13 +3983,84 @@ export class KaguraClient {
   }
 
   /**
-   * Get full memory details. Memory data is in `result.memory`.
+   * Get full memory details. Memory data is in `result.memory`, whose
+   * `version` (v0.113.0+) is the `expectedVersion` to pass to
+   * {@link updateMemory} and whose `observed_at` (v0.127.0+) says when the
+   * fact held.
+   *
+   * Since memory-cloud v0.78.0 (#1685) the reply is bounded (20,000
+   * characters by default, `maxChars` up to 100,000): `content` that does
+   * not fit comes back sliced with `content_truncated` /
+   * `content_next_offset`, and a `details` / `context` / links field that
+   * does not fit is left out with `<field>_omitted` and
+   * `<field>_total_chars` — never cut silently. Page the rest with
+   * `contentOffset`, `detailsOffset` or `contextOffset`; see
+   * {@link ReferenceMemory}. `version`, the offsets, `fields` and
+   * `maxChars` are sent only when set. From v0.82.0 a server refuses an
+   * argument it does not declare ({@link KaguraError}, code
+   * `invalid_argument`); one before v0.82.0 ignores it.
+   *
+   * A call without an offset counts as a read in the memory's access
+   * stats; a continuation counts only when it is the session's first read
+   * of the memory (v0.122.0+, #2139).
+   *
+   * @throws Error before any request if `version` is not an integer ≥ 1;
+   *   if an offset is not an integer ≥ 0, or more than one is given; if
+   *   `fields` is not a list of `"content"`, `"details"`, `"context"`,
+   *   `"links"`, or leaves out the field an offset pages; or if `maxChars`
+   *   is not an integer in [10,000, 100,000]. A boolean is no integer, as
+   *   on the server. More than one offset is refused before any offset's
+   *   range is checked.
+   * @throws KaguraResponseError when the reply's `status` is not a string
+   *   or its `memory` not an object.
    */
-  async reference(options: { contextId: string; memoryId: string }): Promise<ToolResult> {
-    return this.callToolChecked("reference", {
+  async reference(options: ReferenceOptions): Promise<ReferenceResponse> {
+    // Every check first; the arguments are built only for a call that goes out.
+    const version = isSet(options.version) ? validateIntRange("version", options.version, 1) : undefined;
+    const offsets = (
+      [
+        ["content", "contentOffset", "content_offset"],
+        ["details", "detailsOffset", "details_offset"],
+        ["context", "contextOffset", "context_offset"],
+      ] as const
+    ).filter(([, option]) => isSet(options[option]));
+    if (offsets.length > 1) {
+      throw new Error(`Pass only one of contentOffset, detailsOffset, contextOffset per call, got ${offsets.map(([, option]) => option).join(", ")}`);
+    }
+    const paged = offsets[0];
+    const offset = paged === undefined ? undefined : validateIntRange(paged[1], options[paged[1]], 0);
+    let fields: ReferenceField[] | undefined;
+    if (isSet(options.fields)) {
+      const given: unknown = options.fields;
+      if (!Array.isArray(given) || given.some((field) => !REFERENCE_FIELDS.includes(field as ReferenceField))) {
+        throw new Error(`fields must be a list of: ${REFERENCE_FIELDS.join(", ")}, got ${pyRepr(given)}`);
+      }
+      if (paged !== undefined && !given.includes(paged[0])) {
+        throw new Error(`${paged[1]} needs '${paged[0]}' in fields`);
+      }
+      fields = given as ReferenceField[];
+    }
+    const maxChars = isSet(options.maxChars) ? validateMaxChars(options.maxChars) : undefined;
+
+    const args: Record<string, unknown> = {
       context_id: options.contextId,
       memory_id: options.memoryId,
-    });
+    };
+    if (version !== undefined) {
+      args.version = version;
+    }
+    if (paged !== undefined) {
+      args[paged[2]] = offset;
+    }
+    if (fields !== undefined) {
+      args.fields = fields;
+    }
+    if (maxChars !== undefined) {
+      args.max_chars = maxChars;
+    }
+    const result = await this.callToolChecked("reference", args);
+    checkReferenceReply(result);
+    return result as ReferenceResponse;
   }
 
   /**
@@ -3395,30 +4068,41 @@ export class KaguraClient {
    * ID (externalId — requires summary, content, and type).
    *
    * Reject a `supersede_candidate` the server suggested with
-   * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
+   * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`, or
+   * accept it with `updateMemory({ memoryId, acceptSupersedeCandidate: true })`
+   * (memory-cloud v0.126.0+). Edit only some tags or details keys with
+   * `addTags` / `removeTags` / `detailsPatch` (v0.140.0+), and guard the
+   * edit with `expectedVersion` (v0.113.0+).
    *
-   * @throws Error unless exactly one of memoryId/externalId is provided,
-   *   if `dismissSupersedeCandidate` is combined with `externalId`, or if
-   *   `tags` holds more than 50 tags or a tag longer than 100 characters
-   *   — each before any request.
+   * `toolTrigger` and the options from `observedAt` on are sent only when
+   * set, so a server that predates one never sees it. From memory-cloud
+   * v0.82.0 a server refuses an argument it does not declare
+   * ({@link KaguraError}, code `invalid_argument`); one before v0.82.0
+   * ignores it — an `addTags` / `detailsPatch` edit then changes nothing,
+   * and `expectedVersion` guards nothing. The reply's `version` tells them
+   * apart: a server that read the arguments sends it.
+   *
+   * @throws Error before any request, mirroring the server's
+   *   `validation_error`: unless exactly one of memoryId/externalId is
+   *   provided; `externalId` with `dismissSupersedeCandidate`,
+   *   `acceptSupersedeCandidate`, `expectedVersion`, `addTags`,
+   *   `removeTags` or `detailsPatch`; `tags` with `addTags` / `removeTags`,
+   *   or `details` with `detailsPatch`; both supersede flags; the accept
+   *   with any field edit (`toolTrigger` and `observedAt` included);
+   *   `expectedVersion` that is not an integer ≥ 1; `observedAt` in a form
+   *   the server refuses, or disagreeing with `details` / `detailsPatch`;
+   *   `toolTrigger` beside a `tool_trigger` key where it would be merged;
+   *   or `tags` / `addTags` over 50 tags or with a tag over 100 characters.
+   * @throws KaguraVersionConflictError when `expectedVersion` is not the
+   *   memory's version; nothing was written. Its `currentVersion` is the
+   *   version to resend with, after reading the memory again.
+   * @throws KaguraError with `code` `"edge_exists"` when an accept meets a
+   *   different declared edge between the pair (`details.existing_edge`;
+   *   nothing written), or `"validation_error"` for an accept with no live
+   *   suggestion.
    */
-  async updateMemory(options: UpdateMemoryOptions): Promise<ToolResult> {
-    if (!options.memoryId && !options.externalId) {
-      throw new Error("Provide exactly one of memoryId or externalId");
-    }
-    if (options.memoryId && options.externalId) {
-      throw new Error("Provide exactly one of memoryId or externalId");
-    }
-    // The server rejects this pair too; an upsert replaces the memory, so
-    // there is no stored suggestion left to dismiss. Tested for presence,
-    // not truthiness, because `""` is still sent as external_id below.
-    if (options.dismissSupersedeCandidate && options.externalId !== undefined) {
-      throw new Error(
-        "dismissSupersedeCandidate requires memoryId; an externalId upsert " +
-          "replaces the memory and its suggestion",
-      );
-    }
-    validateMemoryTags(options.tags);
+  async updateMemory(options: UpdateMemoryOptions): Promise<UpdateMemoryResult> {
+    const { details, detailsPatch, observed, expectedVersion } = checkUpdateMemoryOptions(options, argNamesOf(options));
 
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.memoryId !== undefined) {
@@ -3445,8 +4129,8 @@ export class KaguraClient {
     if (options.contextSummary !== undefined) {
       args.context_summary = options.contextSummary;
     }
-    if (options.details !== undefined) {
-      args.details = options.details;
+    if (details !== undefined) {
+      args.details = details;
     }
     if (options.deliveryMode !== undefined) {
       args.delivery_mode = options.deliveryMode;
@@ -3454,7 +4138,30 @@ export class KaguraClient {
     if (options.dismissSupersedeCandidate) {
       args.dismiss_supersede_candidate = true;
     }
-    return this.callToolChecked("update_memory", args);
+    if (isSet(options.addTags)) {
+      args.add_tags = options.addTags;
+    }
+    if (isSet(options.removeTags)) {
+      args.remove_tags = options.removeTags;
+    }
+    if (isSet(detailsPatch)) {
+      args.details_patch = detailsPatch;
+    }
+    if (observed !== undefined) {
+      args.observed_at = observed;
+    }
+    if (expectedVersion !== undefined) {
+      args.expected_version = expectedVersion;
+    }
+    if (options.acceptSupersedeCandidate) {
+      args.accept_supersede_candidate = true;
+    }
+    if (options.verbose) {
+      args.verbose = true;
+    }
+    // The reply as sent, as Python returns its dict: `UpdateMemoryResult`
+    // types every key optional, since `{}` (an empty tool result) comes back too.
+    return (await this.callToolChecked("update_memory", args)) as UpdateMemoryResult;
   }
 
   /**
@@ -3868,9 +4575,14 @@ export class KaguraClient {
 
   /**
    * Update a context's search configuration: hybrid weights, reranker,
-   * reinforce re-rank, and query routing. Weights must sum to 1.0
-   * (±0.01). Requires owner or editor permission. Omitted fields keep
-   * their current values.
+   * reinforce re-rank, query routing, content chunks (v0.110.0+) and the
+   * recall LLM selector (v0.115.0+). Weights must sum to 1.0 (±0.01). The
+   * weights, `fetchFactor` and the reranker settings need context editor or
+   * above; `contentChunksEnabled` and `llmSelectorEnabled` need the context
+   * owner or a workspace owner/admin. Omitted fields keep their current
+   * values. Read the stored `*_enabled` flag in `config`, never the
+   * `*_effective` one, before writing it back: echoing an effective
+   * `false` would turn the setting off.
    *
    * The result echoes the whole configuration after the update under
    * `config`. That is the only place the reinforce and routing fields
@@ -3915,6 +4627,12 @@ export class KaguraClient {
     }
     if (options.routingMode !== undefined) {
       args.routing_mode = options.routingMode;
+    }
+    if (isSet(options.contentChunksEnabled)) {
+      args.content_chunks_enabled = options.contentChunksEnabled;
+    }
+    if (isSet(options.llmSelectorEnabled)) {
+      args.llm_selector_enabled = options.llmSelectorEnabled;
     }
     const result = await this.callToolChecked("update_search_config", args);
     return result as ToolResult & { config: SearchConfig };
