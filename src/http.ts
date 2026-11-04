@@ -287,11 +287,20 @@ export interface McpUrlQuery {
  * ({@link joinUrl}), the values form-encoded with commas kept literal.
  * Servers older than a key ignore it.
  *
+ * `shown.guardrailsAsIs` is for display only: the `guardrails` value goes
+ * in as it is, not encoded — a dry run's `<UUID of context VALUE>`
+ * placeholder, as the Python CLI shows it. Such a URL is never written or
+ * run.
+ *
  * @throws Error `profile` is blank or starts with `-`, a tool name starts
  *   with `-` or a list names more than 100, or `context` is not a UUID.
  * @throws TypeError `tools` / `addTools` is not an array of strings.
  */
-export function mcpUrlWithQuery(url: string, updates: McpUrlQuery): string {
+export function mcpUrlWithQuery(
+  url: string,
+  updates: McpUrlQuery,
+  shown: { guardrailsAsIs?: boolean } = {},
+): string {
   const set: [string, string][] = [];
   if (updates.guardrails !== undefined) set.push(["guardrails", updates.guardrails]);
   if (updates.profile !== undefined) set.push(["profile", normalizeToolProfile(updates.profile)]);
@@ -304,7 +313,9 @@ export function mcpUrlWithQuery(url: string, updates: McpUrlQuery): string {
   const keys = set.map(([key]) => key);
   const { base, params, fragment } = splitUrl(url);
   const kept = params.filter((param) => !keys.includes(paramName(param)));
-  return joinUrl(base, [...kept, ...set.map(([key, value]) => `${key}=${quotePlus(value)}`)], fragment);
+  const encode = (key: string, value: string): string =>
+    key === "guardrails" && shown.guardrailsAsIs === true ? value : quotePlus(value);
+  return joinUrl(base, [...kept, ...set.map(([key, value]) => `${key}=${encode(key, value)}`)], fragment);
 }
 
 /** The `tools/list` view an MCP URL's query selects ({@link mcpUrlToolView}). */

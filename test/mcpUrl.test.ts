@@ -72,6 +72,14 @@ describe("mcpUrlWithQuery", () => {
     expect(mcpUrlWithQuery(`${B}?tools=old`, { tools: [] })).toBe(`${B}?tools=old`);
   });
 
+  it("writes a dry run's guardrails placeholder unencoded with guardrailsAsIs, the other keys encoded (#105)", () => {
+    const placeholder = "<UUID of context my proj>";
+    expect(mcpUrlWithQuery(B, { guardrails: placeholder, addTools: ["a b"] }, { guardrailsAsIs: true })).toBe(
+      `${B}?guardrails=${placeholder}&add_tools=a+b`,
+    );
+    expect(mcpUrlWithQuery(B, { guardrails: placeholder })).toBe(`${B}?guardrails=%3CUUID+of+context+my+proj%3E`);
+  });
+
   it("trims the profile it writes", () => {
     expect(mcpUrlWithQuery(B, { profile: " core " })).toBe(`${B}?profile=core`);
   });
