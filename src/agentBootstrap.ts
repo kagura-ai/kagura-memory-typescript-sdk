@@ -2,7 +2,7 @@
  * Shared request contract for the agent bootstrap surfaces.
  *
  * `KaguraClient.getAgentBootstrap` (MCP tool arguments) and
- * `AgentsClient.bootstrap` (REST JSON body) carry the same seven optional
+ * `AgentsClient.bootstrap` (REST JSON body) carry the same eight optional
  * keys; this module keeps the two surfaces in lockstep without the REST
  * client importing the MCP module — the analogue of the Python SDK homing
  * `_bootstrap_payload` in models.py so agents_client.py never imports
@@ -11,6 +11,8 @@
  */
 
 import type { AgentBootstrapComponentName } from "./models.js";
+import { isSet } from "./python.js";
+import { validateMaxChars } from "./responseBudget.js";
 
 export interface GetAgentBootstrapOptions {
   /** Agent UUID from the registry (required). */
@@ -31,7 +33,11 @@ export interface GetAgentBootstrapOptions {
   query?: string;
   /** Number of recall results; forwarded to recall's `k` validation. */
   recallK?: number;
-  /** Override for the pinned-set cap; clamped server-side to [1, 1000]. */
+  /**
+   * Override for the pinned-set cap; clamped server-side to [1, 1000].
+   * Omit for the server default, 20 since server v0.82.0 (100 before;
+   * `loadPinned` still defaults to 100).
+   */
   pinnedCap?: number;
   /**
    * ISO upper bound for upcoming time memories (the lower bound is
@@ -43,12 +49,24 @@ export interface GetAgentBootstrapOptions {
    * `"upcoming"`, `"state"`, `"policy"`. Omit for all components.
    */
   include?: AgentBootstrapComponentName[];
+  /**
+   * Whole-envelope budget in characters, not tokens: 10,000-100,000
+   * (server default 20,000). Over budget the server leaves
+   * `context_summary` out of every pinned, recall and upcoming item first
+   * (`context_summary_omitted: true`), then cuts those lists from the end
+   * in that priority, marking each cut component `truncated: true`. Sent
+   * only when set; needs server v0.82.0+ (MCP tool and REST route), and an
+   * older server ignores it.
+   */
+  maxChars?: number;
 }
 
 /**
  * Build the omit-when-undefined bootstrap payload shared by both
  * surfaces — the port of the Python SDK's `_bootstrap_payload`.
  * Internal — not part of the public API surface.
+ *
+ * @throws Error if `maxChars` is not an integer in 10,000-100,000.
  */
 export function buildBootstrapPayload(
   options: Omit<GetAgentBootstrapOptions, "agentId">,
@@ -74,6 +92,10 @@ export function buildBootstrapPayload(
   }
   if (options.include !== undefined) {
     payload.include = options.include;
+  }
+  // `is not None` in Python: a null from untyped JS is unset too.
+  if (isSet(options.maxChars)) {
+    payload.max_chars = validateMaxChars(options.maxChars);
   }
   return payload;
 }

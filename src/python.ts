@@ -11,6 +11,15 @@
 
 import { JsonNumber, orderedEntries, valueAt } from "./losslessJson.js";
 
+/**
+ * Python's `is not None`, for the optional arguments the SDK sends only
+ * when set: `undefined` and `null` are unset; `""`, `0`, `false` and `NaN`
+ * are values. Shared by `KaguraClient` and the bootstrap payload builder.
+ */
+export function isSet<T>(value: T | null | undefined): value is T {
+  return value !== undefined && value !== null;
+}
+
 /** Digits with single underscores between them (PEP 515), as `int()` and `float()` take them. */
 const DIGITS = String.raw`\d(?:_?\d)*`;
 

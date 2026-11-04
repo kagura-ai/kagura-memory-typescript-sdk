@@ -54,7 +54,13 @@ import type {
   // Referenced only from JSDoc {@link} on the details/recallNearby options.
   MemoryLocation,
   MemoryStatsResponse,
+  // Referenced only from JSDoc {@link} on recallNearby.
+  NearbyMemory,
   RecallNearbyResponse,
+  RecallResponse,
+  // Referenced only from JSDoc {@link} on the recall options.
+  RecallResult,
+  RecallVerbosity,
   RollbackResult,
   RollbackSummary,
   SearchConfig,
@@ -69,6 +75,7 @@ import type {
 } from "./models.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
+import { RECALL_FULL_MAX, validateIntRange, validateMaxChars } from "./responseBudget.js";
 import {
   DUPLICATES_RESPONSE,
   EMBEDDING_MODELS_RESPONSE,
@@ -80,7 +87,7 @@ import {
 } from "./pyModels.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
-import { pyFloatRepr, pyRepr, pyStr, pyTypeName } from "./python.js";
+import { isSet, pyFloatRepr, pyRepr, pyStr, pyTypeName } from "./python.js";
 import {
   ResponseReader,
   laxFloat,
@@ -293,7 +300,18 @@ export interface RecallOptions {
   searchMode?: SearchMode;
   /** Search across multiple contexts (2-20 IDs); contextId not required then. */
   contextIds?: string[];
-  /** Include up to 3 graph discovery hints under `explore_hints`. */
+  /**
+   * Ask for up to 3 graph discovery hints under `explore_hints` — seeds
+   * for a follow-up {@link KaguraClient.explore} call.
+   *
+   * Since server v0.135.0 the server makes them only when the MCP URL
+   * lists the `explore` tool, which the bare URL (the core tool profile)
+   * does not: add `?add_tools=explore` or `?profile=full` to `mcpUrl` (or
+   * `explore` to a `tools=` / `add_tools=` list it already has). On any
+   * other URL the call still succeeds and returns `explore_hints_omitted`
+   * — a sentence naming that opt-in — in place of `explore_hints`.
+   * `explore()` itself is unaffected.
+   */
   includeExploreHints?: boolean;
   /**
    * Include memories shadowed by a supersedes edge (default false).
@@ -301,9 +319,45 @@ export interface RecallOptions {
    * Superseded versions are demoted out of results by default; `true`
    * returns them annotated with `superseded_by`, which is what makes the
    * history {@link RememberOptions.supersedes} preserves actually
-   * readable — audit and "previous versions of this fact" views.
+   * readable — audit and "previous versions of this fact" views. It also
+   * turns off `folded`: every version comes back as its own row.
    */
   includeSuperseded?: boolean;
+  /**
+   * Result detail, `"compact"` or `"full"` (server v0.108.0+). Omit it to
+   * get the deployment default — compact unless
+   * `MCP_RECALL_DEFAULT_VERBOSITY` says otherwise.
+   *
+   * A compact hit is `memory_id`, the first 160 characters of `summary`
+   * (`summary_cut: true` when it was shortened), `type`, `importance`,
+   * `score`, `created_at`, `updated_at` and the content keys
+   * (see {@link RecallOptions.full}). `"full"` adds `context_summary`,
+   * `scope`, `tags`, `version` (v0.113.0+) and the uncut `summary`; code
+   * that reads those from a hit needs it. See {@link RecallResult}.
+   */
+  verbosity?: RecallVerbosity;
+  /**
+   * How many of the top results carry `content`, 0-100 (server v0.114.0+).
+   * Each carries up to 1,500 characters; a longer one adds
+   * `content_truncated: true` and `content_next_offset`
+   * ({@link KaguraClient.reference} returns the whole memory). `0`
+   * returns summaries only.
+   *
+   * Omit it to get the deployment default (`MCP_RECALL_DEFAULT_FULL`, 3
+   * unless set) — a defaulted `full` puts content on trusted,
+   * non-connector rows only, while an explicit value makes every row
+   * eligible. Never more than `k`; lowered to fit `maxChars`.
+   */
+  full?: number;
+  /**
+   * Response budget in characters, not tokens: 10,000-100,000 (server
+   * default 20,000; v0.82.0+). Over budget the server takes `content` off
+   * the lowest-ranked rows first (`full_applied` then counts the rows that
+   * kept it), then `context_summary` off every row
+   * (`context_summary_omitted: true`), then drops the lowest-ranked rows
+   * (`truncated: true`; `count` is the rows returned).
+   */
+  maxChars?: number;
 }
 
 export interface UpdateMemoryOptions {
@@ -724,11 +778,6 @@ function isoArg(value: string | Date, label: string): string {
   // toISOString() throws a bare RangeError on an Invalid Date.
   if (Number.isNaN(value.getTime())) throw new Error(`${label} must be a valid Date`);
   return value.toISOString();
-}
-
-/** Python's `is not None`: the optional arguments it sends, `""` included. */
-function isSet<T>(value: T | null | undefined): value is T {
-  return value !== undefined && value !== null;
 }
 
 /**
@@ -1639,6 +1688,23 @@ export class KaguraClient {
   /**
    * Search memories. Returns the API response with a `results` list.
    *
+   * Since server v0.108.0 a hit is **compact** unless you pass
+   * `verbosity: "full"`: a 160-character summary head and no `tags`,
+   * `context_summary` or `scope`. Since v0.114.0 the top results also
+   * carry `content` unless you pass `full: 0`. `verbosity`, `full` and
+   * `maxChars` are sent only when set. From v0.82.0 a server refuses a
+   * tool argument it does not declare (`KaguraError`, code
+   * `invalid_argument`), so there `verbosity` needs v0.108.0+ and `full`
+   * v0.114.0+; a server before v0.82.0 ignores all three. This method
+   * never retries without them: the caller decides. (The `recall` command
+   * of the `kagura-memory` bin retries once without the ones the refusal
+   * lists in `unknown_arguments`.)
+   *
+   * The result is the server's reply as sent, typed as
+   * {@link RecallResponse}; `confidence` comes first, and its `level`
+   * (`high` / `moderate` / `low` / `none`) says whether the hits are worth
+   * reading.
+   *
    * When the semantic half of a hybrid search (the default `searchMode`)
    * is unavailable, server v0.66.0+ falls back to keyword-only search —
    * `searchMode: "semantic"` still fails — and adds `degraded: true` and
@@ -1649,9 +1715,12 @@ export class KaguraClient {
    *
    * @throws Error if `query` is empty/whitespace; if neither `contextId`
    *   nor `contextIds` is provided; if `contextIds` has fewer than 2 or
-   *   more than 20 IDs; or if `searchMode` is invalid.
+   *   more than 20 IDs; if `searchMode` is invalid; if `verbosity` is not
+   *   `"compact"` / `"full"`; or if `full` (0-100) or `maxChars`
+   *   (10,000-100,000) is not an integer in range. Checked before any
+   *   request.
    */
-  async recall(options: RecallOptions): Promise<ToolResult> {
+  async recall(options: RecallOptions): Promise<RecallResponse> {
     const { query, contextId, contextIds, searchMode } = options;
     if (typeof query !== "string" || !query.trim()) {
       throw new Error("query must be a non-empty string");
@@ -1693,7 +1762,21 @@ export class KaguraClient {
     if (options.includeSuperseded) {
       args.include_superseded = true;
     }
-    return this.callToolChecked("recall", args);
+    const { verbosity, full, maxChars } = options;
+    if (isSet(verbosity)) {
+      if (verbosity !== "compact" && verbosity !== "full") {
+        throw new Error(`verbosity must be 'compact' or 'full', got ${pyRepr(verbosity)}`);
+      }
+      args.verbosity = verbosity;
+    }
+    if (isSet(full)) {
+      args.full = validateIntRange("full", full, 0, RECALL_FULL_MAX);
+    }
+    if (isSet(maxChars)) {
+      args.max_chars = validateMaxChars(maxChars);
+    }
+    // The reply as sent: Python returns the dict unchecked too.
+    return (await this.callToolChecked("recall", args)) as RecallResponse;
   }
 
   /**
@@ -1750,6 +1833,14 @@ export class KaguraClient {
    * unchanged rather than pre-clamped here, so the server stays the single
    * authority on the bound.
    *
+   * Since server v0.82.0 each item carries `location` (the memory's
+   * `details.location`) instead of the whole `details`; an older server
+   * sends `details`. With `includeDetails: true` the item carries
+   * `details` in place of `location`, held to the reply budget (about
+   * 20,000 characters): from the last item backwards, an item that does
+   * not fit carries `details_omitted: true` and `details_total_chars`
+   * instead — read it with {@link reference}. See {@link NearbyMemory}.
+   *
    * @throws Error if `lat`/`lon` are not finite numbers in range. The
    *   server rejects these with HTTP 422; failing locally turns the common
    *   swapped-lat/lon mistake into an immediate, named error.
@@ -1764,6 +1855,13 @@ export class KaguraClient {
     radiusM?: number;
     /** Maximum results (default 20; the server clamps to 1-100). */
     k?: number;
+    /**
+     * Return each item's full `details` object in place of its `location`
+     * (default false). Details can be large. Sent only when `true`; needs
+     * server v0.82.0+, and an older server ignores it and always returns
+     * `details`.
+     */
+    includeDetails?: boolean;
   }): Promise<RecallNearbyResponse> {
     const { lat, lon } = options;
     if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
@@ -1772,13 +1870,17 @@ export class KaguraClient {
     if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
       throw new Error(`lon must be a finite number between -180 and 180, got ${lon}`);
     }
-    const result = await this.callToolChecked("recall_nearby", {
+    const args: Record<string, unknown> = {
       context_id: options.contextId,
       lat,
       lon,
       radius_m: options.radiusM ?? 1000,
       k: options.k ?? 20,
-    });
+    };
+    if (options.includeDetails) {
+      args.include_details = true;
+    }
+    const result = await this.callToolChecked("recall_nearby", args);
     return result as unknown as RecallNearbyResponse;
   }
 
@@ -1896,17 +1998,33 @@ export class KaguraClient {
    * memories — the complete, unranked pinned set on every call.
    *
    * The set is bounded, never silently dropped: when more pinned memories
-   * exist than `cap`, the response `truncated` flag is true and
-   * `total_available` reports the real count.
+   * exist than `cap` or `maxChars` allows, the response `truncated` flag
+   * is true and `total_available` reports the real count;
+   * `context_summary_omitted: true` says the budget took `context_summary`
+   * off the items.
+   *
+   * @throws Error if `maxChars` is not an integer in 10,000-100,000,
+   *   before any request.
    */
   async loadPinned(options: {
     contextId: string;
     /** Override the maximum number returned (1-1000); omit for server default. */
     cap?: number;
+    /**
+     * Response budget in characters, not tokens: 10,000-100,000 (server
+     * default 20,000). Over budget the server leaves `context_summary` out
+     * of every item first (`context_summary_omitted: true`), then cuts
+     * items from the end (`truncated: true`). Sent only when set; needs
+     * server v0.82.0+, and an older server ignores it.
+     */
+    maxChars?: number;
   }): Promise<ToolResult> {
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.cap !== undefined) {
       args.cap = options.cap;
+    }
+    if (isSet(options.maxChars)) {
+      args.max_chars = validateMaxChars(options.maxChars);
     }
     return this.callToolChecked("load_pinned", args);
   }
@@ -1923,15 +2041,32 @@ export class KaguraClient {
    *
    * Never silently dropped: check `tool_triggered_truncated` /
    * `pinned_truncated` before treating the set as complete.
+   *
+   * @throws Error if `maxChars` is not an integer in 10,000-100,000,
+   *   before any request.
    */
   async loadGuardrails(options: {
     contextId: string;
     /** Override the tool-triggered cap (1-1000); omit for server default. */
     cap?: number;
+    /**
+     * Response budget in characters, not tokens: 10,000-100,000 (server
+     * default 20,000). Over budget the server drops the `index` rows
+     * (v0.127.0+) first, then leaves `context_summary` out of the pinned
+     * items (`context_summary_omitted: true`), then cuts pinned and then
+     * tool-triggered items from the end, setting that lane's
+     * `*_truncated`. Sent only when set; needs server v0.82.0+, and an
+     * older server ignores it. The REST twin
+     * (`MemoryClient.loadGuardrails`) takes no `maxChars`.
+     */
+    maxChars?: number;
   }): Promise<LoadGuardrailsResponse> {
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.cap !== undefined) {
       args.cap = options.cap;
+    }
+    if (isSet(options.maxChars)) {
+      args.max_chars = validateMaxChars(options.maxChars);
     }
     const result = await this.callToolChecked("load_guardrails", args);
     return result as unknown as LoadGuardrailsResponse;
@@ -2355,6 +2490,14 @@ export class KaguraClient {
    * available via `AgentsClient` for API-key-only callers such as
    * agent-bound member keys.
    *
+   * Since server v0.82.0 the reply is held to `maxChars` (default 20,000
+   * characters): `context_summary_omitted: true` and a component's
+   * `truncated: true` say what the budget took. Since v0.110.0 the recall
+   * component's rows are {@link recall}'s `verbosity: "full"` rows without
+   * `supersede_candidate` and without content.
+   *
+   * @throws Error if `maxChars` is not an integer in 10,000-100,000,
+   *   before any request.
    * @throws KaguraNotFoundError when the agent or context is not found
    *   (uniform 404 — nonexistent and not-yours are indistinguishable by
    *   design).

@@ -1,10 +1,14 @@
 import { ProxyError } from "./errors.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  getSharedState,
+  CredentialsFileError,
   KaguraOAuth,
+  RefreshNotSavedError,
   loadCredentialsFile,
+  loadForUpdate,
   profileNamed,
+  sharedStateFrom,
+  type CredentialsFile,
 } from "../auth/credentials.js";
 import { login } from "../auth/login.js";
 import { DEFAULT_MCP_URL } from "../auth/resolve.js";
@@ -42,6 +46,31 @@ export function checkedUrl(value: string): URL {
   return url;
 }
 
+/**
+ * The credentials file, refused when it exists but cannot be read or parsed.
+ *
+ * Read as "no profile", it would start a browser login whose result could
+ * not be saved, or a refresh that rewrites it. The refusal names the file
+ * and why, never what it holds, so its message may reach MCP/logs.
+ */
+function readCredentials(credentialsPath: string | undefined): CredentialsFile {
+  try {
+    return loadForUpdate(credentialsPath);
+  } catch (error) {
+    throw credentialsFileError(error);
+  }
+}
+
+/**
+ * A {@link CredentialsFileError} (an unreadable file, or a refreshed profile
+ * that could not be saved) as a {@link ProxyError}: both messages are
+ * authored by the SDK, name the file and the next step, and carry no token.
+ * Anything else is returned as it is.
+ */
+function credentialsFileError(error: unknown): unknown {
+  return error instanceof CredentialsFileError ? new ProxyError(error.message) : error;
+}
+
 /** Owns the desktop login UX; credential persistence/rotation stays in the SDK. */
 export class ProxyAuth {
   readonly mcpUrl: string;
@@ -49,10 +78,11 @@ export class ProxyAuth {
   private oauth?: KaguraOAuth;
   private loginAttempt?: Promise<void>;
   private loginAttempted = false;
+  private lastUnsaved?: string;
   private readonly authFetch: typeof fetch;
 
   constructor(private readonly options: ProxyAuthOptions) {
-    const file = loadCredentialsFile(options.credentialsPath);
+    const file = readCredentials(options.credentialsPath);
     this.profile = options.profile || file.defaultProfile;
     const stored = profileNamed(file, this.profile);
     this.mcpUrl = checkedUrl(
@@ -112,7 +142,11 @@ export class ProxyAuth {
   }
 
   private reload(): void {
-    const state = getSharedState(this.options.credentialsPath, this.profile);
+    // Strict, before any login or refresh: read leniently, an unreadable
+    // file is "no profile", which would start a browser login. The state is
+    // built from this one read.
+    const file = readCredentials(this.options.credentialsPath);
+    const state = sharedStateFrom(file, this.options.credentialsPath, this.profile);
     if (state) {
       const base = checkedUrl(baseUrlFromMcp(this.mcpUrl)).href;
       if (
@@ -133,7 +167,11 @@ export class ProxyAuth {
     try {
       return await this.oauth!.getAuthHeader();
     } catch (error) {
-      if (!(error instanceof KaguraAuthExpiredError)) throw error;
+      if (error instanceof RefreshNotSavedError) {
+        this.reportUnsaved(error);
+        return `Bearer ${error.credentials.accessToken}`;
+      }
+      if (!(error instanceof KaguraAuthExpiredError)) throw credentialsFileError(error);
       await this.authenticate();
       return this.oauth!.getAuthHeader();
     }
@@ -145,9 +183,24 @@ export class ProxyAuth {
     try {
       await this.oauth.forceRefresh();
     } catch (error) {
-      if (!(error instanceof KaguraAuthExpiredError)) throw error;
+      if (error instanceof RefreshNotSavedError) return this.reportUnsaved(error);
+      if (!(error instanceof KaguraAuthExpiredError)) throw credentialsFileError(error);
       await this.authenticate();
     }
+  }
+
+  /**
+   * The refresh worked, but credentials.json could not be saved: the
+   * request goes on with the rotated token, which the shared state keeps
+   * (so the next request neither re-reads the revoked pair on file nor
+   * refreshes again), and the log says why the file is behind, once per
+   * distinct failure. The message names the file and the next step, never
+   * a token.
+   */
+  private reportUnsaved(error: RefreshNotSavedError): void {
+    if (error.message === this.lastUnsaved) return;
+    this.lastUnsaved = error.message;
+    this.options.log(error.message);
   }
 
   private async authenticate(): Promise<void> {
@@ -221,6 +274,8 @@ export class ProxyAuth {
           "Login was denied. Restart the extension when you are ready to approve access.",
         );
       }
+      // The file became unreadable during the login: saving refused it.
+      if (error instanceof CredentialsFileError) throw credentialsFileError(error);
       // OAuth responses may echo tokens: do not copy their bodies into MCP/logs.
       throw new ProxyError(
         "Kagura login failed. Check the configured server and connection, then restart the extension.",
