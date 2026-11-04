@@ -176,6 +176,12 @@ export interface RunClientCommandOptions {
    */
   needsContext?: boolean;
   /**
+   * How the result is printed; default {@link formatJson}. A command whose
+   * Python counterpart prints a model's `model_dump(mode="json")` passes
+   * `formatDumpsJson` of the model's read (`cli/modelDump.ts`).
+   */
+  format?: (result: unknown) => string;
+  /**
    * A line built from the result, printed on stderr after the JSON so
    * stdout stays parseable — the Python helper's `footer` keyword. `null`
    * (or an empty string) prints nothing.
@@ -208,7 +214,7 @@ export async function runClientCommand(
   const client = ctx.makeClient(mcpOptions(config));
   try {
     const result = await operation(client, resolvedContext);
-    ctx.write(formatJson(result));
+    ctx.write((options.format ?? formatJson)(result));
     const note = options.footer?.(result);
     if (note) ctx.writeError(note);
     return 0;

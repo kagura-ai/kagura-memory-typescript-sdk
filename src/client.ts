@@ -95,6 +95,37 @@ import {
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
 import { pyStrip } from "./pyCompat.js";
+// Session tools (#86).
+import { KaguraPartialSessionRollbackError } from "./errors.js";
+import type {
+  BootstrapComponentName,
+  BootstrapFormat,
+  BootstrapResponse,
+  ChangesSinceResponse,
+  ForgetBatchResult,
+  GuideResponse,
+  ListMatchingResponse,
+  ListOrderBy,
+  RememberBatchResult,
+  RevisionsPage,
+  SessionRollbackResult,
+  SessionRollbackSummary,
+  ToolDescriptions,
+} from "./models.js";
+import {
+  BOOTSTRAP_RESPONSE,
+  CHANGES_SINCE_RESPONSE,
+  FORGET_BATCH_RESULT,
+  GUIDE_RESPONSE,
+  LIST_MATCHING_RESPONSE,
+  REMEMBER_BATCH_RESULT,
+  REVISIONS_PAGE,
+  SESSION_ROLLBACK_RESULT,
+  SESSION_ROLLBACK_SUMMARY,
+  TOOL_DESCRIPTIONS,
+} from "./pyModels.js";
+import { MAX_CHARS_MAX, MAX_CHARS_MIN } from "./responseBudget.js";
+import { parseUuid } from "./uuid.js";
 import { isSet, pyFloatRepr, pyRepr, pyStr, pyTypeName } from "./python.js";
 import {
   ResponseReader,
@@ -948,6 +979,231 @@ export interface RecallSeriesOptions {
   end?: string | Date;
 }
 
+// ---------------------------------------------------------------------------
+// Session tools (memory-cloud v0.93.0+, SDK issue #86): options
+// ---------------------------------------------------------------------------
+
+export interface BootstrapOptions {
+  contextId: string;
+  /**
+   * Start of the `changes` window: ISO 8601 (naive = UTC), a `Date` (sent
+   * as its UTC instant), or `"<N>d"` for N days back (`"0d"` to `"999d"`).
+   * Omit for the server's `"7d"`.
+   */
+  since?: string | Date;
+  /** The lanes to compose, a non-empty subset of `pinned`, `upcoming`, `changes`. Omit for all. */
+  include?: readonly BootstrapComponentName[];
+  /**
+   * Reply budget in characters, not tokens, 2,000-100,000 (server default
+   * 20,000). Over budget the full format first leaves `context_summary`
+   * out of the pinned rows (`context_summary_omitted`), then each lane
+   * keeps the prefix that fits (`truncated`). Below 10,000 needs
+   * memory-cloud v0.115.0+ (#2126); an older server refuses it
+   * (`validation_error`).
+   */
+  maxChars?: number;
+  /**
+   * `"index"` for pointer rows (pinned keeps its text; guardrail, upcoming
+   * and change rows carry an 80-character `summary` with `summary_cut`; no
+   * `instructions`) or `"full"`. Omitted, the server picks `"index"` below
+   * `maxChars` 10,000 and `"full"` otherwise. Needs memory-cloud v0.115.0+
+   * (#2126): v0.93.0-v0.114.x refuse the argument (`invalid_argument`).
+   */
+  format?: BootstrapFormat;
+}
+
+export interface ChangesSinceOptions {
+  contextId: string;
+  /** Window start, inclusive: ISO 8601 (naive = UTC) or a `Date`. */
+  since: string | Date;
+  /** Window end, exclusive (later than `since`). Omit for now. */
+  until?: string | Date;
+  /**
+   * Kinds to include, a non-empty subset of `created`, `updated`,
+   * `superseded`, `forgotten` — or, with `sessionId` / `byMe`, of
+   * `created`, `updated`, `forgotten`, `restored`. Omit for all.
+   */
+  kinds?: readonly string[];
+  /** `next_cursor` of the previous page. */
+  cursor?: string;
+  /** Changes per page (server default 50, clamped to 1-100). */
+  limit?: number;
+  /**
+   * Only that session's writes — a `session_id` a write returned
+   * (memory-cloud v0.113.0+, #2044). Another principal's session lists
+   * nothing, unless the caller owns the context.
+   */
+  sessionId?: string;
+  /**
+   * `true` lists only the caller's own writes, in any session (memory-cloud
+   * v0.114.0+, #2121) — what `rollbackSession({ since })` would address.
+   * Sent when set, `false` included.
+   */
+  byMe?: boolean;
+  /** Reply budget in characters, 10,000-100,000 (server default 20,000); a cut page sets `truncated`. */
+  maxChars?: number;
+}
+
+export interface ListMatchingOptions {
+  contextId: string;
+  /**
+   * Exact-match filters, ANDed: `type`, `scope`, `source_type`,
+   * `delivery_mode`, `tags` (+ `tags_match` `any` | `all`,
+   * `tags_normalize`), `importance` `{gte|lte|gt|lt}`, `created_after` /
+   * `created_before` / `updated_after` / `updated_before` (ISO 8601),
+   * `observed_after` / `observed_before` (v0.127.0+), `source_uri_prefix`,
+   * `trust_tier: "trusted"`, and `details.<key>` — a scalar matched with
+   * its stored JSON type (`2` is not `2.0` or `"2"`; v0.96.0+). The server
+   * refuses an unknown filter (`validation_error`). Sent when set, `{}`
+   * included.
+   */
+  filters?: Record<string, unknown>;
+  /**
+   * `"updated_at"` (server default; a never-edited memory sorts by
+   * `created_at`), `"created_at"`, `"importance"` or `"observed_at"`
+   * (memory-cloud v0.127.0+, #2330; memories without one go last). The id
+   * breaks ties.
+   */
+  orderBy?: ListOrderBy;
+  /** `"asc"` or `"desc"` (server default). */
+  direction?: "asc" | "desc";
+  /** `next_cursor` of the previous page. */
+  cursor?: string;
+  /** Memories per page (server default 50, clamped to 1-100). */
+  limit?: number;
+  /**
+   * `true` adds each memory's `details` (dropped first when the reply
+   * passes `maxChars`: `details_omitted`). Sent only when `true`.
+   */
+  includeDetails?: boolean;
+  /** Reply budget in characters, 10,000-100,000 (server default 20,000); a cut page sets `truncated`. */
+  maxChars?: number;
+}
+
+/**
+ * One `rememberBatch` item: the server's `remember` arguments by their
+ * wire names, as sent — no SDK defaults are added, and an undeclared key
+ * fails that item (`invalid_argument`; a whole atomic batch is refused).
+ * `summary`, `content` and `type` are required: an item without one fails
+ * (`missing_fields`) on every server since v0.93.0. An item may repeat the
+ * batch's `context_id` but name no other; `dedupe`, `tags_normalize` and
+ * `verbose` are set on the batch, never on an item.
+ */
+export interface RememberBatchItem {
+  summary: string;
+  content: string;
+  type: string;
+  importance?: number;
+  tags?: string[];
+  source_uri?: string;
+  source_type?: SourceType;
+  context_summary?: string;
+  /** A tool guardrail is `details: { tool_trigger: {...} }`. */
+  details?: Record<string, unknown>;
+  /** ISO 8601 date or datetime (memory-cloud v0.127.0+). */
+  observed_at?: string;
+  context?: string;
+  delivery_mode?: DeliveryMode;
+  linked_memory_ids?: string[];
+  linked_source_uris?: string[];
+  supersedes?: string;
+  context_id?: string;
+  [key: string]: unknown;
+}
+
+export interface RememberBatchOptions {
+  /** Context UUID; it applies to every item. */
+  contextId: string;
+  /** 1-50 items; see {@link RememberBatchItem}. */
+  items: readonly RememberBatchItem[];
+  /**
+   * `true`: all or nothing — a failing item, or a `dedupe: "check"`
+   * candidate, rolls everything back and the other items come back
+   * `skipped`. Server default `false`: each item is written and reported
+   * on its own.
+   */
+  atomic?: boolean;
+  /**
+   * As `remember`'s, applied per item: `"suggest"` (server default),
+   * `"check"` (a near-duplicate comes back as a `duplicate_candidate` row
+   * instead of being written) or `"off"`.
+   */
+  dedupe?: DedupeMode;
+  /** `true` stores each item's tags under the context's established spelling (reported in `lint`). */
+  tagsNormalize?: boolean;
+  /** `true` keeps `persistence.detail` on each row. */
+  verbose?: boolean;
+}
+
+export interface ForgetOptions {
+  contextId: string;
+  /** UUID of one memory to delete. */
+  memoryId?: string;
+  /** Search query to find and delete matching memories. */
+  query?: string;
+  /** Number of memories to delete in query mode (default 10). */
+  k?: number;
+  /** Not in this mode: see {@link ForgetByIdsOptions}. */
+  memoryIds?: undefined;
+}
+
+export interface ForgetByIdsOptions {
+  contextId: string;
+  /**
+   * 1-50 distinct memory UUIDs to delete in one call (memory-cloud
+   * v0.117.0+, #2127), each exactly as `memoryId` would and committed on
+   * its own. Not combined with `memoryId`, `query` or `k`.
+   */
+  memoryIds: readonly string[];
+  memoryId?: undefined;
+  query?: undefined;
+  k?: undefined;
+}
+
+export interface DescribeToolsOptions {
+  /** Case-insensitive substring narrowing the hidden-tool list by name, title or summary. */
+  query?: string;
+  /** Up to 20 tool names whose complete definitions to return instead of the list. */
+  names?: readonly string[];
+}
+
+export interface ListRevisionsOptions {
+  contextId: string;
+  memoryId: string;
+  /** Events per page (server default 20, clamped to 1-100). */
+  limit?: number;
+  /** `next_cursor` of the previous page. */
+  cursor?: string;
+  /** Reply budget in characters, 10,000-100,000 (server default 20,000); a cut page sets `truncated`. */
+  maxChars?: number;
+}
+
+export interface RollbackSessionOptions {
+  contextId: string;
+  /**
+   * The session whose writes to undo — the `session_id` a `remember` /
+   * `updateMemory` / `forget` / `rememberBatch` reply returned.
+   */
+  sessionId?: string;
+  /**
+   * Instead of `sessionId`: undo the caller's own writes since then (ISO
+   * 8601, naive = UTC, or a `Date`; memory-cloud v0.114.0+, #2121).
+   * Preview them with `changesSince({ since, byMe: true })`.
+   */
+  since?: string | Date;
+  /**
+   * Window end, exclusive, at most 7 days after `since`. Omit for now, or
+   * for the end of the caller's unfinished rollback of a window from the
+   * same `since`.
+   */
+  until?: string | Date;
+  /**
+   * `true` (default) only plans and changes nothing; `false` rolls back.
+   * Always sent, so the plan-only default never depends on the server's.
+   */
+  dryRun?: boolean;
+}
+
 /** The series-name cap the server enforces, in characters (code points). */
 const METRIC_MAX_LEN = 64;
 /** The unit cap the server enforces, in characters (code points). */
@@ -1361,7 +1617,9 @@ interface RememberPrepared {
  * @returns The details to send (with the trigger merged in) and the
  *   `observed_at` text.
  * @throws Error naming the refused argument.
- * @internal Shared with the CLI, which checks with `"wire"` names first.
+ * @internal Exported for its tests; the CLI marks its options with
+ *   {@link pythonOptionNames} instead, so the client checks them once,
+ *   in `"wire"` names.
  */
 export function checkRememberOptions(options: RememberOptions, names: ArgNames = "options"): RememberPrepared {
   validateMemoryTags(options.tags);
@@ -1402,7 +1660,9 @@ interface UpdateMemoryPrepared {
  *
  * @param names How the messages name the arguments; see {@link ArgNames}.
  * @throws Error naming the refused argument.
- * @internal Shared with the CLI, which checks with `"wire"` names first.
+ * @internal Exported for its tests; the CLI marks its options with
+ *   {@link pythonOptionNames} instead, so the client checks them once,
+ *   in `"wire"` names.
  */
 export function checkUpdateMemoryOptions(
   options: UpdateMemoryOptions,
@@ -1676,6 +1936,196 @@ function validateBound(label: string, value: unknown, limit: number): void {
   if (!(value >= -limit && value <= limit)) {
     throw new Error(`${label} must be between -${limit} and ${limit}, got ${pyRepr(value)}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Session tools (#86): local checks mirroring the server's own bounds
+// ---------------------------------------------------------------------------
+
+/** `bootstrap` lanes (server `COMPONENTS`). */
+const BOOTSTRAP_COMPONENTS: readonly BootstrapComponentName[] = ["pinned", "upcoming", "changes"];
+const BOOTSTRAP_FORMATS: readonly BootstrapFormat[] = ["full", "index"];
+/** `bootstrap`'s own `max_chars` floor (server `BOOTSTRAP_INDEX_MIN_CHARS`, v0.115.0+); `format: "full"` keeps 10,000. */
+const BOOTSTRAP_MIN_CHARS = 2_000;
+/** `remember_batch` items (server `MAX_BATCH_ITEMS`). */
+const BATCH_MAX_ITEMS = 50;
+/** The `remember` arguments set once, on the batch, never per item (server `_BATCH_LEVEL`). */
+const BATCH_LEVEL_KEYS = ["dedupe", "tags_normalize", "verbose"] as const;
+/** `forget({ memoryIds })` ids per call (server `FORGET_MAX_IDS`). */
+const FORGET_MAX_IDS = 50;
+/** `describe_tools` names / `guide` topics per call (server `MAX_NAMES` / `MAX_TOPICS`). */
+const DESCRIBE_MAX_NAMES = 20;
+const GUIDE_MAX_TOPICS = 20;
+
+/**
+ * A list-of-strings option, copied, or the Python SDK's `_str_list` error
+ * naming it. A bare string is refused rather than iterated: spreading
+ * `"created"` would send its characters as the list.
+ */
+function strList(name: string, values: unknown): string[] {
+  if (!Array.isArray(values)) {
+    throw new Error(`${name} must be a list of strings, not ${pyTypeName(values)}`);
+  }
+  values.forEach((value: unknown, index) => {
+    if (typeof value !== "string") {
+      throw new Error(`${name}[${index}] must be a str, got ${pyTypeName(value)}`);
+    }
+  });
+  return [...(values as string[])];
+}
+
+/** A list-of-names option the server would refuse past `limit` entries. */
+function checkedNames(name: string, values: unknown, limit: number): string[] {
+  const names = strList(name, values);
+  if (names.length > limit) {
+    throw new Error(`${name} holds at most ${limit} names, got ${names.length}`);
+  }
+  return names;
+}
+
+/**
+ * The marker {@link pythonOptionNames} sets on a method's options.
+ *
+ * @internal Not exported from the package entry point.
+ */
+const PYTHON_OPTION_NAMES: unique symbol = Symbol("kagura.pythonOptionNames");
+
+/**
+ * `options`, marked so that the method's local refusals name its options
+ * as the Python SDK names them (`max_chars`, `memory_ids`, `observed_at`,
+ * `add_tags`: {@link ArgNames} `"wire"`) rather than in camelCase —
+ * `bootstrap`, `forget`, `remember` and `updateMemory`. The CLI passes its
+ * options through this, so its `Error:` lines are the Python CLI's while
+ * the checks, and their order, stay the client's own, run once.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function pythonOptionNames<T extends object>(options: T): T {
+  return { ...options, [PYTHON_OPTION_NAMES]: true };
+}
+
+/** How a method's local refusals name its options: `"wire"` (snake_case) under {@link pythonOptionNames}. */
+function argNamesOf(options: object): ArgNames {
+  return (options as { [PYTHON_OPTION_NAMES]?: true })[PYTHON_OPTION_NAMES] ? "wire" : "options";
+}
+
+/** An option's name for a local refusal: as given, or snake_case under {@link pythonOptionNames}. */
+function optionLabel(options: object, camel: string): string {
+  return argName(argNamesOf(options), camel);
+}
+
+/**
+ * Refuse a `forget({ memoryIds })` list the server would refuse, before any
+ * request: not 1-50 ids, an id that is not a UUID, or the same id twice,
+ * compared as the server compares them — as UUIDs, so two spellings of one
+ * id (case, braces) are the same id. The ids go out as given.
+ *
+ * @param name The option's name in the message.
+ */
+function checkedMemoryIds(memoryIds: unknown, name: string): string[] {
+  const ids = strList(name, memoryIds);
+  if (ids.length < 1 || ids.length > FORGET_MAX_IDS) {
+    throw new Error(`${name} must hold 1 to ${FORGET_MAX_IDS} ids, got ${ids.length}`);
+  }
+  const seen = new Set<string>();
+  ids.forEach((value, index) => {
+    let parsed: string;
+    try {
+      parsed = parseUuid(value);
+    } catch {
+      throw new Error(`${name}[${index}] is not a memory UUID`);
+    }
+    if (seen.has(parsed)) throw new Error(`${name} lists ${parsed} more than once`);
+    seen.add(parsed);
+  });
+  return ids;
+}
+
+/** `bootstrap`'s `include`, checked: a non-empty list of known lane names. */
+function checkedBootstrapInclude(include: unknown): string[] {
+  const lanes = strList("include", include);
+  if (lanes.length === 0 || lanes.some((name) => !(BOOTSTRAP_COMPONENTS as readonly string[]).includes(name))) {
+    throw new Error(`include must be a non-empty subset of ${BOOTSTRAP_COMPONENTS.join(", ")}`);
+  }
+  return lanes;
+}
+
+
+/**
+ * Refuse a `rememberBatch` `items` list before any request — the Python
+ * SDK's `_checked_batch_items`, with its messages. Per-item rules the
+ * server reports per item (a missing `summary`, an unknown key) stay the
+ * server's. Refused here: not 1-50 items, an item that is no object, the
+ * batch-level keys, an item `context_id` other than the batch's, and the
+ * tag cap {@link KaguraClient.remember} also checks.
+ */
+function checkedBatchItems(items: unknown, contextId: string): Record<string, unknown>[] {
+  if (!Array.isArray(items)) {
+    throw new Error(`items must be a list of dicts, got ${pyTypeName(items)}`);
+  }
+  if (items.length < 1 || items.length > BATCH_MAX_ITEMS) {
+    throw new Error(`items must hold 1 to ${BATCH_MAX_ITEMS} items, got ${items.length}`);
+  }
+  items.forEach((item: unknown, index) => {
+    if (!isRecord(item)) {
+      throw new Error(`items[${index}] must be a dict, got ${pyTypeName(item)}`);
+    }
+    const batchLevel = BATCH_LEVEL_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(item, key));
+    if (batchLevel.length > 0) {
+      throw new Error(
+        `items[${index}] carries ${batchLevel.join(", ")}: set dedupe / tags_normalize / verbose ` +
+          "on rememberBatch itself, not on an item",
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(item, "context_id") && item.context_id !== contextId) {
+      throw new Error(
+        `items[${index}] carries another context_id: the batch's context_id applies to every item`,
+      );
+    }
+    if (Array.isArray(item.tags)) {
+      try {
+        validateMemoryTags(item.tags);
+      } catch (e) {
+        throw new Error(`items[${index}]: ${excMessage(e)}`);
+      }
+    }
+  });
+  return [...(items as Record<string, unknown>[])];
+}
+
+/** Python's `_opt_int`: an integer, or `null` for anything else (a boolean included). */
+function optInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+/**
+ * The error for `rollback_session`'s `partial_rollback` envelope — the
+ * Python SDK's `_partial_session_rollback_error`.
+ *
+ * Not {@link KaguraClient.raiseForMcpError}'s `partial_rollback`: that one
+ * reads a Sleep run's `rollback_summary`, which this envelope lacks (the
+ * server sends `summary` and `totals`). The partial rollback is already
+ * committed, so a field the SDK cannot read is `null` rather than a second
+ * error that would hide it.
+ */
+function partialSessionRollbackError(result: ToolResult): KaguraPartialSessionRollbackError {
+  const message = Object.prototype.hasOwnProperty.call(result, "message") ? pyStr(result.message) : "Unknown error";
+  let sessionSummary: SessionRollbackSummary | null = null;
+  if (result.summary !== undefined && result.summary !== null) {
+    try {
+      readModel(result.summary, SESSION_ROLLBACK_SUMMARY, "rollback_session");
+      sessionSummary = result.summary as SessionRollbackSummary;
+    } catch (drift) {
+      if (!(drift instanceof KaguraResponseError)) throw drift;
+    }
+  }
+  const err = new KaguraPartialSessionRollbackError(`rollback_session failed (partial_rollback): ${message}`, {
+    sessionSummary,
+    totals: isRecord(result.totals) ? result.totals : null,
+    rollbackId: optInt(result.rollback_id),
+    remaining: optInt(result.remaining),
+  });
+  return annotateServerError(err, "partial_rollback", mcpEnvelopeFields(result));
 }
 
 /**
@@ -2278,7 +2728,8 @@ export class KaguraClient {
       code === "context_not_found" ||
       code === "memory_not_found" ||
       code === "agent_not_found" ||
-      code === "binding_not_found"
+      code === "binding_not_found" ||
+      code === "session_not_found"
     ) {
       return new KaguraNotFoundError(`${operation}: ${message}`);
     }
@@ -2344,7 +2795,7 @@ export class KaguraClient {
    *   "check"` could not embed the summary (nothing written).
    */
   async remember(options: RememberOptions): Promise<RememberResult> {
-    const { details, observed } = checkRememberOptions(options);
+    const { details, observed } = checkRememberOptions(options, argNamesOf(options));
     const args: Record<string, unknown> = {
       context_id: options.contextId,
       summary: options.summary,
@@ -3651,7 +4102,7 @@ export class KaguraClient {
    *   suggestion.
    */
   async updateMemory(options: UpdateMemoryOptions): Promise<UpdateMemoryResult> {
-    const { details, detailsPatch, observed, expectedVersion } = checkUpdateMemoryOptions(options);
+    const { details, detailsPatch, observed, expectedVersion } = checkUpdateMemoryOptions(options, argNamesOf(options));
 
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.memoryId !== undefined) {
@@ -3714,9 +4165,9 @@ export class KaguraClient {
   }
 
   /**
-   * Soft-delete memories by specific memoryId or by search query. The
-   * rows are kept, but not restorable through the API, until the
-   * deployment's cleanup window passes
+   * Soft-delete memories by a specific memoryId, a list of memoryIds or a
+   * search query. The rows are kept, but not restorable through the API,
+   * until the deployment's cleanup window passes
    * (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days; Sleep
    * retention can purge sooner, and `0` turns the sweep off).
    *
@@ -3730,17 +4181,47 @@ export class KaguraClient {
    * A caller who may not write to the workspace at all is refused before
    * any target is looked at, so nothing is skipped silently for it.
    *
+   * `memoryIds` (memory-cloud v0.117.0+, #2127) forgets 1-50 distinct ids
+   * in one call, each exactly as `memoryId` would and committed on its
+   * own, and returns a {@link ForgetBatchResult} with one row per id
+   * (`deleted` / `skipped` / `error`). The ids share one time budget (the
+   * server's `forget` timeout, v0.118.0+, #2191): an id it did not reach is
+   * an `error` row with `error: "not_attempted"` — resend those. `k` is
+   * not sent in this mode. An older server refuses the argument
+   * (`invalid_argument`, v0.82.0+). Since memory-cloud v0.113.0 (#2044)
+   * either reply adds `session_id` when the request has a session (for
+   * {@link changesSince} / {@link rollbackSession}).
+   *
    * @throws KaguraPermissionError for a workspace viewer, which has
    *   read-only access (`requiredRole: "member"`).
-   * @throws Error if neither memoryId nor query is provided.
+   * @throws Error before any request: neither `memoryId`, `query` nor
+   *   `memoryIds` is provided; or `memoryIds` comes with `memoryId`,
+   *   `query` or `k`, is not a list of 1-50 strings, holds an id that is
+   *   not a UUID or the same id twice.
+   * @throws KaguraError with `code` `"batch_failed"` when every one of
+   *   `memoryIds` failed, the rows in `details.results`.
+   * @throws KaguraResponseError when a `memoryIds` reply does not match
+   *   the model (`operation` `"forget"`).
    */
-  async forget(options: {
-    contextId: string;
-    memoryId?: string;
-    query?: string;
-    /** Number of memories to delete in query mode (default 10). */
-    k?: number;
-  }): Promise<ToolResult> {
+  async forget(options: ForgetByIdsOptions): Promise<ForgetBatchResult>;
+  async forget(options: ForgetOptions): Promise<ToolResult>;
+  async forget(options: ForgetOptions | ForgetByIdsOptions): Promise<ToolResult | ForgetBatchResult>;
+  async forget(options: ForgetOptions | ForgetByIdsOptions): Promise<ToolResult | ForgetBatchResult> {
+    if (isSet(options.memoryIds)) {
+      const label = (camel: string) => optionLabel(options, camel);
+      if (options.memoryId || options.query) {
+        throw new Error(`Provide exactly one of ${label("memoryId")}, ${label("memoryIds")} or query`);
+      }
+      if (isSet(options.k)) {
+        throw new Error(`k applies to query mode only, not to ${label("memoryIds")}`);
+      }
+      const result = await this.callToolChecked("forget", {
+        context_id: options.contextId,
+        memory_ids: checkedMemoryIds(options.memoryIds, label("memoryIds")),
+      });
+      readModel(result, FORGET_BATCH_RESULT, "forget");
+      return result as unknown as ForgetBatchResult;
+    }
     if (!options.memoryId && !options.query) {
       throw new Error("Provide either memoryId or query");
     }
@@ -4481,6 +4962,403 @@ export class KaguraClient {
       EMBEDDING_MODELS_RESPONSE,
       "KaguraClient.list_embedding_models",
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Session tools (memory-cloud v0.93.0+, SDK issue #86)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Open an interactive session on one context in one call.
+   *
+   * Calls the `bootstrap` MCP tool (memory-cloud v0.93.0+, #1851): the
+   * context block, its tool `guardrails`, the trusted pinned set (cap 20),
+   * the upcoming Time Memories (k = 20) and the change log since `since`
+   * (at most 50), each bounded and **fail-soft** — a failing lane is
+   * `status: "error"` while the rest return, with `degraded` set.
+   * Deterministic: no recall runs; search by topic with {@link recall} if
+   * the change list does not answer the question. Not
+   * {@link getAgentBootstrap}, which rehydrates a registered agent.
+   *
+   * The memory-cloud session-start skill calls it as
+   * `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
+   *
+   * Every option is sent only when set. The reply is returned as sent,
+   * once the Python SDK's `BootstrapResponse` model accepts it, with one
+   * exception: a `guardrails` block that model cannot read is `null`, as
+   * Python reads it. Since memory-cloud v0.142.0 (#2615) `plan_headroom`
+   * lists every plan dimension at 80 % or more of its limit.
+   *
+   * @throws Error before any request: `maxChars` is not an integer in
+   *   [2,000, 100,000], `format` is not `"full"` / `"index"`,
+   *   `format: "full"` comes with `maxChars` below 10,000, `include` is
+   *   empty, not a list of strings or names an unknown lane, or `since` is
+   *   an invalid `Date`.
+   * @throws KaguraNotFoundError when the context does not exist or is not
+   *   accessible.
+   * @throws KaguraError for another refusal, e.g. a malformed `since`
+   *   (`validation_error`).
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"bootstrap"`).
+   */
+  async bootstrap(options: BootstrapOptions): Promise<BootstrapResponse> {
+    const args: Record<string, unknown> = { context_id: options.contextId };
+    if (isSet(options.since)) {
+      args.since = isoArg(options.since, "since");
+    }
+    if (isSet(options.include)) {
+      args.include = checkedBootstrapInclude(options.include);
+    }
+    const { maxChars, format } = options;
+    const maxCharsName = optionLabel(options, "maxChars");
+    if (isSet(maxChars)) {
+      args.max_chars = validateIntRange(maxCharsName, maxChars, BOOTSTRAP_MIN_CHARS, MAX_CHARS_MAX);
+    }
+    if (isSet(format)) {
+      if (!(BOOTSTRAP_FORMATS as readonly unknown[]).includes(format)) {
+        throw new Error(`format must be 'full' or 'index', got ${pyRepr(format)}`);
+      }
+      if (format === "full" && isSet(maxChars) && maxChars < MAX_CHARS_MIN) {
+        throw new Error(
+          `format="full" needs ${maxCharsName} of at least ${MAX_CHARS_MIN}; ` +
+            'pass format="index" (or omit format) under it',
+        );
+      }
+      args.format = format;
+    }
+    const result = await this.callToolChecked("bootstrap", args);
+    const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
+    // Fail-open, as Python's model reads the block: unreadable is null.
+    // Absent (`?guardrails=off`) stays absent.
+    if (read.guardrails === null && isSet(result.guardrails)) {
+      return { ...result, guardrails: null } as unknown as BootstrapResponse;
+    }
+    return result as unknown as BootstrapResponse;
+  }
+
+  /**
+   * List what changed in a context since a time, oldest first.
+   *
+   * Calls the `changes_since` MCP tool (memory-cloud v0.93.0+, #1852): a
+   * deterministic memory-level change log — `created`, `updated` (Sleep
+   * maintenance included), `superseded` (with `superseded_by`) and
+   * `forgotten` events — keyset-paged. A soft delete logs `forgotten` only
+   * (v0.98.0+, #1924), and every event of a memory that is forgotten now
+   * has no `summary` (v0.96.0+, #1876). With `sessionId` (v0.113.0+) or
+   * `byMe` (v0.114.0+) the log is the revision lane, where `restored` is a
+   * kind too. No ranking, no embedding, no Hebbian write. In a private
+   * context only the caller's own memories (and a linked account's) are
+   * listed. Every option is sent only when set; from memory-cloud v0.82.0 a
+   * server older than an option's floor refuses it (`invalid_argument`).
+   *
+   * Call again with `cursor: result.next_cursor` while `result.has_more`.
+   *
+   * @throws Error before any request: `maxChars` is out of range, `kinds`
+   *   is not a list of strings, or `since` / `until` is an invalid `Date`.
+   * @throws KaguraNotFoundError when the context does not exist or is not
+   *   accessible.
+   * @throws KaguraError for another refusal (`validation_error`: a
+   *   malformed time, `until` not after `since`, a bad `kinds` /
+   *   `session_id` / `cursor`).
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"changes_since"`).
+   */
+  async changesSince(options: ChangesSinceOptions): Promise<ChangesSinceResponse> {
+    const args: Record<string, unknown> = {
+      context_id: options.contextId,
+      since: isoArg(options.since, "since"),
+    };
+    if (isSet(options.until)) {
+      args.until = isoArg(options.until, "until");
+    }
+    if (isSet(options.kinds)) {
+      args.kinds = strList("kinds", options.kinds);
+    }
+    if (isSet(options.cursor)) {
+      args.cursor = options.cursor;
+    }
+    if (isSet(options.limit)) {
+      args.limit = options.limit;
+    }
+    if (isSet(options.sessionId)) {
+      args.session_id = options.sessionId;
+    }
+    if (isSet(options.byMe)) {
+      args.by_me = options.byMe;
+    }
+    if (isSet(options.maxChars)) {
+      args.max_chars = validateMaxChars(options.maxChars);
+    }
+    const result = await this.callToolChecked("changes_since", args);
+    readModel(result, CHANGES_SINCE_RESPONSE, "changes_since");
+    return result as unknown as ChangesSinceResponse;
+  }
+
+  /**
+   * List every live memory of a context that matches exact filters.
+   *
+   * Calls the `list` MCP tool (memory-cloud v0.93.0+, #1852): no ranking,
+   * a stable order and a `total`, e.g. the open backlog
+   * `filters: { type: ["tech-debt"], tags: ["status:open"] }` or
+   * `{ type: "task", "details.status": "open" }`. Use {@link recall} for
+   * meaning.
+   *
+   * {@link listMemories} is a different call: REST `GET
+   * /api/v1/memory/list`, with a summary substring (`q`), a trigger window,
+   * a bounding box and the cross-context "my memories" view. This method is
+   * MCP and takes `recall`'s exact filter vocabulary plus `details.<key>`
+   * equality, orders by `updated_at` / `created_at` / `importance` /
+   * `observed_at` and pages with a cursor. In a private context both list
+   * only the caller's own memories.
+   *
+   * Call again with `cursor: result.next_cursor` while `result.has_more`.
+   *
+   * @throws Error if `maxChars` is out of range, before any request.
+   * @throws KaguraNotFoundError when the context does not exist or is not
+   *   accessible.
+   * @throws KaguraError for another refusal (`validation_error`: an
+   *   unknown filter, `order_by` or `direction`).
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"list"`).
+   */
+  async listMatching(options: ListMatchingOptions): Promise<ListMatchingResponse> {
+    const args: Record<string, unknown> = { context_id: options.contextId };
+    if (isSet(options.filters)) {
+      args.filters = options.filters;
+    }
+    if (isSet(options.orderBy)) {
+      args.order_by = options.orderBy;
+    }
+    if (isSet(options.direction)) {
+      args.direction = options.direction;
+    }
+    if (isSet(options.cursor)) {
+      args.cursor = options.cursor;
+    }
+    if (isSet(options.limit)) {
+      args.limit = options.limit;
+    }
+    if (options.includeDetails) {
+      args.include_details = true;
+    }
+    if (isSet(options.maxChars)) {
+      args.max_chars = validateMaxChars(options.maxChars);
+    }
+    const result = await this.callToolChecked("list", args);
+    readModel(result, LIST_MATCHING_RESPONSE, "list");
+    return result as unknown as ListMatchingResponse;
+  }
+
+  /**
+   * Store up to 50 memories in one call.
+   *
+   * Calls the `remember_batch` MCP tool (memory-cloud v0.93.0+, #1853).
+   * Each item is validated and limited like a single {@link remember}.
+   * Without `atomic` each item is written and reported on its own; with
+   * `atomic: true` the batch is one transaction — a failing item, or a
+   * `dedupe: "check"` candidate, rolls everything back and the other items
+   * come back `skipped`. Items go out as given, by their wire names (see
+   * {@link RememberBatchItem}); the batch options are sent only when set.
+   *
+   * Check `failed` / `candidates` / `skipped` and each row's `status`; on
+   * `committed_after_timeout` every item is stored — do not resend.
+   *
+   * @throws Error before any request: `items` is not a list of 1-50
+   *   objects, an item carries `dedupe`, `tags_normalize` or `verbose`
+   *   (batch-level here) or a `context_id` other than the batch's, or an
+   *   item's `tags` break the 50-tag / 100-character cap.
+   * @throws KaguraQuotaError when an atomic batch did not fit the daily
+   *   quota (`quota_exceeded`; nothing was written, a smaller batch may
+   *   fit).
+   * @throws KaguraCapacityLockedError when the workspace is over its Free
+   *   capacity.
+   * @throws KaguraError when nothing was written: `code` `"batch_failed"`
+   *   (every item failed) or `"batch_refused"` (an atomic batch with an
+   *   invalid item) carries the per-item rows in `details.results`; a
+   *   `dedupe_unavailable` item (the duplicate check is down) is such a row
+   *   — retry it or send `dedupe: "off"`. `"timeout"` (an atomic batch
+   *   rolled back at its time limit) carries no rows: send fewer items, or
+   *   drop `atomic`.
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"remember_batch"`).
+   */
+  async rememberBatch(options: RememberBatchOptions): Promise<RememberBatchResult> {
+    const args: Record<string, unknown> = {
+      context_id: options.contextId,
+      items: checkedBatchItems(options.items, options.contextId),
+    };
+    if (isSet(options.atomic)) {
+      args.atomic = options.atomic;
+    }
+    if (isSet(options.dedupe)) {
+      args.dedupe = options.dedupe;
+    }
+    if (isSet(options.tagsNormalize)) {
+      args.tags_normalize = options.tagsNormalize;
+    }
+    if (isSet(options.verbose)) {
+      args.verbose = options.verbose;
+    }
+    const result = await this.callToolChecked("remember_batch", args);
+    readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
+    return result as unknown as RememberBatchResult;
+  }
+
+  /**
+   * Find the tools this MCP URL's `tools/list` leaves out.
+   *
+   * Calls the `describe_tools` MCP tool (memory-cloud v0.93.0+, #1849). A
+   * profile only shapes `tools/list`: this client can call every tool, but
+   * a model behind a mainstream MCP client can call listed tools only, so
+   * the reply says which URL query lists more.
+   *
+   * @throws Error if `names` is not a list of strings or holds more than
+   *   20 names, before any request.
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"describe_tools"`).
+   */
+  async describeTools(options: DescribeToolsOptions = {}): Promise<ToolDescriptions> {
+    const args: Record<string, unknown> = {};
+    if (isSet(options.query)) {
+      args.query = options.query;
+    }
+    if (isSet(options.names)) {
+      args.names = checkedNames("names", options.names, DESCRIBE_MAX_NAMES);
+    }
+    const result = await this.callToolChecked("describe_tools", args);
+    readModel(result, TOOL_DESCRIPTIONS, "describe_tools");
+    return result as unknown as ToolDescriptions;
+  }
+
+  /**
+   * Read sections of the server's tool manual.
+   *
+   * Calls the `guide` MCP tool (memory-cloud v0.93.0+, #1850): the
+   * walkthroughs the short tool descriptions leave out — how to read a
+   * reply, when to pick one tool over another, the write rules. A caller
+   * error's `help` often names a topic (`'Manual: guide(["<tool>"])'`).
+   * Static text, nothing caller-specific.
+   *
+   * @param topics Up to 20 tool names (`"recall"`) or `"<tool>.<section>"`
+   *   topics. Omit for the server's `["index"]`, which lists them all.
+   *   Unknown names come back in `unknown`, not thrown.
+   * @throws Error if `topics` is not a list of strings or holds more than
+   *   20 names, before any request.
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"guide"`).
+   */
+  async guide(topics?: readonly string[]): Promise<GuideResponse> {
+    const args: Record<string, unknown> = {};
+    if (isSet(topics)) {
+      args.topics = checkedNames("topics", topics, GUIDE_MAX_TOPICS);
+    }
+    const result = await this.callToolChecked("guide", args);
+    readModel(result, GUIDE_RESPONSE, "guide");
+    return result as unknown as GuideResponse;
+  }
+
+  /**
+   * Read one memory's revision log, newest first.
+   *
+   * Calls the `list_revisions` MCP tool (memory-cloud v0.113.0+, #2043):
+   * one row per `created` / `updated` (with the fields it changed) /
+   * `forgotten` / `restored` event, each with the version after it. Same
+   * permission as {@link reference}; a forgotten memory's log is
+   * unreadable (`memory_not_found`).
+   *
+   * @throws Error if `maxChars` is out of range, before any request.
+   * @throws KaguraNotFoundError when the memory or context does not exist,
+   *   is not accessible, or the memory is forgotten.
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"list_revisions"`).
+   */
+  async listRevisions(options: ListRevisionsOptions): Promise<RevisionsPage> {
+    const args: Record<string, unknown> = {
+      context_id: options.contextId,
+      memory_id: options.memoryId,
+    };
+    if (isSet(options.limit)) {
+      args.limit = options.limit;
+    }
+    if (isSet(options.cursor)) {
+      args.cursor = options.cursor;
+    }
+    if (isSet(options.maxChars)) {
+      args.max_chars = validateMaxChars(options.maxChars);
+    }
+    const result = await this.callToolChecked("list_revisions", args);
+    readModel(result, REVISIONS_PAGE, "list_revisions");
+    return result as unknown as RevisionsPage;
+  }
+
+  /**
+   * Plan or undo what one session — or the caller in a window — wrote.
+   *
+   * Calls the `rollback_session` MCP tool (memory-cloud v0.113.0+, #2044).
+   * **Destructive with** `dryRun: false`: per memory, one the session
+   * created is forgotten, one it edited gets the values from before its
+   * first edit back (a new version), one it forgot is restored and
+   * re-embedded. A memory someone else changed since, Sleep merged, a
+   * resource row or one the caller may not write (`not_permitted`,
+   * v0.134.0+, #2432) is skipped with a cause, never half-reverted. Only
+   * the caller's own writes (same user or a linked account, same agent
+   * credential); a context owner may name any session. Needs the context
+   * editor role. A call handles at most 500 events (100 restores):
+   * `status: "in_progress"` with `remaining > 0` means call again with the
+   * same arguments. Once complete, further calls are refused
+   * (`already_rolled_back`) until new writes land.
+   *
+   * `dry_run` is always sent, `true` unless `dryRun: false`, so the
+   * plan-only default never depends on the server's. `since` / `until`
+   * need memory-cloud v0.114.0+ (#2121).
+   *
+   * @throws Error before any request: neither or both of `sessionId` and
+   *   `since` are given, `until` comes without `since`, or a `Date` is
+   *   invalid.
+   * @throws KaguraNotFoundError for `session_not_found` (no session with
+   *   this id the caller may roll back in this context), or a context that
+   *   is not accessible.
+   * @throws KaguraPartialSessionRollbackError when some items failed this
+   *   call; every other item was handled and saved. `sessionSummary` lists
+   *   the failures in `errors`; `totals`, `rollbackId` and `remaining` come
+   *   with it. Call again with the same arguments to retry the failed
+   *   items.
+   * @throws KaguraPermissionError for `permission_denied` (below editor).
+   * @throws KaguraError with `code` `no_writes_in_window`,
+   *   `already_rolled_back` or `validation_error` (e.g. a window wider than
+   *   7 days).
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"rollback_session"`).
+   */
+  async rollbackSession(options: RollbackSessionOptions): Promise<SessionRollbackResult> {
+    const bySession = isSet(options.sessionId);
+    const bySince = isSet(options.since);
+    if (bySession === bySince) {
+      throw new Error("Provide exactly one of sessionId or since");
+    }
+    if (isSet(options.until) && !bySince) {
+      throw new Error("until needs since");
+    }
+    const args: Record<string, unknown> = {
+      context_id: options.contextId,
+      dry_run: options.dryRun ?? true,
+    };
+    if (bySession) {
+      args.session_id = options.sessionId;
+    }
+    if (isSet(options.since)) {
+      args.since = isoArg(options.since, "since");
+    }
+    if (isSet(options.until)) {
+      args.until = isoArg(options.until, "until");
+    }
+    const result = await this.callTool("rollback_session", args);
+    if (result.status === "error" && result.error === "partial_rollback") {
+      throw partialSessionRollbackError(result);
+    }
+    KaguraClient.raiseForMcpError(result, "rollback_session");
+    readModel(result, SESSION_ROLLBACK_RESULT, "rollback_session");
+    return result as unknown as SessionRollbackResult;
   }
 
   /** Release resources. (fetch has no persistent connection to close; kept for API parity.) */

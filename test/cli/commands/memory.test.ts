@@ -323,11 +323,12 @@ describe("an explicitly empty value", () => {
 });
 
 describe("kagura-memory forget", () => {
-  it("requires one of --memory-id or --query, exiting 1", async () => {
+  it("requires one of --memory-id, --query or --ids, exiting 1", async () => {
     // ClickException in Python, so exit 1 rather than the usage code 2.
     const { code, h } = await wire(["forget"]);
     expect(code).toBe(1);
-    expect(h.err.join("\n")).toBe("Error: Either --memory-id or --query is required");
+    // The Python CLI 0.44.0 names --ids too (python-sdk #301).
+    expect(h.err.join("\n")).toBe("Error: Either --memory-id or --query is required (or --ids)");
   });
 
   it("does not send k in pure memory-id mode", async () => {

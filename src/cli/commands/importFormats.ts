@@ -264,34 +264,9 @@ export function pyTypeNameAt(container: object, key: string | number): string {
   return pyTypeName((container as Record<string | number, unknown>)[key]);
 }
 
-/** The first NaN or ±Infinity in `value`, in the order a request body lists it. */
-function firstNonFinite(value: unknown): number | undefined {
-  if (typeof value === "number") return Number.isFinite(value) ? undefined : value;
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  const items = Array.isArray(value) ? value : Object.keys(record).map((k) => record[k]);
-  for (const item of items) {
-    const found = firstNonFinite(item);
-    if (found !== undefined) return found;
-  }
-  return undefined;
-}
-
-/**
- * Refuse payloads that hold a NaN or ±Infinity — which `json.loads` reads,
- * `1e400` included — as the Python CLI's httpx refuses to encode them
- * (`allow_nan=False`), rather than send them as the `null` `JSON.stringify`
- * would make of them. The message is CPython 3.12's and later's; 3.11
- * leaves the value off. An integer too long for a double (over 300
- * digits), which Python would send, is refused the same way: as a JS
- * number it is Infinity too.
- */
-export function refuseNonFinite(payloads: readonly unknown[]): void {
-  const found = firstNonFinite(payloads);
-  if (found !== undefined) {
-    throw new CliError(`Out of range float values are not JSON compliant: ${pyFloatRepr(found)}`);
-  }
-}
+// Moved to `parse.ts` (#86), which `--details` and `list --filters` share;
+// re-exported for `resource.ts` and the tests that import it from here.
+export { refuseNonFinite } from "../parse.js";
 
 /** The four hex digits after the `u` at `uAt`, which must leave text after them. */
 function readHex4(s: string, uAt: number): number {

@@ -8,10 +8,11 @@ import {
   optionalRanged,
   paramLabel,
   parseChoice,
-  parseDetails,
+  CliError,
   parseFloatOption,
   parseIdArg,
   parseIntOption,
+  parseJsonObject,
   parseLocation,
   parseRanged,
   parseTags,
@@ -411,24 +412,30 @@ describe("quote", () => {
 });
 
 
-describe("parseDetails", () => {
+describe("parseJsonObject (the Python CLI's _parse_json_object)", () => {
   it("parses a JSON object", () => {
-    expect(parseDetails('{"a": 1}')).toEqual({ a: 1 });
+    expect(parseJsonObject('{"a": 1}')).toEqual({ a: 1 });
   });
 
   it("accepts an explicit empty object", () => {
     // `--details '{}'` yields {} and IS sent, unlike a blank string.
-    expect(parseDetails("{}")).toEqual({});
+    expect(parseJsonObject("{}")).toEqual({});
   });
 
   it.each([[undefined], [""], ["   "]])("treats %j as unset", (raw) => {
-    expect(parseDetails(raw)).toBeUndefined();
+    expect(parseJsonObject(raw)).toBeUndefined();
   });
 
-  it("rejects malformed JSON with exit code 2", () => {
-    const run = () => parseDetails("{not json");
+  // Recorded from the Python CLI 0.44.0 (`kagura remember --details …`,
+  // `kagura list --filters …`): `json.loads`' own words.
+  it.each([
+    ["{not json", "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"],
+    ['{"a": }', "Expecting value: line 1 column 7 (char 6)"],
+    ["{} x", "Extra data: line 1 column 4 (char 3)"],
+  ])("rejects malformed JSON %j in json.loads' words, exit code 2", (raw, message) => {
+    const run = () => parseJsonObject(raw);
     expect(run).toThrow(CliUsageError);
-    expect(run).toThrow(/^Invalid JSON for --details: /);
+    expect(run).toThrow(`Invalid JSON for --details: ${message}`);
   });
 
   it.each([
@@ -439,7 +446,22 @@ describe("parseDetails", () => {
     ["true", "bool"],
     ["null", "NoneType"],
   ])("rejects non-object JSON %j naming the Python type (%s)", (raw, typeName) => {
-    expect(() => parseDetails(raw)).toThrow(`--details must be a JSON object, got ${typeName}.`);
+    expect(() => parseJsonObject(raw)).toThrow(
+      `--details must be a JSON object, got ${typeName}. Example: --details '{"location": {"lat": 35.68, "lon": 139.76}}'`,
+    );
+  });
+
+  it("names the flag and example it is given (list --filters)", () => {
+    expect(() => parseJsonObject("{bad", "--filters", `'{"type": "task"}'`)).toThrow(
+      "Invalid JSON for --filters: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+    );
+    expect(() => parseJsonObject("[1]", "--filters", `'{"type": "task"}'`)).toThrow(
+      `--filters must be a JSON object, got list. Example: --filters '{"type": "task"}'`,
+    );
+  });
+
+  it("reads NaN and the infinities as json.loads does, for the request to refuse", () => {
+    expect(parseJsonObject('{"a": NaN, "b": -Infinity, "c": 1e400}')).toEqual({ a: NaN, b: -Infinity, c: Infinity });
   });
 });
 
@@ -540,5 +562,21 @@ describe("buildDetails", () => {
 
   it("returns undefined when both are absent", () => {
     expect(buildDetails(undefined, undefined)).toBeUndefined();
+  });
+
+  // The Python CLI 0.44.0 reads `NaN` (json.loads) and fails to send it:
+  // `Error: Out of range float values are not JSON compliant: nan`, exit 1.
+  it.each([
+    ['{"a": NaN}', "nan"],
+    ['{"a": {"b": [1e400]}}', "inf"],
+  ])("refuses %j as httpx refuses to send it (exit 1), not as null", (raw, shown) => {
+    const run = () => buildDetails(raw, undefined);
+    expect(run).toThrow(CliError);
+    expect(run).not.toThrow(CliUsageError);
+    expect(run).toThrow(`Out of range float values are not JSON compliant: ${shown}`);
+  });
+
+  it("reports a --location usage error before a NaN, as Python does", () => {
+    expect(() => buildDetails('{"a": NaN}', "91,0")).toThrow(CliUsageError);
   });
 });

@@ -160,7 +160,7 @@ npx kagura-memory --help
 |---|---|
 | `auth` | `login` `logout` `refresh` `status` `use` `list` `token` `create-key` `list-keys` `revoke-key` |
 | `context` | `list` `create` `update` `delete` `search-config` (plus the `contexts` alias) |
-| memory | `remember` `recall` `reference` `forget` `update-memory` `explore` |
+| memory | `remember` `recall` `reference` `forget` `update-memory` `explore` `bootstrap` `changes` `list` |
 | `edge` | `list` `create` `update` `delete` |
 | `sleep` | `history` `report` `rollback` |
 | `measure` | `record` `series` |
@@ -187,6 +187,10 @@ npx kagura-memory update-memory -m MEM_UUID --add-tag status:done --remove-tag s
   --details-patch '{"status": "done"}' --expected-version 3   # partial edits (v0.140.0+), guarded (v0.113.0+)
 npx kagura-memory update-memory -m MEM_UUID --accept-supersede-candidate   # shadow the suggested older memory (v0.126.0+)
 npx kagura-memory context search-config CTX_UUID --content-chunks --no-llm-selector   # owner only (v0.110.0+ / v0.115.0+)
+npx kagura-memory bootstrap --since 7d --format index --max-chars 5000   # open a session (v0.93.0+; index/--max-chars < 10000 v0.115.0+)
+npx kagura-memory changes 2026-11-04T09:00:00Z --by-me   # what you wrote since then (v0.93.0+; --by-me v0.114.0+)
+npx kagura-memory list --filters '{"type": "task", "details.status": "open"}' --order-by created_at   # exact filters, a total, no ranking
+npx kagura-memory forget --ids "$ID1,$ID2"   # one row per id: deleted / skipped / error (v0.117.0+)
 npx kagura-memory measure record <context-id> weight_kg 71.5 --unit kg
 npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
 npx kagura-memory setup claude --add-tools explore --context <context-id>   # ?add_tools= (v0.129.0+), ?context= (v0.114.0+)
@@ -198,6 +202,17 @@ The context id comes from `-c/--context-id`, or from `context_id` in
 `.kagura.json`. Credentials live in `~/.kagura/credentials.json` and are
 shared with the Python CLI, so either tool can create a profile the other
 then uses.
+
+**`bootstrap`, `changes`, `list` and `forget --ids`** (memory-cloud
+v0.93.0+; `forget --ids` v0.117.0+) are the Python CLI 0.44.0's session
+commands. Each prints the Python SDK model's dump of the reply: a field
+the server left out prints with its default, a timestamp in pydantic's
+form. `list` is the MCP `list` tool (`listMatching`) and takes
+`--filters` as a JSON object; it is no longer a spelling of `auth list`,
+the one bare `auth` alias that gave way. `forget --ids` takes 1-50
+comma-separated memory UUIDs and refuses `-k` (exit 1, as Python); when
+every id failed it prints one `<id> <status> [<error>]` row per id on
+stderr before the error, so the `not_attempted` ones can be resent.
 
 **`context list`** prints the `list_contexts` reply as JSON on stdout.
 From memory-cloud v0.82.0 that is one page: 100 contexts by default, or
@@ -835,9 +850,14 @@ would accept.
 **Differences from the Python CLI 0.42.0 in what it added**, each on
 purpose or out of reach:
 
-- `update-memory --details` and `remember --details` refuse text that is
-  not JSON with JavaScript's parser message after `Invalid JSON for
-  --details:`, where Python prints its `json` module's.
+- `update-memory --details` and `remember --details` refuse a `NaN` or
+  an infinity in the object (`Out of range float values are not JSON
+  compliant: nan`, exit 1, Python's line) before the context is looked
+  up; the Python CLI reads the object as JSON and fails only when it
+  sends it, so without a context it reports that first. (`--details-patch`
+  refuses it where Python does, never sending a `null` that would delete
+  the key.) Text that is not JSON at all gets Python's `json` module's
+  message, as `list --filters` does.
 - `update-memory --merge-details` prints the size of a bounded
   `reference` reply when `details_total_chars` is a whole number sent as a
   float (`24000.0`), which Python leaves out: JSON.parse cannot tell it
@@ -1392,13 +1412,14 @@ keyed on the error code and the envelope's fields, never on the message:
 
 | Class | Raised for | Carries |
 |-------|------------|---------|
-| `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
+| `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings, and `rollbackSession`'s `session_not_found` (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
 | `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off. From memory-cloud v0.100.0 also a plan that dropped below what the workspace holds: `feature` `"members"` on every workspace route for a member without a seat, `"contexts"` on a content write into a context without a writable slot (`limit` / `current` in `details`) | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`, and `rate_limit_exceeded`, the daily MCP call cap every non-read-only tool checks (`quotaType` `api_mcp_daily`, `resetsAt` the next UTC midnight); REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
 | `KaguraCapacityLockedError` | memory-cloud v0.99.0+: a Free workspace over its capacity — MCP `capacity_locked`, REST 403 `CAPACITY-001` (`details.gate` `"capacity"`). Search and saving are refused until it is cleaned up or re-subscribed; listing, deleting, export and `getUsage` keep working. Neither a quota nor a plan gate, so it extends neither class. A caller outside the locked workspace (a public context) gets every figure `null` | `cleanupUrl`, `memoryCount`, `memoryLimit`, `overMemories`, `usedBytes`, `storageLimitBytes`, `overBytes`, `gate` (`"capacity"`) |
 | `KaguraAuthError` | HTTP 401; and from memory-cloud v0.79.0 an OAuth token that lacks the scope a call needs (HTTP 403 `insufficient_scope`): `memory:read` for the read-only tools, `recall` and `getAgentBootstrap`, `memory:write` for every other tool, so a `kagura-memory auth login --read-only` profile gets it on every write. The message names the scope and the re-login | `code` `"insufficient_scope"`, `details.required_scope` |
 | `KaguraServiceUnavailableError` | any HTTP 503 from `/mcp` or a REST route (the OAuth endpoints keep their own errors): `/mcp`'s `temporarily_unavailable` (the credential could not be verified, v0.82.0+) and its JSON-RPC transport failures (a dependency down or timed out), REST `DB-002` (the database unavailable). A `KaguraConnectionError`, so existing handlers keep catching it | `retryAfter` (the `Retry-After` header, else `data.retry_after_seconds`; `null` on a write whose outcome is unknown), `reason` (REST `details.reason`, else the MCP `cause`, else the code) |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
+| `KaguraPartialSessionRollbackError` | `rollbackSession` (memory-cloud v0.113.0+) failed some items of a real run (`partial_rollback`); every other item was handled and saved, and a call with the same arguments retries the failed ones. A field the SDK cannot read is `null` rather than a second error | `sessionSummary` (with `errors`), `totals`, `rollbackId`, `remaining` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. That includes `getServerInfo`, `checkServerVersion` (as `KaguraClient.get_server_info`), `getEmbeddingStatus`, `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`, which check the body against the Python model and return it as sent. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
 | `KaguraVersionConflictError` | memory-cloud v0.113.0+: an `updateMemory({ expectedVersion })` that found the memory at another version, so nothing was written — MCP `version_conflict`, REST 409 `RES-002` with `details.reason` `"version_conflict"` (the files API's dedup 409 shares `RES-002` without that reason and stays a `KaguraConnectionError`). Read the memory again and resend with its version, or drop `expectedVersion` to overwrite | `currentVersion`, `expectedVersion`, `memoryId` (MCP only), all read from `details` |
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
@@ -1517,7 +1538,7 @@ when `undefined`.
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". `observedAfter` (inclusive) / `observedBefore` (exclusive) keep the memories whose fact held in that range (`filters.observed_after` / `observed_before`, v0.127.0+; a date is the start of its UTC day, and a memory without `observed_at` never matches); one beside the same key in `filters` throws. Returns a typed `RecallResponse` (`confidence` first: read `confidence.level` before the hits); see [Recall result shape](#recall-result-shape). |
 | `reference` | Full detail for one memory, under `result.memory` (`ReferenceResponse`), with its `version` (v0.113.0+) — the `expectedVersion` for `updateMemory` — and `observed_at` (v0.127.0+). Since v0.78.0 the reply is bounded (`maxChars`, 10,000–100,000, default 20,000): cut `content` comes with `content_truncated` / `content_next_offset`, and a `details` / `context` / links field that does not fit is left out with `<field>_omitted` / `<field>_total_chars`. Page the rest with `contentOffset`, `detailsOffset` (`details_json` slices) or `contextOffset` — one per call — and pick fields with `fields` (`content`, `details`, `context`, `links`). `version` (v0.113.0+) reads an earlier version (`historical: true`, `current_version`). Every one is checked locally (an integer in range, more than one offset refused first, a known field, an offset's own field listed) before any request. The reply comes back as sent once its `status` (a string) and `memory` (an object) are checked: otherwise `KaguraResponseError` (the CLI's `reference` prints the raw reply, as Python's does). |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off — and `detailsPatch` (v0.140.0+) merges into it instead: each key replaces the stored one, `null` deletes it, the rest are kept. `tags` replaces the list, with `remember`'s caps; `addTags` / `removeTags` (v0.140.0+) edit it (removals first, each new tag once; `addTags` takes the caps, `removeTags` none). `expectedVersion` (v0.113.0+) applies the edit only while the memory is at that version, else throws `KaguraVersionConflictError` with `currentVersion` and writes nothing. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; `acceptSupersedeCandidate: true` (v0.126.0+) accepts it — the candidate is shadowed by a `supersedes` edge, named in the reply's `superseded_memory_id`, and a different edge already linking the pair throws `KaguraError` `code` `"edge_exists"`. `observedAt`, `toolTrigger` and `verbose` work as on `remember`. The reply (`UpdateMemoryResult`, returned unchecked as Python's dict, so every key is optional) carries `version`. See [the local rules](#updatememorys-local-rules) below. |
-| `forget` | Soft-delete by `memoryId` or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
+| `forget` | Soft-delete by `memoryId`, by `memoryIds` (1-50 ids in one call, memory-cloud v0.117.0+; returns a `ForgetBatchResult`, see [Session tools](#session-tools-memory-cloud-v0930)) or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). A row carries `observed_at` (v0.127.0+), when the fact held, as the text the server stores: a date `YYYY-MM-DD` or a UTC datetime `YYYY-MM-DDTHH:MM:SSZ`, never parsed (a date sorts and filters as the start of its UTC day). |
 
 #### `updateMemory`'s local rules
@@ -1600,6 +1621,83 @@ opt-in, in place of `explore_hints`. `explore()` itself is unaffected.
 `kagura-memory setup … --add-tools explore` writes that URL into a
 harness entry, and `kagura-memory-mcp --add-tools explore` sets it on the
 proxy's upstream.
+
+### Session tools (memory-cloud v0.93.0+)
+
+The tools an agent session starts and ends with. Each sends only the
+options set, under the server's names, checks the reply against the Python
+SDK's model (a reply it refuses is `KaguraResponseError` naming the tool)
+and returns it as sent.
+
+| Method | What it does |
+|--------|--------------|
+| `bootstrap` | Open a session on one context in one deterministic call (no recall): the `context` block, its tool `guardrails`, and the `pinned` / `upcoming` / `changes` lanes under `components`, each fail-soft (`degraded: true` when one failed). `since` (`"0d"`–`"999d"`, ISO 8601 or a `Date`; server default `"7d"`), `include`, `maxChars` (2,000–100,000) and `format`. Not `getAgentBootstrap`, which rehydrates a registered agent. |
+| `changesSince` | The change log of a context in `[since, until)`, oldest first: `created`, `updated`, `superseded` (with `superseded_by`) and `forgotten` events, keyset-paged (`cursor: next_cursor` while `has_more`). `kinds`, `limit` (1-100), `sessionId` (v0.113.0+), `byMe` (v0.114.0+), `maxChars`. |
+| `listMatching` | Every live memory matching exact `filters` (recall's vocabulary plus `details.<key>`, JSON-type strict), a stable order (`orderBy` `updated_at` / `created_at` / `importance` / `observed_at` (v0.127.0+), `direction`) and a `total`; offset-paged. The MCP `list` tool — not `listMemories`, which is REST. |
+| `rememberBatch` | Store 1-50 memories in one call; `items` are `remember` arguments by their wire names (`summary`, `content`, `type` required). `atomic`, `dedupe`, `tagsNormalize`, `verbose`. |
+| `describeTools` | The tools this MCP URL's `tools/list` leaves out (`query` narrows them), or with `names` (≤ 20) their full definitions, and which URL query lists more. |
+| `guide` | Sections of the server's tool manual: `guide(["recall", "remember.dedupe"])` (≤ 20 topics; omit for the index). Unknown names come back in `unknown`. |
+| `listRevisions` | One memory's revision log, newest first (v0.113.0+): `created` / `updated` (with `changed_fields`) / `forgotten` / `restored`, each with the version after it; `writer` is `api`, `rollback` or `erasure`. |
+| `rollbackSession` | Plan (`dryRun`, **default `true`, always sent**) or undo what one `sessionId` wrote, or what you wrote in a `since` / `until` window of at most 7 days (v0.114.0+). A memory someone else changed since, Sleep merged or you may not write is skipped with a `cause`, never half-reverted. `status: "in_progress"` with `remaining > 0` means call again with the same arguments. |
+
+**`bootstrap`'s two formats.** `format: "index"` (v0.115.0+) gives pointer
+rows: pinned keeps its text, but guardrail, upcoming and change rows carry
+an 80-character `summary` head with `summary_cut`, and there are no
+`instructions`. `"full"` is the whole shape. Omitted, the server picks
+`index` below `maxChars` 10,000 and `full` otherwise; `format: "full"`
+under 10,000 throws locally, and a `maxChars` below 10,000 needs v0.115.0+
+(an older server refuses it). Over budget a lane keeps the prefix that
+fits (`truncated`), and a full reply leaves `context_summary` out of the
+pinned rows first (`context_summary_omitted`). `guardrails` is absent
+with `?guardrails=off` and `null` when the server's read failed or the
+block cannot be read; `plan_headroom` (v0.142.0+) lists the plan
+dimensions at 80 % or more of their limit. The session-start skill calls
+`bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
+
+**`changesSince` kinds.** Without `sessionId` / `byMe` the kinds are
+`created`, `updated`, `superseded`, `forgotten`; with either (the
+revision lane) `created`, `updated`, `forgotten`, `restored`. Every
+event of a memory that is forgotten now has no `summary` (v0.96.0+), and a
+soft delete logs `forgotten` only. `byMe: true` previews what
+`rollbackSession({ since })` would undo.
+
+**`rememberBatch` accounting.** Without `atomic` each item is written and
+reported on its own; with `atomic: true` the batch is one transaction,
+and a failing item or a `dedupe: "check"` candidate rolls it back, the
+other items `skipped`. `results` has one row per item (`success`,
+`duplicate_candidate`, `skipped` or `error`), and `failed` excludes
+`skipped` and `candidates` (v0.96.0+). `committed_after_timeout: true`
+means every item is stored though the call passed its time limit: do not
+resend. A batch that wrote nothing throws: `KaguraError` with `code`
+`batch_failed` (every item failed) or `batch_refused` (an atomic batch
+with an invalid item), the rows in `details.results`, or `timeout` (an
+atomic batch rolled back, no rows); an atomic batch over the daily quota
+is `KaguraQuotaError`. Items are checked first: 1-50 objects, no
+`dedupe` / `tags_normalize` / `verbose` on an item, no other context's
+`context_id`, `remember`'s tag caps.
+
+**`forget` by ids.** `forget({ contextId, memoryIds })` (v0.117.0+)
+forgets each id exactly as `memoryId` would, committed on its own, and
+returns a `ForgetBatchResult` with one row per id: `deleted`, `skipped`
+(not found, not yours, or already gone) or `error`; an id the call's time
+budget did not reach is `error: "not_attempted"` (v0.118.0+) — resend
+those. `k` is not sent; `memoryIds` with `memoryId`, `query` or `k`, an id
+that is no UUID or a repeated one throws before any request. Every id
+failing throws `KaguraError` `batch_failed` with the rows in
+`details.results`.
+
+```ts
+const session = await client.bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 });
+const lane = session.components.changes;
+if (lane?.has_more) {
+  const next = await client.changesSince({ contextId, since: session.since!, cursor: lane.next_cursor! });
+}
+const batch = await client.rememberBatch({
+  contextId,
+  items: [{ summary: "Adopt FastAPI DI", content: "Use Depends()", type: "decision" }],
+});
+const plan = await client.rollbackSession({ contextId, sessionId: batch.session_id! }); // dry run
+```
 
 ### Deterministic lanes
 

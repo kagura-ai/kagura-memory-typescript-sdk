@@ -1,6 +1,6 @@
 /** Custom errors for the Kagura Memory SDK (port of exceptions.py). */
 
-import type { RollbackSummary } from "./models.js";
+import type { RollbackSummary, SessionRollbackSummary } from "./models.js";
 
 /**
  * Subset of the standard DOM/Node `ErrorOptions`. Declared locally so the
@@ -560,6 +560,57 @@ export class KaguraPartialRollbackError extends KaguraError {
     super(message, options);
     this.reportId = reportId;
     this.summary = summary;
+  }
+}
+
+export interface KaguraPartialSessionRollbackErrorOptions extends KaguraErrorOptions {
+  /** What this call forgot, restored, skipped and failed; `null` when unreadable. */
+  sessionSummary?: SessionRollbackSummary | null;
+  /** The counters of every call of this rollback so far, as sent. */
+  totals?: Record<string, unknown> | null;
+  /** The rollback record's id. */
+  rollbackId?: number | null;
+  /** Events still to handle, the failed items' included. */
+  remaining?: number | null;
+}
+
+/**
+ * `rollbackSession` failed some items of this call (memory-cloud
+ * v0.113.0+, #2044).
+ *
+ * The server answers `partial_rollback` after a real run (`dryRun:
+ * false`) in which some items failed. Every other item of the call was
+ * handled and saved, so nothing is half-reverted; call `rollbackSession`
+ * again with the same arguments to retry the failed items (they are
+ * planned again from the memory as it is then). A sibling of
+ * {@link KaguraPartialRollbackError}, which is the Sleep run rollback's.
+ *
+ * The rest of the envelope stays in `details` (`rollback_status`,
+ * `events`, the `session_id` or `since` / `until` echo); quote
+ * `correlationId` when reporting a failure. The fields below are `null`
+ * when the server did not send them or sent something this SDK cannot
+ * read: the partial rollback is already committed, so an unreadable field
+ * never hides it behind a second error.
+ */
+export class KaguraPartialSessionRollbackError extends KaguraError {
+  /**
+   * What this call forgot, restored, skipped and failed, with one line per
+   * failed item in `sessionSummary.errors`.
+   */
+  readonly sessionSummary: SessionRollbackSummary | null;
+  /** The counters of every call of this rollback so far (`calls` included), as sent. */
+  readonly totals: Record<string, unknown> | null;
+  /** The rollback record's id. */
+  readonly rollbackId: number | null;
+  /** Events still to handle (the failed items' included). */
+  readonly remaining: number | null;
+
+  constructor(message: string, options: KaguraPartialSessionRollbackErrorOptions = {}) {
+    super(message, options);
+    this.sessionSummary = options.sessionSummary ?? null;
+    this.totals = options.totals ?? null;
+    this.rollbackId = options.rollbackId ?? null;
+    this.remaining = options.remaining ?? null;
   }
 }
 
