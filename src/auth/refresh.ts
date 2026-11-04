@@ -48,13 +48,26 @@ export interface RefreshOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Whether an auth failure is the server refusing a wider grant. */
+/** The OAuth `error` codes that refuse the scope a refresh asked for. */
+const SCOPE_REFUSALS: readonly string[] = ["insufficient_scope", "invalid_scope"];
+
+/**
+ * Whether an auth failure is the server refusing a wider grant (Python's
+ * `_refused_scope`).
+ *
+ * Reads the OAuth `error` the refresh keeps as `code`. Only an error
+ * without a code (a body with no OAuth `error` field) falls back to its
+ * message, as the Python SDK does.
+ */
 function isScopeRejection(error: unknown): boolean {
   if (!(error instanceof KaguraAuthError)) {
     return false;
   }
+  if (error.code !== undefined) {
+    return SCOPE_REFUSALS.includes(error.code);
+  }
   const message = error.message.toLowerCase();
-  return message.includes("insufficient_scope") || message.includes("invalid_scope");
+  return SCOPE_REFUSALS.some((refusal) => message.includes(refusal));
 }
 
 /**
