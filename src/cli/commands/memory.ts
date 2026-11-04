@@ -36,6 +36,7 @@ import {
   parseChoice,
   parseDetails,
   parseFloatOption,
+  optionalRanged,
   parseIntOption,
   parseRanged,
   parseTags,
@@ -891,16 +892,12 @@ const updateMemory: Command = {
     // body runs, so a bad -i or --expected-version is a usage error (exit 2)
     // even when the checks below would fail.
     const importance = optionalFloat(args, IMPORTANCE);
-    const rawExpected = args.values["expected-version"];
-    const expectedVersion =
-      rawExpected === undefined
-        ? undefined
-        : parseRanged(EXPECTED_VERSION, rawExpected, {
-            min: 1,
-            max: Number.POSITIVE_INFINITY,
-            rangeLabel: "x>=1",
-            integer: true,
-          });
+    const expectedVersion = optionalRanged(args, EXPECTED_VERSION, {
+      min: 1,
+      max: Number.POSITIVE_INFINITY,
+      rangeLabel: "x>=1",
+      integer: true,
+    });
     if (!memoryId && !externalId) {
       throw new CliError("Either --memory-id or --external-id is required");
     }

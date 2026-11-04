@@ -84,7 +84,29 @@ export function responseShapeError(operation: string, problem: string): KaguraRe
 }
 
 /** A coerced value, or pydantic's message for why it could not be. */
-export type Coerced<T> = { ok: true; value: T } | { ok: false; msg: string };
+export type Coerced<T> = { ok: true; value: T } | CoerceFailure;
+
+/**
+ * Why a value could not be coerced: pydantic's message, at the field's
+ * location. A union every member refused carries `members` instead,
+ * each member's name and message, which pydantic lists under the field's
+ * location plus the name (`id.int: …; id.str: …`); build one with
+ * {@link unionFailure}, the one place that sets `msg` to the first
+ * member's. {@link ResponseReader.refuse} records either.
+ */
+export interface CoerceFailure {
+  ok: false;
+  msg: string;
+  members?: readonly UnionMemberFailure[];
+}
+
+/** One union member's refusal: the member's name (`int`) and its message. */
+type UnionMemberFailure = readonly [member: string, msg: string];
+
+/** A union every member refused, its members in the union's order. */
+function unionFailure(first: UnionMemberFailure, ...rest: UnionMemberFailure[]): CoerceFailure {
+  return { ok: false, msg: first[1], members: [first, ...rest] };
+}
 
 /** One field type's lax-mode conversion. */
 export type Coercer<T> = (value: unknown) => Coerced<T>;
@@ -256,6 +278,33 @@ export const laxBool: Coercer<boolean> = (value) => {
 export const laxStr: Coercer<string> = (value) =>
   typeof value === "string" ? ok(value) : fail("Input should be a valid string");
 
+/**
+ * `int | str`, as pydantic's smart-mode union reads it: a string is the
+ * string as sent, its exact type (`"7"` stays `"7"`, `"akey_…"` stays
+ * `"akey_…"`), and anything else is read as `int` reads it (`7.0` is 7,
+ * `true` is 1). A value neither member takes is refused under each, as
+ * `id.int: Input should be a valid integer; id.str: Input should be a
+ * valid string`.
+ *
+ * A public id (memory-cloud#1008): an integer before server v0.89.0, an
+ * opaque prefixed string (`akey_…`, `winv_…`, `rtok_…`) from v0.89.0 on.
+ * The Python SDK's `id: int | str` (0.42.1+, python-sdk #294).
+ *
+ * @param int The `int` member: {@link laxInt} for a field typed `number`,
+ *   {@link laxExactInt} to keep an int past 2^53 exact.
+ */
+export function intOrStr<I>(int: Coercer<I>): Coercer<I | string> {
+  return (value) => {
+    if (typeof value === "string") return laxStr(value);
+    const asInt = int(value);
+    if (asInt.ok) return asInt;
+    return unionFailure(["int", asInt.msg], ["str", "Input should be a valid string"]);
+  };
+}
+
+/** {@link intOrStr} over {@link laxInt}: a public id held as `number | string`. */
+export const laxIntOrStr: Coercer<number | string> = intOrStr(laxInt);
+
 /** `T | None`: `null` passes, anything else is the inner type's. */
 export function nullable<T>(coerce: Coercer<T>): Coercer<T | null> {
   return (value) => (value === null ? ok(null) : coerce(value));
@@ -300,6 +349,18 @@ export class ResponseReader {
   }
 
   /**
+   * Record a coercer's refusal of the value at `loc`: its message, or a
+   * union's, each member's under its own name (`id.int`, `id.str`).
+   */
+  refuse(loc: Loc, failure: CoerceFailure): void {
+    if (failure.members === undefined) {
+      this.issue(loc, failure.msg);
+      return;
+    }
+    for (const [member, msg] of failure.members) this.issue([...loc, member], msg);
+  }
+
+  /**
    * `value` as an object, or `null` with pydantic's `model_type` problem:
    * `Input should be a valid dictionary or instance of <model>`.
    */
@@ -324,7 +385,7 @@ export class ResponseReader {
     }
     const result = coerce(raw);
     if (result.ok) return result.value;
-    this.issue(at, result.msg);
+    this.refuse(at, result);
     return undefined as T;
   }
 

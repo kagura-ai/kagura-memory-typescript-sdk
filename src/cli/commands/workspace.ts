@@ -24,7 +24,7 @@ import { normalizeUuid } from "../../pyCompat.js";
 import {
   ResponseReader,
   laxBool,
-  laxInt,
+  laxIntOrStr,
   laxStr,
   nullable,
 } from "../../responseShape.js";
@@ -144,7 +144,7 @@ function stringList(r: ResponseReader, obj: Record<string, unknown>, key: string
   if (value === undefined || value === null) return null;
   return r.list(obj, key, (item, at) => {
     const coerced = laxStr(item);
-    if (!coerced.ok) r.issue(at, coerced.msg);
+    if (!coerced.ok) r.refuse(at, coerced);
     return item as string;
   });
 }
@@ -190,7 +190,7 @@ function readInvitation(raw: unknown, operation: string): WorkspaceInvitation {
   const r = new ResponseReader(operation, "WorkspaceInvitation");
   const obj = modelInput(r, raw);
   const invitation: WorkspaceInvitation = {
-    id: r.field(obj, "id", laxInt),
+    id: r.field(obj, "id", laxIntOrStr),
     email: r.field(obj, "email", nullable(laxStr), { default: null }),
     role: r.field(obj, "role", laxStr),
     token: r.field(obj, "token", nullable(laxStr), { default: null }),
@@ -230,6 +230,19 @@ function keyJson(key: MemberAPIKey): Record<string, unknown> {
  */
 function pad(value: string, width: number): string {
   return value + " ".repeat(Math.max(0, width - [...value].length));
+}
+
+/**
+ * Python's `_id_column_width`: the ID column 6 code points wide as
+ * before, wider for an id that is longer — an opaque `akey_…` / `winv_…`
+ * id (memory-cloud v0.89.0+, #1008) is 27 — so every row lines up. A
+ * fold, not `Math.max(...ids)`: spreading a list of 150k ids or more as
+ * arguments throws `RangeError`.
+ *
+ * @internal Exported for its tests.
+ */
+export function idColumnWidth(ids: readonly (number | string)[]): number {
+  return ids.reduce<number>((width, id) => Math.max(width, [...String(id)].length), 6);
 }
 
 /**
@@ -501,11 +514,12 @@ const inviteList: Command = {
         readInvitation(i, "WorkspaceClient.list_invitations"),
       );
       if (args.flags.has("json")) return formatJson(invitations.map(invitationJson));
-      const lines = [`${pad("ID", 6)} ${pad("EMAIL", 30)} ${pad("ROLE", 8)} ${pad("STATE", 9)} EXPIRES`];
+      const w = idColumnWidth(invitations.map((i) => i.id));
+      const lines = [`${pad("ID", w)} ${pad("EMAIL", 30)} ${pad("ROLE", 8)} ${pad("STATE", 9)} EXPIRES`];
       for (const i of invitations) {
         const state = i.is_accepted ? "accepted" : i.is_expired ? "expired" : "pending";
         lines.push(
-          `${pad(String(i.id), 6)} ${pad(i.email || "-", 30)} ${pad(i.role, 8)} ${pad(state, 9)} ` +
+          `${pad(String(i.id), w)} ${pad(i.email || "-", 30)} ${pad(i.role, 8)} ${pad(state, 9)} ` +
             dateOr(i.expires_at, "never"),
         );
       }
@@ -589,10 +603,10 @@ const createKey: Command = {
     });
     rejectExtraArgs(args);
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
-      // The key as the SDK read it, as Python's `MemberAPIKey` does (an id
-      // of "42" is 42). A response that model refuses throws with the
-      // plaintext in the message (the only chance to save it), and without
-      // this line: nothing below is printed.
+      // The key as the SDK read it, as Python's `MemberAPIKey` does (an
+      // `akey_…` id stays the string). A response that model refuses
+      // throws with the plaintext in the message (the only chance to save
+      // it), and without this line: nothing below is printed.
       const key = await client.mintMemberKey(ws, userId, keyName, expiresDays);
       deps.writeError("⚠ Save this key now — it cannot be shown again.");
       // The user as given, the rest as the server answered.
@@ -619,12 +633,13 @@ const listKeys: Command = {
         readMemberKey(k, "WorkspaceClient.list_member_keys"),
       );
       if (args.flags.has("json")) return formatJson(keys.map(keyJson));
+      const w = idColumnWidth(keys.map((k) => k.id));
       const lines = [
-        `${pad("ID", 6)} ${pad("NAME", 24)} ${pad("PREFIX", 18)} ${pad("CREATED", 12)} ${pad("EXPIRES", 12)} REVOKED`,
+        `${pad("ID", w)} ${pad("NAME", 24)} ${pad("PREFIX", 18)} ${pad("CREATED", 12)} ${pad("EXPIRES", 12)} REVOKED`,
       ];
       for (const k of keys) {
         lines.push(
-          `${pad(String(k.id), 6)} ${pad(k.name, 24)} ${pad(k.key_prefix, 18)} ` +
+          `${pad(String(k.id), w)} ${pad(k.name, 24)} ${pad(k.key_prefix, 18)} ` +
             `${pad(dateOr(k.created_at, "-"), 12)} ${pad(dateOr(k.expires_at, "never"), 12)} ` +
             dateOr(k.revoked_at, "-"),
         );

@@ -16,6 +16,10 @@
  * with the server-info probe before the second write — or, when the probe
  * fails or reports 0.82.0+, nothing more written and exit 1.
  *
+ * The replies are MCP tool results in call order, so they come from
+ * FakeServer's per-tool queues rather than pythonDumpHarness's one
+ * recorded body per REST route; its `terminalText` reads what was printed.
+ *
  * Two differences are by design. A message naming a command says
  * `kagura-memory reference`, where Python's says `kagura reference`, as
  * this bin's help does. And a usage error (exit 2) is compared by its
@@ -29,6 +33,7 @@ import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
+import { terminalText } from "../../pythonDumpHarness.js";
 
 interface Case {
   name: string;
@@ -601,7 +606,7 @@ async function expectPython(c: Case) {
   expect(calls).toEqual(c.calls);
   expect(gets).toBe(c.gets ?? 0);
   expect(code).toBe(c.code);
-  expect(out.length > 0 ? `${out.join("\n")}\n` : "").toBe(c.stdout);
+  expect(terminalText(out)).toBe(c.stdout);
   if (c.code === 2) {
     const pyError = c.stderr.split("\n").find((line) => line.startsWith("Error: "))!;
     const jsonError = /^Error: Invalid JSON for --[\w-]+: /.exec(pyError);
@@ -611,7 +616,7 @@ async function expectPython(c: Case) {
       expect(err[0]).toBe(pyError);
     }
   } else {
-    expect(err.length > 0 ? `${err.join("\n")}\n` : "").toBe(asThisBin(c.stderr));
+    expect(terminalText(err)).toBe(asThisBin(c.stderr));
   }
   return result;
 }
