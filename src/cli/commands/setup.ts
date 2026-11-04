@@ -566,6 +566,12 @@ function refuseProfileWithKey(args: ParsedArgs): void {
   }
 }
 
+/**
+ * `setup claude` without a key. No word of `auth login`: setup writes an
+ * API-key entry, and an OAuth profile does not give it one.
+ */
+const NO_API_KEY = `no API key: pass --api-key, set api_key in the project's .kagura.json, or export ${KEY_ENV_VAR}.`;
+
 /** What `setup claude` resolves before touching anything. */
 function resolveInput(args: ParsedArgs): SetupInput {
   rejectExtraArgs(args);
@@ -603,13 +609,7 @@ function resolveInput(args: ParsedArgs): SetupInput {
   const contextFlag = Boolean(args.values["context-id"]);
   const contextId = args.values["context-id"] || own("context_id") || process.env.KAGURA_CONTEXT_ID || "";
 
-  if (!resolvedKey) {
-    // No word of `auth login`: setup writes an API-key entry, and an OAuth
-    // profile does not give it one.
-    throw new CliError(
-      `no API key: pass --api-key, set api_key in the project's .kagura.json, or export ${KEY_ENV_VAR}.`,
-    );
-  }
+  if (!resolvedKey) throw new CliError(NO_API_KEY);
   // The entry and .kagura.json give Claude Code the key for this URL, which
   // sends it with every request. Python's setup claude tests the connection
   // before it writes anything, with a client that refuses plain HTTP to a
@@ -666,12 +666,22 @@ function connectionError(e: unknown, server: string): CliError | null {
  * first page and its failures get its hints, or `Connection failed: …`;
  * the later pages' get the same hints, or `Setup failed: …`. Each stops
  * setup (exit 1) before anything is run or written.
+ *
+ * The lookup authenticates with the setup key alone. A blank one (only
+ * whitespace) stops setup before any request: KaguraClient reads it as no
+ * key and would fall back to KAGURA_API_KEY or an OAuth profile, sending
+ * another credential to this URL.
  */
 async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<string> {
   const holder: { client?: KaguraClient } = {};
   // Built on first use, so a value that needs no lookup builds no client.
-  const client = (): KaguraClient =>
-    (holder.client ??= deps.makeClient({ apiKey: input.apiKey, mcpUrl: input.baseUrl }));
+  const client = (): KaguraClient => {
+    if (holder.client === undefined) {
+      if (!input.apiKey.trim()) throw new CliError(NO_API_KEY);
+      holder.client = deps.makeClient({ apiKey: input.apiKey, mcpUrl: input.baseUrl });
+    }
+    return holder.client;
+  };
   let found: ContextLookup;
   try {
     found = await lookupContext(
@@ -680,6 +690,7 @@ async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<s
         try {
           return await client().listContexts();
         } catch (e) {
+          if (e instanceof CliError) throw e;
           throw connectionError(e, input.baseUrl) ?? new CliError(`Connection failed: ${excMessage(e)}`);
         }
       },

@@ -35,6 +35,7 @@ import type { KaguraConfig } from "../../../src/config.js";
 import { KaguraResponseError } from "../../../src/errors.js";
 import type { ListContextsResponse } from "../../../src/models.js";
 import { pyStrip } from "../../../src/pyCompat.js";
+import { isCanonicalUuid } from "../../../src/uuid.js";
 import { FakeServer } from "../../fakeServer.js";
 
 /** What a scripted reply can be: a `list_contexts` body, an HTTP reply, or a fetch that throws. */
@@ -236,6 +237,18 @@ describe("lookupContext (Python's _lookup_context)", () => {
     expect(fake.calls).toEqual([]);
   });
 
+  it("takes a dashed UUID as an id even when a context bears it as its name (no request)", async () => {
+    // Python's first page would take the row named UUID and give its id;
+    // here a dashed UUID stays off the network (#90), so it is the id it spells.
+    const fake = new PagedContexts(["recent-a", UUID]);
+    expect(await lookupContext(UUID, firstPage(fake), fake.listContexts)).toEqual({
+      value: UUID,
+      context: null,
+      unknown: false,
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
   it("looks another UUID spelling up as a name first", async () => {
     // HEX_NAME is the third context, past a first page of two.
     const fake = new PagedContexts(["recent-a", "recent-b", HEX_NAME]);
@@ -284,6 +297,29 @@ describe("lookupContext (Python's _lookup_context)", () => {
       unknown: true,
     });
     expect(fake.calls).toEqual([{}, { name_contains: chosen }]);
+  });
+});
+
+describe("isCanonicalUuid (Python's is_canonical_uuid)", () => {
+  // Recorded from kagura_memory._http.is_canonical_uuid (0.44.0).
+  const C = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
+  it.each([
+    [C, true],
+    [C.toUpperCase(), true],
+    ["0b5a1c3e-8F2D-4e6a-9c7b-1d2e3f4a5b6c", true],
+    [C.replace(/-/g, ""), false],
+    [`{${C}}`, false],
+    [`urn:uuid:${C}`, false],
+    [` ${C}`, false],
+    [`${C}\n`, false],
+    [C.slice(0, -1), false],
+    [`${C}d`, false],
+    [`${C.slice(0, -1)}g`, false],
+    // A fullwidth "c": ASCII hex digits only, as Python's re.ASCII.
+    [`${C.slice(0, -1)}ｃ`, false],
+    ["", false],
+  ])("%j → %s", (value, expected) => {
+    expect(isCanonicalUuid(value)).toBe(expected);
   });
 });
 
@@ -517,26 +553,63 @@ describe("setup claude resolves a context name across every list_contexts page (
   });
 
   it.each([
-    ["-c", ["-c", UUID]],
-    ["-c in upper case", ["-c", UUID.toUpperCase()]],
-    ["no context", []],
-  ])("sends no request and builds no client for %s", async (_label, extra) => {
+    ["-c", ["-c", UUID], UUID],
+    ["-c in upper case", ["-c", UUID.toUpperCase()], UUID.toUpperCase()],
+    // Trimmed, as Python's _lookup_context trims it, and still no request.
+    ["-c padded", ["-c", ` ${UUID.toUpperCase()}\t\n`], UUID.toUpperCase()],
+    ["no context", [], null],
+  ])("sends no request and builds no client for %s", async (_label, extra, written) => {
     const fake = new PagedContexts(NAMES);
     const run = await runSetup(claude(...extra), fake);
     expect(run.code).toBe(0);
     expect(run.clients).toEqual([]);
     expect(run.server.requests).toEqual([]);
-    expect(report(run).context_id).toBe(extra[1] ?? null);
+    expect(fake.calls).toEqual([]);
+    expect(report(run).context_id).toBe(written);
+    expect(kaguraJson().context_id).toBe(written ?? undefined);
   });
 
-  it("sends no request for a dashed UUID in .kagura.json or KAGURA_CONTEXT_ID either", async () => {
-    fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: UUID }));
-    const fromFile = await runSetup(claude(), new PagedContexts(NAMES));
-    expect(fromFile.clients).toEqual([]);
-    fs.rmSync(path.join(sandbox, ".kagura.json"));
-    process.env.KAGURA_CONTEXT_ID = UUID;
-    const fromEnv = await runSetup(claude(), new PagedContexts(NAMES));
-    expect(fromEnv.clients).toEqual([]);
+  it.each([
+    ["in .kagura.json", { file: ` ${UUID}\n` }],
+    ["in KAGURA_CONTEXT_ID", { env: UUID.toUpperCase() }],
+  ])("sends no request for a dashed UUID %s either", async (_label, from: { file?: string; env?: string }) => {
+    if (from.file !== undefined) {
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: from.file }));
+    }
+    if (from.env !== undefined) process.env.KAGURA_CONTEXT_ID = from.env;
+    const fake = new PagedContexts(NAMES);
+    const run = await runSetup(claude(), fake);
+    expect(run.code).toBe(0);
+    expect(run.clients).toEqual([]);
+    expect(run.server.requests).toEqual([]);
+    expect(fake.calls).toEqual([]);
+    expect(kaguraJson().context_id).toBe(pyStrip(from.file ?? from.env!));
+  });
+
+  it("looks a name up with the setup key alone: a blank key stops setup before any request", async () => {
+    // KaguraClient reads a blank key as none and would fall back to
+    // KAGURA_API_KEY or an OAuth profile, sending another credential here.
+    process.env.KAGURA_API_KEY = "kagura_other_credential";
+    const fake = new PagedContexts(NAMES);
+    const run = await runSetup(
+      ["setup", "claude", "--api-key", "  ", "--mcp-url", MCP_URL, "--project-dir", sandbox, "-c", "far"],
+      fake,
+    );
+    expect(run.code).toBe(1);
+    expect(run.err).toEqual([
+      "Error: no API key: pass --api-key, set api_key in the project's .kagura.json, or export KAGURA_API_KEY.",
+    ]);
+    expect(run.clients).toEqual([]);
+    expect(run.server.requests).toEqual([]);
+    expect(written()).toEqual([]);
+
+    // A dashed UUID needs no lookup, so that offline run is as before.
+    const offline = await runSetup(
+      ["setup", "claude", "--api-key", "  ", "--mcp-url", MCP_URL, "--project-dir", sandbox, "-c", UUID],
+      new PagedContexts(NAMES),
+    );
+    expect(offline.code).toBe(0);
+    expect(offline.clients).toEqual([]);
     expect(kaguraJson().context_id).toBe(UUID);
   });
 
