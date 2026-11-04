@@ -1067,9 +1067,10 @@ export interface RecallSelector {
 
 /**
  * One `recall` hit. Which keys it has depends on `verbosity` (memory-cloud
- * v0.108.0+, #2002), and every optional key is absent, never `null`, when
- * it does not apply (servers before v0.73.0 sent `null` / `[]` for the
- * annotations, so test them for truthiness).
+ * v0.108.0+, #2002). A key that does not apply is left out: `context_summary`
+ * and the annotations since v0.73.0, an empty `tags` since v0.93.0. Older
+ * servers send `null` / `[]` for them, so test them for truthiness, not for
+ * `undefined`. `updated_at` is `null` on a memory never edited.
  *
  * - **compact** (the server default): `memory_id`, the first 160
  *   characters of `summary` (`summary_cut: true` when it was shortened),

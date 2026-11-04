@@ -1216,7 +1216,11 @@ code that reads them from a compact hit gets `undefined`. Both shapes
 carry `observed_at`, `superseded_by`, `contradicts`, `supersede_candidate`
 (with `verified: true` when the server's judge confirmed it, v0.109.0+)
 and `folded` (older versions of the same fact folded under the newest
-row, v0.114.0+) when they apply; an optional key is absent, never `null`.
+row, v0.114.0+) when they apply. A key that does not apply is left out:
+`context_summary` and the annotations since v0.73.0, an empty `tags`
+since v0.93.0. Older servers send `null` / `[]` for them, so test these
+keys for truthiness, not for `undefined`. `updated_at` is `null` on a
+memory never edited.
 
 Since v0.114.0 the top `full` hits also carry `content` (up to 1,500
 characters; `content_truncated` / `content_next_offset` when cut, and
