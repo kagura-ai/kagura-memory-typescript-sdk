@@ -14,6 +14,7 @@
 
 import {
   pythonOptionNames,
+  sentReply,
   type KaguraClient,
   type RecallOptions,
   type RememberOptions,
@@ -225,7 +226,7 @@ const remember: Command = {
     const observedAt = blankToUndefined(args.values["observed-at"]);
     const tagsNormalize = args.flags.has("tags-normalize");
 
-    return runClientCommand(deps, args.values["context-id"], (client, contextId) => {
+    return runClientCommand(deps, args.values["context-id"], async (client, contextId) => {
       const options: RememberOptions = {
         contextId,
         summary,
@@ -244,8 +245,9 @@ const remember: Command = {
       };
       // The client's own checks, worded as the Python CLI prints them.
       // A `duplicate_candidate` reply (`--dedupe check`) is printed with
-      // exit 0: a result, not an error.
-      return client.remember(pythonOptionNames(options));
+      // exit 0: a result, not an error. The reply as sent: the Python CLI
+      // prints its SDK's unchecked dict, a malformed plan_headroom included.
+      return sentReply(await client.remember(pythonOptionNames(options)));
     });
   },
 };
@@ -755,12 +757,12 @@ async function updateWithPatch(
     );
     const current = await currentDetailsForMerge(client, contextId, memoryId, flag);
     const details = applyDetailsPatch(current, patch, observedAt);
-    return client.updateMemory(pythonOptionNames({ contextId, ...write, details }));
+    return sentReply(await client.updateMemory(pythonOptionNames({ contextId, ...write, details })));
   };
 
   let result: UpdateMemoryResult;
   try {
-    result = await client.updateMemory(pythonOptionNames({ contextId, ...edit, detailsPatch: patch }));
+    result = sentReply(await client.updateMemory(pythonOptionNames({ contextId, ...edit, detailsPatch: patch })));
   } catch (e) {
     if (!detailsPatchRefused(e)) throw e;
     // 0.82.0-0.139.x refused the call: nothing was written.
@@ -1020,7 +1022,8 @@ const updateMemory: Command = {
       // to send it, never sent as the `null` that deletes a key.
       if (patch !== undefined) refuseNonFinite([patch]);
       // The client's own checks, worded as the Python CLI prints them.
-      if (patch === undefined) return client.updateMemory(pythonOptionNames(options));
+      // The reply as sent, as on `remember`.
+      if (patch === undefined) return sentReply(await client.updateMemory(pythonOptionNames(options)));
       // A patch without --memory-id was refused above.
       return updateWithPatch(deps, client, contextId, memoryId!, patch, flag, edit);
     });

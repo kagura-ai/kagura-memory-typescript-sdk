@@ -1534,10 +1534,10 @@ when `undefined`.
 
 | Method | What it does |
 |--------|--------------|
-| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. `toolTrigger` marks the guardrail without writing the key yourself. `observedAt` (v0.127.0+) says when the fact held — a `YYYY-MM-DD` date or an extended ISO 8601 datetime, or a `Date` (sent as its UTC instant), stored as `details.observed_at`; a basic form (`20240307`), a time without seconds, an impossible day or a disagreeing `details.observed_at` throws before any request. `dedupe` (v0.93.0+): `"check"` writes nothing when a near-duplicate exists and returns `{ status: "duplicate_candidate", candidate }` instead of throwing, `"off"` opts the memory out of supersede suggestions for good; `tagsNormalize: true` stores each tag under the context's established spelling; `verbose: true` keeps `persistence.detail`. The reply (`RememberResult`, returned unchecked as Python's dict, so every key is optional) carries `version` (v0.113.0+), `session_id` (v0.113.0+) and, when a summary over 500 characters was cut, `summary_truncated` / `summary_original_length` (v0.108.0+). |
+| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. `toolTrigger` marks the guardrail without writing the key yourself. `observedAt` (v0.127.0+) says when the fact held — a `YYYY-MM-DD` date or an extended ISO 8601 datetime, or a `Date` (sent as its UTC instant), stored as `details.observed_at`; a basic form (`20240307`), a time without seconds, an impossible day or a disagreeing `details.observed_at` throws before any request. `dedupe` (v0.93.0+): `"check"` writes nothing when a near-duplicate exists and returns `{ status: "duplicate_candidate", candidate }` instead of throwing, `"off"` opts the memory out of supersede suggestions for good; `tagsNormalize: true` stores each tag under the context's established spelling; `verbose: true` keeps `persistence.detail`. The reply (`RememberResult`, returned unchecked as Python's dict, so every key is optional) carries `version` (v0.113.0+), `session_id` (v0.113.0+), when a summary over 500 characters was cut, `summary_truncated` / `summary_original_length` (v0.108.0+), and `plan_headroom` (v0.142.0+, read fail-open; see [Plan headroom](#plan-headroom-memory-cloud-v01420)). |
 | `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". `observedAfter` (inclusive) / `observedBefore` (exclusive) keep the memories whose fact held in that range (`filters.observed_after` / `observed_before`, v0.127.0+; a date is the start of its UTC day, and a memory without `observed_at` never matches); one beside the same key in `filters` throws. Returns a typed `RecallResponse` (`confidence` first: read `confidence.level` before the hits); see [Recall result shape](#recall-result-shape). |
-| `reference` | Full detail for one memory, under `result.memory` (`ReferenceResponse`), with its `version` (v0.113.0+) — the `expectedVersion` for `updateMemory` — and `observed_at` (v0.127.0+). Since v0.78.0 the reply is bounded (`maxChars`, 10,000–100,000, default 20,000): cut `content` comes with `content_truncated` / `content_next_offset`, and a `details` / `context` / links field that does not fit is left out with `<field>_omitted` / `<field>_total_chars`. Page the rest with `contentOffset`, `detailsOffset` (`details_json` slices) or `contextOffset` — one per call — and pick fields with `fields` (`content`, `details`, `context`, `links`). `version` (v0.113.0+) reads an earlier version (`historical: true`, `current_version`). Every one is checked locally (an integer in range, more than one offset refused first, a known field, an offset's own field listed) before any request. The reply comes back as sent once its `status` (a string) and `memory` (an object) are checked: otherwise `KaguraResponseError` (the CLI's `reference` prints the raw reply, as Python's does). |
-| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off — and `detailsPatch` (v0.140.0+) merges into it instead: each key replaces the stored one, `null` deletes it, the rest are kept. `tags` replaces the list, with `remember`'s caps; `addTags` / `removeTags` (v0.140.0+) edit it (removals first, each new tag once; `addTags` takes the caps, `removeTags` none). `expectedVersion` (v0.113.0+) applies the edit only while the memory is at that version, else throws `KaguraVersionConflictError` with `currentVersion` and writes nothing. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; `acceptSupersedeCandidate: true` (v0.126.0+) accepts it — the candidate is shadowed by a `supersedes` edge, named in the reply's `superseded_memory_id`, and a different edge already linking the pair throws `KaguraError` `code` `"edge_exists"`. `observedAt`, `toolTrigger` and `verbose` work as on `remember`. The reply (`UpdateMemoryResult`, returned unchecked as Python's dict, so every key is optional) carries `version`. See [the local rules](#updatememorys-local-rules) below. |
+| `reference` | Full detail for one memory, under `result.memory` (`ReferenceResponse`), with its `version` (v0.113.0+) — the `expectedVersion` for `updateMemory` — and `observed_at` (v0.127.0+). Since v0.78.0 the reply is bounded (`maxChars`, 10,000–100,000, default 20,000): cut `content` comes with `content_truncated` / `content_next_offset`, and a `details` / `context` / links field that does not fit is left out with `<field>_omitted` / `<field>_total_chars`. Page the rest with `contentOffset`, `detailsOffset` (`details_json` slices) or `contextOffset` — one per call — and pick fields with `fields` (`content`, `details`, `context`, `links`). `version` (v0.113.0+) reads an earlier version (`historical: true`, `current_version`). A live `supersede_candidate` carries `acceptance` (v0.137.0+; see [Supersede suggestions](#supersede-suggestions)). Every one is checked locally (an integer in range, more than one offset refused first, a known field, an offset's own field listed) before any request. The reply comes back as sent once its `status` (a string) and `memory` (an object) are checked: otherwise `KaguraResponseError` (the CLI's `reference` prints the raw reply, as Python's does). |
+| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off — and `detailsPatch` (v0.140.0+) merges into it instead: each key replaces the stored one, `null` deletes it, the rest are kept. `tags` replaces the list, with `remember`'s caps; `addTags` / `removeTags` (v0.140.0+) edit it (removals first, each new tag once; `addTags` takes the caps, `removeTags` none). `expectedVersion` (v0.113.0+) applies the edit only while the memory is at that version, else throws `KaguraVersionConflictError` with `currentVersion` and writes nothing. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; `acceptSupersedeCandidate: true` (v0.126.0+) accepts it — the candidate is shadowed by a `supersedes` edge, named in the reply's `superseded_memory_id`, and a different edge already linking the pair throws `KaguraError` `code` `"edge_exists"`; check the candidate's `acceptance` first ([Supersede suggestions](#supersede-suggestions)). `observedAt`, `toolTrigger` and `verbose` work as on `remember`. The reply (`UpdateMemoryResult`, returned unchecked as Python's dict, so every key is optional) carries `version`, and `plan_headroom` read fail-open as `remember`'s is (v0.142.0+). See [the local rules](#updatememorys-local-rules) below. |
 | `forget` | Soft-delete by `memoryId`, by `memoryIds` (1-50 ids in one call, memory-cloud v0.117.0+; returns a `ForgetBatchResult`, see [Session tools](#session-tools-memory-cloud-v0930)) or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). A row carries `observed_at` (v0.127.0+), when the fact held, as the text the server stores: a date `YYYY-MM-DD` or a UTC datetime `YYYY-MM-DDTHH:MM:SSZ`, never parsed (a date sorts and filters as the start of its UTC day). |
 
@@ -1576,9 +1576,11 @@ Since memory-cloud v0.108.0 a `recall` hit is **compact** unless you pass
 `scope`, `version` and the uncut `summary` need `verbosity: "full"`**;
 code that reads them from a compact hit gets `undefined`. Both shapes
 carry `observed_at`, `superseded_by`, `contradicts`, `supersede_candidate`
-(with `verified: true` when the server's judge confirmed it, v0.109.0+)
-and `folded` (older versions of the same fact folded under the newest
-row, v0.114.0+) when they apply. A key that does not apply is left out:
+(with `verified: true` when the server's judge confirmed it, v0.109.0+,
+and `acceptance` from v0.142.0 — see
+[Supersede suggestions](#supersede-suggestions)) and `folded` (older
+versions of the same fact folded under the newest row, v0.114.0+) when
+they apply. A key that does not apply is left out:
 `context_summary` and the annotations since v0.73.0, an empty `tags`
 since v0.93.0. Older servers send `null` / `[]` for them, so test these
 keys for truthiness, not for `undefined`. `updated_at` is `null` on a
@@ -1622,6 +1624,50 @@ opt-in, in place of `explore_hints`. `explore()` itself is unaffected.
 harness entry, and `kagura-memory-mcp --add-tools explore` sets it on the
 proxy's upstream.
 
+#### Supersede suggestions
+
+A `supersede_candidate` on a `recall` row or a `reference` memory is a
+suggestion, never an edge: a near-duplicate this memory may replace.
+Since memory-cloud v0.137.0 an older memory never takes a newer one as
+its candidate. Accept it with `updateMemory({ memoryId,
+acceptSupersedeCandidate: true })` or reject it with
+`dismissSupersedeCandidate: true`.
+
+The candidate carries `acceptance: { allowed, reason? }` — whether the
+accept would go through — on `reference` since v0.137.0 and on every
+`recall` row that has a candidate since v0.142.0. `reason` is set only
+when `allowed` is `false`, the first of these that applies:
+
+- `not_writable`: no write access to the context (an agent binding that
+  does not grant the write included). From v0.142.0 also a memory
+  carrying `details.tool_trigger` when the caller is below context editor
+  or not on a user credential: the guardrail gate the accept runs first.
+- `not_owner`: one or both memories are not the caller's own (in a
+  private context a linked account's count).
+- `newer_candidate`: the candidate was written after the memory carrying
+  it; dismiss it instead.
+- `edge_exists` (v0.138.0+): a different declared edge already links the
+  pair, so the accept would throw `KaguraError` `code` `"edge_exists"`;
+  from v0.142.0 only the edge kept by the carrier's author, the account
+  the accept writes under, counts.
+
+`acceptance` is absent on an older server, on a share-key read and where
+the server could not evaluate it; the accept call still decides then. It
+is typed `SupersedeAcceptance`, `reason` a plain `string` so a reason a
+newer server adds still reads.
+
+Only the accept checks the direction: `acceptSupersedeCandidate` refuses
+a candidate written after the memory carrying it, since accepting it
+would hide the newer fact behind the older one. `createEdge` and
+`updateEdge` apply no direction check — for a `supersedes` edge the
+caller owns it, source newer and target older.
+
+```ts
+const { results } = await client.recall({ contextId, query: "deploy target" });
+const hit = results.find((r) => r.supersede_candidate?.acceptance?.allowed);
+if (hit) await client.updateMemory({ contextId, memoryId: hit.memory_id, acceptSupersedeCandidate: true });
+```
+
 ### Session tools (memory-cloud v0.93.0+)
 
 The tools an agent session starts and ends with. Each sends only the
@@ -1651,7 +1697,9 @@ fits (`truncated`), and a full reply leaves `context_summary` out of the
 pinned rows first (`context_summary_omitted`). `guardrails` is absent
 with `?guardrails=off` and `null` when the server's read failed or the
 block cannot be read; `plan_headroom` (v0.142.0+) lists the plan
-dimensions at 80 % or more of their limit. The session-start skill calls
+dimensions at 80 % or more of their limit, on every call — see
+[Plan headroom](#plan-headroom-memory-cloud-v01420). The session-start
+skill calls
 `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
 
 **`changesSince` kinds.** Without `sessionId` / `byMe` the kinds are
@@ -1674,7 +1722,8 @@ with an invalid item), the rows in `details.results`, or `timeout` (an
 atomic batch rolled back, no rows); an atomic batch over the daily quota
 is `KaguraQuotaError`. Items are checked first: 1-50 objects, no
 `dedupe` / `tags_normalize` / `verbose` on an item, no other context's
-`context_id`, `remember`'s tag caps.
+`context_id`, `remember`'s tag caps. A batch near a plan limit carries
+`plan_headroom` (v0.142.0+; see [Plan headroom](#plan-headroom-memory-cloud-v01420)).
 
 **`forget` by ids.** `forget({ contextId, memoryIds })` (v0.117.0+)
 forgets each id exactly as `memoryId` would, committed on its own, and
@@ -1699,6 +1748,46 @@ const batch = await client.rememberBatch({
 const plan = await client.rollbackSession({ contextId, sessionId: batch.session_id! }); // dry run
 ```
 
+#### Plan headroom (memory-cloud v0.142.0)
+
+The success reply of `bootstrap`, `rememberBatch`, `remember` and
+`updateMemory` carries `plan_headroom` when a plan dimension is at 80 %
+(`level: "warning"`) or 95 % (`"critical"`) of its effective limit
+(add-on and referral bonuses included): one `PlanHeadroomNotice` per
+dimension — `memories` (live memories), `memories_per_day` or
+`mcp_calls_per_day` — with `used`, `limit`, `percentage` (rounded down to
+one decimal), `plan` (absent when the server could not resolve it),
+`remedies` (`cleanup` for the total cap or `wait` for a daily one, then
+`upgrade` when a higher tier raises that cap, or `admin` on a deployment
+without billing), `help` (what to do and what fails at 100 %) and, on the
+daily dimensions, `resets_at` (the next UTC midnight). Below 80 % the key
+is absent. `bootstrap` carries it on every call (no hourly throttle)
+within a quarter of its `maxChars`: past that, `help` stays on the most
+severe entry only, and past it still that entry alone stays. A write
+shows an entry at most once an hour per workspace, dimension and level,
+so a missing key does not mean the plan has room.
+
+All four read it fail-open, as the Python SDK's `PlanHeadroom` field
+does: the notice is advisory, so an entry the model cannot read is
+dropped (the call still succeeds), and a value that is not a list, or
+keeps no entry, is left out (where Python's model reads `None`). The
+entries that read come back as sent; `dimension`, `level` and the
+`remedies` are plain strings, so a value a newer server adds still
+reads. The Python SDK's `remember` / `update_memory` return their reply
+as an unchecked dict, so for a malformed notice only Python keeps what
+`remember` / `updateMemory` drop here; the CLI's `remember`,
+`update-memory` and `files upload --remember` print the reply as sent, as
+the Python CLI does. The CLI's `bootstrap` prints each notice as Python's
+model dumps it, defaults filled, and `"plan_headroom": null` when none
+reads.
+
+```ts
+const session = await client.bootstrap({ contextId });
+for (const notice of session.plan_headroom ?? []) {
+  console.warn(`${notice.dimension}: ${notice.percentage} % (${notice.level}) — ${notice.help ?? ""}`);
+}
+```
+
 ### Deterministic lanes
 
 These bypass ranking entirely — same inputs, same rows, every call. They are
@@ -1720,7 +1809,7 @@ the counterpart to `recall`'s probabilistic search.
 | `listTags` | Tag vocabulary with counts and recency. `prefix` narrows by spelling; `withTags` is a multi-tag AND drill-down that also excludes those tags from the result — the two compose into server-side faceted browsing with no local index. A drill-down calls the REST tags endpoint on every server, because the MCP tool has `with_tags` only from server v0.77.0 and an older one ignores it; the result has the same shape. Its `context_name` is the one the endpoint sends (server v0.77.0+), else one MCP `list_tags` call names the context, once per client. Its values are trimmed and blank ones dropped, and at most 50 of up to 200 characters each are accepted. Over MCP a reply holds at most 200 tags whatever the `limit` (v0.82.0+), with `has_more: true` when more matched; there is no cursor, so narrow with `prefix` or `minCount`. |
 | `explore` | Graph traversal from a seed memory (`depth` 1–5, `minWeight`). |
 | `listEdges` | Edges touching a memory, incoming and outgoing, deduplicated, heaviest first. Each direction is cut at `limit` (the server's default is 50 from v0.82.0, its maximum 200), and the tool has no cursor: when the server's default or its clamp cut a direction (`outgoing_has_more` / `incoming_has_more`), the client logs a warning (to `console.warn` unless the client's `warn` option routes it); raise `limit` or `minWeight`, or narrow `edgeTypes`. `minWeight` is always sent, `0.0` unless set, so every edge comes back: the server's own default is 0.05 since v0.117.0, which hides weak automatic edges. |
-| `createEdge` / `updateEdge` / `deleteEdge` | Manual edge curation. `(sourceId, targetId)` is the identity; self-loops are rejected. |
+| `createEdge` / `updateEdge` / `deleteEdge` | Manual edge curation. `(sourceId, targetId)` is the identity; self-loops are rejected. No direction check: for a `supersedes` edge the caller owns the direction, source newer and target older (see [Supersede suggestions](#supersede-suggestions)). |
 | `findDuplicates` | Near-duplicate pairs above `threshold` (0.5–1.0, default 0.90). |
 | `feedback` | Record whether a recalled memory was useful — an append-only signal in its own lane, not a memory edit. |
 
@@ -1812,7 +1901,10 @@ the workspace, whoever minted it, and another workspace's token answers
 and `mergeContexts({ deleteSource: true })` moves the source's files to
 the target (v0.101.0). A `supersedes` edge from `createEdge` /
 `updateEdge` needs both memories to be the caller's (v0.132.0), else
-`KaguraPermissionError`.
+`KaguraPermissionError`. On a memory carrying `details.tool_trigger` an
+accepted supersede suggestion is a guardrail edit (context editor or
+above, a user credential), which its `acceptance` reports as
+`not_writable` (v0.142.0).
 
 ## Agent control plane (memory-cloud v0.49.0+)
 

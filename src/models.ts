@@ -1264,7 +1264,11 @@ export interface RecallConfidence {
  * Since memory-cloud v0.109.0 (#2016) `detected_at` is absent rather than
  * `null` when it has no value, and `verified` is a key only when `true`:
  * the deployment's judge (`SUPERSEDE_VERIFY_MODE=llm`) confirmed that this
- * memory replaces the candidate. Keys a newer server adds pass through.
+ * memory replaces the candidate. Since v0.137.0 (#2256) an older memory
+ * never takes a newer one as its candidate. `acceptance` says whether the
+ * accept would go through: on `reference` since v0.137.0 (#2427), on
+ * every `recall` row since v0.142.0 (#2508). Keys a newer server adds
+ * pass through.
  */
 export interface SupersedeCandidate {
   memory_id: string;
@@ -1274,7 +1278,44 @@ export interface SupersedeCandidate {
   detected_at?: string | null;
   /** `true` when judge-verified (v0.109.0+); absent otherwise. */
   verified?: boolean;
+  /**
+   * Whether the caller may accept this candidate (`reference` v0.137.0+,
+   * `recall` rows v0.142.0+). Absent on an older server, on a share-key
+   * read and where the server could not evaluate it — the accept call
+   * still decides then.
+   */
+  acceptance?: SupersedeAcceptance;
   [key: string]: unknown;
+}
+
+/**
+ * `supersede_candidate.acceptance` (memory-cloud v0.137.0+, #2427): whether
+ * `updateMemory({ memoryId, acceptSupersedeCandidate: true })` would go
+ * through, from the rule the accept enforces. The accept still checks on
+ * its own.
+ *
+ * `reason` is set only when `allowed` is `false`, the first that applies
+ * in this order:
+ *
+ * - `"not_writable"`: no write access to the context (an agent binding
+ *   that does not grant the write included). From v0.142.0 (#2614) also a
+ *   memory carrying `details.tool_trigger` when the caller is below
+ *   context editor or not on a user credential — the guardrail gate the
+ *   accept runs first.
+ * - `"not_owner"`: one or both memories are not the caller's own (in a
+ *   private context a linked account's count).
+ * - `"newer_candidate"`: the candidate was written after the memory
+ *   carrying it; dismiss it instead.
+ * - `"edge_exists"` (v0.138.0+, #2518): a different declared edge already
+ *   links the pair — the accept would throw `KaguraError` `code`
+ *   `"edge_exists"`. From v0.142.0 (#2614) only the edge kept by the
+ *   carrier's author, the account the accept writes under, counts.
+ *
+ * Plain `string`, so a reason a newer server adds still reads.
+ */
+export interface SupersedeAcceptance {
+  allowed: boolean;
+  reason?: string;
 }
 
 /**
@@ -1467,6 +1508,17 @@ export interface RememberResult {
    * similarity, supersedable?}`; nothing was written.
    */
   candidate?: Record<string, unknown>;
+  /**
+   * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
+   * #2615); absent below 80 % (never `[]` or `null`), and shown at most
+   * once an hour per workspace, dimension and level, so a missing key does
+   * not mean the plan has room. Read fail-open, as
+   * {@link BootstrapResponse.plan_headroom} is: an entry
+   * {@link PlanHeadroomNotice} cannot read is dropped, and the key is left
+   * out when none reads. The Python SDK returns this reply as an unchecked
+   * dict, so for a malformed notice only it keeps what this drops.
+   */
+  plan_headroom?: PlanHeadroomNotice[];
   [key: string]: unknown;
 }
 
@@ -1497,6 +1549,8 @@ export interface UpdateMemoryResult {
   superseded_memory_id?: string;
   persistence?: Record<string, unknown>;
   lint?: Array<Record<string, unknown>>;
+  /** As on {@link RememberResult.plan_headroom}: read fail-open (v0.142.0+, #2615). */
+  plan_headroom?: PlanHeadroomNotice[];
   [key: string]: unknown;
 }
 
@@ -2344,6 +2398,47 @@ export type BootstrapFormat = "full" | "index";
 export type ListOrderBy = "updated_at" | "created_at" | "importance" | "observed_at";
 
 /**
+ * One `plan_headroom` entry (memory-cloud v0.142.0+, #2615): a plan
+ * dimension at or above 80 % (`level: "warning"`) or 95 % (`"critical"`)
+ * of its *effective* limit (add-on and referral bonuses included).
+ *
+ * `dimension` is `"memories"` (live memories), `"memories_per_day"` or
+ * `"mcp_calls_per_day"`; `dimension` and `level` are plain `string` so a
+ * value a newer server adds still reads. `percentage` is rounded down to
+ * one decimal (94.97 % reads 94.9). `remedies` names what helps:
+ * `"cleanup"` (forget memories or delete contexts; the total cap only),
+ * `"wait"` (the daily reset), then `"upgrade"` (a higher tier raises this
+ * cap) or `"admin"` (a deployment without billing). `help` names those
+ * remedies and what fails at 100 %, in at most 300 characters with no URL.
+ *
+ * `plan` is absent when the server could not resolve the plan. `bootstrap`
+ * holds the notice to a quarter of its `maxChars` budget: past it, `help`
+ * stays on the most severe entry only (the first `critical`, else the
+ * first), and past it still that entry alone stays.
+ *
+ * The entry comes back as sent, after the Python SDK's
+ * `PlanHeadroomNotice` model accepted it: a key a newer server adds is
+ * kept, and a value pydantic's lax mode reads (an int sent as `"97"`)
+ * keeps the form the server sent.
+ */
+export interface PlanHeadroomNotice {
+  dimension: string;
+  level: string;
+  used: number;
+  limit: number;
+  percentage: number;
+  /** Absent when the server could not resolve the plan. */
+  plan?: string | null;
+  /** @default [] */
+  remedies?: string[];
+  /** Absent on all but the most severe entry of a budget-cut `bootstrap`. */
+  help?: string | null;
+  /** The next UTC midnight, ISO 8601, on the daily dimensions only. */
+  resets_at?: string | null;
+  [key: string]: unknown;
+}
+
+/**
  * The `context_*` fields a context-scoped MCP reply echoes: the context the
  * call ran in, useful when it came from the MCP URL's `?context=` default.
  * Absent when the server did not send them.
@@ -2489,15 +2584,14 @@ export interface BootstrapResponse extends ContextEcho {
   /** @default false */
   context_summary_omitted?: boolean;
   /**
-   * Every plan dimension at 80 % or more of its limit (memory-cloud
-   * v0.142.0+, #2615); absent otherwise. Passed through exactly as the
-   * server sent it and not checked, so `unknown`: the server sends a list
-   * of notices, but nothing here refuses another shape. The Python SDK
-   * reads it fail-open as `PlanHeadroomNotice` rows (an unreadable entry
-   * dropped, an unreadable value `None`); a typed reading of it is
-   * kagura-memory-typescript-sdk#88.
+   * Every plan dimension at 80 % or more of its limit, on every call
+   * (memory-cloud v0.142.0+, #2615); absent below 80 %. Read fail-open, as
+   * the Python SDK's `PlanHeadroom` field reads it: the notice is
+   * advisory, so an entry {@link PlanHeadroomNotice} cannot read is
+   * dropped, and a value that is not a list, or keeps no entry, is left
+   * out (where Python's model reads `None`) — never a failed call.
    */
-  plan_headroom?: unknown;
+  plan_headroom?: PlanHeadroomNotice[];
 }
 
 /**
@@ -2636,12 +2730,11 @@ export interface RememberBatchResult extends ContextEcho {
   session_id?: string | null;
   /**
    * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
-   * #2615), once per call, throttled hourly per workspace and dimension.
-   * Passed through exactly as the server sent it and not checked, so
-   * `unknown`, as on {@link BootstrapResponse.plan_headroom}; a typed
-   * reading of it is kagura-memory-typescript-sdk#88.
+   * #2615), throttled to once an hour per workspace, dimension and level —
+   * so a missing key does not mean the plan has room. Read fail-open, as
+   * {@link BootstrapResponse.plan_headroom} is.
    */
-  plan_headroom?: unknown;
+  plan_headroom?: PlanHeadroomNotice[];
 }
 
 /**
