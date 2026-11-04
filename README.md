@@ -348,7 +348,10 @@ do not add up (`Setup failed: …`) and a failed request (`Authentication
 failed: …` or `Cannot connect to …` with Python's hints, else
 `Connection failed: …` on the first page) stop setup (exit 1) before
 anything is written or run, as does a blank key, which the lookup never
-replaces with another credential. A dashed UUID is never looked up, even
+replaces with another credential, and a context that is only whitespace
+(`Invalid context_id: '' — must be alphanumeric, hyphens, or underscores
+only`, Python's words); an empty `--context-id` counts as none, as in
+Python. A dashed UUID is never looked up, even
 one that is a context's name, which Python 0.44.0 would resolve when that
 context is on its first page.
 

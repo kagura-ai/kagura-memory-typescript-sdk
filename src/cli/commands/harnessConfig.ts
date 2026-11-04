@@ -154,7 +154,7 @@ function unquotePlus(text: string): string {
  * A value as Python's `urlencode` writes it (`quote_plus`): `+` for a
  * space, and `!'()*`, which `encodeURIComponent` leaves bare, escaped.
  */
-export function quotePlus(text: string): string {
+function quotePlus(text: string): string {
   return encodeURIComponent(text)
     .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
     .replace(/%20/g, "+");
@@ -170,16 +170,25 @@ export function quotePlus(text: string): string {
  * Every other parameter is kept as written; an unset key is left alone,
  * and with nothing to set the URL comes back as written. A URL it rewrites
  * is rebuilt as Python's is ({@link joinUrl}).
+ *
+ * `shown.guardrailsAsIs` is for display only: the `guardrails` value goes
+ * in as it is, not encoded — a dry run's `<UUID of context VALUE>`
+ * placeholder, as the Python CLI shows it. Such a URL is never written or
+ * run.
  */
 export function mcpUrlWithQuery(
   url: string,
   updates: { guardrails?: string | undefined; profile?: string | undefined },
+  shown: { guardrailsAsIs?: boolean } = {},
 ): string {
   const set = (["guardrails", "profile"] as const).filter((key) => updates[key] !== undefined);
   if (set.length === 0) return url;
   const { base, params, fragment } = splitUrl(url);
   const kept = params.filter((param) => !(set as readonly string[]).includes(paramName(param)));
-  const added = set.map((key) => `${key}=${quotePlus(updates[key]!)}`);
+  const added = set.map((key) => {
+    const value = updates[key]!;
+    return `${key}=${key === "guardrails" && shown.guardrailsAsIs === true ? value : quotePlus(value)}`;
+  });
   return joinUrl(base, [...kept, ...added], fragment);
 }
 

@@ -58,13 +58,7 @@ import { CliError, CliUsageError, parseChoice, quote } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import type { CliDeps } from "../run.js";
 import { resolveConfig } from "../runClientCommand.js";
-import {
-  dryRunContext,
-  lookupContext,
-  showGuardrailsPlaceholder,
-  unknownContextWarning,
-  type ContextLookup,
-} from "./contextLookup.js";
+import { dryRunContext, lookupContext, unknownContextWarning, type ContextLookup } from "./contextLookup.js";
 import {
   KEY_ENV_VAR,
   codexTomlBlock,
@@ -671,16 +665,19 @@ function connectionError(e: unknown, server: string): CliError | null {
  * whitespace) stops setup before any request: KaguraClient reads it as no
  * key and would fall back to KAGURA_API_KEY or an OAuth profile, sending
  * another credential to this URL.
+ *
+ * A context given but blank once trimmed (`-c '  '`) stops setup with no
+ * request, in the Python CLI 0.44.0's words (its `_validate_context_id`).
  */
 async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<string> {
-  const holder: { client?: KaguraClient } = {};
   // Built on first use, so a value that needs no lookup builds no client.
-  const client = (): KaguraClient => {
-    if (holder.client === undefined) {
+  let client: KaguraClient | undefined;
+  const connect = (): KaguraClient => {
+    if (client === undefined) {
       if (!input.apiKey.trim()) throw new CliError(NO_API_KEY);
-      holder.client = deps.makeClient({ apiKey: input.apiKey, mcpUrl: input.baseUrl });
+      client = deps.makeClient({ apiKey: input.apiKey, mcpUrl: input.baseUrl });
     }
-    return holder.client;
+    return client;
   };
   let found: ContextLookup;
   try {
@@ -688,21 +685,30 @@ async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<s
       input.contextId,
       async () => {
         try {
-          return await client().listContexts();
+          return await connect().listContexts();
         } catch (e) {
           if (e instanceof CliError) throw e;
           throw connectionError(e, input.baseUrl) ?? new CliError(`Connection failed: ${excMessage(e)}`);
         }
       },
-      (options) => client().listContexts(options),
+      (options) => connect().listContexts(options),
     );
   } catch (e) {
     if (e instanceof CliError) throw e;
     throw connectionError(e, input.baseUrl) ?? new CliError(`Setup failed: ${excMessage(e)}`);
   } finally {
-    await holder.client?.close();
+    try {
+      await client?.close();
+    } catch {
+      // The lookup's result, or its error, is what setup reports.
+    }
   }
   if (found.context !== null) return String(found.context.id);
+  if (input.contextId !== "" && found.value === "") {
+    throw new CliError(
+      `Invalid context_id: ${pyRepr(found.value)} — must be alphanumeric, hyphens, or underscores only`,
+    );
+  }
   if (found.unknown) deps.writeError(unknownContextWarning(found.value));
   return found.value;
 }
@@ -1597,9 +1603,12 @@ interface HarnessInput {
   /**
    * The AGENTS.md export's context: `-c`, else a `--guardrails` UUID.
    * Never the URL's `?guardrails=` and never `.kagura.json`, as in Python.
-   * In a dry run, as Python shows it ({@link dryRunContext}).
+   * Canonical in a dry run too: only what the run prints shows it as
+   * Python does ({@link shownContext}).
    */
   exportContext: string | undefined;
+  /** `-c` as given, when it was taken; for a dry run's display only. */
+  contextGiven: string | undefined;
   /** The configuration, for the export's credential; null when it could not be loaded. */
   config: KaguraConfig | null;
   /** The variable the entry reads the key from. */
@@ -1710,6 +1719,16 @@ function parseContextFlag(raw: string, profile: string | undefined): string {
   }
 }
 
+/**
+ * `context` (the export's or the Codex lane's, canonical) as the run shows
+ * it: in a dry run, `-c` in any spelling but the dashed UUID is Python's
+ * `<UUID of context VALUE>` placeholder ({@link dryRunContext}). For
+ * display only, never sent or written.
+ */
+function shownContext(input: HarnessInput, context: string): string {
+  return input.dryRun ? dryRunContext(input.contextGiven ?? context) : context;
+}
+
 function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessName): HarnessInput {
   // The name first: a usage error, as click reports before it runs anything.
   const name = parseName(args);
@@ -1813,11 +1832,8 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
     guardrails,
     toolProfile,
     agentsMd,
-    // A dry run shows -c in any spelling but the dashed UUID as Python's
-    // `<UUID of context VALUE>` placeholder (_dry_run_context).
-    exportContext:
-      (flagContext !== undefined && args.flags.has("dry-run") ? dryRunContext(rawContext!) : flagContext) ??
-      (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
+    exportContext: flagContext ?? (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
+    contextGiven: flagContext !== undefined ? rawContext : undefined,
     config,
     keyEnv,
     oauth,
@@ -2427,7 +2443,7 @@ async function applyPlan(deps: CliDeps, plan: HarnessPlan): Promise<number> {
     if (exp !== null) {
       notes.push(
         `AGENTS.md: would ${exportAction(exp.target)} ${pathLabel(exp.target)} ` +
-          `(the guardrail block for context ${exp.contextId})`,
+          `(the guardrail block for context ${shownContext(input, exp.contextId)})`,
       );
     } else if (noInstructions) {
       const target = agentsMdDefault(input.harness);
@@ -2685,6 +2701,8 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
     );
   }
   let guardrails = input.guardrails;
+  // Set when `guardrails` is a dry run's placeholder, shown in the URL unencoded.
+  let placeholder = false;
   if (guardrails === undefined && queryParam(input.baseUrl, "guardrails") === undefined) {
     if (hooksOn && !input.oauth) {
       // The plugin's hooks read this same table and deliver the
@@ -2696,14 +2714,17 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
       );
     } else if (input.contextFlag) {
       // A UUID, canonical: resolveHarnessInput refused anything else. A
-      // dry run's placeholder for one in another spelling, as in Python.
-      guardrails = input.exportContext;
+      // dry run, which writes and runs nothing, shows one in another
+      // spelling as Python's placeholder, unencoded as Python shows it.
+      guardrails = shownContext(input, input.contextId);
+      placeholder = guardrails !== input.contextId;
     }
   }
   notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile));
-  const url = showGuardrailsPlaceholder(
-    mcpUrlWithQuery(input.baseUrl, { guardrails, profile: input.toolProfile }),
-    guardrails,
+  const url = mcpUrlWithQuery(
+    input.baseUrl,
+    { guardrails, profile: input.toolProfile },
+    { guardrailsAsIs: placeholder },
   );
 
   const codex = deps.which("codex");

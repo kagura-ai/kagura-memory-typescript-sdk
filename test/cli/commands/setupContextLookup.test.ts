@@ -25,17 +25,16 @@ import {
   dryRunContext,
   findContextByName,
   lookupContext,
-  showGuardrailsPlaceholder,
   unknownContextWarning,
   type ListContexts,
 } from "../../../src/cli/commands/contextLookup.js";
+import { mcpUrlWithQuery } from "../../../src/cli/commands/harnessConfig.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import type { KaguraConfig } from "../../../src/config.js";
 import { KaguraResponseError } from "../../../src/errors.js";
 import type { ListContextsResponse } from "../../../src/models.js";
-import { pyStrip } from "../../../src/pyCompat.js";
-import { isCanonicalUuid } from "../../../src/uuid.js";
+import { isCanonicalUuid, pyStrip, uuidOrNone } from "../../../src/pyCompat.js";
 import { FakeServer } from "../../fakeServer.js";
 
 /** What a scripted reply can be: a `list_contexts` body, an HTTP reply, or a fetch that throws. */
@@ -300,6 +299,21 @@ describe("lookupContext (Python's _lookup_context)", () => {
   });
 });
 
+describe("uuidOrNone (Python's uuid_or_none)", () => {
+  const C = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
+  it.each([
+    [C.toUpperCase(), C],
+    [C.replace(/-/g, ""), C],
+    [`{${C}}`, C],
+    [`urn:uuid:${C}`, C],
+    // uuid.UUID trims nothing.
+    [` ${C}`, null],
+    ["my-project", null],
+  ])("%j → %j", (value, expected) => {
+    expect(uuidOrNone(value)).toBe(expected);
+  });
+});
+
 describe("isCanonicalUuid (Python's is_canonical_uuid)", () => {
   // Recorded from kagura_memory._http.is_canonical_uuid (0.44.0).
   const C = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
@@ -349,14 +363,19 @@ describe("the Python CLI 0.44.0's texts", () => {
     expect(dryRunContext(chosen)).toBe(shown);
   });
 
-  it("shows a placeholder in a URL as it is, and leaves any other value encoded", () => {
-    expect(
-      showGuardrailsPlaceholder("https://x.test/mcp?guardrails=%3CUUID+of+context+X%3E", "<UUID of context X>"),
-    ).toBe("https://x.test/mcp?guardrails=<UUID of context X>");
-    expect(showGuardrailsPlaceholder(`https://x.test/mcp?guardrails=${UUID}`, UUID)).toBe(
-      `https://x.test/mcp?guardrails=${UUID}`,
+  it("puts a dry run's placeholder in a URL as it is, and encodes everything else", () => {
+    const shown = "<UUID of context X>";
+    const url = "https://x.test/mcp?a=%3CUUID+of+context+X%3E&guardrails=old#frag";
+    expect(mcpUrlWithQuery(url, { guardrails: shown, profile: "a b" }, { guardrailsAsIs: true })).toBe(
+      "https://x.test/mcp?a=%3CUUID+of+context+X%3E&guardrails=<UUID of context X>&profile=a+b#frag",
     );
-    expect(showGuardrailsPlaceholder("https://x.test/mcp", undefined)).toBe("https://x.test/mcp");
+    // Without the option, as before: every value encoded, the other parameters as written.
+    expect(mcpUrlWithQuery(url, { guardrails: shown })).toBe(
+      "https://x.test/mcp?a=%3CUUID+of+context+X%3E&guardrails=%3CUUID+of+context+X%3E#frag",
+    );
+    expect(mcpUrlWithQuery("https://x.test/mcp", { profile: "core" }, { guardrailsAsIs: true })).toBe(
+      "https://x.test/mcp?profile=core",
+    );
   });
 });
 
@@ -414,7 +433,7 @@ interface Run {
 async function runSetup(
   args: string[],
   fake: PagedContexts,
-  programs: { onPath?: Record<string, string> } = {},
+  programs: { onPath?: Record<string, string>; closeRejects?: boolean } = {},
 ): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
@@ -435,7 +454,9 @@ async function runSetup(
     resolveAuth: (): ResolvedAuth => ({ kind: "static", apiKey: KEY, mcpUrl: MCP_URL, source: "env" }),
     makeClient: (options: KaguraClientOptions) => {
       clients.push(options);
-      return new KaguraClient({ ...options, fetch: server.fetch });
+      const client = new KaguraClient({ ...options, fetch: server.fetch });
+      if (programs.closeRejects === true) client.close = () => Promise.reject(new Error("close failed"));
+      return client;
     },
   } as unknown as CliDeps;
   const code = await runCli(args, deps);
@@ -623,6 +644,64 @@ describe("setup claude resolves a context name across every list_contexts page (
     process.env.KAGURA_CONTEXT_ID = "recent-a";
     expect((await runSetup(claude(), new PagedContexts(NAMES))).code).toBe(0);
     expect(kaguraJson().context_id).toBe(PagedContexts.idOf(0));
+  });
+
+  describe("a context given but blank once trimmed", () => {
+    // Recorded from `kagura setup claude --api-key … --mcp-url … -c '  ' -y`
+    // (0.44.0, connection check faked): exit 1, nothing written.
+    const INVALID = "Error: Invalid context_id: '' — must be alphanumeric, hyphens, or underscores only";
+
+    it.each([["  "], ["\t\n"]])("stops setup in Python's words, with no request: -c %j", async (value) => {
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: UUID }));
+      const fake = new PagedContexts(NAMES);
+      const run = await runSetup(claude("-c", value), fake);
+      expect(run.code).toBe(1);
+      expect(run.err).toEqual([INVALID]);
+      expect(run.out).toEqual([]);
+      expect(run.clients).toEqual([]);
+      expect(run.server.requests).toEqual([]);
+      // The project's own context is kept, and nothing else is written.
+      expect(kaguraJson()).toEqual({ context_id: UUID });
+      expect(written()).toEqual([".kagura.json"]);
+    });
+
+    it("from .kagura.json too", async () => {
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: " " }));
+      const run = await runSetup(claude(), new PagedContexts(NAMES));
+      expect(run.code).toBe(1);
+      expect(run.err).toEqual([INVALID]);
+      expect(written()).toEqual([".kagura.json"]);
+    });
+
+    it("but an empty -c is no -c, as in Python: the project's context is kept", async () => {
+      fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: UUID }));
+      const run = await runSetup(claude("-c", ""), new PagedContexts(NAMES));
+      expect(run.code).toBe(0);
+      expect(run.clients).toEqual([]);
+      expect(kaguraJson().context_id).toBe(UUID);
+    });
+  });
+
+  describe("a client whose close() rejects never replaces the lookup's outcome", () => {
+    it("on a match", async () => {
+      const fake = new PagedContexts(NAMES);
+      const run = await runSetup(claude("-c", "far"), fake, { closeRejects: true });
+      expect(run.code).toBe(0);
+      expect(run.clients).toHaveLength(1);
+      expect(kaguraJson().context_id).toBe(FAR_ID);
+      expect(run.err).toEqual([]);
+    });
+
+    it("on a failure", async () => {
+      const fake = new PagedContexts([], 2, [new Response("{}", { status: 401 })]);
+      const run = await runSetup(claude("-c", "far"), fake, { closeRejects: true });
+      expect(run.code).toBe(1);
+      expect(run.err.join("\n")).toBe(
+        "Error: Authentication failed: Authentication failed. Check your API key.\n" +
+          "  Check your API key at: Kagura Web UI > Integrations > API Keys",
+      );
+      expect(written()).toEqual([]);
+    });
   });
 
   describe("stops before anything is run or written", () => {

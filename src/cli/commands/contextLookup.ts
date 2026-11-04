@@ -12,10 +12,8 @@
 
 import { iterPages, type ListContextsOptions } from "../../client.js";
 import type { ContextListItem, ListContextsResponse } from "../../models.js";
-import { normalizeUuid, pyStrip } from "../../pyCompat.js";
+import { isCanonicalUuid, pyStrip, uuidOrNone } from "../../pyCompat.js";
 import { pyRepr, pyTruthy } from "../../python.js";
-import { isCanonicalUuid } from "../../uuid.js";
-import { quotePlus } from "./harnessConfig.js";
 
 /**
  * The longest `name_contains` `list_contexts` takes (memory-cloud
@@ -54,16 +52,6 @@ function rowsOf(page: ListContextsResponse): ContextListItem[] {
     (row): row is ContextListItem =>
       typeof row === "object" && row !== null && !Array.isArray(row) && pyTruthy((row as { id?: unknown }).id),
   );
-}
-
-/** Python's `uuid_or_none(value) is not None`: any spelling `uuid.UUID` takes. */
-function isPythonUuid(value: string): boolean {
-  try {
-    normalizeUuid(value, "value");
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -131,6 +119,9 @@ export async function lookupContext(
   // Python's len() counts code points.
   if ([...value].length > CONTEXT_NAME_MAX_CHARS) return { value, context: null, unknown: true };
   const first = await firstPage();
+  // Python's `value in (ctx["id"], ctx.get("name"))`, kept for parity. A
+  // dashed UUID returned above, so the id half matches only an id the
+  // server spells otherwise.
   const row = rowsOf(first).find((ctx) => ctx.id === value || ctx.name === value);
   if (row !== undefined) return { value, context: row, unknown: false };
   if ((first as { has_more?: unknown }).has_more === true) {
@@ -138,7 +129,7 @@ export async function lookupContext(
     if (named !== null) return { value, context: named, unknown: false };
   }
   // Every page was searched for the name; another spelling of a UUID is still an id.
-  return { value, context: null, unknown: !isPythonUuid(value) };
+  return { value, context: null, unknown: uuidOrNone(value) === null };
 }
 
 /**
@@ -158,16 +149,5 @@ export function unknownContextWarning(value: string): string {
  */
 export function dryRunContext(chosen: string): string {
   const value = pyStrip(chosen);
-  return isCanonicalUuid(value) ? normalizeUuid(value, "value") : `<UUID of context ${value}>`;
-}
-
-/**
- * `url` with a dry run's `guardrails` placeholder ({@link dryRunContext})
- * shown as it is rather than URL-encoded, as Python shows it; any other
- * `guardrails` value (a UUID or `off` never starts with `<`) leaves `url`
- * as it is.
- */
-export function showGuardrailsPlaceholder(url: string, guardrails: string | undefined): string {
-  if (guardrails === undefined || !guardrails.startsWith("<")) return url;
-  return url.split(`guardrails=${quotePlus(guardrails)}`).join(`guardrails=${guardrails}`);
+  return (isCanonicalUuid(value) ? uuidOrNone(value) : null) ?? `<UUID of context ${value}>`;
 }
