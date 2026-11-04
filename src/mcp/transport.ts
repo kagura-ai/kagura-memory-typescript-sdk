@@ -1,5 +1,6 @@
 import { ProxyError } from "./errors.js";
 import { SDK_VERSION } from "../version.js";
+import { insufficientScopeFrom, serverErrorFieldsOf } from "../http.js";
 
 export type RpcMessage = Record<string, unknown> & { jsonrpc: "2.0" };
 export type Emit = (message: RpcMessage) => void;
@@ -74,10 +75,31 @@ const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 // The SSE field prefix is framing, not part of the JSON-RPC payload.
 const MAX_SSE_LINE_BYTES = MAX_MESSAGE_BYTES + Buffer.byteLength("data: ");
 
+const AUTH_FAILURE = "kagura-memory-mcp: Kagura authentication failed and the token could not be refreshed. " +
+  "Run `kagura-memory auth login` to re-authenticate.";
+
+/** Python's recovery wording, retaining the upstream RPC error code and data. */
+function withLoginHint(response: Response, value: unknown, requestId: unknown): unknown {
+  if (response.status !== 401 && response.status !== 403) return value;
+  const fields = serverErrorFieldsOf(value);
+  const scope = response.status === 403 ? insufficientScopeFrom(response.headers, fields) : null;
+  if (response.status !== 401 && scope === null) return value;
+  const message = scope === null ? AUTH_FAILURE : `kagura-memory-mcp: ${scope.message}`;
+  if (isMessage(value) && "error" in value) {
+    return { ...value, id: value.id ?? requestId, error: { ...(value.error as Record<string, unknown>), message } };
+  }
+  const reply = rpcError(requestId, message);
+  if (fields !== null) {
+    reply.error = { ...(reply.error as Record<string, unknown>), data: { ...fields[1], error: fields[0] } };
+  }
+  return reply;
+}
+
 /** Stream JSON or SSE, including server requests before the final response. */
 async function readMessages(
   response: Response,
   emit: (message: RpcMessage) => boolean,
+  requestId: unknown,
 ): Promise<void> {
   const reader = response.body?.getReader();
   if (!reader) return;
@@ -95,6 +117,7 @@ async function readMessages(
     } catch {
       throw new ProxyError("Upstream returned invalid JSON.");
     }
+    value = withLoginHint(response, value, requestId);
     if (!isMessage(value))
       throw new ProxyError("Upstream returned an invalid JSON-RPC message.");
     return emit(value);
@@ -256,12 +279,8 @@ export class McpTransport {
           },
           body: JSON.stringify(message),
         });
-        if (response.status === 401) {
+        if (response.status === 401 && attempt === 0) {
           await response.body?.cancel();
-          if (attempt === 1)
-            throw new ProxyError(
-              "Authentication rejected. Restart the extension or sign in again with kagura-memory auth login.",
-            );
           // Release this HTTP deadline while a refresh may require browser consent.
           clearTimeout(timer);
           await options.auth.forceRefresh();
@@ -318,15 +337,22 @@ export class McpTransport {
           }
           emit(reply);
           return replied;
-        });
-        if (!replied)
+        }, message.id);
+        if (!replied) {
+          if (response.status === 401) throw new ProxyError(AUTH_FAILURE);
+          const scope = response.status === 403 ? insufficientScopeFrom(response.headers, null) : null;
+          if (scope !== null) throw new ProxyError(`kagura-memory-mcp: ${scope.message}`);
           throw new ProxyError(
             `Upstream HTTP ${response.status} did not return a response for this request.`,
           );
+        }
         return;
       } catch (error) {
         if (controller.signal.aborted)
           throw new ProxyError("Kagura request timed out or was cancelled.");
+        if (response?.status === 401) throw new ProxyError(AUTH_FAILURE);
+        const scope = response?.status === 403 ? insufficientScopeFrom(response.headers, null) : null;
+        if (scope !== null) throw new ProxyError(`kagura-memory-mcp: ${scope.message}`);
         throw error;
       } finally {
         if (message.method === "initialize" && !initialized) {

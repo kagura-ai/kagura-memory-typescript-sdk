@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The MCP proxy gives Python-compatible re-login guidance for HTTP 403
+  `insufficient_scope` and HTTP 401 after the refresh attempt. Forwarded
+  JSON-RPC errors retain their upstream codes and data.
+
 ## [0.15.0] - 2026-11-05
 
 Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud

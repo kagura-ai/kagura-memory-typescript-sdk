@@ -244,10 +244,68 @@ describe("transparent MCP transport", () => {
       new Response(null, { status: 401 }),
     ]);
     await expect(s.transport.forward(call, s.emit)).rejects.toThrow(
-      "Authentication rejected",
+      "Kagura authentication failed and the token could not be refreshed.",
     );
     expect(s.auth.forceRefresh).toHaveBeenCalledTimes(1);
     expect(s.calls).toHaveLength(2);
+  });
+
+  it.each([false, true])("adds the Python scope message while preserving RPC metadata (SSE=%s)", async (sse) => {
+    const data = { error: "insufficient_scope", required_scope: "memory:write", details: { reason: "scope_changed" } };
+    const body = { jsonrpc: "2.0", id: "call", error: { code: -32003, message: "Denied.", data } };
+    const upstream = sse
+      ? new Response(`data: ${JSON.stringify(body)}\n\n`, { status: 403, headers: { "Content-Type": "text/event-stream" } })
+      : Response.json(body, { status: 403 });
+    const s = setup([upstream]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output).toEqual([{
+      jsonrpc: "2.0", id: "call", error: {
+        code: -32003, data,
+        message: "kagura-memory-mcp: The OAuth sign-in lacks the memory:write scope this call needs (HTTP 403 insufficient_scope). Run `kagura-memory auth login` to sign in again with it; a `--read-only` login grants memory:read only.",
+      },
+    }]);
+    expect(s.auth.forceRefresh).not.toHaveBeenCalled();
+  });
+
+  it("preserves invalid_token data on the second 401 and adds the login hint", async () => {
+    const upstream = { jsonrpc: "2.0", id: "call", error: { code: -32001, message: "Expired.", data: { code: "invalid_token", help: "Sign in." } } };
+    const s = setup([new Response(null, { status: 401 }), Response.json(upstream, { status: 401 })]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output[0]).toEqual({ ...upstream, error: {
+      ...upstream.error,
+      message: "kagura-memory-mcp: Kagura authentication failed and the token could not be refreshed. Run `kagura-memory auth login` to re-authenticate.",
+    } });
+    expect(s.auth.forceRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("recognizes an OAuth scope body without a JSON-RPC envelope", async () => {
+    const s = setup([Response.json({ error: "insufficient_scope", required_scope: "memory:write" }, { status: 403 })]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output[0]).toMatchObject({ id: "call", error: { message: expect.stringContaining("Run `kagura-memory auth login`") } });
+  });
+
+  it("does not forward a result from a rejected 401 response", async () => {
+    const s = setup([new Response(null, { status: 401 }), Response.json({ jsonrpc: "2.0", id: "call", result: {} }, { status: 401 })]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output[0]).not.toHaveProperty("result");
+    expect(s.output[0]).toMatchObject({ id: "call", error: { message: expect.stringContaining("re-authenticate") } });
+  });
+
+  it("uses the Bearer challenge scope even when the body is not JSON", async () => {
+    const s = setup([new Response("Forbidden", { status: 403, headers: {
+      "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="memory:write"',
+    } })]);
+    await expect(s.transport.forward(call, s.emit)).rejects.toThrow("Run `kagura-memory auth login`");
+    expect(s.auth.forceRefresh).not.toHaveBeenCalled();
+  });
+
+  it("honors a 403 scope challenge even when the body looks like a successful result", async () => {
+    const s = setup([Response.json({ jsonrpc: "2.0", id: "call", result: {} }, {
+      status: 403, headers: { "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="memory:write"' },
+    })]);
+    await s.transport.forward(call, s.emit);
+    expect(s.output[0]).not.toHaveProperty("result");
+    expect(s.output[0]).toMatchObject({ id: "call", error: { message: expect.stringContaining("Run `kagura-memory auth login`") } });
   });
 
   it("uses the rotated token after 401", async () => {
