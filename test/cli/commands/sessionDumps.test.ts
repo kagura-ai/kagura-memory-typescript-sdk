@@ -24,7 +24,8 @@
  * prints `null`.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as pyModels from "../../../src/pyModels.js";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
@@ -608,7 +609,9 @@ const CASES: Case[] = [
 ];
 
 describe("bootstrap / changes / list / forget --ids output, byte for byte the Python CLI's (#86)", () => {
+  afterEach(() => vi.restoreAllMocks());
   it.each(CASES.map((c) => [c.name, c] as const))("%s", async (_name, c) => {
+    const reads = vi.spyOn(pyModels, "readModel");
     const out: string[] = [];
     const err: string[] = [];
     const server = new FakeServer();
@@ -621,6 +624,10 @@ describe("bootstrap / changes / list / forget --ids output, byte for byte the Py
     } as unknown as CliDeps;
 
     expect(await runCli(c.argv, deps)).toBe(c.code);
+    if (c.code === 0 && (["bootstrap", "changes", "list"].includes(c.argv[0]!) ||
+        (c.argv[0] === "forget" && c.argv.includes("--ids")))) {
+      expect(reads.mock.calls).toHaveLength(1);
+    }
     expect(terminalText(out)).toBe(c.stdout);
     // A usage error: this bin prints click's `Error:` line without the
     // `Usage:` / `Try '… --help'` lines before it, as for every command.

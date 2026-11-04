@@ -598,19 +598,13 @@ const JSONRPC_METHOD_NOT_FOUND = -32601;
  */
 export function mcpSessionExpired(
   status: number,
-  bodyText: string,
+  body: string | ErrorBody,
   sessionId: string | null,
 ): boolean {
   if (!sessionId || status !== 404) {
     return false;
   }
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return true;
-  }
-  return jsonRpcError(body)?.code !== JSONRPC_METHOD_NOT_FOUND;
+  return !(body instanceof ErrorBody ? body : new ErrorBody(body)).methodNotFound;
 }
 
 /**
@@ -1220,6 +1214,23 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
   };
 }
 
+// Error bodies are JSON trees. Copy them iteratively so extra OAuth metadata
+// cannot turn a known refusal into structuredClone's recursion RangeError.
+function copyJsonFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  const pending: Array<[object, object]> = [[fields, copy]];
+  while (pending.length > 0) {
+    const [source, target] = pending.pop()!;
+    for (const [key, value] of Object.entries(source)) {
+      const nested = typeof value === "object" && value !== null;
+      const copied = nested ? (Array.isArray(value) ? [] : {}) : value;
+      Object.defineProperty(target, key, { value: copied, writable: true, enumerable: true, configurable: true });
+      if (nested) pending.push([value, copied as object]);
+    }
+  }
+  return copy;
+}
+
 /**
  * A non-2xx response's body, decoded at most once and read each way the
  * error mapping needs it — Python's `ErrorBody` (python-sdk#311).
@@ -1246,6 +1257,7 @@ export class ErrorBody {
   private detailText: string | undefined;
   private envelopeBlock: ErrorEnvelope | null | undefined;
   private errorFields: ServerErrorFields | null | undefined;
+  private oauthFields: { error: string; description: string; fields: Record<string, unknown> } | undefined;
 
   constructor(text: string) {
     this.text = text;
@@ -1259,6 +1271,22 @@ export class ErrorBody {
   private get decoded(): unknown {
     this.decodedBody ??= { value: parseJsonBody(this.text) };
     return this.decodedBody.value;
+  }
+
+  /** The stateless JSON-RPC refusal that must not trigger session renewal. */
+  get methodNotFound(): boolean {
+    return jsonRpcError(this.decoded)?.code === JSONRPC_METHOD_NOT_FOUND;
+  }
+
+  /** Top-level OAuth error fields, without another decode of the response. */
+  get oauth(): { error: string; description: string; fields: Record<string, unknown> } {
+    if (this.oauthFields !== undefined) return this.oauthFields;
+    const body = isRecord(this.decoded) ? this.decoded : {};
+    return this.oauthFields = {
+      error: typeof body.error === "string" ? body.error : "",
+      description: typeof body.error_description === "string" ? body.error_description : "",
+      fields: copyJsonFields(oauthBodyFields(body)),
+    };
   }
 
   /** {@link extractDetail} of the body: the server's message, or `""`. */
@@ -1275,7 +1303,7 @@ export class ErrorBody {
   get envelope(): ErrorEnvelope | null {
     if (this.envelopeBlock === undefined) {
       const envelope = envelopeOf(this.decoded);
-      this.envelopeBlock = envelope === null ? null : { code: envelope.code, details: structuredClone(envelope.details) };
+      this.envelopeBlock = envelope === null ? null : { code: envelope.code, details: copyJsonFields(envelope.details) };
     }
     return this.envelopeBlock;
   }
@@ -1287,7 +1315,7 @@ export class ErrorBody {
   get fields(): ServerErrorFields | null {
     if (this.errorFields === undefined) {
       const fields = serverErrorFieldsOf(this.decoded);
-      this.errorFields = fields === null ? null : [fields[0], structuredClone(fields[1])];
+      this.errorFields = fields === null ? null : [fields[0], copyJsonFields(fields[1])];
     }
     return this.errorFields;
   }

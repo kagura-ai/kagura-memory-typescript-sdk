@@ -15,13 +15,13 @@ import { pythonOptionNames } from "../../client.js";
 import { KaguraError } from "../../errors.js";
 import { isRecord } from "../../http.js";
 import type { BootstrapComponentName, BootstrapFormat, ListOrderBy } from "../../models.js";
+import { modelDumpOf } from "../../modelDumpView.js";
 import { pyStr, pyTruthy } from "../../python.js";
 import {
   BOOTSTRAP_RESPONSE,
   CHANGES_SINCE_RESPONSE,
   FORGET_BATCH_RESULT,
   LIST_MATCHING_RESPONSE,
-  readModel,
   type Model,
 } from "../../pyModels.js";
 import { MAX_CHARS_MAX, MAX_CHARS_MIN } from "../../responseBudget.js";
@@ -66,10 +66,10 @@ function choice<T extends string>(args: ParsedArgs, flag: FlagSpec, choices: rea
  * Print a reply as the Python CLI prints `model.model_dump(mode="json")`.
  *
  * The client checked the reply against the same model and returned it as
- * sent; this reads it once more for the dump's defaults and key order.
+ * sent, retaining its dump-ready view for this immediate formatting step.
  */
 function dump(model: Model, operation: string): (result: unknown) => string {
-  return (result) => formatDumpsJson(readModel(result, model, operation));
+  return (result) => formatDumpsJson(modelDumpOf(result, model, operation));
 }
 
 const BOOTSTRAP_FORMATS: readonly BootstrapFormat[] = ["full", "index"];
