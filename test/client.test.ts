@@ -2515,7 +2515,12 @@ describe("sleep maintenance", () => {
     rollback_sleep_run: ["report_id"],
   };
 
-  /** A {@link FakeServer} that refuses an undeclared argument as memory-cloud v0.82.0+ does. */
+  /**
+   * A {@link FakeServer} that refuses an undeclared argument as memory-cloud
+   * v0.82.0+ does: the envelope of `find_unknown_arguments`
+   * (`backend/src/mcp_server/tools/_arg_coercion.py`) for one unknown name
+   * with no close declared name, in a result flagged `isError`.
+   */
   function strictSleepServer(): FakeServer {
     const server = new FakeServer();
     const answer = server.fetch;
@@ -2535,23 +2540,45 @@ describe("sleep maintenance", () => {
         message:
           `${name} does not accept the argument '${unknown[0]}'. ` +
           `Arguments its inputSchema declares: ${declared.join(", ")}.`,
+        unknown_arguments: unknown,
+        allowed_arguments: declared,
+        suggestions: {},
+        help:
+          "Remove the unknown arguments or rename them as suggested, then call the " +
+          "tool again. tools/list shows each tool's inputSchema.",
       };
       return new Response(
-        JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(refusal) }] } }),
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { content: [{ type: "text", text: JSON.stringify(refusal) }], isError: true },
+        }),
         { status: 200 },
       );
     };
     return server;
   }
 
-  it("the strict fake refuses the context_id SDKs up to 0.14.1 sent", async () => {
-    const server = strictSleepServer();
-    await expect(
-      makeClient(server).callRawTool("get_sleep_report", { context_id: "c1", report_id: "r1" }),
-    ).rejects.toThrow(
+  // The messages memory-cloud v0.143.0's find_unknown_arguments gives for
+  // these calls (the v0.141.0 production probe of python-sdk#296 read the same).
+  it.each([
+    [
+      "get_sleep_report",
       "get_sleep_report failed (invalid_argument): get_sleep_report does not accept the argument " +
         "'context_id'. Arguments its inputSchema declares: actions_cursor, actions_limit, max_chars, report_id.",
-    );
+    ],
+    [
+      "rollback_sleep_run",
+      "rollback_sleep_run failed (invalid_argument): rollback_sleep_run does not accept the argument " +
+        "'context_id'. Arguments its inputSchema declares: report_id.",
+    ],
+  ])("the strict fake refuses the context_id SDKs up to 0.14.1 sent to %s", async (tool, message) => {
+    const server = strictSleepServer();
+    const err = await makeClient(server)
+      .callRawTool(tool, { context_id: "c1", report_id: "r1" })
+      .catch((e: unknown) => e);
+    expect((err as object).constructor).toBe(KaguraError);
+    expect((err as Error).message).toBe(message);
   });
 
   it("getSleepReport sends report_id only and ignores contextId (#79)", async () => {
