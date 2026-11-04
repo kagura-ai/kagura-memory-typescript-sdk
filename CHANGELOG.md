@@ -19,6 +19,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Python SDK 0.44.0 models. Malformed fields raise `KaguraResponseError`
   with the Python operation name. CLI commands reuse the validated rows,
   including normalized timestamps and model defaults.
+### Added
+
+- The MCP proxy gives Python-compatible re-login guidance for HTTP 403
+  `insufficient_scope` and HTTP 401 after the refresh attempt. Forwarded
+  JSON-RPC errors retain their upstream codes and data.
 
 ## [0.15.0] - 2026-11-05
 
