@@ -44,7 +44,11 @@ export class AgentsClient extends KaguraRestClient {
    *
    * REST companion to `KaguraClient.getAgentBootstrap` — same options,
    * same composed envelope, same fail-soft component semantics (see that
-   * method for the full contract).
+   * method for the full contract). The route takes `maxChars` from
+   * memory-cloud v0.82.0; an older server ignores it.
+   *
+   * @throws Error if `agentId` is not a UUID, or `maxChars` is not an
+   *   integer in 10,000-100,000, before any request.
    */
   async bootstrap(options: GetAgentBootstrapOptions): Promise<AgentBootstrapResponse> {
     let agentId: string;
