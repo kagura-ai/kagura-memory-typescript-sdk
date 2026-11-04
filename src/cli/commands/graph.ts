@@ -215,16 +215,27 @@ const sleepHistory: Command = {
 // CONTEXT_ID stays a required positional, as in the Python CLI 0.42.2+, so
 // existing scripts keep working; getSleepReport / rollbackSleepRun ignore
 // it, since memory-cloud v0.82.0+ refuses a context_id on these tools (#79).
-// The paragraph is the Python CLI's, wrapped at 78 columns as click wraps it
-// in a terminal; 0.43.0+ goes on with a sentence about --actions-cursor,
-// which comes with that flag (#85).
+
+/**
+ * The `--help` paragraph `sleep report` and `sleep rollback` share with the
+ * Python CLI 0.42.2+: CONTEXT_ID is not sent. `access` ends the sentence
+ * with what the server checks on the run's context. It comes already
+ * wrapped the way click wraps the whole paragraph in a terminal (78
+ * columns), since its words decide where the second line breaks. For
+ * `sleep report` the Python CLI 0.43.0+ goes on with a sentence about
+ * --actions-cursor, which comes with that flag (#85).
+ */
+function contextIdNotSent(access: string): string {
+  return (
+    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+    `  finds the run by REPORT_ID (memory-cloud 0.126.0+ ${access}`
+  );
+}
+
 const sleepReport: Command = {
   summary: "Get a detailed Sleep Maintenance report including audit log.",
   args: "CONTEXT_ID REPORT_ID",
-  description:
-    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
-    "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
-    "  run's own context).",
+  description: contextIdNotSent("checks read access on the\n  run's own context)."),
   spec: { flags: [] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
@@ -246,9 +257,7 @@ const sleepRollback: Command = {
     "  Reverses edge creation, memory merges and importance updates made by\n" +
     "  the run. Without --yes the report is fetched first so the prompt can\n" +
     "  say what is about to be undone.\n\n" +
-    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
-    "  finds the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner\n" +
-    "  role on the run's own context).",
+    contextIdNotSent("needs the editor or owner\n  role on the run's own context)."),
   spec: { flags: [{ ...YES, help: "Skip confirmation prompt." }] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
