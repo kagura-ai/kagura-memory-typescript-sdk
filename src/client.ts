@@ -2889,10 +2889,10 @@ export class KaguraClient {
    */
   async getSleepReport(options: {
     /**
-     * Ignored; kept so existing calls still compile. The server scopes the
-     * call by `reportId`.
+     * Ignored, and optional: the server finds the run by `reportId`. It
+     * was required up to 0.14.1, so calls that pass it still compile.
      */
-    contextId: string;
+    contextId?: string;
     /** Sleep report UUID, from {@link getSleepHistory}. */
     reportId: string;
   }): Promise<SleepReportDetail> {
@@ -2946,10 +2946,10 @@ export class KaguraClient {
    */
   async rollbackSleepRun(options: {
     /**
-     * Ignored; kept so existing calls still compile. The server scopes the
-     * call by `reportId`.
+     * Ignored, and optional: the server finds the run by `reportId`. It
+     * was required up to 0.14.1, so calls that pass it still compile.
      */
-    contextId: string;
+    contextId?: string;
     /** Sleep report UUID to roll back, from {@link getSleepHistory}. */
     reportId: string;
   }): Promise<RollbackResult> {
