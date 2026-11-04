@@ -11,6 +11,7 @@
  */
 
 import type { AgentBootstrapComponentName } from "./models.js";
+import { isSet } from "./python.js";
 import { validateMaxChars } from "./responseBudget.js";
 
 export interface GetAgentBootstrapOptions {
@@ -93,7 +94,7 @@ export function buildBootstrapPayload(
     payload.include = options.include;
   }
   // `is not None` in Python: a null from untyped JS is unset too.
-  if (options.maxChars !== undefined && options.maxChars !== null) {
+  if (isSet(options.maxChars)) {
     payload.max_chars = validateMaxChars(options.maxChars);
   }
   return payload;

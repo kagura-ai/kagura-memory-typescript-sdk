@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isSet,
   PY_FLOAT,
   PY_INT,
   pyBigInt,
@@ -359,5 +360,12 @@ describe("reprlibRepr", () => {
   ])("case %# -> %s", (value, expected) => {
     // %# (the index), not %j: JSON.stringify throws on the bigint case.
     expect(reprlibRepr(value)).toBe(expected);
+  });
+});
+
+describe("isSet", () => {
+  it("is Python's `is not None`: only undefined and null are unset", () => {
+    expect([undefined, null].map(isSet)).toEqual([false, false]);
+    expect(["", 0, false, Number.NaN, 0n, [], {}].map(isSet)).toEqual([true, true, true, true, true, true, true]);
   });
 });

@@ -81,7 +81,7 @@ import {
 } from "./pyModels.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
-import { pyRepr, pyStr, pyTypeName } from "./python.js";
+import { isSet, pyRepr, pyStr, pyTypeName } from "./python.js";
 import {
   ResponseReader,
   laxFloat,
@@ -745,11 +745,6 @@ function isoArg(value: string | Date, label: string): string {
   // toISOString() throws a bare RangeError on an Invalid Date.
   if (Number.isNaN(value.getTime())) throw new Error(`${label} must be a valid Date`);
   return value.toISOString();
-}
-
-/** Python's `is not None`: the optional arguments it sends, `""` included. */
-function isSet<T>(value: T | null | undefined): value is T {
-  return value !== undefined && value !== null;
 }
 
 /**
