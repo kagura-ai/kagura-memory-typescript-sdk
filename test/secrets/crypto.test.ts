@@ -8,7 +8,7 @@
 
 import { inspect } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { KaguraCryptoError } from "../../src/errors.js";
 import {
@@ -21,7 +21,6 @@ import {
   MAX_CIPHERTEXT_BYTES,
   recipientFromIdentity,
   RECIPIENT_RE,
-  resetAgeCache,
 } from "../../src/secrets/crypto.js";
 import {
   PYRAGE_ARMORED,
@@ -298,68 +297,6 @@ describe("encrypt / decrypt", () => {
     // legitimate values: the check is `>`, not `>=`.
     const atCap = "y".repeat(MAX_CIPHERTEXT_BYTES);
     await expect(decrypt(atCap, TEST_IDENTITY)).rejects.toThrow(/missing PEM header\/footer/);
-  });
-});
-
-describe("Node 18: no WebCrypto global", () => {
-  // WebCrypto only became a global in Node 19. CI on Node 18 failed with
-  // "crypto.getRandomValues must be defined" on every encrypt and keygen
-  // while decryption passed, because only the former need randomness. The
-  // SDK declares engines.node >= 18, so simulate the absence here rather
-  // than relying on the matrix to notice a regression.
-  // Not `!`-asserted: on Node 18 there is no such property, so the
-  // descriptor really is undefined — and an earlier version of this test
-  // crashed on exactly that, on exactly the Node version it was written for.
-  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
-
-  afterEach(() => {
-    if (original === undefined) {
-      delete (globalThis as { crypto?: unknown }).crypto;
-    } else {
-      Object.defineProperty(globalThis, "crypto", original);
-    }
-    resetAgeCache();
-  });
-
-  it("generates and encrypts with no crypto global present", async () => {
-    delete (globalThis as { crypto?: unknown }).crypto;
-    resetAgeCache();
-    expect(globalThis.crypto).toBeUndefined();
-
-    const { identity, recipient } = await generateKeypair();
-    const armored = await encrypt(new TextEncoder().encode("node18"), [recipient]);
-
-    expect(decode(await decrypt(armored, identity))).toBe("node18");
-    // The shim installed it rather than merely working around it once.
-    expect(typeof globalThis.crypto.getRandomValues).toBe("function");
-  });
-
-  it("leaves an existing crypto global alone", async () => {
-    // Install our own object rather than reading whatever the runtime
-    // happens to provide: on Node 18 nothing is there to start with, so an
-    // ambient sentinel would make this assert against undefined. Methods are
-    // bound so age still works through it and the identity check is real.
-    const { webcrypto } = await import("node:crypto");
-    const sentinel = {
-      getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
-      subtle: webcrypto.subtle,
-      // Not the DOM `Crypto` type: this package's tsconfig has no DOM lib,
-      // so that name does not exist here.
-    } as unknown as typeof globalThis.crypto;
-    Object.defineProperty(globalThis, "crypto", { value: sentinel, configurable: true });
-    resetAgeCache();
-
-    await generateKeypair();
-
-    expect(globalThis.crypto).toBe(sentinel);
-  });
-
-  it("keeps it configurable so a host can still substitute its own", async () => {
-    delete (globalThis as { crypto?: unknown }).crypto;
-    resetAgeCache();
-    await generateKeypair();
-
-    expect(Object.getOwnPropertyDescriptor(globalThis, "crypto")!.configurable).toBe(true);
   });
 });
 

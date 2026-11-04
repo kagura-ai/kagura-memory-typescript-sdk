@@ -43,7 +43,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run test:no-webcrypto
       - run: npm run build:mcpb
       - run: npm run test:mcpb
       - name: Reproducible bundle
@@ -69,13 +68,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      # The same suite with globalThis.crypto removed, i.e. Node 18's world
-      # (#28). age-encryption reaches @noble, which reads
-      # crypto.getRandomValues, so encrypt and keygen broke there while
-      # decrypt kept working — an asymmetry only one leg of this matrix could
-      # see. Running it everywhere means the next such regression fails on
-      # whichever leg finishes first, and reproduces locally.
-      - run: npm run test:no-webcrypto
       - run: npm run build
       - name: Pack and install smoke test
         shell: bash

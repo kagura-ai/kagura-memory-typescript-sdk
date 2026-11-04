@@ -87,46 +87,12 @@ interface AgeModule {
 let agePromise: Promise<AgeModule> | null = null;
 
 /**
- * Make `globalThis.crypto` exist, for Node 18.
- *
- * WebCrypto only became a global in Node 19. `age-encryption` reaches
- * `@noble/*`, which reads `globalThis.crypto.getRandomValues` for the file
- * key and for keygen — so on Node 18 every encrypt and every
- * {@link generateKeypair} fails with "crypto.getRandomValues must be
- * defined", while decryption (which needs no randomness) works fine. CI
- * caught exactly that asymmetry.
- *
- * `package.json` says `engines.node >= 18`, so the fix belongs here rather
- * than in the engines field: `node:crypto` has exposed `webcrypto` since
- * Node 15, and installing it is precisely what Node 19+ does for you.
- *
- * Scoped as tightly as a global assignment can be: only when nothing is
- * there, only on the way into the crypto package, and `configurable` so a
- * host that wants its own implementation can still replace it.
- */
-async function ensureWebCrypto(): Promise<void> {
-  if (globalThis.crypto !== undefined) {
-    return;
-  }
-  const { webcrypto } = await import("node:crypto");
-  Object.defineProperty(globalThis, "crypto", {
-    value: webcrypto,
-    configurable: true,
-    enumerable: false,
-    writable: false,
-  });
-}
-
-/**
  * Load `age-encryption` on first use.
  *
  * @throws KaguraCryptoError if the optional peer dependency is not installed.
  */
 async function loadAge(): Promise<AgeModule> {
   agePromise ??= (async () => {
-    // Kept outside the try below so a WebCrypto problem is never reported as
-    // "the package is not installed" — the two need different fixes.
-    await ensureWebCrypto();
     try {
       return (await import("age-encryption")) as AgeModule;
     } catch (e) {
@@ -140,8 +106,7 @@ async function loadAge(): Promise<AgeModule> {
       );
     }
   })().catch((e: unknown) => {
-    // Never memoize a failure: a caller who installs the package mid-process,
-    // or a host that supplies its own WebCrypto after the first attempt,
+    // Never memoize a failure: a caller who installs the package mid-process
     // must get a real retry rather than the cached rejection.
     agePromise = null;
     throw e;

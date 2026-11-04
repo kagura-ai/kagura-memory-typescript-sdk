@@ -73,7 +73,6 @@ Standalone GET event subscriptions and SSE reconnection/replay are not supported
 npm ci
 npm run typecheck
 npm test
-npm run test:no-webcrypto
 npm run build:mcpb
 npm run test:mcpb
 ```

@@ -205,9 +205,6 @@ jobs:
 
       - run: npm run typecheck
       - run: npm test
-      # Node 18 has no WebCrypto global; the crypto path installs
-      # node:crypto's webcrypto itself. See vitest.no-webcrypto.config.ts.
-      - run: npm run test:no-webcrypto
       - run: npm run build
 
       # Zero runtime dependencies is a documented promise, and the optional
@@ -227,7 +224,7 @@ jobs:
             console.log("dependencies: none");
           '
 
-      # `prepublishOnly` re-runs typecheck/test/test:no-webcrypto/build, so
+      # `prepublishOnly` re-runs typecheck/test/build, so
       # the gate above is belt-and-braces — it fails faster and names the
       # failing step.
       #
