@@ -9,7 +9,8 @@
  * A usage error (exit 2) is compared by its `Error:` line: click prints its
  * usage line and a `Try …` hint before it, and this bin its help after it
  * (README, "Command line"). `errorPrefix` marks a line whose tail is a JSON
- * parser's own words: Python's `json` module there, JavaScript's here.
+ * parser's own words where the two differ; `--details` is read in
+ * Python's `json` words (`parseJsonObject`), so its line is compared whole.
  */
 
 import { describe, expect, it } from "vitest";
@@ -114,7 +115,6 @@ const DETAILS_CASES: Case[] = [
     code: 2,
     stdout: "",
     stderr: USAGE + "Error: Invalid JSON for --details: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n",
-    errorPrefix: "Error: Invalid JSON for --details: ",
   },
   {
     name: "a JSON list is a usage error",
@@ -236,7 +236,6 @@ const MERGE_CASES: Case[] = [
     code: 2,
     stdout: "",
     stderr: USAGE + "Error: Invalid JSON for --details: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n",
-    errorPrefix: "Error: Invalid JSON for --details: ",
   },
   {
     name: "a bad -i is click's usage error first",

@@ -789,9 +789,13 @@ would accept.
 **Differences from the Python CLI 0.42.0 in what it added**, each on
 purpose or out of reach:
 
-- `update-memory --details` and `remember --details` refuse text that is
-  not JSON with JavaScript's parser message after `Invalid JSON for
-  --details:`, where Python prints its `json` module's.
+- `update-memory --details` and `remember --details` refuse a `NaN` or
+  an infinity in the object (`Out of range float values are not JSON
+  compliant: nan`, exit 1, Python's line) before the context is looked
+  up; the Python CLI reads the object as JSON and fails only when it
+  sends it, so without a context it reports that first. Text that is not
+  JSON at all gets Python's `json` module's message, as `list --filters`
+  does.
 - `update-memory --merge-details` prints the size of a bounded
   `reference` reply when `details_total_chars` is a whole number sent as a
   float (`24000.0`), which Python leaves out: JSON.parse cannot tell it

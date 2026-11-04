@@ -9,6 +9,7 @@
  * tools reads the same guidance.
  */
 
+import { JsonDecodeError, parseJsonLossless } from "../losslessJson.js";
 import { pyStrip } from "../pyCompat.js";
 import { PY_INT, pyBigInt, pyFloat, pyFloatRepr, pyInt, pyRepr, pyTypeName } from "../python.js";
 import type { FlagSpec, ParsedArgs } from "./parseArgs.js";
@@ -303,29 +304,74 @@ export function quote(value: string): string {
   return pyRepr(value);
 }
 
+/** The value `--details`'s error shows (the Python CLI's `_DETAILS_EXAMPLE`). */
+const DETAILS_EXAMPLE = `'{"location": {"lat": 35.68, "lon": 139.76}}'`;
+
 /**
- * Parse `--details`, a JSON *object*.
+ * Parse a JSON *object* option — `--details` by default, `list --filters`
+ * too — or `undefined` when it is blank.
  *
- * Port of `_parse_details`. Blank means unset rather than a usage error,
- * so `--details "$MAYBE_EMPTY"` behaves.
+ * Port of the Python CLI's `_parse_json_object`, its one parser for every
+ * JSON-object flag. Blank means unset rather than a usage error, so
+ * `--details "$MAYBE_EMPTY"` behaves. The text is read as `json.loads`
+ * reads it ({@link parseJsonLossless}), so a malformed value is refused in
+ * its words (`Expecting value: line 1 column 7 (char 6)`). `NaN` and the
+ * infinities are JSON to `json.loads`; Python refuses them only when the
+ * request is encoded, as {@link refuseNonFinite} does.
+ *
+ * @param flag The flag named in the error.
+ * @param example A valid value, shown after `flag` in the error.
+ * @throws CliUsageError (exit 2) if the text is not JSON, or is JSON but
+ *   not an object.
  */
-export function parseDetails(raw: string | undefined): Record<string, unknown> | undefined {
+export function parseJsonObject(
+  raw: string | undefined,
+  flag = "--details",
+  example = DETAILS_EXAMPLE,
+): Record<string, unknown> | undefined {
   if (raw === undefined || !raw.trim()) return undefined;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = parseJsonLossless(raw);
   } catch (e) {
-    throw new CliUsageError(
-      `Invalid JSON for --details: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    if (!(e instanceof JsonDecodeError)) throw e;
+    throw new CliUsageError(`Invalid JSON for ${flag}: ${e.message}`);
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new CliUsageError(
-      `--details must be a JSON object, got ${pyTypeName(parsed)}. ` +
-        `Example: --details '{"location": {"lat": 35.68, "lon": 139.76}}'`,
-    );
+    throw new CliUsageError(`${flag} must be a JSON object, got ${pyTypeName(parsed)}. Example: ${flag} ${example}`);
   }
   return parsed as Record<string, unknown>;
+}
+
+/** The first NaN or ±Infinity in `value`, in the order a request body lists it. */
+function firstNonFinite(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? undefined : value;
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const items = Array.isArray(value) ? value : Object.keys(record).map((k) => record[k]);
+  for (const item of items) {
+    const found = firstNonFinite(item);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Refuse payloads that hold a NaN or ±Infinity — which `json.loads` reads,
+ * `1e400` included — as the Python CLI's httpx refuses to encode them
+ * (`allow_nan=False`), rather than send them as the `null` `JSON.stringify`
+ * would make of them. The message is CPython 3.12's and later's; 3.11
+ * leaves the value off. An integer too long for a double (over 300
+ * digits), which Python would send, is refused the same way: as a JS
+ * number it is Infinity too.
+ *
+ * @throws CliError (exit 1).
+ */
+export function refuseNonFinite(payloads: readonly unknown[]): void {
+  const found = firstNonFinite(payloads);
+  if (found !== undefined) {
+    throw new CliError(`Out of range float values are not JSON compliant: ${pyFloatRepr(found)}`);
+  }
 }
 
 export interface LocationPayload {
@@ -395,13 +441,16 @@ export function buildDetails(
   details: string | undefined,
   location: string | undefined,
 ): Record<string, unknown> | undefined {
-  const parsed = parseDetails(details);
+  const parsed = parseJsonObject(details);
   const loc = parseLocation(location);
-  if (loc === undefined) return parsed;
-  if (parsed && "location" in parsed) {
+  if (loc !== undefined && parsed && "location" in parsed) {
     throw new CliUsageError(
       "--location conflicts with the 'location' key in --details. Use one or the other.",
     );
   }
-  return { ...(parsed ?? {}), location: loc };
+  // A NaN or infinity the Python CLI fails to send (exit 1) is refused
+  // here, after every usage error as there, rather than sent as `null`.
+  // Python refuses it at the request, so a missing context comes first.
+  if (parsed !== undefined) refuseNonFinite([parsed]);
+  return loc === undefined ? parsed : { ...(parsed ?? {}), location: loc };
 }
