@@ -128,6 +128,12 @@ afterEach(() => {
 });
 
 const KEY = "kagura_secret_0123456789";
+/**
+ * The `tools` check the Python CLI 0.44.0 prints after the server's lines
+ * (python-sdk#300) for the fake server's one-tool `tools/list` on a bare
+ * URL: a server below 0.93.0 has no `core` default to name.
+ */
+const TOOLS_LINE_078 = "PASS tools/list on the CLI's MCP URL: 1 tool (no ?profile=)";
 // Windows has no POSIX mode bits and needs privileges for a symlink.
 const onPosixIt = os.platform() === "win32" ? it.skip : it;
 const CONTEXT = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
@@ -265,7 +271,7 @@ describe("kagura-memory doctor", () => {
       "FAIL mcp_url is not HTTPS: http://memory.example.com/mcp — credentials would be sent in the clear",
     );
     expect(h.out.filter((line) => line.startsWith("WARN MCP URL must use HTTPS"))).toEqual([]);
-    expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+    expect(h.out.slice(-3)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0", TOOLS_LINE_078]);
     expect(code).toBe(1);
   });
 
@@ -950,13 +956,20 @@ describe("kagura-memory doctor", () => {
         seen.push(o);
         return makeClient(h.server, o);
       }) as CliDeps["makeClient"];
-      h.server.forcedResponse = new Response('{"detail":"Invalid API key"}', { status: 401 });
+      // REST refuses the OAuth bearer; MCP takes it, so the tools check
+      // (Python 0.44.0, python-sdk#300) passes on the same client.
+      const mcp = h.server.fetch;
+      h.server.fetch = async (input, init) =>
+        String(input).includes("/api/v1/")
+          ? new Response('{"detail":"Invalid API key"}', { status: 401 })
+          : mcp(input, init);
       const code = await runCli(["doctor"], h.deps);
       expect(seen).toEqual([{}]);
-      expect(h.out).toContain(
+      expect(h.out.slice(-2)).toEqual([
         "INFO Could not verify server version over REST with an OAuth profile (expected: REST validates " +
           "API keys, not OAuth bearers; the MCP connection is unaffected).",
-      );
+        TOOLS_LINE_078,
+      ]);
       expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
       expect(code).toBe(0);
     });
@@ -1143,7 +1156,7 @@ describe("kagura-memory doctor", () => {
       const code = await runCli(["doctor"], h.deps);
       expect(h.out).toContain("INFO no mcp_url configured; the default is used");
       expect(h.out.filter((line) => /mcp_url is/.test(line))).toEqual([]);
-      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(h.out.slice(-3)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0", TOOLS_LINE_078]);
       expect(code).toBe(0);
     });
 
@@ -1176,7 +1189,7 @@ describe("kagura-memory doctor", () => {
       const code = await runCli(["doctor", "--profile", "missing"], h.deps);
       expect(h.out.join("\n")).not.toContain("no profile named 'missing'");
       expect(h.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
-      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(h.out.slice(-3)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0", TOOLS_LINE_078]);
       expect(code).toBe(0);
     });
 
@@ -1200,14 +1213,15 @@ describe("kagura-memory doctor", () => {
         new KaguraClient({ ...o, fetch: h.server.fetch })) as CliDeps["makeClient"];
       const { checks } = await serverChecks(h);
       expect(checks.map((c) => c.message)).toEqual(["Server reachable", "Version: 0.78.0"]);
-      expect(h.server.requests.map((r) => r.headers.authorization)).toEqual(["Bearer 123"]);
+      // /system/info, then the tools check's initialize and tools/list.
+      expect(h.server.requests.map((r) => r.headers.authorization)).toEqual(["Bearer 123", "Bearer 123", "Bearer 123"]);
     });
 
-    it("prints the two lines as Python does", async () => {
+    it("prints the two lines as Python does, then the tools check", async () => {
       const h = harness();
       h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version: "0.78.0" };
       await runCli(["doctor"], h.deps);
-      expect(h.out.slice(-2)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0"]);
+      expect(h.out.slice(-3)).toEqual(["PASS Server reachable", "PASS Version: 0.78.0", TOOLS_LINE_078]);
     });
   });
 
@@ -1219,6 +1233,206 @@ describe("kagura-memory doctor", () => {
       expect(Object.keys(check)).toEqual(["section", "status", "message", "details"]);
       expect(typeof check.details).toBe("object");
     }
+  });
+});
+
+// Python 0.44.0's `tools` check (python-sdk#300): `tools/list` on the CLI's
+// MCP URL, after the server's lines. Every expected message and details
+// object was recorded from Python's `_check_tool_listing` given the same
+// URL, server version and `tools/list` reply (or error).
+describe("doctor's tools check (#83)", () => {
+  const INFO_PATH = "/api/v1/system/info";
+  const BASE = "https://memory.example.com/mcp/w/ws";
+
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    process.chdir(sandbox); // no .mcp.json of the repo's own in the way of the exit code
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  /**
+   * doctor on `url` (the configured key's URL, which the client posts to),
+   * the server at `version`, `tools/list` answering `listing`: tools, an
+   * error object, or a Response.
+   */
+  function tooling(url: string, version: string, listing: unknown[] | Response | Error, key = "kagura_k") {
+    const h = harness({ api_key: key, mcp_url: url });
+    h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version };
+    const served = h.server.fetch;
+    const seen: string[] = [];
+    h.deps.makeClient = ((o: KaguraClientOptions) =>
+      new KaguraClient({
+        ...o,
+        apiKey: key,
+        mcpUrl: url,
+        fetch: async (input, init) => {
+          const body = typeof init?.body === "string" ? (JSON.parse(init.body) as { method?: string; id?: unknown }) : {};
+          if (body.method !== "tools/list") return served(input, init);
+          seen.push(String(input));
+          if (listing instanceof Error) throw listing;
+          if (listing instanceof Response) return listing;
+          return Response.json({ jsonrpc: "2.0", id: body.id, result: { tools: listing } });
+        },
+      })) as CliDeps["makeClient"];
+    return { h, seen };
+  }
+
+  async function toolsChecks(h: Harness) {
+    const code = await runCli(["doctor", "--json"], h.deps);
+    const report = JSON.parse(h.out.join("\n")) as {
+      checks: { section: string; status: string; message: string; details: unknown }[];
+      sections: Record<string, string>;
+    };
+    return {
+      code,
+      last: report.checks.at(-1),
+      tools: report.checks.filter((c) => c.section === "tools"),
+      section: report.sections.tools,
+    };
+  }
+
+  const tools = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `t${i}` }));
+
+  it.each<[string, string, number, string, Record<string, unknown>]>([
+    [BASE, "0.143.0", 21, "21 tools (profile core (default))", { profile: "core (default)" }],
+    [BASE, "0.143.0", 1, "1 tool (profile core (default))", { profile: "core (default)" }],
+    // No core default to name below 0.93.0, nor for a version that does not parse.
+    [BASE, "0.92.0", 3, "3 tools (no ?profile=)", { profile: "(no ?profile=)" }],
+    [BASE, "main-abc123", 3, "3 tools (no ?profile=)", { profile: "(no ?profile=)" }],
+    [`${BASE}?profile=full`, "0.143.0", 72, "72 tools (profile full)", { profile: "full" }],
+    [
+      `${BASE}?add_tools=explore,list_edges`,
+      "0.143.0",
+      23,
+      "23 tools (profile core (default) + add_tools explore, list_edges)",
+      { profile: "core (default)", add_tools: ["explore", "list_edges"] },
+    ],
+    [
+      `${BASE}?profile=core&add_tools=explore`,
+      "0.143.0",
+      22,
+      "22 tools (profile core + add_tools explore)",
+      { profile: "core", add_tools: ["explore"] },
+    ],
+    [`${BASE}?tools=recall,remember`, "0.143.0", 2, "2 tools (tools allowlist recall,remember)", { tools: "recall,remember" }],
+    // The first value wins, as the server reads it; tools beats the other two.
+    [`${BASE}?tools=recall&tools=x&add_tools=explore&profile=full`, "0.143.0", 1, "1 tool (tools allowlist recall)", { tools: "recall" }],
+  ])("%s on %s with %i tools: PASS … %s", async (url, version, count, shown, view) => {
+    const { h, seen } = tooling(url, version, tools(count));
+    const { code, last, section } = await toolsChecks(h);
+    expect(last).toEqual({
+      section: "tools",
+      status: "pass",
+      message: `tools/list on the CLI's MCP URL: ${shown}`,
+      details: { mcp_url: url, ...view, tool_count: count },
+    });
+    expect(section).toBe("pass");
+    expect(seen).toEqual([url]);
+    expect(code).toBe(0);
+  });
+
+  it("prints the line last, after the server's two", async () => {
+    const { h } = tooling(BASE, "0.143.0", tools(21));
+    expect(await runCli(["doctor"], h.deps)).toBe(0);
+    expect(h.out.slice(-3)).toEqual([
+      "PASS Server reachable",
+      "PASS Version: 0.143.0",
+      "PASS tools/list on the CLI's MCP URL: 21 tools (profile core (default))",
+    ]);
+  });
+
+  it("fails the check, and doctor, with the server's refusal of a ?tools= naming no tool", async () => {
+    const refusal = Response.json({
+      jsonrpc: "2.0",
+      id: 1,
+      error: {
+        code: -32602,
+        message:
+          "Invalid params: the 'tools' query parameter matches no known tool. List tools without it to see the valid names.",
+      },
+    });
+    const { h } = tooling(`${BASE}?tools=`, "0.143.0", refusal);
+    const { code, last } = await toolsChecks(h);
+    expect(last).toEqual({
+      section: "tools",
+      status: "fail",
+      message:
+        "tools/list on the CLI's MCP URL failed (tools allowlist (empty)): MCP error: Invalid params: the 'tools' " +
+        "query parameter matches no known tool. List tools without it to see the valid names.",
+      details: { mcp_url: `${BASE}?tools=`, tools: "(empty)" },
+    });
+    expect(code).toBe(1);
+  });
+
+  it("fails the check for a blank ?profile=, shown as (empty)", async () => {
+    const { h } = tooling(`${BASE}?profile=`, "0.143.0", new Response("oops", { status: 500 }));
+    const { code, last } = await toolsChecks(h);
+    expect(last).toEqual({
+      section: "tools",
+      status: "fail",
+      message: "tools/list on the CLI's MCP URL failed (profile (empty)): HTTP 500",
+      details: { mcp_url: `${BASE}?profile=`, profile: "(empty)" },
+    });
+    expect(code).toBe(1);
+  });
+
+  it("fails the check, never doctor, when tools/list throws something no Kagura error wraps", async () => {
+    const h = harness({ api_key: "kagura_k", mcp_url: BASE });
+    h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version: "0.143.0" };
+    const make = h.deps.makeClient;
+    h.deps.makeClient = ((o: KaguraClientOptions) => {
+      const client = make(o);
+      client.getToolDefinitions = async () => {
+        throw new TypeError("tools is not iterable");
+      };
+      return client;
+    }) as CliDeps["makeClient"];
+    const { code, last } = await toolsChecks(h);
+    expect(last).toMatchObject({
+      section: "tools",
+      status: "fail",
+      message: "tools/list on the CLI's MCP URL failed (profile core (default)): tools is not iterable",
+    });
+    expect(code).toBe(1);
+  });
+
+  it("adds the bearer-routing hint to a 401 for a configured key without the kagura_ prefix", async () => {
+    const denied = new Response('{"detail":"Invalid API key"}', { status: 401 });
+    const { h } = tooling(BASE, "0.143.0", denied, "not-a-kagura-key");
+    const { last } = await toolsChecks(h);
+    expect(last).toMatchObject({
+      section: "tools",
+      status: "fail",
+      message:
+        "tools/list on the CLI's MCP URL failed (profile core (default)): Authentication failed. Check your API key. " +
+        "This value does not look like a Kagura API key (kagura_…); the server routes bearer tokens by shape, so " +
+        "an OAuth token passed as an API key is a 401.",
+    });
+    expect(JSON.stringify(last)).not.toContain("not-a-kagura-key");
+
+    const prefixed = tooling(BASE, "0.143.0", new Response('{"detail":"Invalid API key"}', { status: 401 }));
+    const { last: plain } = await toolsChecks(prefixed.h);
+    expect(plain!.message).toBe(
+      "tools/list on the CLI's MCP URL failed (profile core (default)): Authentication failed. Check your API key.",
+    );
+  });
+
+  it("is skipped when the server is below the SDK's minimum, as Python skips it", async () => {
+    const { h, seen } = tooling(BASE, "0.74.0", tools(3));
+    const { tools: checks } = await toolsChecks(h);
+    expect(checks).toEqual([]);
+    expect(seen).toEqual([]);
+  });
+
+  it("is skipped when the server cannot be reached", async () => {
+    const { h, seen } = tooling(BASE, "0.143.0", tools(3));
+    h.server.forcedResponse = new Response("down", { status: 503 });
+    const { tools: checks } = await toolsChecks(h);
+    expect(checks).toEqual([]);
+    expect(seen).toEqual([]);
   });
 });
 
@@ -1703,7 +1917,7 @@ describe("kagura-memory setup claude", () => {
       "--profile TEXT OAuth profile (from `kagura auth login`) for the Python CLI's kagura-mcp entry, " +
         "which this port cannot write: refused",
     );
-    expect(text).toMatch(/--tool-profile NAME\s+.*server v0\.73\.0\+.*'full' and 'core'/);
+    expect(text).toMatch(/--tool-profile NAME\s+.*server v0\.73\.0\+.*0\.93\.0\+ lists 'core'.*'full' lists every tool/);
     for (const flag of INERT) {
       expect(text).toMatch(new RegExp(`${flag}\\s+Accepted for compatibility; this port ` + "(installs no|never prompts)"));
     }
@@ -1772,10 +1986,10 @@ describe("setup claude --guardrails and --tool-profile", () => {
     },
   );
 
-  it.each(["", "  "])("rejects --tool-profile %j with exit 2, as Python does", async (value) => {
+  it.each(["", "  "])("rejects --tool-profile %j with exit 2, in Python 0.44.0's words", async (value) => {
     const h = harness({});
     expect(await runCli(claude(`--tool-profile=${value}`), h.deps)).toBe(2);
-    expect(h.err).toContain("Error: Invalid value for '--tool-profile': must not be empty");
+    expect(h.err).toContain("Error: Invalid value for '--tool-profile': tool_profile must not be empty");
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 
@@ -1792,6 +2006,149 @@ describe("setup claude --guardrails and --tool-profile", () => {
       h.deps,
     );
     expect(entryUrl()).toBe("https://x.test/mcp?tools=recall&profile=core");
+  });
+});
+
+// Python 0.43.0's --add-tools / --context (python-sdk#300; memory-cloud
+// v0.129.0 / v0.114.0). Neither CLI's `setup claude` has a --dry-run: the
+// entry each writes is compared instead, recorded from the Python SDK
+// 0.44.0's `_static_token_entry(token, mcp_url_with_query(…))` for the
+// same flags.
+describe("setup claude --add-tools and --context (#83)", () => {
+  const mcpJson = () => path.join(sandbox, ".mcp.json");
+  const entry = () => readJson(mcpJson()).mcpServers["kagura-memory"];
+  const notesOf = (h: Harness): string[] => JSON.parse(h.out.join("\n")).notes as string[];
+
+  it("writes the entry the Python CLI writes for --add-tools explore --context UUID", async () => {
+    const h = harness({});
+    const argv = claude("--mcp-url", "https://x.test/mcp", "--add-tools", "explore", "--context", `{${CONTEXT.toUpperCase()}}`);
+    expect(await runCli(argv, h.deps)).toBe(0);
+    expect(entry()).toEqual({
+      type: "http",
+      url: `https://x.test/mcp?add_tools=explore&context=${CONTEXT}`,
+      headers: { Authorization: `Bearer ${KEY}` },
+    });
+    expect(JSON.parse(h.out.join("\n")).mcp_url).toBe(`https://x.test/mcp?add_tools=explore&context=${CONTEXT}`);
+    // .kagura.json keeps the URL as given: the query is the entry's.
+    expect(readJson(path.join(sandbox, ".kagura.json")).mcp_url).toBe("https://x.test/mcp");
+  });
+
+  it("orders the four keys as Python does, and sends them in the user-scope entry too", async () => {
+    const h = harness({}, { onPath: { claude: "/usr/bin/claude" } });
+    const argv = claude(
+      "--scope", "user",
+      "--mcp-url", "https://x.test/mcp?add_tools=old&keep=1",
+      "--guardrails", "off",
+      "--tool-profile", "core",
+      "--add-tools", "explore",
+      "--add-tools", "list_edges,explore",
+      "--context", CONTEXT,
+    );
+    expect(await runCli(argv, h.deps)).toBe(0);
+    const url = `https://x.test/mcp?keep=1&guardrails=off&profile=core&add_tools=explore,list_edges&context=${CONTEXT}`;
+    const added = h.runs.find((r) => r[2] === "add-json")!;
+    expect(JSON.parse(added.at(-1)!)).toEqual({
+      type: "http",
+      url,
+      headers: { Authorization: "Bearer ${KAGURA_MCP_API_KEY}" },
+    });
+  });
+
+  // Recorded from the Python CLI 0.44.0 (exit 2 each).
+  it.each([
+    [["--context", "nope"], "Error: Invalid value for '--context': --context must be a UUID, got 'nope'"],
+    [["--context="], "Error: Invalid value for '--context': --context must be a UUID, got ''"],
+    [["--add-tools="], "Error: Invalid value for '--add-tools': must name at least one tool"],
+    [["--add-tools", " , "], "Error: Invalid value for '--add-tools': must name at least one tool"],
+    [["--add-tools=-x"], "Error: Invalid value for '--add-tools': add_tools names cannot start with '-': '-x'"],
+    [["--add-tools", "a,-b"], "Error: Invalid value for '--add-tools': add_tools names cannot start with '-': '-b'"],
+    [
+      ["--add-tools", Array.from({ length: 101 }, (_, i) => `t${i}`).join(",")],
+      "Error: Invalid value for '--add-tools': add_tools accepts at most 100 tool names, got 101",
+    ],
+    [["--tool-profile=-x"], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
+  ])("refuses %j with exit 2, writing nothing", async (extra, message) => {
+    const h = harness({});
+    expect(await runCli(claude(...extra), h.deps)).toBe(2);
+    expect(h.err).toContain(message);
+    expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
+    expect(fs.existsSync(mcpJson())).toBe(false);
+  });
+
+  it("notes the --add-tools and --context a re-run leaves out, as Python's _dropped_query_flags does", async () => {
+    const first = harness({});
+    await runCli(claude("--mcp-url", "https://x.test/mcp", "--add-tools", "explore", "--context", CONTEXT), first.deps);
+    const second = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp"), second.deps)).toBe(0);
+    expect(notesOf(second)).toContain(
+      `Note: the previous project-scope entry also had --add-tools explore and --context ${CONTEXT}, which this ` +
+        "run left out; re-run with them to keep them.",
+    );
+  });
+
+  it("adds up a stdio entry's repeated --add-tools, as the proxy reads them", async () => {
+    fs.writeFileSync(
+      mcpJson(),
+      JSON.stringify({
+        mcpServers: {
+          "kagura-memory": {
+            command: "kagura-mcp",
+            args: ["--profile", "d", "--add-tools", "a", "--add-tools=b", `--context=${CONTEXT}`],
+          },
+        },
+      }),
+    );
+    const h = harness({});
+    expect(await runCli(claude(), h.deps)).toBe(0);
+    expect(notesOf(h)).toContain(
+      `Note: the previous project-scope entry also had --add-tools a,b and --context ${CONTEXT}, which this run ` +
+        "left out; re-run with them to keep them.",
+    );
+  });
+
+  it("reads an http entry's query as the server does: blank values are no flag, the rest trimmed", async () => {
+    fs.writeFileSync(
+      mcpJson(),
+      JSON.stringify({
+        mcpServers: {
+          "kagura-memory": {
+            type: "http",
+            url: "https://x.test/mcp?add_tools=%20,&context=%20&guardrails=+off+&profile=+core",
+            headers: { Authorization: "Bearer k" },
+          },
+        },
+      }),
+    );
+    const h = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp"), h.deps)).toBe(0);
+    // Python 0.44.0: ['--guardrails off', '--tool-profile core']
+    expect(notesOf(h)).toContain(
+      "Note: the previous project-scope entry also had --guardrails off and --tool-profile core, which this run " +
+        "left out; re-run with them to keep them.",
+    );
+  });
+
+  it("warns that a ?tools= allowlist wins over --tool-profile and --add-tools", async () => {
+    const h = harness({});
+    const argv = claude("--mcp-url", "https://x.test/mcp?tools=recall", "--tool-profile", "core", "--add-tools", "explore");
+    expect(await runCli(argv, h.deps)).toBe(0);
+    expect(notesOf(h)).toContain(
+      "Warning: the MCP URL has a ?tools= allowlist, which the server applies instead of --tool-profile core " +
+        "and --add-tools explore.",
+    );
+    expect(entry().url).toBe("https://x.test/mcp?tools=recall&profile=core&add_tools=explore");
+
+    const only = harness({});
+    await runCli(claude("--mcp-url", "https://x.test/mcp?tools=recall", "--add-tools", "explore"), only.deps);
+    expect(notesOf(only)).toContain(
+      "Warning: the MCP URL has a ?tools= allowlist, which the server applies instead of --add-tools explore.",
+    );
+  });
+
+  it("keeps the plugin's server_url free of the tool view and the default context", async () => {
+    const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
+    await runCli(claude("--mcp-url", "https://x.test/mcp", "--guardrails", "off", "--add-tools", "explore", "--context", CONTEXT), h.deps);
+    expect(notesOf(h).join("\n")).toContain("server_url = https://x.test/mcp?guardrails=off,");
   });
 });
 

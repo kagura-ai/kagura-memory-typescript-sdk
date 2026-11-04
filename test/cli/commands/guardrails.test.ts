@@ -650,6 +650,43 @@ describe("guardrails digest", () => {
     );
   });
 
+  it("forwards --add-tools as one add_tools value, names joined as the server reads them (#83)", async () => {
+    const h = harness();
+    serveDigest(h, "base text");
+    const argv = [CTX, "--target", "instructions", "--add-tools", "explore", "--add-tools", " list_edges,explore,"];
+    expect(await runCli(["guardrails", "digest", ...argv], h.deps)).toBe(0);
+    expect(h.rest.requests[0]!.url.split("?")[1]).toBe(
+      `context_id=${CTX}&target=instructions&add_tools=explore%2Clist_edges`,
+    );
+  });
+
+  it("refuses --add-tools without --target instructions, in Python 0.44.0's words", async () => {
+    const h = harness();
+    expect(await runCli(["guardrails", "digest", CTX, "--add-tools", "explore"], h.deps)).toBe(2);
+    expect(h.err).toEqual([
+      "Error: --profile / --tools / --add-tools shape the instructions preview; add --target instructions",
+    ]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
+  // Recorded from the Python CLI 0.44.0: `kagura guardrails digest CTX --target instructions --add-tools …`.
+  it.each([
+    [[""], "Error: Invalid value for '--add-tools': must name at least one tool"],
+    [[" , "], "Error: Invalid value for '--add-tools': must name at least one tool"],
+    [["-x"], "Error: Invalid value for '--add-tools': add_tools names cannot start with '-': '-x'"],
+    [["a,-b"], "Error: Invalid value for '--add-tools': add_tools names cannot start with '-': '-b'"],
+    [
+      [Array.from({ length: 101 }, (_, i) => `t${i}`).join(",")],
+      "Error: Invalid value for '--add-tools': add_tools accepts at most 100 tool names, got 101",
+    ],
+  ])("refuses --add-tools %j with exit 2, before any request", async (values, message) => {
+    const h = harness();
+    const argv = [CTX, "--target", "instructions", ...values.flatMap((v) => [`--add-tools=${v}`])];
+    expect(await runCli(["guardrails", "digest", ...argv], h.deps)).toBe(2);
+    expect(h.err).toEqual([message]);
+    expect(h.rest.requests).toEqual([]);
+  });
+
   it("says so on stderr, and prints nothing, when the context has no tool guardrails", async () => {
     const h = harness();
     serveDigest(h, "");
@@ -662,7 +699,7 @@ describe("guardrails digest", () => {
     const h = harness();
     expect(await runCli(["guardrails", "digest", CTX, flag, "core"], h.deps)).toBe(2);
     expect(h.err).toEqual([
-      "Error: --profile / --tools shape the instructions preview; add --target instructions",
+      "Error: --profile / --tools / --add-tools shape the instructions preview; add --target instructions",
     ]);
     expect(h.rest.requests).toEqual([]);
   });
@@ -681,7 +718,7 @@ describe("guardrails digest", () => {
     const h = harness();
     expect(await runCli(["guardrails", "digest", "--out", "X.md", "--profile", "core"], h.deps)).toBe(2);
     expect(h.err).toEqual([
-      "Error: --profile / --tools shape the instructions preview; add --target instructions",
+      "Error: --profile / --tools / --add-tools shape the instructions preview; add --target instructions",
     ]);
   });
 
