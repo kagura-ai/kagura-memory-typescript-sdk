@@ -194,6 +194,10 @@ afterwards with `kagura-memory context update <context_id> --summary …`.
 As in Python, `resource tokens revoke` prints `Token revoked.`, and
 `resource schema` prints `No schema registered for this resource.` when
 there is none (the route's 404).
+`resource list` (`ResourceClient.listResources()`) also lists a resource
+whose contexts were all deleted while it still holds active tokens, with
+`context_id` and `context_name` null (memory-cloud v0.94.0+), so those
+tokens stay reachable; revoking its last token removes the row.
 
 **Records print as the Python CLI prints them.** `resource tokens
 list|create|update`, `resource list|stats|indexer-status|events|schema`,
