@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import * as fs from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,15 +12,32 @@ import {
   updateProfile,
 } from "../../src/auth/credentials.js";
 
+// The atomic write's rename, failing only on request (#92): a refreshed
+// profile that cannot be saved.
+const failRename = vi.hoisted(() => ({ errors: [] as Error[] }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+      const error = failRename.errors.shift();
+      if (error !== undefined) throw error;
+      actual.renameSync(from, to);
+    },
+  };
+});
+
 let dir: string;
 let credentialsPath: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "kagura-proxy-auth-"));
   credentialsPath = join(dir, "credentials.json");
+  failRename.errors = [];
   resetStateCache();
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  failRename.errors = [];
   resetStateCache();
 });
 
@@ -232,6 +250,60 @@ describe("desktop OAuth", () => {
     });
     await expect(s.auth.getAuthHeader()).rejects.toThrow("server changed");
     expect(s.fetcher).not.toHaveBeenCalled();
+  });
+
+  describe("credentials.json it cannot read or write (#92)", () => {
+    const cannotUpdate = () =>
+      `Cannot update ${credentialsPath}: it is not valid JSON.\n` +
+      "  Fix the file, or move it aside and run: kagura-memory auth login";
+
+    it("refuses an unreadable file at startup, naming it, before any request", () => {
+      writeFileSync(credentialsPath, "not json {{{");
+      let thrown: unknown;
+      try {
+        setup([]);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ProxyError);
+      // An authored message, which carries no token: it reaches MCP/logs.
+      expect(safeError(thrown)).toBe(cannotUpdate());
+      expect(readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
+    });
+
+    it("refuses a file that became unreadable while running, without starting a login", async () => {
+      await stored();
+      const s = setup([Response.json(authorization), Response.json(token)]);
+      expect(await s.auth.getAuthHeader()).toBe("Bearer old-access");
+      writeFileSync(credentialsPath, "not json {{{");
+      // Read as "no profile", it would open the browser for a login whose
+      // result could not be saved.
+      await expect(s.auth.getAuthHeader()).rejects.toThrow(new ProxyError(cannotUpdate()));
+      await expect(s.auth.forceRefresh()).rejects.toThrow(new ProxyError(cannotUpdate()));
+      expect(s.fetcher).not.toHaveBeenCalled();
+      expect(s.open).not.toHaveBeenCalled();
+      expect(readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
+    });
+
+    it("names a refresh it could not save, and keeps working on the token it holds", async () => {
+      await stored();
+      const s = setup([Response.json(token)]);
+      failRename.errors = [Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" })];
+      const error = await s.auth.forceRefresh().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ProxyError);
+      expect(safeError(error)).toBe(
+        `Refreshed profile 'desktop', but could not save it to ${credentialsPath}: EROFS: read-only file system\n` +
+          "  The refresh used up the refresh token on file, so the profile on file cannot be refreshed again.\n" +
+          "  Fix the cause, then run: kagura-memory auth login",
+      );
+      expect(safeError(error)).not.toContain("private-");
+      // The file still holds the revoked pair; the proxy reloads it per
+      // request, and must keep the rotated one it holds instead.
+      expect(loadCredentialsFile(credentialsPath).profiles.desktop?.accessToken).toBe("old-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(s.fetcher).toHaveBeenCalledOnce();
+      expect(s.open).not.toHaveBeenCalled();
+    });
   });
 
   it("does not retain a profile removed by CLI logout", async () => {
