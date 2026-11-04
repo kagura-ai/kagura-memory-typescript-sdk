@@ -111,9 +111,12 @@ export async function findContextByName(name: string, listContexts: ListContexts
  * The Python CLI reads the first page in its connection check, before it
  * looks at the value; this port reads it only for a value it looks up, so
  * a dashed UUID or no value keeps `setup claude` off the network. The
- * outcome is the same: a first page cannot match a blank value or one
- * longer than any context name, and a dashed UUID matched there is
- * returned as given either way.
+ * outcome is the same for a blank value or one longer than any context
+ * name, which no row can match, and for a dashed UUID that is a row's id,
+ * returned as given either way. It differs for a dashed UUID that is a
+ * context's NAME (the server's `^[a-z0-9_-]+$` allows a lowercase one):
+ * Python takes that row from its first page and writes the row's id; this
+ * port uses the value as the id it is spelled as.
  *
  * @throws whatever `firstPage` or `listContexts` throws, and
  *   KaguraResponseError from {@link findContextByName}.
