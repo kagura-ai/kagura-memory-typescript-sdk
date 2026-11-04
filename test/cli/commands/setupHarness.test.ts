@@ -2833,6 +2833,9 @@ describe("the tool view on every harness (#83)", () => {
     ],
     [["--tool-profile=-x"], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
     [["--tool-profile="], "Error: Invalid value for '--tool-profile': tool_profile must not be empty"],
+    // Trimmed first, then checked (Python's normalize_tool_profile).
+    [["--tool-profile=  "], "Error: Invalid value for '--tool-profile': tool_profile must not be empty"],
+    [["--tool-profile= -x "], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
   ])("refuses %j with exit 2 on every harness, running nothing", async (extra, message) => {
     for (const name of ["codex", "hermes", "openclaw"]) {
       const h = harness({ onPath: { codex: "/usr/bin/codex", openclaw: "/usr/bin/openclaw" } });
@@ -2840,6 +2843,13 @@ describe("the tool view on every harness (#83)", () => {
       expect(h.err).toContain(message);
       expect(h.runs).toEqual([]);
     }
+  });
+
+  // Python 0.44.0's dry run writes `…/mcp?profile=core` on all three.
+  it.each(["codex", "hermes", "openclaw"])("%s writes a padded --tool-profile trimmed", async (name) => {
+    const h = harness({});
+    expect(await runCli(setup(name, "--tool-profile", " core ", "-y", "--dry-run"), h.deps)).toBe(0);
+    expect(report(h).mcp_url).toBe(`${MCP_URL}?profile=core`);
   });
 
   it.each(["codex", "hermes", "openclaw"])("%s documents --tool-profile and --add-tools in Python's words", async (name) => {
