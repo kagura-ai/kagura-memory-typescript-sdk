@@ -425,9 +425,16 @@ result with `KaguraResponseError`, all client-side.
 exact name with `name_contains` (0.73.0) and the `cursor` (0.82.0) when
 the first page says `has_more`, which only 0.82.0 and later send, so both
 go only to servers that declare them. Before 0.82.0 the first page is
-every context, and no second request is sent. A dashed UUID or no context
-sends no request, and neither does `setup codex|hermes|openclaw
---dry-run`.
+every context, and no second request is sent. A dashed UUID checks the
+first page too: a matching ID or exact name wins, otherwise it is used
+as an ID without further pages (#116). No context sends no request, and
+neither does `setup codex|hermes|openclaw --dry-run`.
+Claude setup validates the resolved ID against ASCII letters, digits,
+hyphens and underscores before writing. UUID normalization accepts Unicode
+decimal digits as Python does, including non-BMP mathematical digits;
+the digit repertoire follows Node's ICU Unicode version, which can differ
+from Python's. Harness UUID normalization and dry-run placeholders remain
+separate from Claude's resolved-ID validation.
 
 **Auth**
 ([#81](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/81),

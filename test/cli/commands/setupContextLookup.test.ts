@@ -26,6 +26,7 @@ import {
   findContextByName,
   lookupContext,
   unknownContextWarning,
+  validateContextId,
   type ListContexts,
 } from "../../../src/cli/commands/contextLookup.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
@@ -34,8 +35,28 @@ import type { KaguraConfig } from "../../../src/config.js";
 import { KaguraResponseError } from "../../../src/errors.js";
 import { mcpUrlWithQuery } from "../../../src/http.js";
 import type { ListContextsResponse } from "../../../src/models.js";
-import { isCanonicalUuid, pyStrip, uuidOrNone } from "../../../src/pyCompat.js";
+import { isCanonicalUuid, normalizeUuid, pyStrip, uuidOrNone } from "../../../src/pyCompat.js";
 import { FakeServer } from "../../fakeServer.js";
+
+// Recorded from Python SDK0.44.0 _validate_context_id / _lookup_context
+// and uuid.UUID, independently of setup's progress/report presentation.
+const CONTEXT_CASES: Array<{ value: string; normalized: string | null; code: number; stdout: string; stderr: string; unknown: boolean;
+  setup_code?: number; setup_stdout?: string; setup_stderr?: string }> =
+  JSON.parse(fs.readFileSync(new URL("./context116.json", import.meta.url), "utf8"));
+
+describe("Python context/UUID oracle (#116)", () => {
+  it.each(CONTEXT_CASES)("$value", (c) => {
+    expect(uuidOrNone(c.value)).toBe(c.normalized);
+    if (c.normalized !== null) expect(normalizeUuid(c.value, "context_id")).toBe(c.normalized);
+    try {
+      validateContextId(c.value);
+      expect(c.code).toBe(0);
+    } catch (e) {
+      expect(c.code).toBe(1);
+      expect(`Error: ${(e as Error).message}\n`).toBe(c.stderr);
+    }
+  });
+});
 
 /** What a scripted reply can be: a `list_contexts` body, an HTTP reply, or a fetch that throws. */
 type Reply = Record<string, unknown> | Response | Error;
@@ -226,26 +247,36 @@ describe("lookupContext (Python's _lookup_context)", () => {
     expect(fake.calls).toEqual([{}]);
   });
 
-  it.each([UUID, UUID.toUpperCase(), ` ${UUID}\n`])("sends no request for a dashed UUID (%j)", async (chosen) => {
+  it.each([UUID, UUID.toUpperCase(), ` ${UUID}\n`])("checks only the first page for a dashed UUID (%j)", async (chosen) => {
     const fake = new PagedContexts(NAMES);
     expect(await lookupContext(chosen, firstPage(fake), fake.listContexts)).toEqual({
       value: chosen.trim(),
       context: null,
       unknown: false,
     });
-    expect(fake.calls).toEqual([]);
+    expect(fake.calls).toEqual([{}]);
   });
 
-  it("takes a dashed UUID as an id even when a context bears it as its name (no request)", async () => {
-    // Python's first page would take the row named UUID and give its id;
-    // here a dashed UUID stays off the network (#90), so it is the id it spells.
+  it("resolves a UUID-shaped name on the first page before treating it as an id", async () => {
     const fake = new PagedContexts(["recent-a", UUID]);
     expect(await lookupContext(UUID, firstPage(fake), fake.listContexts)).toEqual({
       value: UUID,
-      context: null,
+      context: { id: PagedContexts.idOf(1), name: UUID },
       unknown: false,
     });
-    expect(fake.calls).toEqual([]);
+    expect(fake.calls).toEqual([{}]);
+  });
+
+  it("keeps first-page row order when one row's name equals another row's ID", async () => {
+    const rows = [{ id: "first-id", name: UUID }, { id: UUID, name: "second" }];
+    const fake = new PagedContexts([], 2, [{ contexts: rows, has_more: false }]);
+    expect((await lookupContext(UUID, firstPage(fake), fake.listContexts)).context).toEqual(rows[0]);
+  });
+
+  it("does not search later pages for a canonical UUID-shaped name", async () => {
+    const fake = new PagedContexts(["recent-a", "recent-b", UUID]);
+    expect((await lookupContext(UUID, firstPage(fake), fake.listContexts)).context).toBeNull();
+    expect(fake.calls).toEqual([{}]);
   });
 
   it("looks another UUID spelling up as a name first", async () => {
@@ -490,6 +521,39 @@ const warning = (name: string) =>
   `  Warning: no context named '${name}' is visible to this credential; using it as a raw context id.`;
 
 describe("setup claude resolves a context name across every list_contexts page (#90)", () => {
+  it.each(CONTEXT_CASES.filter(c => c.code === 1))("refuses $value before writing or running anything", async (c) => {
+    const fake = new PagedContexts([]);
+    const run = await runSetup(claude("-c", c.value), fake);
+    // Full Python CLI recordings, with only connection/entry planning mocked.
+    expect(run.code).toBe(c.setup_code);
+    expect(run.out.map(line => `${line}\n`).join("")).toBe(c.setup_stdout);
+    expect(run.err.map(line => `${line}\n`).join("")).toBe(c.setup_stderr);
+    expect(written()).toEqual([]);
+    expect(run.runs).toEqual([]);
+  });
+
+  it("writes the resolved ID for a first-page UUID-shaped context name", async () => {
+    const fake = new PagedContexts([UUID]);
+    const run = await runSetup(claude("-c", UUID), fake);
+    expect(run.code).toBe(0);
+    expect(kaguraJson().context_id).toBe(PagedContexts.idOf(0));
+    expect(fake.calls).toEqual([{}]);
+  });
+
+  it("validates the resolved row ID, not just the supplied name", async () => {
+    const fake = new PagedContexts([], 2, [{ contexts: [{ id: "bad.id", name: "valid-name" }] }]);
+    const run = await runSetup(claude("-c", "valid-name"), fake);
+    expect(run.code).toBe(1);
+    expect(run.err).toEqual(["Error: Invalid context_id: 'bad.id' — must be alphanumeric, hyphens, or underscores only"]);
+    expect(written()).toEqual([]);
+  });
+
+  it("accepts a name containing punctuation when it resolves to a valid ID", async () => {
+    const fake = new PagedContexts(["team.prod"]);
+    const run = await runSetup(claude("-c", "team.prod"), fake);
+    expect(run.code).toBe(0);
+    expect(kaguraJson().context_id).toBe(PagedContexts.idOf(0));
+  });
   it("finds a name on page two and writes its id, on the setup key and URL", async () => {
     const fake = new PagedContexts(NAMES);
     const run = await runSetup(claude("-c", "far"), fake);
@@ -510,8 +574,8 @@ describe("setup claude resolves a context name across every list_contexts page (
     const run = await runSetup(["setup", "claude", "--help"], new PagedContexts([]));
     expect(run.code).toBe(0);
     expect(run.out.join("\n").replace(/\s+/g, " ")).toContain(
-      "A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) other than a dashed UUID is looked up by " +
-        "exact name on every list_contexts page, and its id is written; a dashed UUID or no context sends no request.",
+      "A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) is matched against IDs and exact names on " +
+        "the first list_contexts page. A dashed UUID not found there is used as an ID; other names are searched on every page.",
     );
   });
 
@@ -581,16 +645,15 @@ describe("setup claude resolves a context name across every list_contexts page (
   it.each([
     ["-c", ["-c", UUID], UUID],
     ["-c in upper case", ["-c", UUID.toUpperCase()], UUID.toUpperCase()],
-    // Trimmed, as Python's _lookup_context trims it, and still no request.
+    // Trimmed, as Python's _lookup_context trims it.
     ["-c padded", ["-c", ` ${UUID.toUpperCase()}\t\n`], UUID.toUpperCase()],
     ["no context", [], null],
-  ])("sends no request and builds no client for %s", async (_label, extra, written) => {
+  ])("checks the first page for %s when a context is given", async (_label, extra, written) => {
     const fake = new PagedContexts(NAMES);
     const run = await runSetup(claude(...extra), fake);
     expect(run.code).toBe(0);
-    expect(run.clients).toEqual([]);
-    expect(run.server.requests).toEqual([]);
-    expect(fake.calls).toEqual([]);
+    expect(run.clients).toEqual(written === null ? [] : [{ apiKey: KEY, mcpUrl: MCP_URL }]);
+    expect(fake.calls).toEqual(written === null ? [] : [{}]);
     expect(report(run).context_id).toBe(written);
     expect(kaguraJson().context_id).toBe(written ?? undefined);
   });
@@ -598,7 +661,7 @@ describe("setup claude resolves a context name across every list_contexts page (
   it.each([
     ["in .kagura.json", { file: ` ${UUID}\n` }],
     ["in KAGURA_CONTEXT_ID", { env: UUID.toUpperCase() }],
-  ])("sends no request for a dashed UUID %s either", async (_label, from: { file?: string; env?: string }) => {
+  ])("checks the first page for a dashed UUID %s too", async (_label, from: { file?: string; env?: string }) => {
     if (from.file !== undefined) {
       fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: from.file }));
     }
@@ -606,9 +669,8 @@ describe("setup claude resolves a context name across every list_contexts page (
     const fake = new PagedContexts(NAMES);
     const run = await runSetup(claude(), fake);
     expect(run.code).toBe(0);
-    expect(run.clients).toEqual([]);
-    expect(run.server.requests).toEqual([]);
-    expect(fake.calls).toEqual([]);
+    expect(run.clients).toEqual([{ apiKey: KEY, mcpUrl: MCP_URL }]);
+    expect(fake.calls).toEqual([{}]);
     expect(kaguraJson().context_id).toBe(pyStrip(from.file ?? from.env!));
   });
 
@@ -629,14 +691,14 @@ describe("setup claude resolves a context name across every list_contexts page (
     expect(run.server.requests).toEqual([]);
     expect(written()).toEqual([]);
 
-    // A dashed UUID needs no lookup, so that offline run is as before.
+    // A dashed UUID also checks the first page and must not fall back to another key.
     const offline = await runSetup(
       ["setup", "claude", "--api-key", "  ", "--mcp-url", MCP_URL, "--project-dir", sandbox, "-c", UUID],
       new PagedContexts(NAMES),
     );
-    expect(offline.code).toBe(0);
+    expect(offline.code).toBe(1);
     expect(offline.clients).toEqual([]);
-    expect(kaguraJson().context_id).toBe(UUID);
+    expect(written()).toEqual([]);
   });
 
   it("resolves a name in .kagura.json and KAGURA_CONTEXT_ID, and writes the id", async () => {
@@ -682,7 +744,7 @@ describe("setup claude resolves a context name across every list_contexts page (
       fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ context_id: UUID }));
       const run = await runSetup(claude("-c", ""), new PagedContexts(NAMES));
       expect(run.code).toBe(0);
-      expect(run.clients).toEqual([]);
+      expect(run.clients).toEqual([{ apiKey: KEY, mcpUrl: MCP_URL }]);
       expect(kaguraJson().context_id).toBe(UUID);
     });
   });
@@ -793,6 +855,18 @@ describe("setup claude resolves a context name across every list_contexts page (
 // --- setup codex | openclaw --dry-run ----------------------------------------
 
 describe("a harness dry run shows a UUID not in the dashed form as Python's placeholder (#90)", () => {
+  it.each(CONTEXT_CASES.filter(c => c.normalized !== null && /[^\x00-\x7f]/.test(c.value)))(
+    "normalizes $value in a real harness run and preserves the dry-run placeholder", async (c) => {
+      const real = await runSetup(["setup", "codex", "--mcp-url", MCP_URL, "-c", c.value], new PagedContexts([]));
+      expect(real.code).toBe(0);
+      expect(report(real).context_id).toBe(c.normalized);
+      const dry = await runSetup(["setup", "codex", "--mcp-url", MCP_URL, "-c", c.value, "--dry-run"], new PagedContexts([]));
+      expect(dry.code).toBe(0);
+      expect(report(dry).mcp_url).toContain(`<UUID of context ${c.value}>`);
+      expect(real.server.requests).toEqual([]);
+      expect(dry.server.requests).toEqual([]);
+    },
+  );
   const DASHLESS = "0B5A1C3E8F2D4E6A9C7B1D2E3F4A5B6C";
   const CANONICAL = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
 

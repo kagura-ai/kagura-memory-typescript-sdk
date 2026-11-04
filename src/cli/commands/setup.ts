@@ -63,7 +63,7 @@ import {
 } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
-import { pyRepr, pyTruthy } from "../../python.js";
+import { pyRepr, pyStr, pyTruthy } from "../../python.js";
 import { isUuid, parseUuid } from "../../uuid.js";
 import { examples, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import type { ExecOptions } from "../exec.js";
@@ -73,7 +73,7 @@ import { CliError, CliUsageError, parseAddTools, parseChoice } from "../parse.js
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import type { CliDeps } from "../run.js";
 import { resolveConfig } from "../runClientCommand.js";
-import { dryRunContext, lookupContext, unknownContextWarning, type ContextLookup } from "./contextLookup.js";
+import { dryRunContext, lookupContext, unknownContextWarning, validateContextId, type ContextLookup } from "./contextLookup.js";
 import {
   KEY_ENV_VAR,
   codexTomlBlock,
@@ -723,7 +723,8 @@ function connectionError(e: unknown, server: string): CliError | null {
  * to its id on the setup key and URL — Python's `_select_or_create_context`
  * for a preselected value (python-sdk#309, {@link lookupContext}).
  *
- * No value and a dashed UUID send no request. A value no page matches is
+ * No value sends no request. A dashed UUID checks only the first page.
+ * A value no page matches is
  * still used as given, after Python's stderr warning when it names no
  * context this credential can see. Python's connection check reads the
  * first page and its failures get its hints, or `Connection failed: …`;
@@ -741,6 +742,8 @@ function connectionError(e: unknown, server: string): CliError | null {
 async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<string> {
   // Built on first use, so a value that needs no lookup builds no client.
   let client: KaguraClient | undefined;
+  let checkedConnection = false;
+  let contextCount: unknown = 0;
   const connect = (): KaguraClient => {
     if (client === undefined) {
       if (!input.apiKey.trim()) throw new CliError(NO_API_KEY);
@@ -754,7 +757,10 @@ async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<s
       input.contextId,
       async () => {
         try {
-          return await connect().listContexts();
+          const page = await connect().listContexts();
+          checkedConnection = true;
+          contextCount = Object.prototype.hasOwnProperty.call(page, "count") ? page.count : 0;
+          return page;
         } catch (e) {
           if (e instanceof CliError) throw e;
           throw connectionError(e, input.baseUrl) ?? new CliError(`Connection failed: ${excMessage(e)}`);
@@ -772,13 +778,27 @@ async function resolveClaudeContext(deps: CliDeps, input: SetupInput): Promise<s
       // The lookup's result, or its error, is what setup reports.
     }
   }
-  if (found.context !== null) return String(found.context.id);
-  if (input.contextId !== "" && found.value === "") {
-    throw new CliError(
-      `Invalid context_id: ${pyRepr(found.value)} — must be alphanumeric, hyphens, or underscores only`,
-    );
+  const validateResolved = (id: string): void => {
+    try {
+      validateContextId(id);
+    } catch (e) {
+      // On a validation refusal preserve Python's connection/selection
+      // diagnostics. Successful setup still prints this port's JSON report.
+      if (checkedConnection) {
+        const chosen = found.context === null ? found.value
+          : `${pyStr(found.context.name ?? "?")} (${[...id].slice(0, 8).join("")}...)`;
+        deps.write(`\nVerifying connection...\n  Connected! (${pyStr(contextCount)} contexts available)\n  Using context: ${chosen}`);
+      }
+      throw e;
+    }
+  };
+  if (found.context !== null) {
+    const id = String(found.context.id);
+    validateResolved(id);
+    return id;
   }
   if (found.unknown) deps.writeError(unknownContextWarning(found.value));
+  if (input.contextId !== "") validateResolved(found.value);
   return found.value;
 }
 
@@ -3408,9 +3428,10 @@ const claude: Command = {
     "  --guardrails, --tool-profile, --add-tools or --context, or whose\n" +
     "  --mcp-url lacks the old entry's ?tools= allowlist, drops the earlier\n" +
     "  value, and says so.\n\n" +
-    "  A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) other than a\n" +
-    "  dashed UUID is looked up by exact name on every list_contexts page, and\n" +
-    "  its id is written; a dashed UUID or no context sends no request.\n\n" +
+    "  A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) is matched\n" +
+    "  against IDs and exact names on the first list_contexts page. A dashed\n" +
+    "  UUID not found there is used as an ID; other names are searched on every\n" +
+    "  page. No context sends no request.\n\n" +
     "  This port installs no hooks or slash commands: the Python CLI's flags\n" +
     "  for them, and --no-auto-context, are accepted and change nothing.\n\n" +
     GUARDRAILS_ADVICE +

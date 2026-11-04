@@ -30,6 +30,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   0.44.0 models. `sleep rollback` prints model defaults, preserves exact
   counters, matches Python's confirmation and cancellation behavior, and
   prints the partial rollback summary before exiting with an error (#110).
+### Fixed
+
+- Claude setup validates resolved context IDs before writing and resolves
+  UUID-shaped context names on the first page, following Python 0.44.0.
+  UUID normalization now accepts Unicode decimal digits, including digits
+  outside the BMP, while preserving Python's original length check (#116).
 
 ## [0.15.0] - 2026-11-05
 

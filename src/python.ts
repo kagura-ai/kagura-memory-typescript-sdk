@@ -89,16 +89,19 @@ function digitValue(digit: string): number {
 }
 
 /**
- * The text `int()` and `float()` parse: stripped as they strip it, and
- * every decimal digit past ASCII (Arabic-Indic, full-width, …) read as its
+ * Every decimal digit past ASCII (Arabic-Indic, full-width, …) read as its
  * ASCII digit, as CPython's `_PyUnicode_TransformDecimalAndSpaceToASCII`
- * reads it. Digits follow the Unicode version of Node's ICU, which may
+ * reads it, without stripping whitespace. Digits follow Node's ICU, which may
  * differ from Python's by a release.
  */
-function numberText(text: string): string {
-  return stripNumberSpace(text).replace(DECIMAL_DIGIT_RE, (d) =>
+export function normalizeDecimalDigits(text: string): string {
+  return text.replace(DECIMAL_DIGIT_RE, (d) =>
     d.length === 1 && d <= "9" ? d : String(digitValue(d)),
   );
+}
+
+function numberText(text: string): string {
+  return normalizeDecimalDigits(stripNumberSpace(text));
 }
 
 /**
