@@ -87,7 +87,11 @@ Four ways to authenticate, in resolution order:
    (below) or the Python CLI's `kagura auth login`. Profiles
    (`KAGURA_PROFILE` env or `{ profile: "name" }`) and auto-refresh work
    exactly like the Python SDK; the credentials file is shared between both
-   SDKs.
+   SDKs. Every refresh (a client's, `kagura-memory-mcp`'s, `refresh()`'s,
+   `auth refresh`'s and `auth token`'s) takes one lock on the file and
+   re-reads it first, so processes sharing a profile refresh it once, and a
+   `credentials.json` that exists but cannot be read is never rewritten (see
+   [Refreshing](#refreshing)).
 4. **Config file** — `.kagura.json` in the working directory or home:
 
 ```json
@@ -172,6 +176,10 @@ npx kagura-memory --help
 npx kagura-memory auth login --profile work --read-only
 npx kagura-memory recall "OAuth setup" -c dev -k 10
 npx kagura-memory recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
+npx kagura-memory recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
+npx kagura-memory recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
+# A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
+# retry without the ones it names (every one it sent when it names none), with a note on stderr.
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
 npx kagura-memory measure record <context-id> weight_kg 71.5 --unit kg
 npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
@@ -841,7 +849,15 @@ resolves it, as in Python: `KAGURA_API_KEY`, then the OAuth profile
 is the default), then `.kagura.json`. A selected profile that does not
 exist fails the auth section once, with the resolution's message, and
 with `KAGURA_API_KEY` set an expired or missing profile is no failure, as
-in Python, whose warning is that the key shadows the profile. A resolved
+in Python, whose warning is that the key shadows the profile. A static
+key that does not start with `kagura_` gets Python's auth warning
+(`Unusual API key shape: <first 8>...<last 4>. This value does not look
+like a Kagura API key (kagura_…); the server routes bearer tokens by
+shape, so an OAuth token passed as an API key is a 401.`): from
+memory-cloud v0.119.0 the server looks a `kagura_` bearer up only among
+API keys and any other one only among OAuth tokens, so an OAuth token
+configured as the API key is refused. It is a warning, so the exit code is
+unchanged, and only the redacted preview is printed. A resolved
 MCP URL that is not HTTPS is a warning and the server is not contacted
 (`Server connectivity check skipped because the MCP URL is insecure`),
 whichever source it came from:
@@ -1129,6 +1145,54 @@ Callers holding their own provider can use `KaguraOAuth` directly — its
 `forceRefresh()` is what `refresh()` builds on, including the
 cross-process lock and the "another process already rotated" dedup.
 
+**One refresh path.** A refresh token works once (memory-cloud v0.79.0+,
+kagura-ai/memory-cloud#1686): of two processes presenting the same one, the
+second gets `invalid_grant`. So every refresh — `KaguraOAuth` in a client or
+in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
+`auth token` — takes the lock on `credentials.json` (a sibling
+`credentials.json.lock`), re-reads the profile, and when another process
+already rotated it to a token that has not expired, uses that profile and
+sends nothing; otherwise it refreshes from the refresh token on file and
+saves the result before it releases the lock. (Python 0.44.0 also adopts a
+different token that has expired; this SDK refreshes it instead.) The
+device flow a widening `--scope` falls back to runs after the lock is
+released, since it waits on the user. The Python SDK
+locks the same `credentials.json.lock` with an OS lock, which Node does not
+have, so the two SDKs' locks do not exclude each other: between them only
+the re-read applies. This is client-side and works against every server. As
+in Python SDK 0.44.0 (kagura-ai/kagura-memory-python-sdk#313):
+
+- `auth refresh` says `✓ Profile 'NAME' was already refreshed by another
+  process.` when it found the profile rotated under the lock, and `✓
+  Refreshed profile 'NAME'.` after a refresh of its own, each followed by
+  the `Scope:` and `Expires:` lines; both exit 0. `auth token` prints the
+  token another process refreshed.
+- A `credentials.json` that exists but cannot be read or parsed is refused
+  before any refresh request or write, and left as it is: `KaguraAuthError`
+  `Cannot update <path>: it is not valid JSON.` (or why else it cannot be
+  read), with `Fix the file, or move it aside and run: kagura-memory auth
+  login`. This holds for a refresh (checked under the lock), the save at
+  the end of `login()`, `updateProfile`, `setDefaultProfile` and
+  `deleteProfile`; `kagura-memory-mcp` refuses it at startup and before any
+  login. "Exists" includes a dangling symlink, and a file in a directory
+  this process cannot search. A missing file is still "no profile".
+  `loadCredentialsFile()`, client construction, `refresh()` and the CLI's
+  `auth refresh` / `auth token` read such a file as holding no profile first,
+  as Python's do (`No profile named 'default'.`); the refusal comes when it
+  became unreadable by the time the lock is held.
+- When the server refreshed but the profile cannot be saved (a full disk, a
+  read-only directory), the refresh throws `KaguraAuthError` `Refreshed
+  profile 'NAME', but could not save it to <path>: <reason>`, saying the
+  refresh used up the refresh token on file and to run `kagura-memory auth
+  login` after fixing the cause. The process that refreshed keeps the
+  rotated token in memory (its next refresh sends the new refresh token,
+  until another process saves the profile), so a client stays usable until
+  it expires; `kagura-memory-mcp` goes on serving the request with it and
+  logs the message once. A widening `--scope` whose device-flow grant
+  cannot be saved gives the same kind of error (`Got consent for scope
+  …`), and the grant is kept the same way. `auth refresh` and `auth token`
+  exit 1, and `auth token` prints no token.
+
 ### Error handling
 
 All errors extend `KaguraError`:
@@ -1147,6 +1211,59 @@ try {
 }
 ```
 
+Every error the server reported keeps what it sent. `code` is its error
+code: the MCP envelope's `error` (`payload_too_large`, `capacity_locked`
+…), the REST body's `error` (`FEAT-001`, `CAPACITY-001`, `DB-002` …), the
+OAuth `error` (`invalid_client`, `insufficient_scope` …) or a JSON-RPC
+error's `data.error`; it is `undefined` when the SDK raised the error
+itself or the server named no code (an MCP envelope without `error`,
+whose message still reads `failed (unknown)`). `details` holds the other
+fields as sent (the MCP envelope without `status` / `error` / `message`,
+the REST `details` whole, the JSON-RPC `data` without its `error`, an
+OAuth body without its `error`), `{}` when there are none. A JSON-RPC
+error that `/mcp` answers with HTTP 200 (a `tools/call` whose plumbing
+failed) stays a `KaguraConnectionError` (`MCP error: …`), as in Python,
+and keeps its `data` the same way. **Branch on `code` and the class,
+never on the message**: memory-cloud words its messages for people and
+changes them.
+
+Since memory-cloud v0.78.0 an MCP tool refusal carries `help`, the next
+step, and a tool's server failure `help`, `cause`, `correlation_id`,
+`retryable` and, for a write, `outcome: "unknown"`; since v0.82.0 the
+`/mcp` transport's own JSON-RPC errors (a 503, a failed session) carry
+them too. `KaguraError` reads
+them from `details` as getters, `null` when absent:
+
+| Getter | Envelope field | Meaning |
+|--------|----------------|---------|
+| `help` | `help` | what to do next |
+| `serverCause` | `cause` | why a server failure happened: `timeout`, `service_unavailable` or `internal_error`; `null` on a refusal, which is the caller's to fix |
+| `correlationId` | `correlation_id` | the id the server logged the failure under — quote it in a report |
+| `retryable` | `retryable` | whether repeating the call is safe; `false` for a write whose outcome is unknown |
+| `outcome` | `outcome` | `"unknown"` when a failed write may or may not have been applied: check with the read `help` names before calling it again |
+
+`serverCause` is the Python SDK's `cause` property, renamed because
+JavaScript's `Error.cause` already holds the chained error (the `fetch`
+failure, a parse error); `details.cause` holds the server's value too.
+
+```ts
+import { KaguraCapacityLockedError, KaguraError, KaguraServiceUnavailableError } from "kagura-memory";
+
+try {
+  await client.remember({ contextId, summary: "s", content: "..." });
+} catch (e) {
+  if (e instanceof KaguraCapacityLockedError) {
+    console.log(`over by ${e.overMemories} memories; clean up at ${e.cleanupUrl}`);
+  } else if (e instanceof KaguraServiceUnavailableError) {
+    console.log(`retry in ${e.retryAfter ?? "a few"} s (${e.reason})`);
+  } else if (e instanceof KaguraError && e.code === "payload_too_large") {
+    console.log(`split it: ${e.details.actual} > ${e.details.limit}`);
+  } else if (e instanceof KaguraError && e.outcome === "unknown") {
+    console.log(`may have been saved; ${e.help} (correlation id ${e.correlationId})`);
+  }
+}
+```
+
 Server-side domain errors (`{"status": "error", ...}`) are translated into
 exceptions, so you never need to inspect `result.status`. The class is
 keyed on the error code and the envelope's fields, never on the message:
@@ -1154,12 +1271,51 @@ keyed on the error code and the envelope's fields, never on the message:
 | Class | Raised for | Carries |
 |-------|------------|---------|
 | `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
-| `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+| `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off. From memory-cloud v0.100.0 also a plan that dropped below what the workspace holds: `feature` `"members"` on every workspace route for a member without a seat, `"contexts"` on a content write into a context without a writable slot (`limit` / `current` in `details`) | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`, and `rate_limit_exceeded`, the daily MCP call cap every non-read-only tool checks (`quotaType` `api_mcp_daily`, `resetsAt` the next UTC midnight); REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
+| `KaguraCapacityLockedError` | memory-cloud v0.99.0+: a Free workspace over its capacity — MCP `capacity_locked`, REST 403 `CAPACITY-001` (`details.gate` `"capacity"`). Search and saving are refused until it is cleaned up or re-subscribed; listing, deleting, export and `getUsage` keep working. Neither a quota nor a plan gate, so it extends neither class. A caller outside the locked workspace (a public context) gets every figure `null` | `cleanupUrl`, `memoryCount`, `memoryLimit`, `overMemories`, `usedBytes`, `storageLimitBytes`, `overBytes`, `gate` (`"capacity"`) |
+| `KaguraAuthError` | HTTP 401; and from memory-cloud v0.79.0 an OAuth token that lacks the scope a call needs (HTTP 403 `insufficient_scope`): `memory:read` for the read-only tools, `recall` and `getAgentBootstrap`, `memory:write` for every other tool, so a `kagura-memory auth login --read-only` profile gets it on every write. The message names the scope and the re-login | `code` `"insufficient_scope"`, `details.required_scope` |
+| `KaguraServiceUnavailableError` | any HTTP 503 from `/mcp` or a REST route (the OAuth endpoints keep their own errors): `/mcp`'s `temporarily_unavailable` (the credential could not be verified, v0.82.0+) and its JSON-RPC transport failures (a dependency down or timed out), REST `DB-002` (the database unavailable). A `KaguraConnectionError`, so existing handlers keep catching it | `retryAfter` (the `Retry-After` header, else `data.retry_after_seconds`; `null` on a write whose outcome is unknown), `reason` (REST `details.reason`, else the MCP `cause`, else the code) |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. That includes `getServerInfo`, `checkServerVersion` (as `KaguraClient.get_server_info`), `getEmbeddingStatus`, `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`, which check the body against the Python model and return it as sent. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
-| `KaguraError` | any other code | — |
+| `KaguraError` | any other code — `payload_too_large` among them, a memory over 1 MB on MCP (memory-cloud v0.108.0+; it replaced `quota_exceeded` there, and REST keeps `429 QUOTA-001`): no plan lifts it, so it is no quota | `code`, `details` (`limit` / `actual` for `payload_too_large`) |
+
+The codes the SDK types, by surface:
+
+| Code | Surface | Class | Server |
+|------|---------|-------|--------|
+| `capacity_locked` | MCP | `KaguraCapacityLockedError` | v0.99.0+ |
+| `CAPACITY-001` (`details.gate` `"capacity"`) | REST 403 | `KaguraCapacityLockedError` | v0.99.0+ |
+| `plan_required`, `feature_not_available` | MCP | `KaguraFeatureNotAvailableError` | |
+| `FEAT-001` (`details.feature`; `members` / `contexts` from v0.100.0) | REST 403 | `KaguraFeatureNotAvailableError` | |
+| `quota_exceeded`, `CONNECTOR-001`, `rate_limit_exceeded` | MCP | `KaguraQuotaError` | |
+| `QUOTA-001`, `QUOTA-002`, `CONNECTOR-001` | REST | `KaguraQuotaError` | |
+| `insufficient_scope` | MCP / REST 403 | `KaguraAuthError` | v0.79.0+ |
+| `temporarily_unavailable` | MCP 503 | `KaguraServiceUnavailableError` | v0.82.0+ |
+| `timeout`, `service_unavailable` (JSON-RPC `data.error`) | MCP 503 | `KaguraServiceUnavailableError` | v0.82.0+ |
+| `DB-002` (`details.reason`: `pool_exhausted`, `connection_refused`, `database_error`, `deadlock`) | REST 503 | `KaguraServiceUnavailableError` | v0.104.0+ (`deadlock` v0.105.0) |
+| `payload_too_large` (`limit`, `actual`) | MCP | `KaguraError` | v0.108.0+ |
+| `invalid_request`, `invalid_client`, `invalid_scope` (`device/authorize`) | OAuth | `KaguraAuthError`, `error_description` in the message and `details` | v0.78.0+ |
+
+A gate is read before the code, so a v0.75.0+ server's `gate` decides the
+class whatever the code. `kagura-memory` commands print, under the error
+message, the reset time, the required plan, the capacity lock's cleanup
+page (unless `help` already names it), a 503's retry window and the
+server's `help` and correlation id, as the Python CLI does.
+
+`authorizeDevice` turns an RFC 6749 refusal from `device/authorize`
+(memory-cloud v0.78.0+) into a `KaguraAuthError` whose `code` is the OAuth
+`error` and whose message carries the `error_description`. Only an RFC
+6749 code or a body with an `error_description` reads so: any other error
+body — memory-cloud's REST `HTTP-404` from a server URL with the wrong
+path — keeps the generic `Device authorization failed (HTTP 404): …`
+message and its "Verify the server URL" hint, with the body's code as
+`code` (Python 0.44.0 drops that hint). `pollForToken` keeps the OAuth
+`error` of a refusal it does not know as `code` too. `pollForToken` treats `temporarily_unavailable` (v0.84.0+) as transient:
+it keeps polling until the device code expires, after the `Retry-After`
+wait when the server sent one (never less than the interval, never past
+the expiry), else the interval.
 
 `ResourceClient`'s readers check each 2xx body against the Python SDK's
 model, as Python's `_parse` does, and throw `KaguraResponseError` for one
@@ -1234,11 +1390,65 @@ when `undefined`.
 | Method | What it does |
 |--------|--------------|
 | `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. |
-| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". Returns a typed `RecallResponse` (`confidence` first: read `confidence.level` before the hits); see [Recall result shape](#recall-result-shape). |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. `tags` replaces the list, with `remember`'s caps. |
 | `forget` | Soft-delete by `memoryId` or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). A row carries `observed_at` (v0.127.0+), when the fact held, as the text the server stores: a date `YYYY-MM-DD` or a UTC datetime `YYYY-MM-DDTHH:MM:SSZ`, never parsed (a date sorts and filters as the start of its UTC day). |
+
+#### Recall result shape
+
+Since memory-cloud v0.108.0 a `recall` hit is **compact** unless you pass
+`verbosity: "full"`: `memory_id`, a 160-character `summary` head
+(`summary_cut: true` when it was cut), `type`, `importance`, `score`,
+`created_at` and `updated_at`. **`tags`, `context_summary`,
+`scope`, `version` and the uncut `summary` need `verbosity: "full"`**;
+code that reads them from a compact hit gets `undefined`. Both shapes
+carry `observed_at`, `superseded_by`, `contradicts`, `supersede_candidate`
+(with `verified: true` when the server's judge confirmed it, v0.109.0+)
+and `folded` (older versions of the same fact folded under the newest
+row, v0.114.0+) when they apply. A key that does not apply is left out:
+`context_summary` and the annotations since v0.73.0, an empty `tags`
+since v0.93.0. Older servers send `null` / `[]` for them, so test these
+keys for truthiness, not for `undefined`. `updated_at` is `null` on a
+memory never edited.
+
+Since v0.114.0 the top `full` hits also carry `content` (up to 1,500
+characters; `content_truncated` / `content_next_offset` when cut, and
+`reference()` has the rest). The MCP default is 3 (the deployment's
+`MCP_RECALL_DEFAULT_FULL`), on trusted, non-connector rows only; an
+explicit `full` makes every row eligible, and `full: 0` returns summaries
+only. `maxChars` (10,000–100,000, server default 20,000; v0.82.0+) bounds
+the whole reply: content goes first (`full_applied` counts the rows that
+kept it), then `context_summary` (`context_summary_omitted: true`), then
+the lowest-ranked rows (`truncated: true`). A context with the LLM
+selector on adds `selector` and per-row `spans` (v0.115.0+).
+
+```ts
+const detailed = await client.recall({ contextId, query: "OAuth2", verbosity: "full", full: 0 });
+for (const hit of detailed.results) {
+  console.log(hit.summary, hit.tags ?? []); // an empty tag list is omitted, not []
+}
+const top = await client.recall({ contextId, query: "deploy runbook", full: 1, maxChars: 40_000 });
+// top.results[0]?.content; with content_truncated, reference() has the whole memory
+```
+
+`verbosity`, `full` and `maxChars` are sent only when set, and checked
+locally first (`full` 0–100, `maxChars` 10,000–100,000, integers). From
+v0.82.0 a server refuses an argument it does not declare (`KaguraError`,
+code `invalid_argument`), so `verbosity` needs v0.108.0+ and `full`
+v0.114.0+ there; older servers ignore all three. `recall()` never retries
+without them; the `recall` command of the bin does, once.
+
+`includeExploreHints` asks for `explore_hints`, seeds for `explore()`.
+Since v0.135.0 the server makes them only when the MCP URL lists the
+`explore` tool, which the bare URL (the core tool profile) does not: add
+`?add_tools=explore` or `?profile=full` to `mcpUrl` (or `explore` to a
+`tools=` / `add_tools=` list it already has). On any other URL the call
+still succeeds and carries `explore_hints_omitted`, a sentence naming that
+opt-in, in place of `explore_hints`. `explore()` itself is unaffected.
+Writing that URL from `kagura-memory setup` is
+[#83](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/83).
 
 ### Deterministic lanes
 
@@ -1247,10 +1457,10 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | Axis |
 |--------|------|
-| `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. |
-| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`; `context_summary_omitted` (v0.82.0+) says the reply passed its budget and the pinned items lost their `context_summary`. |
+| `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. `maxChars` (10,000–100,000, server default 20,000; v0.82.0+) bounds the reply: `context_summary` goes first (`context_summary_omitted: true`), then items from the end. |
+| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`; `context_summary_omitted` (v0.82.0+) says the reply passed its budget and the pinned items lost their `context_summary`. `maxChars` as for `loadPinned` (MCP only; the REST twin takes none). |
 | `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. Items carry `trigger`, not `details` (server v0.73.0+); `includeDetails: true` returns the full `details` object instead. |
-| `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. See [the WHERE axis](#the-where-axis--geospatial-memories). |
+| `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. Items carry `location`, not `details` (server v0.82.0+); `includeDetails: true` returns the full `details` object instead. See [the WHERE axis](#the-where-axis--geospatial-memories). |
 | `recordMeasurement` | HOW-MUCH — append one number to a metric's series (server v0.54.0+). Not a memory: never embedded, recalled or consolidated. Append-only, with no delete. See [the HOW-MUCH axis](#the-how-much-axis--measurement-series). |
 | `recallSeries` | HOW-MUCH — one metric's series, bucketed by `period` (`day`, `week`, `month`) and aggregated by `agg` (`avg`, `min`, `max`, `sum`, `count`, `last`), UTC-aligned, empty buckets omitted. `count` is buckets, not observations. |
 
@@ -1322,7 +1532,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 |--------|--------------|
 | `getServerInfo` | Version, deployment feature flags, and (v0.69.0+) the reranker defaults new contexts start with, under `search_defaults` (from v0.112.0 also `content_chunks_enabled`, a new context's chunk setting). `content_chunks_require_plan` (v0.113.0+) and `llm_selector_require_plan` (v0.115.0+) say the deployment gates those features by plan. |
 | `checkServerVersion` | Compare against `MIN_SERVER_VERSION` (0.75.0). Advisory: logs, and never throws on an old version; a body that is not a `ServerInfo` throws `KaguraResponseError`, as in `getServerInfo`. Reads the version as the Python SDK does: `v0.75.0`, `0.75.0+build` and `0.75.0.post1` meet it, a pre-release of it (`0.75.0-rc1`, `0.75.0rc1`, `0.75.0.dev1`) does not, and a version it cannot read (`0.75`, `main-abc123`) is not compared. |
-| `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. |
+| `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
 | `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
@@ -1381,7 +1591,10 @@ const bootstrap = await client.getAgentBootstrap({
   agentId: agent.id,          // contextId omitted → default binding
   sessionId: "run-42",        // echoed in the correlation block
   query: "session summary",   // enables the trusted-only recall component
+  maxChars: 40_000,           // whole-envelope budget (server v0.82.0+; default 20,000)
 });
+// Server v0.82.0+ loads 20 pinned memories by default here (pinnedCap raises it);
+// bootstrap.context_summary_omitted / a component's truncated say what the budget took.
 if (bootstrap.degraded) {
   // some component failed fail-soft; inspect bootstrap.components
 }
@@ -1459,6 +1672,12 @@ into `details`, so `"35.68"` is rejected server-side with HTTP 422.
 `recallNearby()` returns a typed `RecallNearbyResponse`
 (`results[].distance_m`); `MemoryLocation` and `NearbyMemory` are exported
 too. Out-of-range coordinates throw locally rather than round-tripping.
+Since server v0.82.0 each item carries `location` (its
+`details.location`) instead of the whole `details`; `includeDetails: true`
+returns `details` again, held to a reply budget of about 20,000
+characters: from the last item backwards, one that does not fit carries
+`details_omitted: true` and `details_total_chars` instead (read it with
+`reference()`). Older servers always send `details`.
 
 `listMemories()` filters by a bounding box instead (server v0.54.0+):
 `latMin`, `latMax`, `lonMin` and `lonMax`, in any combination, keep only

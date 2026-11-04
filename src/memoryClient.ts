@@ -217,7 +217,9 @@ export class MemoryClient extends KaguraRestClient {
    * capped lanes and the same truncation flags; check `pinned_truncated` /
    * `tool_triggered_truncated` before trusting the set as complete. This
    * surface carries no context block, so `context_id` / `context_name`
-   * are `null`.
+   * are `null`. Unlike the MCP tool, the route takes no `maxChars`
+   * (memory-cloud v0.143.0's request body is `{context_id, cap}`), so this
+   * reply is bounded by the caps alone.
    *
    * The body is read as the Python SDK's `GuardrailSet` model reads it: a
    * set missing a required field, a truncation flag included, or holding
