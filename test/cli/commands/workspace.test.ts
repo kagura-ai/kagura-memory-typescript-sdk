@@ -163,6 +163,9 @@ describe("workspace member list", () => {
         user_email: "o@x.com",
         role: "owner",
         user_id: "google_1",
+        // memory-cloud v0.100.0+ (#1943); absent from the second row, as an
+        // older server sends it.
+        seat_paused: true,
       },
       { role: "member", user_id: "google_2" },
     ]);
@@ -186,7 +189,8 @@ describe("workspace member list", () => {
         '      "claude_app_visible": true,',
         '      "chatgpt_app_visible": false,',
         '      "custom_app_count": 0',
-        "    }",
+        "    },",
+        '    "seat_paused": true',
         "  },",
         "  {",
         '    "user_id": "google_2",',
@@ -196,7 +200,8 @@ describe("workspace member list", () => {
         '    "joined_at": null,',
         '    "last_login_at": null,',
         '    "allowed_context_ids": null,',
-        '    "credentials_status": null',
+        '    "credentials_status": null,',
+        '    "seat_paused": false',
         "  }",
         "]",
       ].join("\n"),
@@ -1063,7 +1068,12 @@ describe("auth list-keys", () => {
         '    "last_used_at": "2026-07-04T00:00:00Z",',
         '    "revoked_at": null,',
         '    "expires_at": "2026-10-01T00:00:00Z",',
-        '    "bound_context_id": null',
+        '    "bound_context_id": null,',
+        // memory-cloud v0.118.0+ / v0.129.0+, null on an older server's row.
+        '    "default_context_id": null,',
+        '    "default_context_name": null,',
+        '    "agent_id": null,',
+        '    "connector_id": null',
         "  }",
         "]",
       ].join("\n"),

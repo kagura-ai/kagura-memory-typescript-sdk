@@ -112,6 +112,11 @@ export function readMemberKey(raw: unknown, operation: string): MemberAPIKey {
     revoked_at: passThrough(row, "revoked_at"),
     expires_at: passThrough(row, "expires_at"),
     bound_context_id: r.field(row, "bound_context_id", nullable(laxStr), { default: null }),
+    // memory-cloud v0.118.0+ (#2188) and v0.129.0+ (#2299).
+    default_context_id: r.field(row, "default_context_id", nullable(laxStr), { default: null }),
+    default_context_name: r.field(row, "default_context_name", nullable(laxStr), { default: null }),
+    agent_id: r.field(row, "agent_id", nullable(laxStr), { default: null }),
+    connector_id: r.field(row, "connector_id", nullable(laxStr), { default: null }),
   };
   r.check();
   return key;

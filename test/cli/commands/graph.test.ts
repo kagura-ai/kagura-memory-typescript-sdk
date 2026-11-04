@@ -157,10 +157,43 @@ describe("kagura-memory sleep", () => {
     expect(h.err.join("\n")).toContain("'abc' is not a valid integer range.");
   });
 
+  // Recorded from the Python CLI 0.44.0 (click 8.3.3): click converts every
+  // option before it checks for leftover positionals, so a bad option value
+  // wins over an extra argument; the extra argument alone is reported as such.
+  it.each([
+    [["sleep", "history", "ctx-1", "extra", "--source", "nope"], "Error: Invalid value for '--source': 'nope' is not one of 'sleep', 'analysis', 'all'."],
+    [["sleep", "history", "ctx-1", "extra", "--limit", "0"], "Error: Invalid value for '--limit': 0 is not in the range 1<=x<=50."],
+    [["sleep", "report", "ctx-1", "r-1", "extra", "--actions-limit", "0"], "Error: Invalid value for '--actions-limit': 0 is not in the range 1<=x<=200."],
+    [["sleep", "history", "ctx-1", "extra"], "Error: Got unexpected extra argument (extra)"],
+  ])("%j reports what the Python CLI reports first", async (argv, message) => {
+    const { code, h } = await wire(argv);
+    expect(code).toBe(2);
+    expect(h.err).toEqual([message]);
+    expect(h.server.requests).toEqual([]);
+  });
+
   it("sends REPORT_ID only; CONTEXT_ID is required and not sent (#79)", async () => {
-    // memory-cloud v0.82.0+ refuses the context_id 0.14.1 sent here.
+    // memory-cloud v0.82.0+ refuses the context_id 0.14.1 sent here. The
+    // reply is a whole report: since #85 `sleep report` reads it through
+    // the Python SDK's SleepReportDetail model, as the Python CLI does.
     const h = harness();
-    h.server.toolResults.get_sleep_report = { status: "success", report: { id: "r-1" } };
+    h.server.toolResults.get_sleep_report = {
+      status: "success",
+      report: {
+        report_id: "r-1",
+        status: "completed",
+        memories_processed: 0,
+        edges_created: 0,
+        memories_merged: 0,
+        memories_promoted: 0,
+        llm_calls_made: 0,
+        llm_tokens_used: 0,
+        memories_flagged: 0,
+        embedding_calls_made: 0,
+      },
+      actions: [],
+      action_count: 0,
+    };
     expect(await runCli(["sleep", "report", "ctx-1", "r-1"], h.deps)).toBe(0);
     expect(h.server.toolCallArgs(0)).toEqual({ report_id: "r-1" });
   });
@@ -174,16 +207,76 @@ describe("kagura-memory sleep", () => {
 
   it("says in --help that CONTEXT_ID is not sent", async () => {
     // `kagura sleep report --help` of the Python CLI 0.44.0 in a terminal
-    // (click wraps at 78 columns); its paragraph goes on with a sentence
-    // about --actions-cursor, which comes with that flag (#85).
+    // (click wraps at 78 columns); its paragraph goes on, on the same line,
+    // with the sentence about --actions-cursor (#85).
     const h = harness();
     expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
     expect(h.out.join("\n")).toContain(
       "\n\n" +
         "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
         "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
-        "  run's own context).\n\n",
+        "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
+        "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
+        "  cursor.\n\n",
     );
+  });
+});
+
+/**
+ * `COLUMNS=80 kagura sleep report --help` of the Python CLI 0.44.0 (click
+ * 8.3.3), as recorded. Everything above `Options:` is click's wrap of the
+ * docstring at 78 columns; the options are laid out by this bin's own help
+ * renderer (no wrapping, for every command), so only their texts are
+ * compared.
+ */
+const PYTHON_SLEEP_REPORT_HELP =
+  "Usage: kagura sleep report [OPTIONS] CONTEXT_ID REPORT_ID\n" +
+  "\n" +
+  "  Get a detailed Sleep Maintenance report including audit log.\n" +
+  "\n" +
+  "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+  "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
+  "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
+  "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
+  "  cursor.\n" +
+  "\n" +
+  "Options:\n" +
+  "  --actions-cursor TEXT          actions_next_cursor of the previous page\n" +
+  "                                 (memory-cloud 0.82.0+).\n" +
+  "  --actions-limit INTEGER RANGE  Actions per page (1-200; the server's default\n" +
+  "                                 is 50; memory-cloud 0.82.0+).  [1<=x<=200]\n" +
+  "  --help                         Show this message and exit.\n";
+
+describe("kagura-memory sleep report --help (#85)", () => {
+  it("prints the Python CLI 0.44.0's text above Options byte for byte, under this bin's name", async () => {
+    const h = harness();
+    expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
+    const text = `${h.out.join("\n")}\n`;
+    const head = (help: string) => help.slice(0, help.indexOf("Options:\n"));
+    expect(head(text)).toBe(head(PYTHON_SLEEP_REPORT_HELP).replace("Usage: kagura ", "Usage: kagura-memory "));
+  });
+
+  it("lists both paging options with the Python CLI's help texts", async () => {
+    const h = harness();
+    expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
+    const options = h.out.join("\n").split("Options:\n")[1]!.split("\n");
+    expect(options.map((line) => line.trim().split(/\s{2,}/))).toEqual([
+      ["--actions-cursor TEXT", "actions_next_cursor of the previous page (memory-cloud 0.82.0+)."],
+      ["--actions-limit INTEGER", "Actions per page (1-200; the server's default is 50; memory-cloud 0.82.0+)."],
+      ["--help", "Show this message and exit."],
+    ]);
+  });
+});
+
+describe("kagura-memory sleep history --help (#85)", () => {
+  it("lists --source with its choices and the Python CLI's help text", async () => {
+    const h = harness();
+    expect(await runCli(["sleep", "history", "--help"], h.deps)).toBe(0);
+    const options = h.out.join("\n").split("Options:\n")[1]!.split("\n");
+    expect(options.map((line) => line.trim().split(/\s{2,}/))).toContainEqual([
+      "--source [sleep|analysis|all]",
+      "Sleep runs (the server's default), Memory Analysis spend rows, or all (memory-cloud 0.138.0+).",
+    ]);
   });
 });
 
@@ -251,14 +344,15 @@ describe("kagura-memory sleep rollback", () => {
  * prints the same in both.
  *
  * The Python CLI 0.44.0, given the same replies, prints the error cases
- * identically and the success replies differently, for a gap this fix
- * leaves alone: its dumps add the model fields of 0.43.0 (`source`,
- * `details_omitted`, `details_total_chars`, `actions_has_more`,
- * `actions_next_cursor`, `note`; `chunks_requeued`, `points_requeued`;
- * #85). The two refusals whose envelope carries `help` print the
- * `  Help: <help>` line the Python CLI adds from 0.43.0 (python-sdk#299,
- * this bin's #84): their stderr is recorded from the Python CLI 0.44.0
- * with the same `_call_tool` stand-in (same exit code, stdout and call).
+ * identically and the success replies differently where its dumps add the
+ * model fields of 0.43.0 (`source`, `details_omitted`,
+ * `details_total_chars`, `actions_has_more`, `actions_next_cursor`, `note`;
+ * `chunks_requeued`, `points_requeued`; #85). #85 closed the `sleep
+ * report` part: the first case's stdout is the Python CLI 0.44.0's dump.
+ * The two refusals whose envelope carries `help` print the `  Help:
+ * <help>` line the Python CLI adds from 0.43.0 (python-sdk#299, this bin's
+ * #84): their stderr is recorded from the Python CLI 0.44.0 with the same
+ * `_call_tool` stand-in (same exit code, stdout and call).
  */
 interface SleepCase {
   name: string;
@@ -279,7 +373,11 @@ const PYTHON_SLEEP_CASES: SleepCase[] = [
     results: {"get_sleep_report":{"status":"success","report":{"report_id":"11111111-2222-4333-8444-555555555555","context_id":"c0ffee00-0000-4000-8000-000000000001","status":"completed","started_at":"2026-06-01T00:00:00Z","completed_at":"2026-06-01T00:05:00Z","memories_processed":12,"edges_created":3,"memories_merged":1,"memories_promoted":0,"llm_calls_made":4,"llm_tokens_used":900,"llm_call_failures":null,"memories_flagged":0,"embedding_calls_made":2,"error_message":null,"edge_discovery_result":{"edges":3},"dedup_result":null,"merge_retention_result":null,"importance_result":null,"consolidation_result":null,"reindex_result":null},"actions":[{"id":"a1","phase":"edge_discovery","action_type":"create_edge","memory_id":"m1","target_id":"m2","details":{"similarity":0.91},"created_at":"2026-06-01T00:01:00Z"}],"action_count":1}},
     calls: [["get_sleep_report",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
     code: 0,
-    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_id\": \"c0ffee00-0000-4000-8000-000000000001\",\n  \"status\": \"completed\",\n  \"started_at\": \"2026-06-01T00:00:00Z\",\n  \"completed_at\": \"2026-06-01T00:05:00Z\",\n  \"memories_processed\": 12,\n  \"edges_created\": 3,\n  \"memories_merged\": 1,\n  \"memories_promoted\": 0,\n  \"llm_calls_made\": 4,\n  \"llm_tokens_used\": 900,\n  \"llm_call_failures\": null,\n  \"memories_flagged\": 0,\n  \"embedding_calls_made\": 2,\n  \"error_message\": null,\n  \"edge_discovery_result\": {\n    \"edges\": 3\n  },\n  \"dedup_result\": null,\n  \"merge_retention_result\": null,\n  \"importance_result\": null,\n  \"consolidation_result\": null,\n  \"reindex_result\": null,\n  \"actions\": [\n    {\n      \"id\": \"a1\",\n      \"phase\": \"edge_discovery\",\n      \"action_type\": \"create_edge\",\n      \"memory_id\": \"m1\",\n      \"target_id\": \"m2\",\n      \"details\": {\n        \"similarity\": 0.91\n      },\n      \"created_at\": \"2026-06-01T00:01:00Z\"\n    }\n  ],\n  \"action_count\": 1\n}\n",
+    // Since #85 `sleep report` prints the Python SDK's SleepReportDetail
+    // dump, so this is the Python CLI 0.44.0's stdout for the reply (0.42.2
+    // printed it without the 0.43.0 model fields); recorded in
+    // sleepDumps.test.ts ("report: #79 reply, the 0.43.0 model fields filled").
+    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_id\": \"c0ffee00-0000-4000-8000-000000000001\",\n  \"status\": \"completed\",\n  \"started_at\": \"2026-06-01T00:00:00Z\",\n  \"completed_at\": \"2026-06-01T00:05:00Z\",\n  \"memories_processed\": 12,\n  \"edges_created\": 3,\n  \"memories_merged\": 1,\n  \"memories_promoted\": 0,\n  \"llm_calls_made\": 4,\n  \"llm_tokens_used\": 900,\n  \"llm_call_failures\": null,\n  \"source\": null,\n  \"memories_flagged\": 0,\n  \"embedding_calls_made\": 2,\n  \"error_message\": null,\n  \"edge_discovery_result\": {\n    \"edges\": 3\n  },\n  \"dedup_result\": null,\n  \"merge_retention_result\": null,\n  \"importance_result\": null,\n  \"consolidation_result\": null,\n  \"reindex_result\": null,\n  \"actions\": [\n    {\n      \"id\": \"a1\",\n      \"phase\": \"edge_discovery\",\n      \"action_type\": \"create_edge\",\n      \"memory_id\": \"m1\",\n      \"target_id\": \"m2\",\n      \"details\": {\n        \"similarity\": 0.91\n      },\n      \"created_at\": \"2026-06-01T00:01:00Z\",\n      \"details_omitted\": false,\n      \"details_total_chars\": null\n    }\n  ],\n  \"action_count\": 1,\n  \"actions_has_more\": false,\n  \"actions_next_cursor\": null,\n  \"note\": null\n}\n",
     stderr: "",
   },
   {

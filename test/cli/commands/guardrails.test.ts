@@ -285,6 +285,8 @@ describe("guardrails load", () => {
         tool_triggered_truncated: true,
         context_id: CTX,
         context_name: "dev",
+        // Python SDK 0.43.0+ (memory-cloud v0.82.0+): false when the tool omits it.
+        context_summary_omitted: false,
       }),
     ]);
     expect(h.err).toEqual([]);
@@ -443,7 +445,17 @@ describe("projectGuardrailSet", () => {
     expect(set.status).toBe("success");
     expect(set.context_id).toBeNull();
     expect(set.context_name).toBeNull();
-    expect(Object.keys(set)).toHaveLength(15);
+    expect(set.context_summary_omitted).toBe(false);
+    expect(Object.keys(set)).toHaveLength(16);
+  });
+
+  it("reads context_summary_omitted (memory-cloud v0.82.0+), last in the model's order", () => {
+    const set = projectGuardrailSet({ ...base(), context_summary_omitted: true });
+    expect(set.context_summary_omitted).toBe(true);
+    expect(Object.keys(set).at(-1)).toBe("context_summary_omitted");
+    expect(() => projectGuardrailSet({ ...base(), context_summary_omitted: "maybe" })).toThrow(
+      "context_summary_omitted: Input should be a valid boolean, unable to interpret input",
+    );
   });
 
   it("fills an item's absent optional fields with null and drops unknown keys", () => {
