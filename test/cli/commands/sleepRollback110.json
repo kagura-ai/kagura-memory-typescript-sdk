@@ -1,0 +1,425 @@
+[
+  {
+    "name": "defaults and unknown fields",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {\"edges_deleted\": \"3\", \"errors\": [\"取り消せない\"], \"unknown\": true}, \"unknown\": 1}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": [\n      \"取り消せない\"\n    ]\n  }\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "large integer count",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {\"points_requeued\": 9007199254740993}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 9007199254740993,\n    \"errors\": []\n  }\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "missing summary",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\"}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: rollback_sleep_run: unexpected server response for RollbackResult (rollback_summary: Field required). The server may be newer than this SDK; upgrading kagura-memory may help.\n"
+  },
+  {
+    "name": "invalid summary fields",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {\"edges_deleted\": 1.5, \"errors\": [2]}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: rollback_sleep_run: unexpected server response for RollbackResult (rollback_summary.edges_deleted: Input should be a valid integer, got a number with a fractional part; rollback_summary.errors.0: Input should be a valid string). The server may be newer than this SDK; upgrading kagura-memory may help.\n"
+  },
+  {
+    "name": "partial rollback",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"status\": \"error\", \"error\": \"partial_rollback\", \"report_id\": \"r-1\", \"message\": \"Some actions failed\", \"rollback_summary\": {\"edges_deleted\": 2, \"errors\": [\"cannot undo merge\"]}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"error\": \"partial_rollback\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 2,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": [\n      \"cannot undo merge\"\n    ]\n  }\n}\n",
+    "stderr": "Error: rollback_sleep_run failed (partial_rollback): Some actions failed\n"
+  },
+  {
+    "name": "partial malformed summary",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"status\": \"error\", \"error\": \"partial_rollback\", \"report_id\": \"r-1\", \"message\": \"Some actions failed\", \"rollback_summary\": {\"edges_deleted\": null}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"error\": \"partial_rollback\",\n  \"rollback_summary\": null\n}\n",
+    "stderr": "Error: rollback_sleep_run failed (partial_rollback): Some actions failed (rollback_summary could not be read)\n"
+  },
+  {
+    "name": "partial missing summary",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1",
+      "--yes"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"status\": \"error\", \"error\": \"partial_rollback\", \"message\": \"Some actions failed\"}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "{\n  \"report_id\": null,\n  \"error\": \"partial_rollback\",\n  \"rollback_summary\": null\n}\n",
+    "stderr": "Error: rollback_sleep_run failed (partial_rollback): Some actions failed (rollback_summary could not be read)\n"
+  },
+  {
+    "name": "prompt None",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": true,
+    "prompts": [
+      "Roll back sleep run r-1? Started None, 7 action(s). This reverses edge creation, merges, importance updates, promotions, and archives."
+    ],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ],
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": []\n  }\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "prompt 2026-06-01T00:00:00Z",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": \"2026-06-01T00:00:00Z\"}, \"action_count\": 7}"
+    },
+    "confirm": true,
+    "prompts": [
+      "Roll back sleep run r-1? Started 2026-06-01 00:00:00+00:00, 7 action(s). This reverses edge creation, merges, importance updates, promotions, and archives."
+    ],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ],
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": []\n  }\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "prompt 2026-06-01T03:02:10.5+09:00",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": \"2026-06-01T03:02:10.5+09:00\"}, \"action_count\": 7}"
+    },
+    "confirm": true,
+    "prompts": [
+      "Roll back sleep run r-1? Started 2026-06-01 03:02:10.500000+09:00, 7 action(s). This reverses edge creation, merges, importance updates, promotions, and archives."
+    ],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ],
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": []\n  }\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "prompt 2026-06-01",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": \"2026-06-01\"}, \"action_count\": 7}"
+    },
+    "confirm": true,
+    "prompts": [
+      "Roll back sleep run r-1? Started 2026-06-01 00:00:00, 7 action(s). This reverses edge creation, merges, importance updates, promotions, and archives."
+    ],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ],
+      [
+        "rollback_sleep_run",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": []\n  }\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "declined",
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": false,
+    "prompts": [
+      "Roll back sleep run r-1? Started None, 7 action(s). This reverses edge creation, merges, importance updates, promotions, and archives."
+    ],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "",
+    "stderr": "Aborted!\n"
+  },
+  {
+    "name": "help",
+    "argv": [
+      "sleep",
+      "rollback",
+      "--help"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {}}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"started_at\": null}, \"action_count\": 7}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [],
+    "code": 0,
+    "stdout": "Usage: kagura-memory sleep rollback [OPTIONS] CONTEXT_ID REPORT_ID\n\n  Roll back a completed (or degraded) Sleep Maintenance run.\n\n  Reverses edge creation, memory merges, importance updates, scope promotions,\n  and archives. If some steps fail, the summary of what was reversed is still\n  printed and the command exits non-zero.\n\n  CONTEXT_ID is kept for backwards compatibility and not sent: the server finds\n  the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner role on\n  the run's own context).\n\nOptions:\n  -y, --yes  Skip confirmation prompt.\n  --help     Show this message and exit.\n",
+    "stderr": ""
+  },
+  {
+    "name": "report exact counters and nested floats",
+    "argv": [
+      "sleep",
+      "report",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 9007199254740993, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"action_count\": 1, \"edge_discovery_result\": {\"2\": 1.0, \"1\": 1e-07, \"float\": -0.0}}, \"action_count\": 9007199254740995}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": 9007199254740993, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"action_count\": 1, \"edge_discovery_result\": {\"2\": 1.0, \"1\": 1e-07, \"float\": -0.0}}, \"action_count\": 9007199254740995}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 0,
+    "stdout": "{\n  \"report_id\": \"r-1\",\n  \"context_id\": null,\n  \"status\": \"completed\",\n  \"started_at\": null,\n  \"completed_at\": null,\n  \"memories_processed\": 9007199254740993,\n  \"edges_created\": 3,\n  \"memories_merged\": 1,\n  \"memories_promoted\": 0,\n  \"llm_calls_made\": 4,\n  \"llm_tokens_used\": 900,\n  \"llm_call_failures\": null,\n  \"source\": null,\n  \"memories_flagged\": 0,\n  \"embedding_calls_made\": 2,\n  \"error_message\": null,\n  \"edge_discovery_result\": {\n    \"2\": 1.0,\n    \"1\": 1e-07,\n    \"float\": -0.0\n  },\n  \"dedup_result\": null,\n  \"merge_retention_result\": null,\n  \"importance_result\": null,\n  \"consolidation_result\": null,\n  \"reindex_result\": null,\n  \"actions\": [],\n  \"action_count\": 9007199254740995,\n  \"actions_has_more\": false,\n  \"actions_next_cursor\": null,\n  \"note\": null\n}\n",
+    "stderr": ""
+  },
+  {
+    "name": "report malformed success",
+    "argv": [
+      "sleep",
+      "report",
+      "ctx-1",
+      "r-1"
+    ],
+    "toolTexts": {
+      "rollback_sleep_run": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": null, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2}, \"action_count\": \"bad\"}",
+      "get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"r-1\", \"status\": \"completed\", \"memories_processed\": null, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"memories_flagged\": 0, \"embedding_calls_made\": 2}, \"action_count\": \"bad\"}"
+    },
+    "confirm": null,
+    "prompts": [],
+    "calls": [
+      [
+        "get_sleep_report",
+        {
+          "report_id": "r-1"
+        }
+      ]
+    ],
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: get_sleep_report: unexpected server response for SleepReportDetail (memories_processed: Input should be a valid integer; action_count: Input should be a valid integer, unable to parse string as an integer). The server may be newer than this SDK; upgrading kagura-memory may help.\n"
+  }
+]

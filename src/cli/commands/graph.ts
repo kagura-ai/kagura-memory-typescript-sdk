@@ -7,11 +7,14 @@
  * re-running with the right one.
  */
 
-import { readModel, SLEEP_REPORT, SLEEP_REPORT_DETAIL } from "../../pyModels.js";
+import { KaguraPartialRollbackError, KaguraResponseError, excMessage } from "../../errors.js";
+import { readModel, ROLLBACK_RESULT, ROLLBACK_SUMMARY, SLEEP_REPORT, SLEEP_REPORT_DETAIL } from "../../pyModels.js";
+import { formatDumpsJson } from "../modelDump.js";
+import { cliErrorMessage } from "../output.js";
 import { examples, requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
 import { CliError, parseChoice, parseFloatOption, parseIntOption, parseRanged, parseTags } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
-import { runClientCommand } from "../runClientCommand.js";
+import { mcpOptions, resolveConfig, runClientCommand } from "../runClientCommand.js";
 
 const YES: FlagSpec = { name: "yes", short: "y", type: "switch", help: "Skip confirmation prompt" };
 
@@ -306,18 +309,18 @@ const sleepReport: Command = {
           SLEEP_REPORT_DETAIL,
           "get_sleep_report",
         ),
-      { needsContext: false },
+      { needsContext: false, format: formatDumpsJson },
     );
   },
 };
 
 const sleepRollback: Command = {
-  summary: "Roll back a completed Sleep Maintenance run.",
+  summary: "Roll back a completed (or degraded) Sleep Maintenance run.",
   args: "CONTEXT_ID REPORT_ID",
   description:
-    "  Reverses edge creation, memory merges and importance updates made by\n" +
-    "  the run. Without --yes the report is fetched first so the prompt can\n" +
-    "  say what is about to be undone.\n\n" +
+    "  Reverses edge creation, memory merges, importance updates, scope promotions,\n" +
+    "  and archives. If some steps fail, the summary of what was reversed is still\n" +
+    "  printed and the command exits non-zero.\n\n" +
     contextIdNotSent("needs the editor or owner\n  role on the run's own context)."),
   spec: { flags: [{ ...YES, help: "Skip confirmation prompt." }] },
   run: async (deps, args) => {
@@ -325,24 +328,42 @@ const sleepRollback: Command = {
     const reportId = requireArg(args, 1, "REPORT_ID");
     rejectExtraArgs(args, 2);
     const skipPrompt = args.flags.has("yes");
-    return runClientCommand(
-      deps,
-      undefined,
-      async (client) => {
-        if (!skipPrompt) {
-          // Python pre-fetches only when it is going to prompt, so `--yes`
-          // is exactly one round trip.
-          const report = await client.getSleepReport({ contextId, reportId });
-          const actions = (report as { action_count?: number }).action_count;
-          const detail = actions === undefined ? "" : ` (${actions} actions)`;
-          if (!(await deps.confirm(`Roll back sleep run ${reportId}${detail}?`))) {
-            throw new CliError("Aborted!");
-          }
+    const { config } = resolveConfig(deps, undefined, false);
+    const client = deps.makeClient(mcpOptions(config));
+    try {
+      if (!skipPrompt) {
+        // Python pre-fetches only when it is going to prompt, so `--yes`
+        // is exactly one round trip.
+        const report = readModel(
+          await client.getSleepReport({ contextId, reportId }), SLEEP_REPORT_DETAIL, "get_sleep_report",
+        );
+        // Python interpolates datetime.__str__, retaining the original offset.
+        const started = report.started_at === null
+          ? "None" : String(report.started_at).replace("T", " ").replace(/Z$/, "+00:00");
+        const prompt = `Roll back sleep run ${reportId}? Started ${started}, ${report.action_count} action(s). ` +
+          "This reverses edge creation, merges, importance updates, promotions, and archives.";
+        if (!(await deps.confirm(prompt))) {
+          deps.writeError("Aborted!");
+          return 1;
         }
-        return client.rollbackSleepRun({ contextId, reportId });
-      },
-      { needsContext: false },
-    );
+      }
+      const result = await client.rollbackSleepRun({ contextId, reportId });
+      deps.write(formatDumpsJson(readModel(result, ROLLBACK_RESULT, "rollback_sleep_run")));
+      return 0;
+    } catch (e) {
+      if (e instanceof KaguraPartialRollbackError) {
+        deps.write(formatDumpsJson({
+          report_id: e.reportId,
+          error: "partial_rollback",
+          rollback_summary: e.cause instanceof KaguraResponseError ? null :
+            readModel(e.summary, ROLLBACK_SUMMARY, "rollback_sleep_run"),
+        }));
+        throw new CliError(excMessage(e));
+      }
+      throw e instanceof CliError ? e : new CliError(cliErrorMessage(e));
+    } finally {
+      await client.close();
+    }
   },
 };
 

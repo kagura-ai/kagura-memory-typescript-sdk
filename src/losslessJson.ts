@@ -137,6 +137,22 @@ export function jsonValue(value: unknown): unknown {
   return value instanceof JsonNumber ? value.value : value;
 }
 
+/** Object spread with number literals retained for a flattened tool envelope. */
+export function mergeJsonObjects(...sources: Record<string, unknown>[]): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const numbers = new Map<string, JsonNumber>();
+  for (const source of sources) {
+    for (const [key, value] of Object.entries(source)) {
+      Object.defineProperty(result, key, { value, enumerable: true, writable: true, configurable: true });
+      const literal = valueAt(source, key);
+      if (literal instanceof JsonNumber) numbers.set(key, literal);
+      else numbers.delete(key);
+    }
+  }
+  SOURCES.set(result, { numbers });
+  return result;
+}
+
 /**
  * `Object.entries(obj)` in the order the body wrote the keys, which is
  * Python's dict order: `{"b": 1, "2": 2}` gives `b` first, where

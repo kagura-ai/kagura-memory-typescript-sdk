@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { sleepReport } from "./sleepFixtures.js";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -2482,12 +2483,20 @@ describe("REST endpoints", () => {
 });
 
 describe("sleep maintenance", () => {
+  it("refuses malformed successful reports and rollback results at the SDK boundary", async () => {
+    const server = new FakeServer();
+    server.toolResults.get_sleep_report = { status: "success", report: { report_id: "r1" } };
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1" };
+    const client = makeClient(server);
+    await expect(client.getSleepReport({ reportId: "r1" })).rejects.toBeInstanceOf(KaguraResponseError);
+    await expect(client.rollbackSleepRun({ reportId: "r1" })).rejects.toBeInstanceOf(KaguraResponseError);
+  });
   it("getSleepReport flattens the report envelope", async () => {
     const server = new FakeServer();
     server.toolResults.get_sleep_report = {
       status: "success",
-      report: { report_id: "r1", context_id: "c1", run_status: "completed" },
-      actions: [{ action: "merge" }],
+      report: { ...sleepReport("r1"), context_id: "c1" },
+      actions: [{ id: "a1", phase: "dedup", action_type: "merge" }],
       action_count: 1,
     };
     const client = makeClient(server);
@@ -2556,7 +2565,7 @@ describe("sleep maintenance", () => {
     const server = strictSleepServer();
     server.toolResults.get_sleep_report = {
       status: "success",
-      report: { report_id: "r1", context_id: "c-of-the-report", status: "completed" },
+      report: { ...sleepReport("r1"), context_id: "c-of-the-report" },
       actions: [],
       action_count: 0,
     };
@@ -2583,8 +2592,8 @@ describe("sleep maintenance", () => {
 
   it("getSleepReport and rollbackSleepRun take no contextId at all", async () => {
     const server = strictSleepServer();
-    server.toolResults.get_sleep_report = { status: "success", report: { report_id: "r1" }, actions: [] };
-    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1" };
+    server.toolResults.get_sleep_report = { status: "success", report: sleepReport("r1"), actions: [], action_count: 0 };
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1", rollback_summary: {} };
     const client = makeClient(server);
     await client.getSleepReport({ reportId: "r1" });
     await client.rollbackSleepRun({ reportId: "r1" });

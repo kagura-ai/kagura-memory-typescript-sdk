@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
+import { sleepReport } from "../../sleepFixtures.js";
 
 interface Harness {
   deps: CliDeps;
@@ -16,6 +17,7 @@ function harness(confirm = true): Harness {
   const err: string[] = [];
   const prompts: string[] = [];
   const server = new FakeServer();
+  server.toolResults.rollback_sleep_run = { report_id: "r-1", status: "rolled_back", rollback_summary: {} };
   const deps = {
     write: (line: string) => void out.push(line),
     writeError: (line: string) => void err.push(line),
@@ -285,11 +287,11 @@ describe("kagura-memory sleep rollback", () => {
     const h = harness(true);
     h.server.toolResults.get_sleep_report = {
       status: "success",
-      report: { id: "r-1" },
+      report: sleepReport("r-1"),
       action_count: 7,
     };
     expect(await runCli(["sleep", "rollback", "ctx-1", "r-1"], h.deps)).toBe(0);
-    expect(h.prompts).toEqual(["Roll back sleep run r-1 (7 actions)?"]);
+    expect(h.prompts).toEqual(["Roll back sleep run r-1? Started None, 7 action(s). This reverses edge creation, merges, importance updates, promotions, and archives."]);
     // Neither call sends CONTEXT_ID: memory-cloud v0.82.0+ refuses it (#79).
     const toolCalls = h.server.requests
       .filter((r) => r.body?.method === "tools/call")
@@ -324,36 +326,18 @@ describe("kagura-memory sleep rollback", () => {
 
   it("does not roll back when the prompt is declined", async () => {
     const h = harness(false);
-    h.server.toolResults.get_sleep_report = { status: "success", report: { id: "r-1" } };
+    h.server.toolResults.get_sleep_report = { status: "success", report: sleepReport("r-1"), action_count: 0 };
     expect(await runCli(["sleep", "rollback", "ctx-1", "r-1"], h.deps)).toBe(1);
     const toolNames = h.server.requests
       .filter((r) => r.body?.method === "tools/call")
       .map((r) => (r.body?.params as { name: string }).name);
     expect(toolNames).toEqual(["get_sleep_report"]);
+    expect(h.err).toEqual(["Aborted!"]);
+    expect(h.out).toEqual([]);
   });
 });
 
-/**
- * `sleep report` / `sleep rollback` print what the Python CLI 0.42.2 prints
- * for the same tool reply (#79): each case is the reply, the arguments the
- * Python CLI sent, and its stdout, stderr and exit code, recorded from the
- * Python CLI 0.42.2 (click 8.3.3, pydantic 2.13.4) with `KaguraClient._call_tool`
- * answering these exact objects. The success replies carry the Python
- * model's keys in its order: this bin prints the reply as the server sent
- * it, where Python prints the model (`model_dump`), so only such a reply
- * prints the same in both.
- *
- * The Python CLI 0.44.0, given the same replies, prints the error cases
- * identically and the success replies differently where its dumps add the
- * model fields of 0.43.0 (`source`, `details_omitted`,
- * `details_total_chars`, `actions_has_more`, `actions_next_cursor`, `note`;
- * `chunks_requeued`, `points_requeued`; #85). #85 closed the `sleep
- * report` part: the first case's stdout is the Python CLI 0.44.0's dump.
- * The two refusals whose envelope carries `help` print the `  Help:
- * <help>` line the Python CLI adds from 0.43.0 (python-sdk#299, this bin's
- * #84): their stderr is recorded from the Python CLI 0.44.0 with the same
- * `_call_tool` stand-in (same exit code, stdout and call).
- */
+/** Python SDK/CLI 0.44.0 recordings, refreshed for #110 from the same #79 tool replies. */
 interface SleepCase {
   name: string;
   argv: string[];
@@ -395,7 +379,7 @@ const PYTHON_SLEEP_CASES: SleepCase[] = [
     results: {"rollback_sleep_run":{"report_id":"11111111-2222-4333-8444-555555555555","status":"rolled_back","rollback_summary":{"edges_deleted":3,"merges_reversed":1,"merges_unreversible":0,"importance_restored":0,"promotions_reversed":0,"importance_kept":0,"promotions_kept":0,"archives_restored":0,"errors":[]}}},
     calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
     code: 0,
-    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 1,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"errors\": []\n  }\n}\n",
+    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 1,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": []\n  }\n}\n",
     stderr: "",
   },
   {
@@ -427,7 +411,7 @@ const PYTHON_SLEEP_CASES: SleepCase[] = [
   },
 ];
 
-describe("kagura-memory sleep report|rollback, byte for byte the Python CLI 0.42.2's (#79)", () => {
+describe("kagura-memory sleep report|rollback, byte for byte the Python CLI 0.44.0's (#79, #110)", () => {
   it.each(PYTHON_SLEEP_CASES.map((c) => [c.name, c] as const))("%s", async (_name, c) => {
     const h = harness();
     h.server.toolResults = { ...c.results };
