@@ -445,6 +445,19 @@ describe("files upload", () => {
       expect(printed.memory).toMatchObject({ memory_id: "mem-1" });
     });
 
+    it("prints the memory reply as sent, a malformed plan_headroom included, as Python prints its dict", async () => {
+      const h = harness();
+      // The client drops the unreadable notice (#88); the CLI prints the reply the server sent.
+      const notices = [null, { dimension: "memories", level: "warning" }];
+      h.mcp.toolResults.remember = { status: "success", memory_id: "mem-1", plan_headroom: notices };
+      expect(await runCli(["files", "upload", file, "--remember"], h.deps)).toBe(0);
+      expect(JSON.parse(h.out.join("\n")).memory).toEqual({
+        status: "success",
+        memory_id: "mem-1",
+        plan_headroom: notices,
+      });
+    });
+
     it("forwards --summary, --type, --importance and --tags", async () => {
       const h = harness();
       const argv = ["files", "upload", file, "--remember", "--summary", "My doc", "--type", "doc"];

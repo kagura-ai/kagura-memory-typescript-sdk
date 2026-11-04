@@ -1512,9 +1512,11 @@ export interface RememberResult {
    * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
    * #2615); absent below 80 % (never `[]` or `null`), and shown at most
    * once an hour per workspace, dimension and level, so a missing key does
-   * not mean the plan has room. As sent and unchecked, like the rest of this
-   * reply (the Python SDK keeps the entries dicts here); `bootstrap` and
-   * `rememberBatch` read theirs fail-open.
+   * not mean the plan has room. Read fail-open, as
+   * {@link BootstrapResponse.plan_headroom} is: an entry
+   * {@link PlanHeadroomNotice} cannot read is dropped, and the key is left
+   * out when none reads. The Python SDK returns this reply as an unchecked
+   * dict, so for a malformed notice only it keeps what this drops.
    */
   plan_headroom?: PlanHeadroomNotice[];
   [key: string]: unknown;
@@ -1547,7 +1549,7 @@ export interface UpdateMemoryResult {
   superseded_memory_id?: string;
   persistence?: Record<string, unknown>;
   lint?: Array<Record<string, unknown>>;
-  /** As on {@link RememberResult.plan_headroom}: as sent, unchecked (v0.142.0+, #2615). */
+  /** As on {@link RememberResult.plan_headroom}: read fail-open (v0.142.0+, #2615). */
   plan_headroom?: PlanHeadroomNotice[];
   [key: string]: unknown;
 }
@@ -2412,8 +2414,12 @@ export type ListOrderBy = "updated_at" | "created_at" | "importance" | "observed
  * `plan` is absent when the server could not resolve the plan. `bootstrap`
  * holds the notice to a quarter of its `maxChars` budget: past it, `help`
  * stays on the most severe entry only (the first `critical`, else the
- * first), and past it still that entry alone stays. The entry comes back
- * as sent, once the Python SDK's `PlanHeadroomNotice` model reads it.
+ * first), and past it still that entry alone stays.
+ *
+ * The entry comes back as sent, after the Python SDK's
+ * `PlanHeadroomNotice` model accepted it: a key a newer server adds is
+ * kept, and a value pydantic's lax mode reads (an int sent as `"97"`)
+ * keeps the form the server sent.
  */
 export interface PlanHeadroomNotice {
   dimension: string;
@@ -2429,6 +2435,7 @@ export interface PlanHeadroomNotice {
   help?: string | null;
   /** The next UTC midnight, ISO 8601, on the daily dimensions only. */
   resets_at?: string | null;
+  [key: string]: unknown;
 }
 
 /**

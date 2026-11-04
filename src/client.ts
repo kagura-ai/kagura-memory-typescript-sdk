@@ -1582,24 +1582,48 @@ function detailsWithToolTrigger(
   return { ...(details ?? {}), tool_trigger: toolTrigger };
 }
 
+/** A reply {@link withReadablePlanHeadroom} changed → the reply as the server sent it. */
+const SENT_REPLIES = new WeakMap<object, ToolResult>();
+
+/**
+ * The reply `result` was made from, as the server sent it: `result` itself
+ * unless a fail-open read dropped `plan_headroom` entries from it. For the
+ * `kagura-memory` CLI's `remember` / `update-memory`, which print the reply
+ * as the Python CLI prints its SDK's unchecked dict. Internal: not
+ * exported from the package entry point.
+ */
+export function sentReply(result: object): ToolResult {
+  return SENT_REPLIES.get(result) ?? (result as ToolResult);
+}
+
 /**
  * `reply` with its `plan_headroom` (memory-cloud v0.142.0+, #2615) read
  * fail-open, as the Python SDK's `PlanHeadroom` field type reads it: the
  * notice is advisory, so an entry `PlanHeadroomNotice` cannot read is
  * dropped, and a value that is not a list, or keeps no entry, is left out.
  * A list that reads whole is returned as sent, and so is a reply without
- * the key.
+ * the key. A reply it changes keeps the one sent for {@link sentReply}.
+ *
+ * @param read The reply's model reading, when the caller has one
+ *   (`readModel` of a model whose `plan_headroom` is a `failOpenList`): a
+ *   list as long as the one sent says every entry reads, `null` that none
+ *   does, so the entries are read again only when some were dropped.
  */
-function withReadablePlanHeadroom(reply: ToolResult, operation: string): ToolResult {
+function withReadablePlanHeadroom(reply: ToolResult, operation: string, read?: Record<string, unknown>): ToolResult {
   if (!Object.prototype.hasOwnProperty.call(reply, "plan_headroom")) return reply;
   const sent = reply.plan_headroom;
-  const notices = readableEntries(sent, PLAN_HEADROOM_NOTICE, operation);
+  const modelRead = read?.plan_headroom as unknown[] | null | undefined;
+  if (Array.isArray(sent) && Array.isArray(modelRead) && modelRead.length === sent.length) return reply;
+  const notices = modelRead === null ? undefined : readableEntries(sent, PLAN_HEADROOM_NOTICE, operation);
+  if (notices !== undefined && notices.length === (sent as unknown[]).length) return reply;
+  const out: ToolResult = { ...reply };
   if (notices === undefined) {
-    const rest = { ...reply };
-    delete rest.plan_headroom;
-    return rest;
+    delete out.plan_headroom;
+  } else {
+    out.plan_headroom = notices;
   }
-  return notices.length === (sent as unknown[]).length ? reply : { ...reply, plan_headroom: notices };
+  SENT_REPLIES.set(out, reply);
+  return out;
 }
 
 /** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
@@ -2806,8 +2830,13 @@ export class KaguraClient {
    * "check"` possibly the `duplicate_candidate` reply instead, with nothing
    * written: check `status`. See {@link RememberResult}. From memory-cloud
    * v0.142.0 (#2615) a success may carry `plan_headroom`, the plan
-   * dimensions at 80 % or more of their limit, as sent: a write shows an
-   * entry at most once an hour per workspace, dimension and level.
+   * dimensions at 80 % or more of their limit: a write shows an entry at
+   * most once an hour per workspace, dimension and level. It is read
+   * fail-open, as on {@link bootstrap}: an entry `PlanHeadroomNotice`
+   * cannot read is dropped, and the key is left out when none reads (the
+   * Python SDK returns this reply as an unchecked dict, so it keeps a
+   * malformed notice as sent). The rest of the reply is returned as sent,
+   * unchecked.
    *
    * `toolTrigger`, `observedAt`, `tagsNormalize`, `dedupe` and `verbose`
    * are sent only when set, so a server that predates one never sees it.
@@ -2879,7 +2908,7 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `RememberResult` types
     // every key optional, since `{}` (an empty tool result) comes back too.
-    return (await this.callToolChecked("remember", args)) as RememberResult;
+    return withReadablePlanHeadroom(await this.callToolChecked("remember", args), "remember") as RememberResult;
   }
 
   /**
@@ -4122,7 +4151,8 @@ export class KaguraClient {
    * ignores it — an `addTags` / `detailsPatch` edit then changes nothing,
    * and `expectedVersion` guards nothing. The reply's `version` tells them
    * apart: a server that read the arguments sends it. `plan_headroom`
-   * (memory-cloud v0.142.0+, #2615) comes as on {@link remember}.
+   * (memory-cloud v0.142.0+, #2615) comes, and is read fail-open, as on
+   * {@link remember}.
    *
    * Check `supersede_candidate.acceptance` before an accept — on the
    * {@link reference} reply (v0.137.0+) or the {@link recall} row
@@ -4211,7 +4241,10 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `UpdateMemoryResult`
     // types every key optional, since `{}` (an empty tool result) comes back too.
-    return (await this.callToolChecked("update_memory", args)) as UpdateMemoryResult;
+    return withReadablePlanHeadroom(
+      await this.callToolChecked("update_memory", args),
+      "update_memory",
+    ) as UpdateMemoryResult;
   }
 
   /**
@@ -5087,7 +5120,7 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("bootstrap", args);
     const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
-    const reply = withReadablePlanHeadroom(result, "bootstrap");
+    const reply = withReadablePlanHeadroom(result, "bootstrap", read);
     // Fail-open, as Python's model reads the block: unreadable is null.
     // Absent (`?guardrails=off`) stays absent.
     if (read.guardrails === null && isSet(result.guardrails)) {
@@ -5263,8 +5296,8 @@ export class KaguraClient {
       args.verbose = options.verbose;
     }
     const result = await this.callToolChecked("remember_batch", args);
-    readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
-    return withReadablePlanHeadroom(result, "remember_batch") as unknown as RememberBatchResult;
+    const read = readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
+    return withReadablePlanHeadroom(result, "remember_batch", read) as unknown as RememberBatchResult;
   }
 
   /**

@@ -184,12 +184,7 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
   if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, raw, at);
   if ("orNone" in kind) return readOrNull(r.operation, kind.orNone, value);
   if ("failOpenList" in kind) {
-    if (!Array.isArray(value)) return null;
-    const model = kind.failOpenList;
-    const read = value
-      .map((_entry, index) => readOrNull(r.operation, model, valueAt(value, index)))
-      .filter((entry) => entry !== null);
-    return read.length > 0 ? read : null;
+    return readableReads(value, kind.failOpenList, r.operation)?.map(([, read]) => read) ?? null;
   }
   if ("dictOf" in kind) {
     if (!isObject(value)) {
@@ -250,15 +245,34 @@ function readOrNull(operation: string, model: Model, raw: unknown): Record<strin
 }
 
 /**
+ * The entries of `value` that `model` reads, each as `[index, read]` in
+ * order, or `undefined` where a `failOpenList` field reads `null`: `value`
+ * is not a list, or no entry reads. Python's `_plan_headroom_or_none`,
+ * shared by that reader kind (the reads) and {@link readableEntries} (the
+ * entries as sent).
+ */
+function readableReads(
+  value: unknown,
+  model: Model,
+  operation: string,
+): Array<[index: number, read: Record<string, unknown>]> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const kept: Array<[number, Record<string, unknown>]> = [];
+  value.forEach((_entry, index) => {
+    const read = readOrNull(operation, model, valueAt(value, index));
+    if (read !== null) kept.push([index, read]);
+  });
+  return kept.length > 0 ? kept : undefined;
+}
+
+/**
  * What a `failOpenList` field keeps of `value`, as sent: the entries
  * `model` reads, or `undefined` where the field reads `null` (`value` is
  * not a list, or no entry reads). For the client, which returns a reply as
  * sent once its model accepted it.
  */
 export function readableEntries(value: unknown, model: Model, operation: string): unknown[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const kept = value.filter((_entry, index) => readOrNull(operation, model, valueAt(value, index)) !== null);
-  return kept.length > 0 ? kept : undefined;
+  return readableReads(value, model, operation)?.map(([index]) => (value as unknown[])[index]);
 }
 
 function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Record<string, unknown> | undefined {

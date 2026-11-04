@@ -5,12 +5,13 @@
  * `supersede_candidate.acceptance` on every `recall` row (#2508), as on
  * `reference` since v0.137.0 (#2427).
  *
- * **plan_headroom.** `bootstrap` and `rememberBatch` read it fail-open, as
- * Python's `PlanHeadroom` field type reads it: an entry
- * `PlanHeadroomNotice` refuses is dropped and the call succeeds, and a
- * value that is not a list, or keeps no entry, is left out. The entries
- * that read come back as sent. `remember` / `updateMemory` return it as
- * sent, unchecked, as Python's dicts do. The notices are shaped like
+ * **plan_headroom.** All four read it fail-open, as Python's
+ * `PlanHeadroom` field type reads it: an entry `PlanHeadroomNotice`
+ * refuses is dropped and the call succeeds, and a value that is not a
+ * list, or keeps no entry, is left out. The entries that read come back
+ * as sent. Python's `remember` / `update_memory` return their dict
+ * unchecked, so for a malformed notice only Python keeps what this drops;
+ * `sentReply` gives the CLI the reply as sent. The notices are shaped like
  * memory-cloud v0.142.0's `services/plan_headroom.py::_notice` (key order
  * `dimension, level, used, limit, percentage, resets_at?, plan?, remedies,
  * help`), with `help` on the most severe entry only, as `bootstrap`'s
@@ -23,8 +24,16 @@
 
 import { describe, expect, it } from "vitest";
 
+import { sentReply } from "../src/client.js";
 import { KaguraResponseError } from "../src/errors.js";
-import type { BootstrapResponse, PlanHeadroomNotice, RememberBatchResult, SupersedeAcceptance } from "../src/index.js";
+import type {
+  BootstrapResponse,
+  PlanHeadroomNotice,
+  RememberBatchResult,
+  RememberResult,
+  SupersedeAcceptance,
+  UpdateMemoryResult,
+} from "../src/index.js";
 import { FakeServer, makeClient } from "./fakeServer.js";
 
 const CTX = "11111111-2222-4333-8444-555555555555";
@@ -108,7 +117,12 @@ const BATCH = {
   context_id: CTX,
 };
 
-type Envelope = BootstrapResponse | RememberBatchResult;
+const REMEMBER = { status: "success", memory_id: M1, scope: "persistent", version: 1, session_id: "sess_3f2a9c" };
+
+const UPDATE = { status: "success", memory_id: M1, operation: "updated", re_embedded: false, version: 2 };
+
+type Tool = "bootstrap" | "remember_batch" | "remember" | "update_memory";
+type Envelope = BootstrapResponse | RememberBatchResult | RememberResult | UpdateMemoryResult;
 
 const ITEMS = [{ summary: "s", content: "c", type: "note" }];
 
@@ -117,22 +131,27 @@ const ITEMS = [{ summary: "s", content: "c", type: "note" }];
  * options: the notice is response-only, so nothing new goes on the wire
  * and a server older than v0.142.0 sees the same call.
  */
-const WIRE_ARGS = {
+const WIRE_ARGS: Record<Tool, Record<string, unknown>> = {
   bootstrap: { context_id: CTX },
   remember_batch: { context_id: CTX, items: ITEMS },
-} as const;
+  remember: { context_id: CTX, summary: "s", content: "c", type: "note", importance: 0.5 },
+  update_memory: { context_id: CTX, memory_id: M1, summary: "A summary of ten" },
+};
 
 /**
  * Call `tool` through its method against a server that answers `reply`,
  * checking that the call sent {@link WIRE_ARGS} and nothing else.
  */
-async function call(tool: "bootstrap" | "remember_batch", reply: unknown): Promise<Envelope> {
+async function call(tool: Tool, reply: unknown): Promise<Envelope> {
   const server = new FakeServer();
   server.toolResults[tool] = reply;
   const client = makeClient(server);
-  const result = await (tool === "bootstrap"
-    ? client.bootstrap({ contextId: CTX })
-    : client.rememberBatch({ contextId: CTX, items: ITEMS }));
+  const result = await {
+    bootstrap: () => client.bootstrap({ contextId: CTX }),
+    remember_batch: () => client.rememberBatch({ contextId: CTX, items: ITEMS }),
+    remember: () => client.remember({ contextId: CTX, summary: "s", content: "c" }),
+    update_memory: () => client.updateMemory({ contextId: CTX, memoryId: M1, summary: "A summary of ten" }),
+  }[tool]();
   const calls = server.requests.filter((r) => r.body?.method === "tools/call").map((r) => r.body?.params);
   expect(calls).toEqual([{ name: tool, arguments: WIRE_ARGS[tool] }]);
   return result;
@@ -141,9 +160,11 @@ async function call(tool: "bootstrap" | "remember_batch", reply: unknown): Promi
 const ENVELOPES = [
   ["bootstrap", BOOTSTRAP],
   ["remember_batch", BATCH],
+  ["remember", REMEMBER],
+  ["update_memory", UPDATE],
 ] as const;
 
-describe("plan_headroom on bootstrap and remember_batch (memory-cloud v0.142.0, #2615)", () => {
+describe("plan_headroom on bootstrap, remember_batch, remember and update_memory (memory-cloud v0.142.0, #2615)", () => {
   it.each(ENVELOPES)("%s returns notices that read as sent", async (tool, envelope) => {
     const reply = { ...envelope, plan_headroom: SENT };
     const result = await call(tool, reply);
@@ -161,6 +182,8 @@ describe("plan_headroom on bootstrap and remember_batch (memory-cloud v0.142.0, 
     // As sent: the reply's keys and each entry's (resets_at before plan) in the server's order.
     expect(Object.keys(result)).toEqual(Object.keys(reply));
     expect(notices?.map((n) => Object.keys(n))).toEqual(SENT.map((n) => Object.keys(n)));
+    // Nothing dropped: the reply is the one sent.
+    expect(sentReply(result)).toBe(result);
   });
 
   it.each(ENVELOPES)("%s without plan_headroom (below 80 %%) has none", async (tool, envelope) => {
@@ -176,6 +199,8 @@ describe("plan_headroom on bootstrap and remember_batch (memory-cloud v0.142.0, 
     expect(result).toEqual({ ...envelope, plan_headroom: [PER_DAY_CRITICAL, NEWER_KEY] });
     // The rest of the reply is untouched, its keys in the order sent.
     expect(Object.keys(result)).toEqual(Object.keys(reply));
+    // The CLI still has the reply as sent.
+    expect(sentReply(result)).toEqual(reply);
   });
 
   it.each(
@@ -191,9 +216,11 @@ describe("plan_headroom on bootstrap and remember_batch (memory-cloud v0.142.0, 
       ).map(([why, value]) => [tool, why, envelope, value] as const),
     ),
   )("%s leaves plan_headroom out when %s", async (tool, _why, envelope, value) => {
-    const result = await call(tool, { ...envelope, plan_headroom: value });
+    const reply = { ...envelope, plan_headroom: value };
+    const result = await call(tool, reply);
     expect(result).toEqual(envelope);
     expect(result).not.toHaveProperty("plan_headroom");
+    expect(sentReply(result)).toEqual(reply);
   });
 
   it("bootstrap reads an unreadable guardrails block and plan_headroom fail-open together", async () => {
@@ -207,29 +234,6 @@ describe("plan_headroom on bootstrap and remember_batch (memory-cloud v0.142.0, 
     const err = await call("remember_batch", reply).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(KaguraResponseError);
     expect((err as Error).message).toContain("(count: Field required)");
-  });
-});
-
-describe("plan_headroom on remember and update_memory: as sent, as Python's dicts (#2615)", () => {
-  // Unchecked, like the rest of these replies: nothing is dropped.
-  const notices = [UNREADABLE[0], PER_DAY_CRITICAL];
-
-  it("remember returns the notices as sent", async () => {
-    const server = new FakeServer();
-    const reply = { status: "success", memory_id: M1, scope: "persistent", version: 1, plan_headroom: notices };
-    server.toolResults.remember = reply;
-    const result = await makeClient(server).remember({ contextId: CTX, summary: "s", content: "c" });
-    expect(result).toEqual(reply);
-    expect(result.plan_headroom?.[1]?.level).toBe("critical");
-  });
-
-  it("updateMemory returns the notices as sent", async () => {
-    const server = new FakeServer();
-    const reply = { status: "success", memory_id: M1, operation: "updated", version: 2, plan_headroom: notices };
-    server.toolResults.update_memory = reply;
-    const result = await makeClient(server).updateMemory({ contextId: CTX, memoryId: M1, summary: "A summary of ten" });
-    expect(result).toEqual(reply);
-    expect(result.plan_headroom?.[1]?.dimension).toBe("memories_per_day");
   });
 });
 
