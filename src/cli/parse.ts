@@ -9,8 +9,7 @@
  * tools reads the same guidance.
  */
 
-import { excMessage } from "../errors.js";
-import { normalizeAddTools } from "../http.js";
+import { readAddToolsFlag } from "../http.js";
 import { pyStrip } from "../pyCompat.js";
 import { PY_INT, pyBigInt, pyFloat, pyFloatRepr, pyInt, pyRepr, pyTypeName } from "../python.js";
 import type { FlagSpec, ParsedArgs } from "./parseArgs.js";
@@ -20,22 +19,14 @@ export { PY_INT, pyFloatRepr, pyRepr };
 /**
  * `--add-tools NAME[,NAME...]` (repeatable, `setup *` and `guardrails
  * digest`) as one normalized list; undefined when absent — Python's
- * `_add_tools_option` (python-sdk#300). A value that names no tool is a
- * typo, so it is refused rather than dropped; so are a name starting with
- * `-` and more than 100 names in all, in the Python CLI's words.
+ * `_add_tools_option` (python-sdk#300), checked by {@link readAddToolsFlag}
+ * as the proxy checks it, refused in the Python CLI's words.
  */
 export function parseAddTools(raw: readonly string[] | undefined): string[] | undefined {
   if (raw === undefined || raw.length === 0) return undefined;
-  const invalid = (problem: string) => new CliUsageError(`Invalid value for '--add-tools': ${problem}`);
-  let joined: string;
-  try {
-    if (raw.some((item) => !normalizeAddTools([item]))) throw invalid("must name at least one tool");
-    joined = normalizeAddTools(raw);
-  } catch (e) {
-    if (e instanceof CliUsageError) throw e;
-    throw invalid(excMessage(e));
-  }
-  return joined.split(",");
+  const read = readAddToolsFlag(raw);
+  if ("problem" in read) throw new CliUsageError(`Invalid value for '--add-tools': ${read.problem}`);
+  return read.names;
 }
 
 /**

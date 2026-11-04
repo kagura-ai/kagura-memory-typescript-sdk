@@ -8,21 +8,18 @@ import {
   hermesYamlOauthBlock,
   isHttpUrl,
   json5HasServer,
-  mcpUrlWithQuery,
   normalizeUrl,
   openclawBlock,
   openclawOauthBlock,
   openclawOauthEntry,
   pluginServerUrl,
-  queryParam,
   shellCommand,
   tomlHasServer,
-  withoutQuery,
-  withoutQueryParam,
   yamlHasServer,
   yamlServersIndent,
   yamlServersInline,
 } from "../../../src/cli/commands/harnessConfig.js";
+import { mcpUrlWithQuery, queryParam, withoutQuery, withoutQueryParam } from "../../../src/http.js";
 
 const UUID = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
 

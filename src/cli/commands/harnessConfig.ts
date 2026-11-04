@@ -88,15 +88,6 @@ export function isHttpUrl(url: string): boolean {
 }
 
 /**
- * The MCP URL query edits, from `http.ts`: the one composer
- * (`mcpUrlWithQuery`, Python's `mcp_url_with_query`) and the readers every
- * command shares, so `setup`, `guardrails digest`, `doctor` and
- * `kagura-memory-mcp` read and write a URL's query alike, as the server
- * reads it.
- */
-export { mcpUrlWithQuery, queryParam, withoutQuery, withoutQueryParam } from "../../http.js";
-
-/**
  * The URL for the Claude plugin's `server_url` setting.
  *
  * The plugin's hooks call the server themselves with their own

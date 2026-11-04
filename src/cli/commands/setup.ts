@@ -47,11 +47,15 @@ import { KaguraAuthError, KaguraConnectionError, KaguraNotFoundError, excMessage
 import { hasGuardrailBlock, writeGuardrailBlock, type GuardrailBlockStatus } from "../../guardrailExport.js";
 import {
   baseUrlFromMcp,
+  mcpQueryToolView,
   mcpUrlQueryValues,
   mcpUrlToolView,
+  mcpUrlWithQuery,
   normalizeGuardrails,
   normalizeToolProfile,
+  queryParam,
   validateHttpsUrl,
+  withoutQueryParam,
 } from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
@@ -75,18 +79,15 @@ import {
   hermesYamlOauthBlock,
   isHttpUrl,
   json5HasServer,
-  mcpUrlWithQuery,
   normalizeUrl,
   openclawBlock,
   openclawEntry,
   openclawOauthBlock,
   openclawOauthEntry,
   pluginServerUrl,
-  queryParam,
   shellCommand,
   shellQuote,
   tomlHasServer,
-  withoutQueryParam,
   yamlHasServer,
   yamlServersIndent,
   yamlServersInline,
@@ -1389,7 +1390,7 @@ function queryFlags(entry: Record<string, unknown>): Map<string, string> {
   }
   if (typeof entry.url !== "string") return found;
   const query = mcpUrlQueryValues(entry.url);
-  const view = mcpUrlToolView(entry.url);
+  const view = mcpQueryToolView(query);
   const settings: [string, string][] = [
     ["--guardrails", pyStrip(query.get("guardrails") ?? "")],
     ["--tool-profile", view.profile ?? ""],

@@ -4,9 +4,9 @@ import { excMessage } from "../errors.js";
 import {
   mcpUrlToolView,
   mcpUrlWithQuery,
-  normalizeAddTools,
   normalizeGuardrails,
   normalizeToolProfile,
+  readAddToolsFlag,
   type McpUrlQuery,
 } from "../http.js";
 import { normalizeUuid, pyStrip } from "../pyCompat.js";
@@ -114,13 +114,9 @@ function upstreamOptions(
 ): Upstream {
   const guardrails = checked("guardrails", values.guardrails, normalizeGuardrails);
   const profile = checked("tool-profile", values["tool-profile"], normalizeToolProfile);
-  for (const item of addToolsRaw) {
-    if (checked("add-tools", item, (v) => normalizeAddTools([v])) === "") {
-      throw invalid("add-tools", "must name at least one tool");
-    }
-  }
-  // Over 100 names across repeated --add-tools.
-  const added = checked("add-tools", addToolsRaw.join(","), (v) => normalizeAddTools([v])) ?? "";
+  // Each value, then over 100 names across repeated --add-tools, as the CLI checks them.
+  const added = readAddToolsFlag(addToolsRaw);
+  if ("problem" in added) throw invalid("add-tools", added.problem);
   const context = checked("context", values.context, (v) => normalizeUuid(pyStrip(v), "context"));
   let session = checked("session-id", values["session-id"], sessionId);
   const fromEnv = pyStrip(env[SESSION_ENV] ?? "");
@@ -132,7 +128,7 @@ function upstreamOptions(
     }
   }
   return {
-    query: { guardrails, profile, addTools: added ? added.split(",") : undefined, context },
+    query: { guardrails, profile, addTools: added.names.length > 0 ? added.names : undefined, context },
     sessionId: session,
   };
 }

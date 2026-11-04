@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_ADD_TOOLS,
+  mcpQueryToolView,
   mcpUrlQueryValues,
   mcpUrlToolView,
   mcpUrlWithQuery,
@@ -21,6 +22,7 @@ import {
   normalizeGuardrails,
   normalizeToolProfile,
   queryParam,
+  readAddToolsFlag,
   type McpUrlQuery,
 } from "../src/http.js";
 
@@ -77,7 +79,10 @@ describe("mcpUrlWithQuery", () => {
     expect(mcpUrlWithQuery(B, { guardrails: placeholder, addTools: ["a b"] }, { guardrailsAsIs: true })).toBe(
       `${B}?guardrails=${placeholder}&add_tools=a+b`,
     );
-    expect(mcpUrlWithQuery(B, { guardrails: placeholder })).toBe(`${B}?guardrails=%3CUUID+of+context+my+proj%3E`);
+    // Without the option the placeholder is validated, and refused.
+    expect(() => mcpUrlWithQuery(B, { guardrails: placeholder })).toThrow(
+      new Error(`guardrails must be 'off' or a context UUID, got '${placeholder}'`),
+    );
   });
 
   it("trims the profile it writes", () => {
@@ -103,6 +108,34 @@ describe("mcpUrlWithQuery", () => {
       new TypeError("add_tools must be a list of tool names, not a str"),
     );
     expect(() => mcpUrlWithQuery(B, { addTools: [5 as unknown as string] })).toThrow(TypeError);
+  });
+
+  // Python's `type(item).__name__` in normalize_add_tools' TypeError.
+  it.each<[unknown, string]>([
+    [5, "int"],
+    [1.5, "float"],
+    [null, "NoneType"],
+    [true, "bool"],
+    [["x"], "list"],
+    [{}, "dict"],
+  ])("names a %j item by its Python type", (item, name) => {
+    expect(() => normalizeAddTools(["ok", item as string])).toThrow(
+      new TypeError(`add_tools items must be str, got ${name}`),
+    );
+  });
+
+  it("validates guardrails as normalizeGuardrails does, unless shown as is", () => {
+    expect(mcpUrlWithQuery(B, { guardrails: " OFF " })).toBe(`${B}?guardrails=off`);
+    expect(mcpUrlWithQuery(B, { guardrails: `{${U.toUpperCase()}}` })).toBe(`${B}?guardrails=${U}`);
+    expect(() => mcpUrlWithQuery(B, { guardrails: "on" })).toThrow(
+      new Error("guardrails must be 'off' or a context UUID, got 'on'"),
+    );
+    expect(() => mcpUrlWithQuery(B, { guardrails: "" })).toThrow(
+      new Error("guardrails must be 'off' or a context UUID, got ''"),
+    );
+    expect(mcpUrlWithQuery(B, { guardrails: "<UUID of context x>" }, { guardrailsAsIs: true })).toBe(
+      `${B}?guardrails=<UUID of context x>`,
+    );
   });
 });
 
@@ -136,6 +169,22 @@ describe("normalizeAddTools / normalizeToolProfile / normalizeGuardrails", () =>
   });
 });
 
+describe("readAddToolsFlag (the CLI's and the proxy's --add-tools check)", () => {
+  it.each<[string[], { names: string[] } | { problem: string }]>([
+    [[], { names: [] }],
+    [["explore", " list_edges,explore"], { names: ["explore", "list_edges"] }],
+    [["explore", " , "], { problem: "must name at least one tool" }],
+    [[""], { problem: "must name at least one tool" }],
+    [["a,-b"], { problem: "add_tools names cannot start with '-': '-b'" }],
+    // Each value is checked first, in order, as click and argparse check them.
+    [["", "-x"], { problem: "must name at least one tool" }],
+    [["-x", ""], { problem: "add_tools names cannot start with '-': '-x'" }],
+    [[names(60).join(","), names(101).slice(60).join(",")], { problem: "add_tools accepts at most 100 tool names, got 101" }],
+  ])("reads %j", (values, expected) => {
+    expect(readAddToolsFlag(values)).toEqual(expected);
+  });
+});
+
 describe("mcpUrlToolView", () => {
   // [url, Python's mcp_url_tool_view(url)]
   it.each<[string, { profile: string | null; tools: string[] | null; addTools: string[] }]>([
@@ -165,6 +214,12 @@ describe("mcpUrlToolView", () => {
     [`${B}?a=1;profile=full`, { profile: null, tools: null, addTools: [] }],
   ])("reads %s as Python does", (url, view) => {
     expect(mcpUrlToolView(url)).toEqual(view);
+  });
+
+  it("is mcpQueryToolView of the URL's query values, as Python's mcp_query_tool_view", () => {
+    const url = `${B}?tools=recall&add_tools=explore,x&profile=%20full`;
+    expect(mcpQueryToolView(mcpUrlQueryValues(url))).toEqual(mcpUrlToolView(url));
+    expect(mcpQueryToolView(new Map())).toEqual({ profile: null, tools: null, addTools: [] });
   });
 
   it("reads the first 100 names of a list, as the server does", () => {

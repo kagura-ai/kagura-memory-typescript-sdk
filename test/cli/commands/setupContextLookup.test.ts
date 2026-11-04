@@ -28,11 +28,11 @@ import {
   unknownContextWarning,
   type ListContexts,
 } from "../../../src/cli/commands/contextLookup.js";
-import { mcpUrlWithQuery } from "../../../src/cli/commands/harnessConfig.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import type { KaguraConfig } from "../../../src/config.js";
 import { KaguraResponseError } from "../../../src/errors.js";
+import { mcpUrlWithQuery } from "../../../src/http.js";
 import type { ListContextsResponse } from "../../../src/models.js";
 import { isCanonicalUuid, pyStrip, uuidOrNone } from "../../../src/pyCompat.js";
 import { FakeServer } from "../../fakeServer.js";
@@ -369,9 +369,14 @@ describe("the Python CLI 0.44.0's texts", () => {
     expect(mcpUrlWithQuery(url, { guardrails: shown, profile: "a b" }, { guardrailsAsIs: true })).toBe(
       "https://x.test/mcp?a=%3CUUID+of+context+X%3E&guardrails=<UUID of context X>&profile=a+b#frag",
     );
-    // Without the option, as before: every value encoded, the other parameters as written.
-    expect(mcpUrlWithQuery(url, { guardrails: shown })).toBe(
-      "https://x.test/mcp?a=%3CUUID+of+context+X%3E&guardrails=%3CUUID+of+context+X%3E#frag",
+    // Without the option the composer validates guardrails (#83), so the
+    // placeholder, no guardrails value, is refused; a real value is
+    // written normalized, the other parameters as written.
+    expect(() => mcpUrlWithQuery(url, { guardrails: shown })).toThrow(
+      new Error("guardrails must be 'off' or a context UUID, got '<UUID of context X>'"),
+    );
+    expect(mcpUrlWithQuery(url, { guardrails: "OFF", profile: "a b" })).toBe(
+      "https://x.test/mcp?a=%3CUUID+of+context+X%3E&guardrails=off&profile=a+b#frag",
     );
     expect(mcpUrlWithQuery("https://x.test/mcp", { profile: "core" }, { guardrailsAsIs: true })).toBe(
       "https://x.test/mcp?profile=core",

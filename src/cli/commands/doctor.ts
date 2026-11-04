@@ -683,30 +683,32 @@ async function checkResolvedServer(
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
   let info: ServerInfo;
+  let meets: boolean | null;
   let listing: DoctorCheck[] = [];
   try {
-    info = await client.getServerInfo();
+    try {
+      info = await client.getServerInfo();
+    } catch (e) {
+      if (e instanceof KaguraAuthError) {
+        // An OAuth bearer reaches MCP where REST refuses it, so its tool view
+        // is still checked, the server's version unknown.
+        return resolved.kind === "oauth"
+          ? [
+              { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED },
+              ...(await checkToolListing(client, resolved, null)),
+            ]
+          : [{ section: "server", status: "fail", message: excMessage(e) }];
+      }
+      if (e instanceof KaguraConnectionError) {
+        return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
+      }
+      if (e instanceof KaguraResponseError) return [serverUnreadable(e)];
+      return [{ section: "server", status: "fail", message: excMessage(e) }];
+    }
+    meets = meetsMinimum(info.version, MIN_SERVER_VERSION_TRIPLE);
     // tools/list on the same client, before it closes (python-sdk#300),
-    // unless the version check fails below.
-    if (meetsMinimum(info.version, MIN_SERVER_VERSION_TRIPLE) !== false) {
-      listing = await checkToolListing(client, resolved, info.version);
-    }
-  } catch (e) {
-    if (e instanceof KaguraAuthError) {
-      // An OAuth bearer reaches MCP where REST refuses it, so its tool view
-      // is still checked, the server's version unknown.
-      return resolved.kind === "oauth"
-        ? [
-            { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED },
-            ...(await checkToolListing(client, resolved, null)),
-          ]
-        : [{ section: "server", status: "fail", message: excMessage(e) }];
-    }
-    if (e instanceof KaguraConnectionError) {
-      return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
-    }
-    if (e instanceof KaguraResponseError) return [serverUnreadable(e)];
-    return [{ section: "server", status: "fail", message: excMessage(e) }];
+    // unless the server is below the minimum. It never throws.
+    if (meets !== false) listing = await checkToolListing(client, resolved, info.version);
   } finally {
     await client.close();
   }
@@ -716,7 +718,6 @@ async function checkResolvedServer(
 
   const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];
   const shown = typeof version === "string" ? version : pyRepr(version);
-  const meets = meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE);
   if (meets === null) {
     checks.push({ section: "server", status: "info", message: `Version: ${shown}`, details: { version } });
   } else if (!meets) {

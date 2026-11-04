@@ -1,6 +1,7 @@
 /** Shared HTTP utilities for Kagura Memory SDK clients (port of _http.py). */
 
 import {
+  excMessage,
   KaguraAuthError,
   KaguraCapacityLockedError,
   KaguraConnectionError,
@@ -12,6 +13,7 @@ import {
 } from "./errors.js";
 import type { KaguraCapacityLockedErrorOptions, KaguraQuotaErrorOptions } from "./errors.js";
 import { normalizeUuid, PY_SPACE_CLASS, pyRepr, pyStrip } from "./pyCompat.js";
+import { pyTypeName } from "./python.js";
 
 export { SDK_VERSION } from "./version.js";
 
@@ -183,13 +185,13 @@ function toolNames(value: string, cap: number | null): string[] {
 /** Validate a tool name list for `label` (`add_tools`, `tools`) and join it; {@link normalizeAddTools}. */
 function normalizeToolNames(names: readonly string[], label: string): string {
   if (!Array.isArray(names)) {
-    // Python's words for a str, which it would read a character at a time.
-    throw new TypeError(
-      `${label} must be a list of tool names, not a ${typeof names === "string" ? "str" : typeof names}`,
-    );
+    // Python's words for a str, which it would read a character at a time;
+    // any other non-list is named by its Python type too.
+    throw new TypeError(`${label} must be a list of tool names, not a ${pyTypeName(names)}`);
   }
   for (const item of names) {
-    if (typeof item !== "string") throw new TypeError(`${label} items must be str, got ${typeof item}`);
+    // Python's `type(item).__name__`: `got int`, `got NoneType`.
+    if (typeof item !== "string") throw new TypeError(`${label} items must be str, got ${pyTypeName(item)}`);
   }
   // Every name is read, not the first 100: a longer list is refused below.
   const unique = toolNames(names.join(","), null);
@@ -221,6 +223,27 @@ function normalizeToolNames(names: readonly string[], label: string): string {
  */
 export function normalizeAddTools(names: readonly string[]): string {
   return normalizeToolNames(names, "add_tools");
+}
+
+/**
+ * `--add-tools NAME[,NAME...]` values (the flag repeats; each value is
+ * comma-separated) as one list — the check Python's `_add_tools_option`
+ * (`setup *`, `guardrails digest`) and `kagura-mcp`'s `_add_tools_arg`
+ * share, which the CLI and the proxy each wrap in their own usage error.
+ * A value naming no tool is a typo, so it is refused rather than dropped;
+ * so is a name starting with `-`, and more than 100 names in all.
+ *
+ * @returns The names, normalized by {@link normalizeAddTools} (`[]` for no
+ *   values), or the problem in the Python CLI's words.
+ */
+export function readAddToolsFlag(values: readonly string[]): { names: string[] } | { problem: string } {
+  try {
+    if (values.some((item) => !normalizeAddTools([item]))) return { problem: "must name at least one tool" };
+    const joined = normalizeAddTools(values);
+    return { names: joined ? joined.split(",") : [] };
+  } catch (e) {
+    return { problem: excMessage(e) };
+  }
 }
 
 /**
@@ -288,12 +311,14 @@ export interface McpUrlQuery {
  * Servers older than a key ignore it.
  *
  * `shown.guardrailsAsIs` is for display only: the `guardrails` value goes
- * in as it is, not encoded — a dry run's `<UUID of context VALUE>`
- * placeholder, as the Python CLI shows it. Such a URL is never written or
- * run.
+ * in as it is, neither validated nor encoded — a dry run's `<UUID of
+ * context VALUE>` placeholder, as the Python CLI shows it. Such a URL is
+ * never written or run.
  *
- * @throws Error `profile` is blank or starts with `-`, a tool name starts
- *   with `-` or a list names more than 100, or `context` is not a UUID.
+ * @throws Error `guardrails` is neither `off` nor a context UUID
+ *   ({@link normalizeGuardrails}), `profile` is blank or starts with `-`, a
+ *   tool name starts with `-` or a list names more than 100, or `context`
+ *   is not a UUID.
  * @throws TypeError `tools` / `addTools` is not an array of strings.
  */
 export function mcpUrlWithQuery(
@@ -302,7 +327,10 @@ export function mcpUrlWithQuery(
   shown: { guardrailsAsIs?: boolean } = {},
 ): string {
   const set: [string, string][] = [];
-  if (updates.guardrails !== undefined) set.push(["guardrails", updates.guardrails]);
+  if (updates.guardrails !== undefined) {
+    const asIs = shown.guardrailsAsIs === true;
+    set.push(["guardrails", asIs ? updates.guardrails : normalizeGuardrails(updates.guardrails)]);
+  }
   if (updates.profile !== undefined) set.push(["profile", normalizeToolProfile(updates.profile)]);
   const tools = updates.tools !== undefined ? normalizeToolNames(updates.tools, "tools") : "";
   if (tools) set.push(["tools", tools]);
@@ -341,7 +369,15 @@ export interface McpToolView {
  * the caller.
  */
 export function mcpUrlToolView(url: string): McpToolView {
-  const query = mcpUrlQueryValues(url);
+  return mcpQueryToolView(mcpUrlQueryValues(url));
+}
+
+/**
+ * {@link mcpUrlToolView} of a query {@link mcpUrlQueryValues} already read
+ * — Python's `mcp_query_tool_view`, for a caller that reads other
+ * parameters of the same URL too, so the query is parsed once.
+ */
+export function mcpQueryToolView(query: ReadonlyMap<string, string>): McpToolView {
   const profile = query.get("profile");
   const tools = query.get("tools");
   return {
