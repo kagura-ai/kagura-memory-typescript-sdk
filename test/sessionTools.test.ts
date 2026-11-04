@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { KaguraClient } from "../src/client.js";
+import { KaguraClient, pythonOptionNames } from "../src/client.js";
 import {
   KaguraCapacityLockedError,
   KaguraError,
@@ -640,6 +640,39 @@ describe("rollbackSession", () => {
     const err = await client.rollbackSession({ contextId: CTX, sessionId: "s" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(KaguraResponseError);
     expect((err as KaguraResponseError).operation).toBe("rollback_session");
+  });
+});
+
+describe("pythonOptionNames (the CLI's marker)", () => {
+  it.each([
+    [
+      (c: KaguraClient) => c.bootstrap(pythonOptionNames({ contextId: CTX, format: "full" as const, maxChars: 5000 })),
+      'format="full" needs max_chars of at least 10000; pass format="index" (or omit format) under it',
+    ],
+    [
+      (c: KaguraClient) => c.bootstrap(pythonOptionNames({ contextId: CTX, maxChars: 1999 })),
+      "max_chars must be an integer between 2000 and 100000, got 1999",
+    ],
+    [
+      (c: KaguraClient) => c.forget(pythonOptionNames({ contextId: CTX, memoryIds: [M1, "x"] })),
+      "memory_ids[1] is not a memory UUID",
+    ],
+    [
+      (c: KaguraClient) => c.forget(pythonOptionNames({ contextId: CTX, memoryIds: [M1], memoryId: M2 }) as never),
+      "Provide exactly one of memory_id, memory_ids or query",
+    ],
+    [
+      (c: KaguraClient) => c.forget(pythonOptionNames({ contextId: CTX, memoryIds: [M1], k: 3 }) as never),
+      "k applies to query mode only, not to memory_ids",
+    ],
+  ])("names the options as Python does in local refusal %#, before any request", async (call, message) => {
+    await refusedLocally(call, message);
+  });
+
+  it("changes nothing that is sent", async () => {
+    const { server, client } = setup("forget", FORGET_OK);
+    await client.forget(pythonOptionNames({ contextId: CTX, memoryIds: [M1, M2] }));
+    expect(toolCalls(server)).toEqual([{ name: "forget", arguments: { context_id: CTX, memory_ids: [M1, M2] } }]);
   });
 });
 

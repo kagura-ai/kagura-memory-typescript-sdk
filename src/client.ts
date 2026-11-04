@@ -1433,16 +1433,41 @@ function checkedNames(name: string, values: unknown, limit: number): string[] {
 }
 
 /**
+ * The marker {@link pythonOptionNames} sets on a method's options.
+ *
+ * @internal Not exported from the package entry point.
+ */
+const PYTHON_OPTION_NAMES: unique symbol = Symbol("kagura.pythonOptionNames");
+
+/**
+ * `options`, marked so that the method's local refusals name its options
+ * as the Python SDK names them (`max_chars`, `memory_ids`) rather than in
+ * camelCase. The CLI passes its options through this, so its `Error:`
+ * lines are the Python CLI's while the checks, and their order, stay the
+ * client's own.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function pythonOptionNames<T extends object>(options: T): T {
+  return { ...options, [PYTHON_OPTION_NAMES]: true };
+}
+
+/** An option's name for a local refusal: as given, or snake_case under {@link pythonOptionNames}. */
+function optionLabel(options: object, camel: string): string {
+  return (options as { [PYTHON_OPTION_NAMES]?: true })[PYTHON_OPTION_NAMES]
+    ? camel.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+    : camel;
+}
+
+/**
  * Refuse a `forget({ memoryIds })` list the server would refuse, before any
  * request: not 1-50 ids, an id that is not a UUID, or the same id twice,
  * compared as the server compares them — as UUIDs, so two spellings of one
  * id (case, braces) are the same id. The ids go out as given.
  *
- * @param name The option's name in the message: the CLI passes Python's
- *   `memory_ids`, so its `Error:` line is the Python CLI's.
- * @internal Not exported from the package entry point.
+ * @param name The option's name in the message.
  */
-export function checkedMemoryIds(memoryIds: unknown, name = "memoryIds"): string[] {
+function checkedMemoryIds(memoryIds: unknown, name: string): string[] {
   const ids = strList(name, memoryIds);
   if (ids.length < 1 || ids.length > FORGET_MAX_IDS) {
     throw new Error(`${name} must hold 1 to ${FORGET_MAX_IDS} ids, got ${ids.length}`);
@@ -1461,12 +1486,8 @@ export function checkedMemoryIds(memoryIds: unknown, name = "memoryIds"): string
   return ids;
 }
 
-/**
- * `bootstrap`'s `include`, checked: a non-empty list of known lane names.
- *
- * @internal Not exported from the package entry point.
- */
-export function checkedBootstrapInclude(include: unknown): string[] {
+/** `bootstrap`'s `include`, checked: a non-empty list of known lane names. */
+function checkedBootstrapInclude(include: unknown): string[] {
   const lanes = strList("include", include);
   if (lanes.length === 0 || lanes.some((name) => !(BOOTSTRAP_COMPONENTS as readonly string[]).includes(name))) {
     throw new Error(`include must be a non-empty subset of ${BOOTSTRAP_COMPONENTS.join(", ")}`);
@@ -1474,22 +1495,6 @@ export function checkedBootstrapInclude(include: unknown): string[] {
   return lanes;
 }
 
-/**
- * The error for `bootstrap({ format: "full" })` under the 10,000-character
- * floor that format keeps.
- *
- * @param name The budget option's name: the CLI passes Python's `max_chars`.
- * @internal Not exported from the package entry point.
- */
-export function bootstrapFullFormatTooSmall(name = "maxChars"): Error {
-  return new Error(
-    `format="full" needs ${name} of at least ${MAX_CHARS_MIN}; pass format="index" (or omit format) under it`,
-  );
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * Refuse a `rememberBatch` `items` list before any request — the Python
@@ -1507,7 +1512,7 @@ function checkedBatchItems(items: unknown, contextId: string): Record<string, un
     throw new Error(`items must hold 1 to ${BATCH_MAX_ITEMS} items, got ${items.length}`);
   }
   items.forEach((item: unknown, index) => {
-    if (!isPlainObject(item)) {
+    if (!isRecord(item)) {
       throw new Error(`items[${index}] must be a dict, got ${pyTypeName(item)}`);
     }
     const batchLevel = BATCH_LEVEL_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(item, key));
@@ -3455,15 +3460,16 @@ export class KaguraClient {
   async forget(options: ForgetOptions | ForgetByIdsOptions): Promise<ToolResult | ForgetBatchResult>;
   async forget(options: ForgetOptions | ForgetByIdsOptions): Promise<ToolResult | ForgetBatchResult> {
     if (isSet(options.memoryIds)) {
+      const label = (camel: string) => optionLabel(options, camel);
       if (options.memoryId || options.query) {
-        throw new Error("Provide exactly one of memoryId, memoryIds or query");
+        throw new Error(`Provide exactly one of ${label("memoryId")}, ${label("memoryIds")} or query`);
       }
       if (isSet(options.k)) {
-        throw new Error("k applies to query mode only, not to memoryIds");
+        throw new Error(`k applies to query mode only, not to ${label("memoryIds")}`);
       }
       const result = await this.callToolChecked("forget", {
         context_id: options.contextId,
-        memory_ids: checkedMemoryIds(options.memoryIds),
+        memory_ids: checkedMemoryIds(options.memoryIds, label("memoryIds")),
       });
       readModel(result, FORGET_BATCH_RESULT, "forget");
       return result as unknown as ForgetBatchResult;
@@ -4245,15 +4251,19 @@ export class KaguraClient {
       args.include = checkedBootstrapInclude(options.include);
     }
     const { maxChars, format } = options;
+    const maxCharsName = optionLabel(options, "maxChars");
     if (isSet(maxChars)) {
-      args.max_chars = validateIntRange("maxChars", maxChars, BOOTSTRAP_MIN_CHARS, MAX_CHARS_MAX);
+      args.max_chars = validateIntRange(maxCharsName, maxChars, BOOTSTRAP_MIN_CHARS, MAX_CHARS_MAX);
     }
     if (isSet(format)) {
       if (!(BOOTSTRAP_FORMATS as readonly unknown[]).includes(format)) {
         throw new Error(`format must be 'full' or 'index', got ${pyRepr(format)}`);
       }
       if (format === "full" && isSet(maxChars) && maxChars < MAX_CHARS_MIN) {
-        throw bootstrapFullFormatTooSmall();
+        throw new Error(
+          `format="full" needs ${maxCharsName} of at least ${MAX_CHARS_MIN}; ` +
+            'pass format="index" (or omit format) under it',
+        );
       }
       args.format = format;
     }

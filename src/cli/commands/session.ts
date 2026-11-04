@@ -6,15 +6,17 @@
  * each prints the Python SDK model's `model_dump(mode="json")` as the
  * Python CLI's `json.dumps(…, indent=2, ensure_ascii=False)` writes it
  * (`formatDumpsJson` of the model's read), so a field the server left out
- * prints with its default and a timestamp in pydantic's form. `forget
+ * prints with its default and a timestamp in pydantic's form. One
+ * exception until #88: `plan_headroom` prints exactly as sent, where
+ * Python fills each notice's defaults and drops an unreadable one. `forget
  * --ids` lives with `forget` in `memory.ts`.
  */
 
-import { bootstrapFullFormatTooSmall, checkedBootstrapInclude, checkedMemoryIds } from "../../client.js";
+import { pythonOptionNames } from "../../client.js";
 import { KaguraError } from "../../errors.js";
-import { JsonDecodeError, parseJsonLossless } from "../../losslessJson.js";
+import { isRecord } from "../../http.js";
 import type { BootstrapComponentName, BootstrapFormat, ListOrderBy } from "../../models.js";
-import { pyStr, pyTruthy, pyTypeName } from "../../python.js";
+import { pyStr, pyTruthy } from "../../python.js";
 import {
   BOOTSTRAP_RESPONSE,
   CHANGES_SINCE_RESPONSE,
@@ -26,7 +28,7 @@ import {
 import { MAX_CHARS_MAX, MAX_CHARS_MIN } from "../../responseBudget.js";
 import { examples, rejectExtraArgs, requireArg, type Command, type CommandDeps } from "../command.js";
 import { formatDumpsJson } from "../modelDump.js";
-import { CliUsageError, optionalRanged, parseChoice, parseTags } from "../parse.js";
+import { optionalRanged, parseChoice, parseJsonObject, parseTags, refuseNonFinite } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
 
@@ -61,32 +63,14 @@ function choice<T extends string>(args: ParsedArgs, flag: FlagSpec, choices: rea
   return raw === undefined ? undefined : parseChoice(flag, raw, choices);
 }
 
-/** Print a reply as the Python CLI prints `model.model_dump(mode="json")`. */
+/**
+ * Print a reply as the Python CLI prints `model.model_dump(mode="json")`.
+ *
+ * The client checked the reply against the same model and returned it as
+ * sent; this reads it once more for the dump's defaults and key order.
+ */
 function dump(model: Model, operation: string): (result: unknown) => string {
   return (result) => formatDumpsJson(readModel(result, model, operation));
-}
-
-/**
- * A JSON-object option, or `undefined` when blank — the Python CLI's
- * `_parse_json_object`, as `list --filters` calls it: read as Python's
- * `json.loads` reads it, so a malformed value is refused in its words.
- *
- * @throws CliUsageError (exit 2) for text that is not JSON, or JSON that
- *   is not an object.
- */
-function parseJsonObject(raw: string | undefined, flag: string, example: string): Record<string, unknown> | undefined {
-  if (raw === undefined || !raw.trim()) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = parseJsonLossless(raw);
-  } catch (e) {
-    if (!(e instanceof JsonDecodeError)) throw e;
-    throw new CliUsageError(`Invalid JSON for ${flag}: ${e.message}`);
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new CliUsageError(`${flag} must be a JSON object, got ${pyTypeName(parsed)}. Example: ${flag} ${example}`);
-  }
-  return parsed as Record<string, unknown>;
 }
 
 const BOOTSTRAP_FORMATS: readonly BootstrapFormat[] = ["full", "index"];
@@ -139,21 +123,18 @@ const bootstrap: Command = {
     return runClientCommand(
       deps,
       args.values["context-id"],
-      (client, contextId) => {
-        // The client's own checks, in its order, but in the Python CLI's
-        // words: `max_chars`, where the client names its option `maxChars`.
-        if (format === "full" && maxChars !== undefined && maxChars < MAX_CHARS_MIN) {
-          if (include !== undefined) checkedBootstrapInclude(include);
-          throw bootstrapFullFormatTooSmall("max_chars");
-        }
-        return client.bootstrap({
-          contextId,
-          ...(since !== undefined ? { since } : {}),
-          ...(include !== undefined ? { include } : {}),
-          ...(maxChars !== undefined ? { maxChars } : {}),
-          ...(format !== undefined ? { format } : {}),
-        });
-      },
+      (client, contextId) =>
+        // The client's own checks, in its order; their messages name
+        // `max_chars` as the Python CLI's do.
+        client.bootstrap(
+          pythonOptionNames({
+            contextId,
+            ...(since !== undefined ? { since } : {}),
+            ...(include !== undefined ? { include } : {}),
+            ...(maxChars !== undefined ? { maxChars } : {}),
+            ...(format !== undefined ? { format } : {}),
+          }),
+        ),
       // Python dumps it by alias, which only `components.upcoming.from` has.
       { format: dump(BOOTSTRAP_RESPONSE, "bootstrap") },
     );
@@ -197,9 +178,10 @@ const changes: Command = {
     ],
   },
   run: async (deps, args) => {
-    const since = requireArg(args, 0, "SINCE");
+    // click checks a given option before it reports a SINCE not given.
     const limit = rangedInt(args, CHANGES_LIMIT, 1, 100);
     const maxChars = rangedInt(args, MAX_CHARS, MAX_CHARS_MIN, MAX_CHARS_MAX);
+    const since = requireArg(args, 0, "SINCE");
     rejectExtraArgs(args, 1);
     const { until, cursor } = args.values;
     const sessionId = args.values["session-id"];
@@ -277,8 +259,11 @@ const list: Command = {
     return runClientCommand(
       deps,
       args.values["context-id"],
-      (client, contextId) =>
-        client.listMatching({
+      (client, contextId) => {
+        // What Python's httpx refuses to encode, after the context is
+        // resolved, rather than sent as `null`.
+        if (filters !== undefined) refuseNonFinite([filters]);
+        return client.listMatching({
           contextId,
           ...(filters !== undefined ? { filters } : {}),
           ...(orderBy !== undefined ? { orderBy } : {}),
@@ -287,17 +272,14 @@ const list: Command = {
           ...(limit !== undefined ? { limit } : {}),
           ...(includeDetails ? { includeDetails } : {}),
           ...(maxChars !== undefined ? { maxChars } : {}),
-        }),
+        });
+      },
       { format: dump(LIST_MATCHING_RESPONSE, "list") },
     );
   },
 };
 
 export const SESSION_COMMANDS: Record<string, Command> = { bootstrap, changes, list };
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * Print one `<memory_id> <status> [<error>]` line per row on stderr — the
@@ -309,7 +291,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function echoForgetRows(writeError: (line: string) => void, rows: unknown): void {
   if (!Array.isArray(rows)) return;
   for (const row of rows) {
-    if (!isPlainObject(row)) continue;
+    if (!isRecord(row)) continue;
     // Python's `row.get(key)`: a missing key is None.
     let line = `${pyStr(row.memory_id ?? null)} ${pyStr(row.status ?? null)}`;
     if (pyTruthy(row.error)) line += ` ${pyStr(row.error)}`;
@@ -328,10 +310,10 @@ export function runForgetByIds(deps: CommandDeps, contextIdFlag: string | undefi
     deps,
     contextIdFlag,
     async (client, contextId) => {
-      // The client's own check, in the Python CLI's words (`memory_ids`).
-      checkedMemoryIds(ids, "memory_ids");
       try {
-        return await client.forget({ contextId, memoryIds: ids });
+        // The client checks the ids; its messages name `memory_ids` as the
+        // Python CLI's do.
+        return await client.forget(pythonOptionNames({ contextId, memoryIds: ids }));
       } catch (e) {
         // batch_failed: every id failed, and the rows say which to resend.
         if (e instanceof KaguraError) echoForgetRows(deps.writeError, e.details.results);

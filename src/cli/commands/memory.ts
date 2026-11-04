@@ -62,14 +62,14 @@ const TAGS: FlagSpec = {
 const MEMORY_ID: FlagSpec = { name: "memory-id", short: "m", type: "value" };
 
 /** `-k` is short-only in Python; see FlagSpec.shortOnly. */
-const kFlag = (help: string, defaultLabel: string): FlagSpec => ({
+const kFlag = (help: string, defaultLabel?: string): FlagSpec => ({
   name: "k",
   short: "k",
   shortOnly: true,
   type: "value",
   metavar: "INTEGER",
   help,
-  defaultLabel,
+  ...(defaultLabel !== undefined ? { defaultLabel } : {}),
 });
 
 const SOURCE_TYPES: readonly SourceType[] = ["file", "url", "vault", "api", "manual"];
@@ -428,17 +428,10 @@ const reference: Command = {
 };
 
 /**
- * `-k`, short-only, with no default of its own since the Python CLI 0.44.0:
- * `--ids` refuses it, so "not given" must stay apart from 10.
+ * `-k` with no default of its own since the Python CLI 0.44.0: `--ids`
+ * refuses it, so "not given" must stay apart from 10.
  */
-const FORGET_K: FlagSpec = {
-  name: "k",
-  short: "k",
-  shortOnly: true,
-  type: "value",
-  metavar: "INTEGER",
-  help: "Max memories to delete in query mode (default 10)",
-};
+const FORGET_K = kFlag("Max memories to delete in query mode (default 10)");
 
 const FORGET_IDS: FlagSpec = {
   name: "ids",

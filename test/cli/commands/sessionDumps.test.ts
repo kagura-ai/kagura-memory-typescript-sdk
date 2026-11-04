@@ -482,6 +482,82 @@ const CASES: Case[] = [
     stdout: "",
     stderr: "Usage: kagura forget [OPTIONS]\nTry 'kagura forget --help' for help.\n\nError: Invalid value for '-k': 'x' is not a valid integer.\n",
   },
+  // click checks a given option before it reports SINCE missing; a NaN or
+  // an infinity json.loads reads is what httpx then refuses to send, after
+  // the context is resolved; --details is read by the same parser as
+  // --filters, so its JSON errors are json.loads' words too.
+  {
+    name: "changes limit 0 without SINCE",
+    argv: ["changes","--limit","0"],
+    toolTexts: {},
+    calls: [],
+    code: 2,
+    stdout: "",
+    stderr: "Usage: kagura changes [OPTIONS] SINCE\nTry 'kagura changes --help' for help.\n\nError: Invalid value for '--limit': 0 is not in the range 1<=x<=100.\n",
+  },
+  {
+    name: "changes max-chars 5 without SINCE",
+    argv: ["changes","-c","11111111-2222-4333-8444-555555555555","--max-chars","5"],
+    toolTexts: {},
+    calls: [],
+    code: 2,
+    stdout: "",
+    stderr: "Usage: kagura changes [OPTIONS] SINCE\nTry 'kagura changes --help' for help.\n\nError: Invalid value for '--max-chars': 5 is not in the range 10000<=x<=100000.\n",
+  },
+  {
+    name: "list filters NaN",
+    argv: ["list","-c","11111111-2222-4333-8444-555555555555","--filters","{\"details.x\": NaN}"],
+    toolTexts: {"list":"{\"status\": \"success\", \"memories\": [], \"total\": 0, \"has_more\": false}"},
+    calls: [],
+    code: 1,
+    stdout: "",
+    stderr: "Error: Out of range float values are not JSON compliant: nan\n",
+  },
+  {
+    name: "list filters 1e400",
+    argv: ["list","-c","11111111-2222-4333-8444-555555555555","--filters","{\"details.x\": 1e400}"],
+    toolTexts: {"list":"{\"status\": \"success\", \"memories\": [], \"total\": 0, \"has_more\": false}"},
+    calls: [],
+    code: 1,
+    stdout: "",
+    stderr: "Error: Out of range float values are not JSON compliant: inf\n",
+  },
+  {
+    name: "list filters NaN no context",
+    argv: ["list","--filters","{\"details.x\": NaN}"],
+    toolTexts: {},
+    calls: [],
+    code: 1,
+    stdout: "",
+    stderr: "Error: context_id required. Pass the context ID or set context_id in .kagura.json\n",
+  },
+  {
+    name: "remember details NaN",
+    argv: ["remember","-c","11111111-2222-4333-8444-555555555555","-s","A summary long enough","--content","c","--details","{\"a\": NaN}"],
+    toolTexts: {"remember":"{\"status\": \"success\", \"memory_id\": \"m\"}"},
+    calls: [],
+    code: 1,
+    stdout: "",
+    stderr: "Error: Out of range float values are not JSON compliant: nan\n",
+  },
+  {
+    name: "remember details bad json",
+    argv: ["remember","-c","11111111-2222-4333-8444-555555555555","-s","A summary long enough","--content","c","--details","{\"a\": }"],
+    toolTexts: {},
+    calls: [],
+    code: 2,
+    stdout: "",
+    stderr: "Usage: kagura remember [OPTIONS]\nTry 'kagura remember --help' for help.\n\nError: Invalid JSON for --details: Expecting value: line 1 column 7 (char 6)\n",
+  },
+  {
+    name: "remember details trailing",
+    argv: ["remember","-c","11111111-2222-4333-8444-555555555555","-s","A summary long enough","--content","c","--details","{} x"],
+    toolTexts: {},
+    calls: [],
+    code: 2,
+    stdout: "",
+    stderr: "Usage: kagura remember [OPTIONS]\nTry 'kagura remember --help' for help.\n\nError: Invalid JSON for --details: Extra data: line 1 column 4 (char 3)\n",
+  },
 ];
 
 describe("bootstrap / changes / list / forget --ids output, byte for byte the Python CLI's (#86)", () => {
