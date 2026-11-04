@@ -9,6 +9,7 @@ import {
   KaguraQuotaError,
   KaguraRateLimitError,
   KaguraServiceUnavailableError,
+  KaguraVersionConflictError,
 } from "./errors.js";
 import type { KaguraCapacityLockedErrorOptions, KaguraQuotaErrorOptions } from "./errors.js";
 import { PY_SPACE_CLASS } from "./pyCompat.js";
@@ -496,6 +497,30 @@ export function gateError(
   return kind === "plan"
     ? new KaguraFeatureNotAvailableError(message, options)
     : new KaguraQuotaError(message, retryAfter, options);
+}
+
+/**
+ * Type a refused `expectedVersion` (memory-cloud v0.113.0+, #2043): the
+ * port of Python's `version_conflict_error` (its #302), or `null` when the
+ * error is something else.
+ *
+ * MCP answers `version_conflict`; REST answers `RES-002` — a code the
+ * files API's sha256 dedup 409 shares — told apart by its
+ * `details.reason === "version_conflict"`. The caller keeps the server's
+ * `code` and fields on the error ({@link annotateServerError}).
+ *
+ * @param fields The MCP envelope, or the REST `details`.
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function versionConflictError(
+  code: string | null | undefined,
+  message: string,
+  fields: Record<string, unknown>,
+): KaguraVersionConflictError | null {
+  if (code === "version_conflict" || (code === "RES-002" && fields.reason === "version_conflict")) {
+    return new KaguraVersionConflictError(message);
+  }
+  return null;
 }
 
 /**
