@@ -1205,7 +1205,8 @@ describe("cli: status", () => {
       const token = harness();
       expect(await runCli(["auth", "token", "--profile", name], token.deps)).toBe(1);
       expect(token.out).toEqual([]);
-      expect(token.err).toEqual([`No profile named '${name}'.\n  Run: kagura-memory auth login`]);
+      // Python's ClickException line (#92), "Error: " included.
+      expect(token.err).toEqual([`Error: No profile named '${name}'.\n  Run: kagura-memory auth login`]);
     },
   );
 

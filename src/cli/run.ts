@@ -25,7 +25,6 @@ import {
   hasProfile,
   isExpired,
   loadCredentialsFile,
-  loadForUpdate,
   profileNamed,
   setDefaultProfile,
   type OAuthCredentials,
@@ -804,14 +803,15 @@ function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
  * is sent. A refresh that could not be saved exits 1 without the token.
  */
 async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
-  // Strict: a credentials file that cannot be read is named, not read as
-  // "no profile".
-  const cf = loadForUpdate(deps.credentialsPath);
+  // Lenient, as Python's: a file that cannot be read holds no profile
+  // here. The refresh refuses it under the lock if it became unreadable
+  // after this read.
+  const cf = loadCredentialsFile(deps.credentialsPath);
   const name = args.values.profile ?? cf.defaultProfile;
   const creds = profileNamed(cf, name);
   if (creds === undefined) {
-    deps.writeError(`No profile named '${name}'.\n  Run: kagura-memory auth login`);
-    return 1;
+    // Exit 1, as Python's ClickException.
+    throw new CliError(`No profile named '${name}'.\n  Run: kagura-memory auth login`);
   }
   if (!isExpired(creds)) {
     deps.write(creds.accessToken);

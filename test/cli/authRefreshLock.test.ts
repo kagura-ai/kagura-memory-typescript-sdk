@@ -9,7 +9,9 @@
  * lock" patched the CLI's first read of the file to return that profile
  * while the file held the peer's (`atok-peer`, expiring 2099-01-01) or
  * `not json {{{`; "not saved" patched `save_credentials_file` to raise
- * `OSError(EROFS, "Read-only file system")`. This bin names itself
+ * `OSError(EROFS, "Read-only file system")`. "No profile" is what both a
+ * missing file and one holding `not json {{{` at the first read give
+ * (`auth refresh` and `auth token` alike). This bin names itself
  * `kagura-memory`, and Node words the system error its own way; everything
  * else is compared byte for byte.
  */
@@ -186,14 +188,16 @@ function run(argv: string[], fetch: ReturnType<typeof tokenEndpoint>) {
 async function peerRotatesWhileCliWaits(
   argv: string[],
   fetch: ReturnType<typeof tokenEndpoint>,
-  peer: OAuthCredentials = PEER,
+  peer: OAuthCredentials | string = PEER,
 ) {
   const lock = await acquireFileLock(credentialsPath);
   let result: ReturnType<typeof run>;
   try {
     result = run(argv, fetch);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    seed(peer);
+    // A string is what the file becomes instead (Python's "under the lock").
+    if (typeof peer === "string") fs.writeFileSync(credentialsPath, peer);
+    else seed(peer);
   } finally {
     lock.release();
   }
@@ -249,14 +253,19 @@ describe("auth refresh on the locked path (#92)", () => {
     expect(getProfile(loadCredentialsFile(credentialsPath))?.accessToken).toBe("atok-1");
   });
 
-  it("refuses a credentials.json it cannot read before any request, naming it, and leaves it as it is", async () => {
-    // Python reads the file first as "no profile" here, and gives this
-    // refusal only when the file became unreadable by the time it holds the
-    // lock; this bin refuses it from the first read (#92).
+  it("reads a credentials.json it cannot read as no profile, as Python does, sending nothing", async () => {
     fs.writeFileSync(credentialsPath, "not json {{{");
     const fetch = tokenEndpoint();
     const { code, streams } = run(["auth", "refresh"], fetch);
-    expect({ code: await code, ...streams() }).toEqual({
+    expect({ code: await code, ...streams() }).toEqual({ ...PYTHON.noProfile, stderr: here(PYTHON.noProfile.stderr) });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(fs.readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
+  });
+
+  it("refuses, naming it, a credentials.json that became unreadable by the time it holds the lock", async () => {
+    seed(creds());
+    const fetch = tokenEndpoint();
+    expect(await peerRotatesWhileCliWaits(["auth", "refresh"], fetch, "not json {{{")).toEqual({
       ...PYTHON.cannotUpdate,
       stderr: here(PYTHON.cannotUpdate.stderr),
     });
@@ -309,11 +318,19 @@ describe("auth token on the locked path (#92)", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
-  it("refuses a credentials.json it cannot read, naming it, and leaves it as it is", async () => {
+  it("reads a credentials.json it cannot read as no profile, as Python does", async () => {
     fs.writeFileSync(credentialsPath, "not json {{{");
     const fetch = tokenEndpoint();
     const { code, streams } = run(["auth", "token"], fetch);
-    expect({ code: await code, ...streams() }).toEqual({
+    expect({ code: await code, ...streams() }).toEqual({ ...PYTHON.noProfile, stderr: here(PYTHON.noProfile.stderr) });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(fs.readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
+  });
+
+  it("refuses, naming it, a credentials.json that became unreadable by the time it holds the lock", async () => {
+    seed(EXPIRED);
+    const fetch = tokenEndpoint();
+    expect(await peerRotatesWhileCliWaits(["auth", "token"], fetch, "not json {{{")).toEqual({
       ...PYTHON.cannotUpdate,
       stderr: here(PYTHON.cannotUpdate.stderr),
     });
