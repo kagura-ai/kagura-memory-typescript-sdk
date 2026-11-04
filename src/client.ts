@@ -2243,24 +2243,24 @@ export class KaguraClient {
       ["limit", limit],
       ["maxChars", maxChars],
     ];
-    const sent = given.filter(([, value]) => value !== undefined && value !== null).map(([name]) => name);
-    if (options.key !== undefined && sent.length > 0) {
+    const sent = given.filter(([, value]) => isSet(value)).map(([name]) => name);
+    if (isSet(options.key) && sent.length > 0) {
       // The Python SDK 0.44.0's ValueError text, which names each list-mode
       // argument given (`cursor, limit: …`): the server reads them in list
       // mode only, so with a key they would be dropped.
       throw new Error(`${sent.join(", ")}: list mode only; omit key to list the entries`);
     }
     const args: Record<string, unknown> = { context_id: options.contextId };
-    if (options.key !== undefined) {
+    if (isSet(options.key)) {
       args.key = options.key;
     }
-    if (cursor !== undefined && cursor !== null) {
+    if (isSet(cursor)) {
       args.cursor = cursor;
     }
-    if (limit !== undefined && limit !== null) {
+    if (isSet(limit)) {
       args.limit = validateIntRange("limit", limit, 1, STATE_LIST_MAX_LIMIT);
     }
-    if (maxChars !== undefined && maxChars !== null) {
+    if (isSet(maxChars)) {
       args.max_chars = validateMaxChars(maxChars);
     }
     return this.callToolChecked("get_state", args);
@@ -2636,7 +2636,7 @@ export class KaguraClient {
   async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
     const nameContains = normalizeNameContains(options.nameContains);
     let limit: number | undefined;
-    if (options.limit !== undefined && options.limit !== null) {
+    if (isSet(options.limit)) {
       limit = validateIntRange("limit", options.limit, 1, LIST_CONTEXTS_MAX_LIMIT);
       if (detailsPageOverCap(options.includeDetails, nameContains, limit)) {
         throw new Error(
@@ -2658,7 +2658,7 @@ export class KaguraClient {
     if (options.includeStats) {
       args.include_stats = true;
     }
-    if (options.cursor !== undefined) {
+    if (isSet(options.cursor)) {
       args.cursor = options.cursor;
     }
     if (limit !== undefined) {

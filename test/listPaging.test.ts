@@ -81,6 +81,12 @@ describe("listContexts({ limit }) (memory-cloud v0.82.0+, #89)", () => {
     expect(toolCalls(server).map((c) => c.arguments)).toEqual([{}, { include_details: true }]);
   });
 
+  it("treats a null cursor or limit as unset, as Python's None", async () => {
+    const server = strictServer();
+    await makeClient(server).listContexts({ cursor: null, limit: null } as unknown as ListContextsOptions);
+    expect(server.toolCallArgs(0)).toEqual({});
+  });
+
   it.each([1, 20, 200])("sends limit %d and the cursor when set", async (limit) => {
     const server = strictServer();
     server.toolResults.list_contexts = {
@@ -247,6 +253,31 @@ describe("createContext's quota pre-check (#89)", () => {
     );
     expect(toolCalls(server).map((c) => c.name)).toEqual(["list_contexts"]);
   });
+
+  it("works against a server before v0.82.0, which ignores limit and sends every context", async () => {
+    // Not strict: a server before v0.82.0 ignores an argument it does not know.
+    const server = new FakeServer();
+    const everyContext = {
+      status: "success",
+      contexts: [context(1), context(2), context(3)],
+      count: 3,
+      total: 3,
+      limit: 5,
+    };
+    server.toolResults.list_contexts = { ...everyContext, can_create: true };
+    server.toolResults.create_context = { status: "success", context: { id: CTX, name: "dev" } };
+    await expect(makeClient(server).createContext({ name: "dev" })).resolves.toMatchObject({ status: "success" });
+    expect(toolCalls(server)).toEqual([
+      { name: "list_contexts", arguments: { limit: 1 } },
+      { name: "create_context", arguments: { name: "dev", is_private: true } },
+    ]);
+
+    // The quota fields are read from the envelope, whatever the rows.
+    server.toolResults.list_contexts = { ...everyContext, count: 5, can_create: false };
+    await expect(makeClient(server).createContext({ name: "dev" })).rejects.toThrow(
+      "Context limit reached (5/5). Delete unused contexts or upgrade your plan.",
+    );
+  });
 });
 
 // ===========================================================================
@@ -318,6 +349,12 @@ describe("getState({ limit, maxChars }) in list mode (memory-cloud v0.82.0+, #89
       makeClient(server).getState({ contextId: CTX, key: "step", ...paging } as { contextId: string }),
     ).rejects.toThrow(new Error(message));
     expect(server.requests).toEqual([]);
+  });
+
+  it("treats a null key as unset, as Python's None: list mode, so the paging options are sent", async () => {
+    const server = strictServer();
+    await makeClient(server).getState({ contextId: CTX, key: null, limit: 10 } as unknown as { contextId: string });
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, limit: 10 });
   });
 
   it("reads one key as before when no list-mode option is set", async () => {
