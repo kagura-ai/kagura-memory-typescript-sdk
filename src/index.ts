@@ -38,6 +38,7 @@ export {
   KaguraAuthDeniedError,
   KaguraAuthError,
   KaguraAuthExpiredError,
+  KaguraCapacityLockedError,
   KaguraConnectionError,
   KaguraContextError,
   KaguraError,
@@ -52,14 +53,17 @@ export {
   KaguraQuotaError,
   KaguraRateLimitError,
   KaguraResponseError,
+  KaguraServiceUnavailableError,
   KaguraCryptoError,
   KaguraKeyCustodyError,
   KaguraSecretError,
 } from "./errors.js";
 export type {
+  KaguraCapacityLockedErrorOptions,
   KaguraErrorOptions,
   KaguraGateOptions,
   KaguraQuotaErrorOptions,
+  KaguraServiceUnavailableErrorOptions,
 } from "./errors.js";
 
 export { SDK_VERSION } from "./version.js";

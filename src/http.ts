@@ -2,13 +2,15 @@
 
 import {
   KaguraAuthError,
+  KaguraCapacityLockedError,
   KaguraConnectionError,
   KaguraError,
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraRateLimitError,
+  KaguraServiceUnavailableError,
 } from "./errors.js";
-import type { KaguraQuotaErrorOptions } from "./errors.js";
+import type { KaguraCapacityLockedErrorOptions, KaguraQuotaErrorOptions } from "./errors.js";
 import { PY_SPACE_CLASS } from "./pyCompat.js";
 
 export { SDK_VERSION } from "./version.js";
@@ -286,23 +288,37 @@ export function responseRetryAfter(headers: Headers, bodyText: string): number |
 }
 
 /**
- * Which refusal `block` is: `"plan"`, `"quota"`, or `null` for neither.
+ * The Free capacity lock (memory-cloud v0.99.0+, #1941): REST `403
+ * CAPACITY-001` with `details.gate === "capacity"`, MCP `capacity_locked`.
+ * Either code means the lock on either surface, as in the Python SDK.
+ */
+const CAPACITY_GATE = "capacity";
+const CAPACITY_CODES: readonly string[] = ["capacity_locked", "CAPACITY-001"];
+
+/**
+ * Which refusal `block` is: `"capacity"`, `"plan"`, `"quota"`, or `null`
+ * for none of them.
  *
  * `block` holds the gate fields: the MCP envelope itself, or a REST
- * body's `details`. Its `gate` (memory-cloud v0.75.0+) decides whenever
- * it is one the SDK knows, because the code alone can mislead: the
- * resource-token cap is a quota that answers 403, and the connector seat
- * cap keeps a code of its own. `allowlist` and `deployment` are the other
- * two reasons a feature is unavailable, so they count as `"plan"` — the
- * kind an older server's bare `FEAT-001` already gets. With no gate,
- * `code` decides against the surface's `codes`.
+ * body's `details`. The capacity lock comes first, by its `gate` or its
+ * code: it is neither a quota nor a plan gate. Then the `gate`
+ * (memory-cloud v0.75.0+) decides whenever it is one the SDK knows,
+ * because the code alone can mislead: the resource-token cap is a quota
+ * that answers 403, and the connector seat cap keeps a code of its own.
+ * `allowlist` and `deployment` are the other two reasons a feature is
+ * unavailable, so they count as `"plan"` — the kind an older server's bare
+ * `FEAT-001` already gets. With no gate, `code` decides against the
+ * surface's `codes`.
  */
 function gateKind(
   block: Record<string, unknown>,
   code: string | null,
   codes: GateCodes,
-): "plan" | "quota" | null {
+): "capacity" | "plan" | "quota" | null {
   const gate = stringField(block, "gate");
+  if (gate === CAPACITY_GATE || (code !== null && CAPACITY_CODES.includes(code))) {
+    return "capacity";
+  }
   if (gate === "quota") {
     return "quota";
   }
@@ -374,13 +390,54 @@ function withMcpDailyCapFields(block: Record<string, unknown>): Record<string, u
 }
 
 /**
- * Build the typed error for a plan or quota refusal, or `null` if it is
- * neither: {@link KaguraFeatureNotAvailableError} or {@link KaguraQuotaError}, as
+ * A whole number at `block[key]`, else `null` (Python's `_opt_int`): a
+ * count the server sent as anything else is dropped rather than trusted.
+ */
+function intField(block: Record<string, unknown>, key: string): number | null {
+  const value = block[key];
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+/** The capacity lock's figures in `block`, camelCased; a wrong-typed one reads `null`. */
+function capacityOptions(block: Record<string, unknown>): KaguraCapacityLockedErrorOptions {
+  return {
+    cleanupUrl: stringField(block, "cleanup_url"),
+    memoryCount: intField(block, "memory_count"),
+    memoryLimit: intField(block, "memory_limit"),
+    overMemories: intField(block, "over_memories"),
+    usedBytes: intField(block, "used_bytes"),
+    storageLimitBytes: intField(block, "storage_limit_bytes"),
+    overBytes: intField(block, "over_bytes"),
+  };
+}
+
+/** Envelope keys that frame an MCP refusal rather than describe it. */
+const ENVELOPE_KEYS: readonly string[] = ["status", "error", "message"];
+
+/** `fields` without the {@link ENVELOPE_KEYS}, as a fresh object. */
+function withoutEnvelopeKeys(fields: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!ENVELOPE_KEYS.includes(key)) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the typed error for a plan, quota or capacity refusal, or `null` if
+ * it is none of them: {@link KaguraCapacityLockedError},
+ * {@link KaguraFeatureNotAvailableError} or {@link KaguraQuotaError}, as
  * `gateKind` decides, carrying the payload `block` holds. `retryAfter` is
  * the caller's reading of the response's retry hint; with none, a quota
  * error derives it from `resets_at`. The MCP daily call cap
  * ({@link MCP_DAILY_CAP_CODE}) is the `api_mcp_daily` quota, resetting at
  * the next UTC midnight.
+ *
+ * The error's `code` is `code`, and its `details` every field of `block`
+ * but `status` / `error` / `message` — as the server sent them, before the
+ * daily cap's canonical names are filled in.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -389,6 +446,7 @@ export function gateError(
   message: string,
   retryAfter: number | null = null,
 ): KaguraError | null {
+  const details = withoutEnvelopeKeys(block);
   if (code === MCP_DAILY_CAP_CODE) {
     block = withMcpDailyCapFields(block);
   }
@@ -396,10 +454,201 @@ export function gateError(
   if (kind === null) {
     return null;
   }
-  const options = gateOptions(block);
+  const server = code === null ? { details } : { code, details };
+  if (kind === "capacity") {
+    return new KaguraCapacityLockedError(message, { ...capacityOptions(block), ...server });
+  }
+  const options = { ...gateOptions(block), ...server };
   return kind === "plan"
     ? new KaguraFeatureNotAvailableError(message, options)
     : new KaguraQuotaError(message, retryAfter, options);
+}
+
+/**
+ * Keep the server's error `code` and its other fields on `err` (Python's
+ * `annotate_server_error`).
+ *
+ * `fields` is what came with the code — the MCP envelope, the REST
+ * `details`, a JSON-RPC error's `data` or an OAuth body's other fields;
+ * `status` / `error` / `message` frame the envelope and are left out. A
+ * `code` or `details` the error already has (a typed error builds its own)
+ * is kept.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function annotateServerError<E extends KaguraError>(
+  err: E,
+  code: string,
+  fields: Record<string, unknown>,
+): E {
+  // Written once, here, where the server's answer is read; readonly to callers.
+  const target = err as unknown as { code: string | undefined; details: Record<string, unknown> };
+  if (target.code === undefined) {
+    target.code = code;
+  }
+  if (Object.keys(target.details).length === 0) {
+    target.details = withoutEnvelopeKeys(fields);
+  }
+  return err;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `[code, fields]` of an error body that names an error code, else `null`
+ * (Python's `server_error_fields`).
+ *
+ * Reads the three shapes memory-cloud answers with: the REST envelope
+ * `{"error": <code>, "message": …, "details": {…}}` (`fields` is
+ * `details`); a JSON-RPC error whose `data` carries `error` — the `/mcp`
+ * transport's refusals and server failures, with `cause`,
+ * `correlation_id`, `help` and `retryable` (memory-cloud v0.82.0+, #1742;
+ * `fields` is `data`); and the OAuth-style `{"error": <code>,
+ * "error_description": …}` (`fields` is the body without `error`).
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function serverErrorFields(bodyText: string): [string, Record<string, unknown>] | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (!isRecord(body)) {
+    return null;
+  }
+  const error = body.error;
+  if (isRecord(error)) {
+    const data = error.data;
+    return isRecord(data) && typeof data.error === "string" ? [data.error, data] : null;
+  }
+  if (typeof error !== "string") {
+    return null;
+  }
+  if (isRecord(body.details)) {
+    return [error, body.details];
+  }
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (key !== "error") {
+      rest[key] = value;
+    }
+  }
+  return [error, rest];
+}
+
+const INSUFFICIENT_SCOPE = "insufficient_scope";
+
+/**
+ * One item of a `WWW-Authenticate` value: a `name=value` parameter (the
+ * value a quoted string, RFC 9110 §11.2, or a bare token), else a bare
+ * token — an auth-scheme, or the token68 some schemes carry. One value can
+ * hold several challenges: fetch joins repeated headers with ", " (RFC
+ * 9110 §11.6.1).
+ */
+const CHALLENGE_ITEM_RE = /([A-Za-z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))|([^\s,="]+=*)/g;
+
+/**
+ * The parameters of the `WWW-Authenticate: Bearer` challenge in `headers`
+ * (RFC 6750 §3), names lower-cased; `{}` when there is none. The Bearer
+ * challenge may come after another one (`Basic realm="x", Bearer
+ * error=…`, a proxy's challenge joined with the server's).
+ */
+function bearerChallenge(headers: Headers): Record<string, string> {
+  const header = headers.get("WWW-Authenticate");
+  if (header === null) {
+    return {};
+  }
+  let params: Record<string, string> | null = null;
+  for (const match of header.matchAll(CHALLENGE_ITEM_RE)) {
+    const scheme = match[4];
+    if (scheme !== undefined) {
+      if (params !== null) {
+        break; // the next challenge starts: the Bearer one is complete
+      }
+      if (scheme.toLowerCase() === "bearer") {
+        params = {};
+      }
+    } else if (params !== null) {
+      const quoted = match[2];
+      params[match[1]!.toLowerCase()] = quoted !== undefined ? quoted.replace(/\\(.)/g, "$1") : match[3]!;
+    }
+  }
+  return params ?? {};
+}
+
+/**
+ * The {@link KaguraAuthError} for a 403 `insufficient_scope`, else `null`
+ * (Python's `insufficient_scope_error`).
+ *
+ * memory-cloud v0.79.0+ (#1686) refuses a `tools/call` whose OAuth token
+ * lacks the tool's scope — `memory:read` for the read-only tools, `recall`
+ * and `get_agent_bootstrap`, `memory:write` for every other tool — with
+ * HTTP 403, a `WWW-Authenticate: Bearer error="insufficient_scope"`
+ * challenge and a JSON-RPC error whose `data` names `required_scope`. REST
+ * `/api/v1/*` sends the challenge with `scope="<required>"`.
+ * `data.required_scope` wins: the `/mcp` challenge's `scope` is the granted
+ * scopes plus the required one.
+ *
+ * The error's `code` is `"insufficient_scope"`, and `details.required_scope`
+ * names the scope when it is known.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function insufficientScopeError(headers: Headers, bodyText: string): KaguraAuthError | null {
+  const fields = serverErrorFields(bodyText);
+  const data = fields !== null && fields[0] === INSUFFICIENT_SCOPE ? fields[1] : null;
+  const challenge = bearerChallenge(headers);
+  if (data === null && challenge.error !== INSUFFICIENT_SCOPE) {
+    return null;
+  }
+  const scope = stringField(data ?? {}, "required_scope") || challenge.scope || null;
+  const needs = scope ? `the ${scope} scope` : "a scope";
+  const err = new KaguraAuthError(
+    `The OAuth sign-in lacks ${needs} this call needs (HTTP 403 insufficient_scope). ` +
+      "Run `kagura-memory auth login` to sign in again with it; a `--read-only` login grants " +
+      "memory:read only.",
+  );
+  annotateServerError(err, INSUFFICIENT_SCOPE, data ?? {});
+  if (scope) {
+    err.details.required_scope = scope;
+  }
+  return err;
+}
+
+/**
+ * The {@link KaguraServiceUnavailableError} for an HTTP 503 (Python's
+ * `service_unavailable_error`).
+ *
+ * `retryAfter` is the numeric `Retry-After` header, else a JSON-RPC
+ * `data.retry_after_seconds`; `reason` is the REST `details.reason`
+ * (`DB-002`, memory-cloud v0.104.0+), else the MCP `cause`, else the error
+ * code (`/mcp`'s `temporarily_unavailable`, v0.82.0+). The error keeps the
+ * body's code and fields.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function serviceUnavailableError(
+  headers: Headers,
+  message: string,
+  bodyText: string,
+): KaguraServiceUnavailableError {
+  const fields = serverErrorFields(bodyText);
+  const code = fields === null ? null : fields[0];
+  const data = fields === null ? {} : fields[1];
+  const retryAfter = retryAfterSeconds(headers) ?? intField(data, "retry_after_seconds");
+  const reason = stringField(data, "reason") || stringField(data, "cause") || code;
+  const err = new KaguraServiceUnavailableError(message, { retryAfter, reason });
+  return code === null ? err : annotateServerError(err, code, data);
+}
+
+/** `HTTP <status>: <detail>`, or the bare status when there is no detail. */
+function statusMessage(status: number, detail: string): string {
+  // Avoid a doubled "HTTP 500: HTTP 500" when the body carries no detail.
+  return detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`;
 }
 
 /**
@@ -432,12 +681,16 @@ export function parseErrorEnvelope(
 /**
  * Translate a non-2xx HTTP response into the matching Kagura error.
  *
- * Maps 401 → KaguraAuthError, 429 → KaguraRateLimitError (honoring a
- * numeric `Retry-After` header, else the body's `details.retry_after`),
- * and every other status →
- * KaguraConnectionError. The server-supplied detail is appended when
- * present, otherwise `fallbackMessage` is used so the status is never
- * left bare. This function always throws.
+ * Maps 401 → KaguraAuthError, a 403 `insufficient_scope` (an OAuth token
+ * without the scope the call needs, memory-cloud v0.79.0+, #1686) →
+ * KaguraAuthError naming the scope, 429 → KaguraRateLimitError (honoring
+ * a numeric `Retry-After` header, else the body's `details.retry_after`),
+ * 503 → KaguraServiceUnavailableError (its `Retry-After` and reason), and
+ * every other status → KaguraConnectionError. The server-supplied detail
+ * is appended when present, otherwise `fallbackMessage` is used so the
+ * status is never left bare. The error code and fields the body carried
+ * (a JSON-RPC error's `data`, the REST `details`, an OAuth body's fields)
+ * are kept as the error's `code` / `details`. This function always throws.
  *
  * A 429 that is a typed quota refusal (the daily call quota) keeps its
  * class, which existing handlers catch, but carries the quota's gate
@@ -452,19 +705,30 @@ export function throwForKaguraStatus(
   if (status === 401) {
     throw new KaguraAuthError("Authentication failed. Check your API key.");
   }
+  if (status === 403) {
+    const scopeError = insufficientScopeError(headers, bodyText);
+    if (scopeError !== null) {
+      throw scopeError;
+    }
+  }
   const detail = extractDetail(bodyText) || fallbackMessage || "";
+  let err: KaguraError;
   if (status === 429) {
     const envelope = parseErrorEnvelope(bodyText);
-    throw new KaguraRateLimitError(
+    err = new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       responseRetryAfter(headers, bodyText),
       envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
         ? gateOptions(envelope.details)
         : {},
     );
+  } else if (status === 503) {
+    err = serviceUnavailableError(headers, statusMessage(status, detail), bodyText);
+  } else {
+    err = new KaguraConnectionError(statusMessage(status, detail));
   }
-  // Avoid a doubled "HTTP 500: HTTP 500" when the body carries no detail.
-  throw new KaguraConnectionError(detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`);
+  const fields = serverErrorFields(bodyText);
+  throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
 }
 
 // Plain-HTTP is permitted only for genuine loopback hosts. The host token must

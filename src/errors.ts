@@ -9,6 +9,16 @@ import type { RollbackSummary } from "./models.js";
  */
 export interface KaguraErrorOptions {
   cause?: unknown;
+  /**
+   * The server's error code, kept as {@link KaguraError.code}: the MCP
+   * envelope's `error`, the REST body's `error` or the OAuth `error`.
+   */
+  code?: string;
+  /**
+   * The other fields the server sent with the error, kept as
+   * {@link KaguraError.details}.
+   */
+  details?: Record<string, unknown> | null;
 }
 
 /**
@@ -82,15 +92,93 @@ export function excMessage(e: unknown): string {
   return s || (typeof e === "object" && e !== null ? e.constructor.name : "unknown error");
 }
 
-/** Base error for the Kagura SDK. */
+/** `details[key]` when it is a string, else `null`. */
+function strDetail(details: Record<string, unknown> | undefined, key: string): string | null {
+  const value = details?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Base error for the Kagura SDK.
+ *
+ * An error the server reported keeps what it sent. Branch on {@link code}
+ * (and on the subclass), never on the message: memory-cloud words its
+ * messages for people and may change them.
+ */
 export class KaguraError extends Error {
+  /**
+   * The server's error code — the MCP envelope's `error`
+   * (`"payload_too_large"`, `"capacity_locked"` …), the REST `error`
+   * (`"FEAT-001"`, `"CAPACITY-001"`, `"DB-002"` …), the OAuth `error`
+   * (`"invalid_client"`, `"insufficient_scope"` …) or a JSON-RPC error's
+   * `data.error` — when the SDK read one, else `undefined`.
+   */
+  readonly code: string | undefined;
+  /**
+   * The other fields the server sent with the error — the MCP envelope
+   * without `status` / `error` / `message`, the REST `details`, a JSON-RPC
+   * error's `data` or an OAuth body's other fields. `{}` when the SDK
+   * raised the error itself or the server sent nothing more. The getters
+   * below read the MCP error-envelope fields from it.
+   */
+  readonly details: Record<string, unknown>;
+
   constructor(message: string, options?: KaguraErrorOptions) {
     super(message, options);
     this.name = new.target.name;
+    this.code = options?.code ?? undefined;
+    this.details = { ...(options?.details ?? {}) };
+  }
+
+  /** The server's next step for the caller (memory-cloud v0.78.0+, #1684). */
+  get help(): string | null {
+    return strDetail(this.details, "help");
+  }
+
+  /**
+   * Why a server failure happened (memory-cloud v0.82.0+, #1742):
+   * `"timeout"`, `"service_unavailable"` or `"internal_error"`; `null` on a
+   * refusal, which is the caller's to fix.
+   *
+   * The Python SDK's `cause` property. JavaScript's `Error.cause` already
+   * holds the chained error (the `fetch` failure, the parse error), so the
+   * server's `cause` is read here instead; `details.cause` holds it too.
+   */
+  get serverCause(): string | null {
+    return strDetail(this.details, "cause");
+  }
+
+  /** The id the server logged a failure under — quote it in a report (v0.82.0+). */
+  get correlationId(): string | null {
+    return strDetail(this.details, "correlation_id");
+  }
+
+  /**
+   * Whether repeating the call is safe, on a server failure (v0.82.0+).
+   * `false` for a write whose {@link outcome} is `"unknown"`: check with the
+   * read {@link help} names before calling it again.
+   */
+  get retryable(): boolean | null {
+    const value = this.details.retryable;
+    return typeof value === "boolean" ? value : null;
+  }
+
+  /** `"unknown"` when a failed write may or may not have been applied (v0.82.0+). */
+  get outcome(): string | null {
+    return strDetail(this.details, "outcome");
   }
 }
 
-/** Authentication failed. */
+/**
+ * Authentication failed.
+ *
+ * Also raised for an OAuth token that lacks the scope a call needs (HTTP
+ * 403 `insufficient_scope`, memory-cloud v0.79.0+, #1686): `code` is then
+ * `"insufficient_scope"` and `details.required_scope` names the scope
+ * (`"memory:read"` or `"memory:write"`) when the server sent it. A
+ * `kagura-memory auth login --read-only` profile gets this on every tool
+ * that writes; sign in again without `--read-only`.
+ */
 export class KaguraAuthError extends KaguraError {}
 
 /**
@@ -114,6 +202,48 @@ export class KaguraAuthDeniedError extends KaguraAuthError {}
 
 /** Connection to Kagura server failed. */
 export class KaguraConnectionError extends KaguraError {}
+
+/** {@link KaguraErrorOptions} plus what a 503 says about waiting. */
+export interface KaguraServiceUnavailableErrorOptions extends KaguraErrorOptions {
+  /** Seconds to wait; see {@link KaguraServiceUnavailableError.retryAfter}. */
+  retryAfter?: number | null;
+  /** Why; see {@link KaguraServiceUnavailableError.reason}. */
+  reason?: string | null;
+}
+
+/**
+ * The server answered HTTP 503: it could not serve the request right now.
+ *
+ * A {@link KaguraConnectionError}, so existing handlers still catch it.
+ * Raised for `/mcp`'s `temporarily_unavailable` (the credential could not
+ * be verified, memory-cloud v0.82.0+, #1742) and its JSON-RPC transport
+ * failures (a dependency down or timed out), and for REST `DB-002` (the
+ * database is unavailable, `details.reason` from v0.104.0). `details` keeps
+ * what the server sent — on `/mcp` the JSON-RPC `data` with `cause`,
+ * `correlation_id`, `help`, `retryable` and, for a write, `outcome`.
+ */
+export class KaguraServiceUnavailableError extends KaguraConnectionError {
+  /**
+   * Seconds to wait, from the `Retry-After` header (else the JSON-RPC
+   * `data.retry_after_seconds`); `null` when the server named no wait — on
+   * `/mcp` that means the request was a write whose `outcome` is unknown,
+   * so check before repeating it.
+   */
+  readonly retryAfter: number | null;
+  /**
+   * Why: REST `details.reason` (`pool_exhausted`, `connection_refused`,
+   * `deadlock`, `database_error`), the MCP `cause` (`timeout`,
+   * `service_unavailable`), or the error code (`temporarily_unavailable`)
+   * when nothing finer was sent.
+   */
+  readonly reason: string | null;
+
+  constructor(message: string, options: KaguraServiceUnavailableErrorOptions = {}) {
+    super(message, options);
+    this.retryAfter = options.retryAfter ?? null;
+    this.reason = options.reason ?? null;
+  }
+}
 
 /** Requested resource not found (HTTP 404). */
 export class KaguraNotFoundError extends KaguraError {}
@@ -206,8 +336,10 @@ export class KaguraContextError extends KaguraError {}
  * With no `gate` — a server older than v0.75.0, or the SDK's own
  * context-limit pre-check, which knows only `quotaType`, `current` and
  * `limit` — a `null` `requiredPlan` means the plan is unknown, not that no
- * plan lifts the cap. An untyped limit, such as the 1 MB memory-size
- * guard, arrives with no gate either.
+ * plan lifts the cap. An untyped limit, such as the REST 1 MB memory-size
+ * guard, arrives with no gate either. On MCP that guard is no quota: from
+ * memory-cloud v0.108.0 (#2003) it is a plain {@link KaguraError} with
+ * `code` `"payload_too_large"` and `limit` / `actual` in `details`.
  *
  * `retryAfter` is the `Retry-After` header when there was one, else the
  * retry hint the body carried (REST `details.retry_after`, MCP
@@ -292,6 +424,71 @@ export class KaguraFeatureNotAvailableError extends KaguraError {
     this.requiredPlan = options.requiredPlan ?? null;
     this.requiredPlanDisplay = options.requiredPlanDisplay ?? null;
     this.currentPlan = options.currentPlan ?? null;
+  }
+}
+
+/**
+ * {@link KaguraErrorOptions} plus the overage figures of a capacity lock,
+ * camelCased from the server's key names.
+ */
+export interface KaguraCapacityLockedErrorOptions extends KaguraErrorOptions {
+  cleanupUrl?: string | null;
+  memoryCount?: number | null;
+  memoryLimit?: number | null;
+  overMemories?: number | null;
+  usedBytes?: number | null;
+  storageLimitBytes?: number | null;
+  overBytes?: number | null;
+}
+
+/**
+ * The workspace is over its Free plan capacity and locked (memory-cloud
+ * v0.99.0+, #1941).
+ *
+ * A workspace back on Free from a subscription that still holds more
+ * memories or file bytes than Free allows: search and saving (recall,
+ * reference, explore, remember, uploads, context creation …) are refused
+ * until it is cleaned up or re-subscribed; listing, deleting, export and
+ * usage keep working. REST answers `403 CAPACITY-001` with `details.gate
+ * === "capacity"`, MCP `capacity_locked`; since v0.126.0 (#1954) a context
+ * the caller cannot read answers `context_not_found` instead. Neither a
+ * quota nor a plan gate — waiting does not lift it and an upgrade is only
+ * one way out — so it extends neither {@link KaguraQuotaError} nor
+ * {@link KaguraFeatureNotAvailableError}.
+ *
+ * The figures are the server's, `null` when it did not send them or sent
+ * something that is no whole number. A caller who is not a member of the
+ * locked workspace (reading a public context) gets every figure and
+ * `cleanupUrl` as `null`. `details` keeps every field the server sent (on
+ * MCP also `help`, which names how much to remove).
+ */
+export class KaguraCapacityLockedError extends KaguraError {
+  /** Always `"capacity"`. */
+  readonly gate = "capacity" as const;
+  /** The web page where the owner cleans up or re-subscribes. */
+  readonly cleanupUrl: string | null;
+  /** Live memories in the workspace. */
+  readonly memoryCount: number | null;
+  /** The effective memory limit. */
+  readonly memoryLimit: number | null;
+  /** Memories to remove to unlock (0 when within the limit). */
+  readonly overMemories: number | null;
+  /** File bytes the owner can still delete. */
+  readonly usedBytes: number | null;
+  /** The effective storage limit. */
+  readonly storageLimitBytes: number | null;
+  /** File bytes to remove to unlock (0 when within the limit). */
+  readonly overBytes: number | null;
+
+  constructor(message: string, options: KaguraCapacityLockedErrorOptions = {}) {
+    super(message, options);
+    this.cleanupUrl = options.cleanupUrl ?? null;
+    this.memoryCount = options.memoryCount ?? null;
+    this.memoryLimit = options.memoryLimit ?? null;
+    this.overMemories = options.overMemories ?? null;
+    this.usedBytes = options.usedBytes ?? null;
+    this.storageLimitBytes = options.storageLimitBytes ?? null;
+    this.overBytes = options.overBytes ?? null;
   }
 }
 
