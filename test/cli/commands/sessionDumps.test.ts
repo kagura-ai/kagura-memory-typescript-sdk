@@ -17,9 +17,11 @@
  * tool, as in `sleepDumps.test.ts`: the shared `recordedFetch` replays REST
  * routes, not MCP's JSON-RPC.
  *
- * The `plan_headroom` notice is passed through as sent until #88 models
- * it; the recorded one is in the model's own key order, so the two print
- * the same.
+ * A `plan_headroom` notice (#88) prints as Python's `PlanHeadroomNotice`
+ * dumps it — in the model's key order, `help` / `plan` / `resets_at` the
+ * entry left out filled with `null` and `percentage` a float (`97.0`) —
+ * an entry the model refuses is dropped, and a list with no readable entry
+ * prints `null`.
  */
 
 import { describe, expect, it } from "vitest";
@@ -148,6 +150,33 @@ const CASES: Case[] = [
     code: 2,
     stdout: "",
     stderr: "Usage: kagura bootstrap [OPTIONS]\nTry 'kagura bootstrap --help' for help.\n\nError: Got unexpected extra argument (x)\n",
+  },
+  {
+    name: "bootstrap plan_headroom as v0.142.0 sends it",
+    argv: ["bootstrap","-c","11111111-2222-4333-8444-555555555555","--include","changes","--format","index","--max-chars","2000"],
+    toolTexts: {"bootstrap": "{\"status\": \"success\", \"format\": \"index\", \"degraded\": false, \"components\": {\"changes\": {\"status\": \"ok\", \"changes\": [], \"has_more\": false}}, \"since\": \"2026-10-28T12:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"plan_headroom\": [{\"dimension\": \"memories\", \"level\": \"warning\", \"used\": 4100, \"limit\": 5000, \"percentage\": 82.0, \"plan\": \"free\", \"remedies\": [\"cleanup\", \"upgrade\"]}, {\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"used\": 97, \"limit\": 100, \"percentage\": 97.0, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}, {\"dimension\": \"mcp_calls_per_day\", \"level\": \"warning\", \"used\": 8123, \"limit\": 10000, \"percentage\": 81.2, \"resets_at\": \"2026-11-05T00:00:00Z\", \"remedies\": [\"wait\", \"admin\"]}]}"},
+    calls: [{"context_id":"11111111-2222-4333-8444-555555555555","include":["changes"],"max_chars":2000,"format":"index"}],
+    code: 0,
+    stdout: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"format\": \"index\",\n  \"degraded\": false,\n  \"context\": null,\n  \"instructions\": null,\n  \"guardrails\": null,\n  \"components\": {\n    \"pinned\": null,\n    \"upcoming\": null,\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"changes\": [],\n      \"has_more\": false,\n      \"next_cursor\": null\n    }\n  },\n  \"since\": \"2026-10-28T12:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories\",\n      \"level\": \"warning\",\n      \"used\": 4100,\n      \"limit\": 5000,\n      \"percentage\": 82.0,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"cleanup\",\n        \"upgrade\"\n      ],\n      \"help\": null,\n      \"resets_at\": null\n    },\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"used\": 97,\n      \"limit\": 100,\n      \"percentage\": 97.0,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\",\n      \"resets_at\": \"2026-11-05T00:00:00Z\"\n    },\n    {\n      \"dimension\": \"mcp_calls_per_day\",\n      \"level\": \"warning\",\n      \"used\": 8123,\n      \"limit\": 10000,\n      \"percentage\": 81.2,\n      \"plan\": null,\n      \"remedies\": [\n        \"wait\",\n        \"admin\"\n      ],\n      \"help\": null,\n      \"resets_at\": \"2026-11-05T00:00:00Z\"\n    }\n  ]\n}\n",
+    stderr: "",
+  },
+  {
+    name: "bootstrap plan_headroom unreadable entries",
+    argv: ["bootstrap","-c","11111111-2222-4333-8444-555555555555","--include","changes","--format","index","--max-chars","2000"],
+    toolTexts: {"bootstrap": "{\"status\": \"success\", \"format\": \"index\", \"degraded\": false, \"components\": {\"changes\": {\"status\": \"ok\", \"changes\": [], \"has_more\": false}}, \"since\": \"2026-10-28T12:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"plan_headroom\": [{\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"limit\": 100, \"percentage\": 97.0, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}, null, \"x\", {\"dimension\": \"mcp_calls_per_day\", \"level\": \"warning\", \"used\": 8123, \"limit\": 10000, \"percentage\": \"high\", \"resets_at\": \"2026-11-05T00:00:00Z\", \"remedies\": [\"wait\", \"admin\"]}, {\"dimension\": \"memories\", \"level\": \"warning\", \"used\": 4100, \"limit\": 5000, \"percentage\": 82.0, \"plan\": \"free\", \"remedies\": [\"cleanup\", \"upgrade\"], \"addon\": \"storage\"}]}"},
+    calls: [{"context_id":"11111111-2222-4333-8444-555555555555","include":["changes"],"max_chars":2000,"format":"index"}],
+    code: 0,
+    stdout: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"format\": \"index\",\n  \"degraded\": false,\n  \"context\": null,\n  \"instructions\": null,\n  \"guardrails\": null,\n  \"components\": {\n    \"pinned\": null,\n    \"upcoming\": null,\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"changes\": [],\n      \"has_more\": false,\n      \"next_cursor\": null\n    }\n  },\n  \"since\": \"2026-10-28T12:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories\",\n      \"level\": \"warning\",\n      \"used\": 4100,\n      \"limit\": 5000,\n      \"percentage\": 82.0,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"cleanup\",\n        \"upgrade\"\n      ],\n      \"help\": null,\n      \"resets_at\": null\n    }\n  ]\n}\n",
+    stderr: "",
+  },
+  {
+    name: "bootstrap plan_headroom nothing readable",
+    argv: ["bootstrap","-c","11111111-2222-4333-8444-555555555555","--include","changes","--format","index","--max-chars","2000"],
+    toolTexts: {"bootstrap": "{\"status\": \"success\", \"format\": \"index\", \"degraded\": false, \"components\": {\"changes\": {\"status\": \"ok\", \"changes\": [], \"has_more\": false}}, \"since\": \"2026-10-28T12:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"plan_headroom\": [{\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"limit\": 100, \"percentage\": 97.0, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}]}"},
+    calls: [{"context_id":"11111111-2222-4333-8444-555555555555","include":["changes"],"max_chars":2000,"format":"index"}],
+    code: 0,
+    stdout: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"format\": \"index\",\n  \"degraded\": false,\n  \"context\": null,\n  \"instructions\": null,\n  \"guardrails\": null,\n  \"components\": {\n    \"pinned\": null,\n    \"upcoming\": null,\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"changes\": [],\n      \"has_more\": false,\n      \"next_cursor\": null\n    }\n  },\n  \"since\": \"2026-10-28T12:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": null\n}\n",
+    stderr: "",
   },
   {
     name: "changes page",

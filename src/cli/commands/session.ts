@@ -6,10 +6,9 @@
  * each prints the Python SDK model's `model_dump(mode="json")` as the
  * Python CLI's `json.dumps(…, indent=2, ensure_ascii=False)` writes it
  * (`formatDumpsJson` of the model's read), so a field the server left out
- * prints with its default and a timestamp in pydantic's form. One
- * exception until #88: `plan_headroom` prints exactly as sent, where
- * Python fills each notice's defaults and drops an unreadable one. `forget
- * --ids` lives with `forget` in `memory.ts`.
+ * prints with its default and a timestamp in pydantic's form; a
+ * `plan_headroom` notice prints with its defaults filled, an unreadable one
+ * dropped (#88). `forget --ids` lives with `forget` in `memory.ts`.
  */
 
 import { pythonOptionNames } from "../../client.js";
