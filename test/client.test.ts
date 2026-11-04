@@ -600,7 +600,7 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     expect(quota.retryAfter).toBe(3600);
   });
 
-  it("maps a pre-v0.75 quota_exceeded envelope by its code", async () => {
+  it("keeps a legacy unknown quota type generic like Python 0.44.0", async () => {
     // v0.68-v0.74: no gate, no canonical `current` — only the legacy counts.
     const server = new FakeServer();
     server.toolResults.remember = {
@@ -614,13 +614,21 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       c.remember({ contextId: "c", summary: "s", content: "x" }),
     );
 
-    expect(err).toBeInstanceOf(KaguraQuotaError);
-    const quota = err as KaguraQuotaError;
-    expect(quota.gate).toBeNull();
-    expect(quota.quotaType).toBe("memory_limit");
-    expect(quota.limit).toBe(1000);
-    expect(quota.current).toBeNull();
-    expect(quota.retryAfter).toBeNull();
+    expect((err as Error).constructor).toBe(KaguraError);
+    expect(err).toMatchObject({
+      code: "quota_exceeded",
+      details: { quota_type: "memory_limit", limit: 1000 },
+    });
+  });
+
+  it.each([1.5, "5", true])("keeps quota_exceeded generic for an invalid retry window %j", async (retry) => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error", error: "quota_exceeded", message: "Refused.", retry_after_seconds: retry,
+    };
+    const err = await failure(server, (c) => c.remember({ contextId: "c", summary: "s", content: "x" }));
+    expect((err as Error).constructor).toBe(KaguraError);
+    expect(err).toMatchObject({ code: "quota_exceeded", details: { retry_after_seconds: retry } });
   });
 
   it("reads used_today as current when an older server sends no current", async () => {

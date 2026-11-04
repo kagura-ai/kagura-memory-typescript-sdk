@@ -21,7 +21,6 @@ import {
 import {
   annotateServerError,
   baseUrlFromMcp,
-  bodyRetryAfter,
   detailOf,
   gateError,
   isRecord,
@@ -2809,7 +2808,7 @@ export class KaguraClient {
       code ?? null,
       MCP_GATE_CODES,
       failure,
-      bodyRetryAfter(result, "retry_after_seconds"),
+      null,
       mcpEnvelopeFields(result),
     );
     if (gated !== null) {

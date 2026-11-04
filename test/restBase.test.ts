@@ -388,6 +388,20 @@ describe("status mapping", () => {
     expect((err as KaguraFeatureNotAvailableError).feature).toBe("team_invitations");
   });
 
+  it.each([429, 402])("preserves Python's HTTP %i mapping with either quota envelope shape", async (status) => {
+    for (const details of [{}, { gate: "quota", quota_type: "storage_bytes" }]) {
+      const server = new FakeRest();
+      server.status = status;
+      server.body = JSON.stringify({
+        error: "QUOTA-001", message: "Refused.",
+        details: { ...details, help: "Inspect the request.", correlation_id: "request-113" },
+      });
+      const err = await caught(makeProbe(server).requestPublic("POST", "/api/v1/things"));
+      expect((err as Error).constructor).toBe(status === 429 ? KaguraQuotaError : KaguraConnectionError);
+      expect(err).toMatchObject({ code: "QUOTA-001", help: "Inspect the request.", correlationId: "request-113" });
+    }
+  });
+
   it("maps a pre-v0.75 403 CONNECTOR-001 to KaguraQuotaError by its code", async () => {
     // v0.74 sent the connector seat cap with its own code and legacy counts.
     const server = new FakeRest();

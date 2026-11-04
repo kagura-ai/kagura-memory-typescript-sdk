@@ -3,12 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   KaguraAuthError,
   KaguraConnectionError,
+  KaguraError,
+  KaguraQuotaError,
   KaguraRateLimitError,
   KaguraServiceUnavailableError,
 } from "../src/errors.js";
 import {
   baseUrlFromMcp,
   ErrorBody,
+  gateError,
+  MCP_GATE_CODES,
+  REST_GATE_CODES,
   extractDetail,
   mcpSessionExpired,
   mcpSessionHeader,
@@ -21,6 +26,38 @@ import {
   throwForKaguraStatus,
   validateHttpsUrl,
 } from "../src/http.js";
+
+describe("Python 0.44.0 quota classification", () => {
+  it.each([
+    [REST_GATE_CODES, "QUOTA-001"],
+    [MCP_GATE_CODES, "quota_exceeded"],
+  ] as const)("keeps ambiguous quota codes generic without a tier or retry window (%j, %s)", (codes, code) => {
+    const details = { help: "Reduce the payload size.", correlation_id: "request-113" };
+    const error = gateError(details, code, codes, "Payload too large.");
+    expect(error?.constructor).toBe(KaguraError);
+    expect(error).toMatchObject({ code, details, help: details.help, correlationId: "request-113" });
+  });
+
+  it.each([
+    [{}, null, false],
+    [{ quota_type: "unknown" }, null, false],
+    [{ quota_type: 1 }, null, false],
+    [{ quota_type: "storage_bytes" }, null, true],
+    [{ gate: "quota" }, null, true],
+    [{}, 0, true],
+    [{ retry_after_seconds: 5 }, null, true],
+    [{ retry_after_seconds: "5" }, null, false],
+    [{ retry_after_seconds: true }, null, false],
+    [{ retry_after_seconds: 1.5 }, null, false],
+  ] as const)("classifies QUOTA-001 with %j and retry %s", (details, retry, quota) => {
+    const error = gateError(details, "QUOTA-001", REST_GATE_CODES, "Refused.", retry);
+    expect(error?.constructor).toBe(quota ? KaguraQuotaError : KaguraError);
+  });
+
+  it.each(["QUOTA-002", "CONNECTOR-001"])("keeps the single-cap code %s a quota without descriptor fields", (code) => {
+    expect(gateError({}, code, REST_GATE_CODES, "Refused.")).toBeInstanceOf(KaguraQuotaError);
+  });
+});
 
 /** `run()`'s result, and how often JSON.parse read `text` while it ran. */
 function parsesOf<T>(text: string, run: () => T): { result: T; parses: number } {
