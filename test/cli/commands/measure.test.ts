@@ -386,6 +386,37 @@ describe("kagura-memory measure record", () => {
     );
   });
 
+  // Recorded from the Python CLI 0.44.0 (`kagura measure record C m 5 --at
+  // yesterday` against a local MCP stand-in answering the same envelope):
+  // the `  Help:` line follows the message only when the envelope has
+  // `help` (python-sdk#299); exit 1 either way.
+  it.each([
+    [
+      "with help",
+      { help: "Correct the arguments the message describes, then call the tool again." },
+      "Error: record_measurement failed (validation_error): 'measured_at' is not a valid ISO 8601 " +
+        "datetime: 'yesterday'\n  Help: Correct the arguments the message describes, then call the tool again.",
+    ],
+    [
+      "without help",
+      {},
+      "Error: record_measurement failed (validation_error): 'measured_at' is not a valid ISO 8601 " +
+        "datetime: 'yesterday'",
+    ],
+  ])("prints a refusal %s as Python 0.44.0 does (#84)", async (_label, extra, expected) => {
+    const { code, out, err } = await run(["measure", "record", C, "m", "5", "--at", "yesterday"], (h) => {
+      h.server.toolResults.record_measurement = {
+        status: "error",
+        error: "validation_error",
+        message: "'measured_at' is not a valid ISO 8601 datetime: 'yesterday'",
+        ...extra,
+      };
+    });
+    expect(code).toBe(1);
+    expect(out).toBe("");
+    expect(err).toBe(expected);
+  });
+
   it("adds the server's help and correlation id, as Python's CLI does (#84)", async () => {
     // memory-cloud v0.82.0+ (#1742): a write that failed server-side, its
     // outcome unknown. Python 0.43.0's _cli_error_message adds both lines.
