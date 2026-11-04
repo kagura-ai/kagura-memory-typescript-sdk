@@ -14,6 +14,7 @@
 import { KaguraAuthError } from "../errors.js";
 import type { OAuthCredentials, RefreshResult } from "./credentials.js";
 import {
+  CredentialsFileError,
   RefreshNotSavedError,
   keepUnsaved,
   loadCredentialsFile,
@@ -63,9 +64,15 @@ const SCOPE_REFUSALS: readonly string[] = ["insufficient_scope", "invalid_scope"
  * another code (`invalid_request` …) still asks for consent, as before
  * the code was kept. Python's `_refused_scope` reads the message only for
  * an error without a code; this keeps the wider check this SDK had.
+ *
+ * A credentials-file error (a file that cannot be read, a refresh or grant
+ * that could not be saved) is never a refusal: it carries no OAuth code,
+ * and its message holds a path and a profile name, which the fallback
+ * would read — a profile named `insufficient_scope` would start a device
+ * flow after a refresh that worked.
  */
 function isScopeRejection(error: unknown): boolean {
-  if (!(error instanceof KaguraAuthError)) {
+  if (!(error instanceof KaguraAuthError) || error instanceof CredentialsFileError) {
     return false;
   }
   if (error.code !== undefined && SCOPE_REFUSALS.includes(error.code)) {

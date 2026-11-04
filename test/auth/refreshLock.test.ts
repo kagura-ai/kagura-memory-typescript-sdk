@@ -683,6 +683,45 @@ describe("a refreshed profile that cannot be saved (#92)", () => {
     });
   });
 
+  // `refresh()` asks for consent on a scope refusal, read from the OAuth
+  // code or, failing that, the message (#84). A credentials-file error has
+  // no code, and its message holds the profile name and the path.
+  it("a failed save under a scope is never read as a scope refusal, whatever the profile is called", async () => {
+    seed({ insufficient_scope: creds() });
+    const endpoint = singleUseEndpoint({ "rtok-1": ["atok-2", "rtok-2", 3600] });
+    const onUserCode = vi.fn();
+    failRename.errors = [erofs()];
+
+    const error = await refresh({
+      credentialsPath,
+      profile: "insufficient_scope",
+      scope: "memory:read",
+      fetch: endpoint.fetch,
+      onUserCode,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RefreshNotSavedError);
+    expect(endpoint.sent).toEqual(["rtok-1"]);
+    expect(onUserCode).not.toHaveBeenCalled();
+  });
+
+  it("nor is a file that cannot be read, whatever its path says", async () => {
+    const scoped = path.join(dir, "invalid_scope", "credentials.json");
+    const cf = emptyCredentialsFile();
+    setProfile(cf, "default", creds());
+    saveCredentialsFile(cf, scoped);
+    const lock = await acquireFileLock(scoped);
+    const fetch = vi.fn(neverFetch);
+    const onUserCode = vi.fn();
+    const pending = refresh({ credentialsPath: scoped, scope: "memory:read", fetch, onUserCode }).catch((e: unknown) => e);
+    fs.writeFileSync(scoped, "not json {{{");
+    lock.release();
+
+    const error = await pending;
+    expect(error).toBeInstanceOf(CredentialsFileError);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onUserCode).not.toHaveBeenCalled();
+  });
+
   // The device flow a widening scope falls back to saves its grant outside
   // the lock: a failure there is the same typed error, and the grant —
   // which exists nowhere else — is kept in memory and used next.
