@@ -27,6 +27,7 @@ import {
   getProfile,
   getSharedState,
   loadCredentialsFile,
+  loadForUpdate,
   refreshProfileLocked,
   resetStateCache,
   saveCredentialsFile,
@@ -172,24 +173,103 @@ describe("a credentials.json that cannot be read (#92)", () => {
     expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
   });
 
-  it.each(UNREADABLE)("refresh() refuses %s before any request, leaving it as it is", async (_label, bytes, reason) => {
+  // Python's `kagura auth refresh` reads the file leniently first.
+  it.each(UNREADABLE)("refresh() reads %s as no profile, sending nothing, leaving it as it is", async (_label, bytes) => {
     fs.writeFileSync(credentialsPath, bytes);
     const fetch = vi.fn(neverFetch);
 
-    const error = await refresh({ credentialsPath, fetch }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(KaguraAuthError);
-    expect(error).toBeInstanceOf(CredentialsFileError);
-    expect((error as Error).message).toBe(cannotUpdate(reason));
+    await expect(refresh({ credentialsPath, fetch })).rejects.toThrow(
+      "No profile named 'default'.\n  Run: kagura-memory auth login",
+    );
     expect(fetch).not.toHaveBeenCalled();
     expect(fs.readFileSync(credentialsPath)).toEqual(bytes);
   });
 
+  it.each(UNREADABLE)(
+    "refresh() refuses %s that it became by the time the lock is held, before any request",
+    async (_label, bytes, reason) => {
+      seed({ default: creds() });
+      // A peer holds the lock; refresh() reads the file, then waits.
+      const lock = await acquireFileLock(credentialsPath);
+      const fetch = vi.fn(neverFetch);
+      const pending = refresh({ credentialsPath, fetch }).catch((e: unknown) => e);
+      fs.writeFileSync(credentialsPath, bytes);
+      lock.release();
+
+      const error = await pending;
+      expect(error).toBeInstanceOf(CredentialsFileError);
+      expect(error).toBeInstanceOf(KaguraAuthError);
+      expect((error as Error).message).toBe(cannotUpdate(reason));
+      expect(fetch).not.toHaveBeenCalled();
+      expect(fs.readFileSync(credentialsPath)).toEqual(bytes);
+    },
+  );
+
   it("names a file that cannot be read at all, with the system's reason", async () => {
     fs.mkdirSync(credentialsPath); // EISDIR on read
-    await expect(refresh({ credentialsPath, fetch: neverFetch })).rejects.toThrow(
+    await expect(
+      refreshProfileLocked("default", { expectedStaleToken: "atok-1", fallback: creds(), credentialsPath, fetch: neverFetch }),
+    ).rejects.toThrow(
       new RegExp(`^Cannot update ${credentialsPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: it cannot be read \\(EISDIR`),
     );
   });
+
+  // fs.existsSync is false for a dangling symlink: read as "no file", the
+  // save would replace the link with a file holding one profile.
+  it("refuses a credentials.json that is a dangling symlink, and leaves the link as it is", async () => {
+    const target = path.join(dir, "elsewhere", "credentials.json");
+    fs.symlinkSync(target, credentialsPath);
+    const fetch = vi.fn(neverFetch);
+
+    for (const attempt of [
+      () => refreshProfileLocked("default", { expectedStaleToken: "atok-1", fallback: creds(), credentialsPath, fetch }),
+      () => updateProfile("default", creds(), credentialsPath),
+      () => setDefaultProfile("default", credentialsPath),
+      () => deleteProfile("default", credentialsPath),
+    ]) {
+      const error = await attempt().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CredentialsFileError);
+      expect((error as Error).message).toMatch(/: it cannot be read \(ENOENT/);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(fs.lstatSync(credentialsPath).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(credentialsPath)).toBe(target);
+    expect(fs.existsSync(target)).toBe(false);
+    // The lenient reader still reads it as empty, as Python's does.
+    expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+  });
+
+  // A directory this process cannot search: existsSync is false here too,
+  // and a save (which chmods the directory back) would drop every profile.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "refuses a credentials.json in a directory it cannot search, and leaves the file as it is",
+    async () => {
+      seed({ default: creds(), work: creds({ accessToken: "work-token" }) });
+      const before = fs.readFileSync(credentialsPath);
+      fs.chmodSync(dir, 0o600); // read and write, no search
+      let thrown: unknown;
+      try {
+        loadForUpdate(credentialsPath);
+      } catch (e) {
+        thrown = e;
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+      expect(thrown).toBeInstanceOf(CredentialsFileError);
+      expect((thrown as Error).message).toMatch(/^Cannot update .*: it cannot be read \(EACCES/);
+      expect(fs.readFileSync(credentialsPath)).toEqual(before);
+
+      fs.chmodSync(dir, 0o600);
+      try {
+        expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+        // A write refuses too (here already taking the lock beside it).
+        await expect(updateProfile("default", creds({ accessToken: "new" }), credentialsPath)).rejects.toThrow(/EACCES/);
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+      expect(fs.readFileSync(credentialsPath)).toEqual(before);
+    },
+  );
 
   it.each(UNREADABLE)(
     "KaguraOAuth refuses %s that appeared after it loaded, on both refresh paths",
@@ -542,6 +622,114 @@ describe("a refreshed profile that cannot be saved (#92)", () => {
     // A login saved since is picked up as before.
     await updateProfile("default", creds({ accessToken: "t-login", refreshToken: "r-login" }), credentialsPath);
     expect(getSharedState(credentialsPath)?.credentials.accessToken).toBe("t-login");
+  });
+
+  it("adopting another profile from the file clears the mark that the file is behind", async () => {
+    seed({ default: creds({ accessToken: "old", refreshToken: "rtok-old" }) });
+    const state = getSharedState(credentialsPath)!;
+    const endpoint = singleUseEndpoint({ "rtok-old": ["fresh", "rtok-fresh", 3600] });
+    failRename.errors = [erofs()];
+    await expect(new KaguraOAuth(state, { fetch: endpoint.fetch }).forceRefresh()).rejects.toBeInstanceOf(
+      RefreshNotSavedError,
+    );
+    expect([state.usedAccessToken, state.usedRefreshToken]).toEqual(["old", "rtok-old"]);
+
+    await updateProfile("default", creds({ accessToken: "t-login", refreshToken: "r-login" }), credentialsPath);
+    expect(getSharedState(credentialsPath)).toBe(state);
+    expect(state.credentials.accessToken).toBe("t-login");
+    expect([state.usedAccessToken, state.usedRefreshToken]).toEqual([null, null]);
+    // So the old pair, should it come back (a restored backup), is no
+    // longer mistaken for the one this process got ahead of.
+    seed({ default: creds({ accessToken: "old", refreshToken: "rtok-old" }) });
+    expect(getSharedState(credentialsPath)?.credentials.accessToken).toBe("old");
+  });
+
+  // A server that keeps the refresh token on a refresh (omits it from the
+  // response) leaves the same refresh token on file across another
+  // process's rotation; the access token tells the two profiles apart.
+  describe("with a server that keeps the refresh token on a refresh", () => {
+    const soon = () => new Date(Date.now() + 5_000); // within REFRESH_SKEW_SEC
+    const keepsRefreshToken = () =>
+      vi.fn(async () => Response.json({ access_token: "t2", token_type: "Bearer", expires_in: 3600 }));
+
+    it("getSharedState adopts a rotation another process saved since", async () => {
+      seed({ default: creds({ accessToken: "t1", refreshToken: "r1", expiresAt: soon() }) });
+      const state = getSharedState(credentialsPath)!;
+      const fetch = keepsRefreshToken();
+      failRename.errors = [erofs()];
+      await expect(
+        new KaguraOAuth(state, { fetch: fetch as unknown as typeof globalThis.fetch }).getAuthHeader(),
+      ).rejects.toBeInstanceOf(RefreshNotSavedError);
+      expect([state.credentials.accessToken, state.credentials.refreshToken]).toEqual(["t2", "r1"]);
+
+      await updateProfile("default", creds({ accessToken: "t3", refreshToken: "r1" }), credentialsPath);
+      expect(getSharedState(credentialsPath)?.credentials.accessToken).toBe("t3");
+      expect(state.usedRefreshToken).toBeNull();
+    });
+
+    it("the lock path adopts it too instead of refreshing from the copy in memory", async () => {
+      seed({ default: creds({ accessToken: "t1", refreshToken: "r1", expiresAt: soon() }) });
+      const state = independentState(creds({ accessToken: "t1", refreshToken: "r1", expiresAt: soon() }));
+      const fetch = keepsRefreshToken();
+      const auth = new KaguraOAuth(state, { fetch: fetch as unknown as typeof globalThis.fetch });
+      failRename.errors = [erofs()];
+      await expect(auth.getAuthHeader()).rejects.toBeInstanceOf(RefreshNotSavedError);
+
+      await updateProfile("default", creds({ accessToken: "t3", refreshToken: "r1" }), credentialsPath);
+      await auth.forceRefresh(); // t2 rejected upstream
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(state.credentials.accessToken).toBe("t3");
+      expect([state.usedAccessToken, state.usedRefreshToken]).toEqual([null, null]);
+    });
+  });
+
+  // The device flow a widening scope falls back to saves its grant outside
+  // the lock: a failure there is the same typed error, and the grant —
+  // which exists nowhere else — is kept in memory and used next.
+  it("a widening scope's consent that cannot be saved is the same typed error, kept in memory", async () => {
+    seed({ default: creds() });
+    const wide = "memory:read memory:write profile:read";
+    const bodies: string[] = [];
+    const replies = [
+      Response.json({ error: "insufficient_scope" }, { status: 400 }),
+      Response.json({
+        device_code: "dev-1",
+        user_code: "WDJB-MJHT",
+        verification_uri: "https://x.test/activate",
+        expires_in: 600,
+        interval: 0,
+      }),
+      Response.json({ access_token: "at-wide", refresh_token: "rt-wide", token_type: "Bearer", expires_in: 3600, scope: wide }),
+      Response.json({ access_token: "at-next", refresh_token: "rt-next", token_type: "Bearer", expires_in: 3600, scope: wide }),
+    ];
+    const fetch = (async (_input: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      const reply = replies.shift();
+      if (reply === undefined) throw new Error("unexpected request");
+      return reply;
+    }) as unknown as typeof globalThis.fetch;
+    failRename.errors = [erofs()];
+
+    const error = await refresh({ credentialsPath, scope: wide, fetch, onUserCode: () => {}, sleep: async () => {} }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(RefreshNotSavedError);
+    expect(error).toBeInstanceOf(KaguraAuthError);
+    expect((error as Error).message).toBe(
+      `Got consent for scope '${wide}' on profile 'default', but could not save it to ${credentialsPath}: ` +
+        "EROFS: read-only file system\n" +
+        "  The profile on file keeps its previous grant.\n" +
+        `  Fix the cause, then run: kagura-memory auth refresh --scope "${wide}"`,
+    );
+    expect(util.inspect(error, { depth: 10 })).not.toContain("at-wide");
+    expect(onDisk()?.accessToken).toBe("atok-1");
+    expect(getSharedState(credentialsPath)?.credentials.accessToken).toBe("at-wide");
+
+    // The next refresh sends the consented grant's refresh token, and saves.
+    const next = await refresh({ credentialsPath, fetch });
+    expect(new URLSearchParams(bodies[3]).get("refresh_token")).toBe("rt-wide");
+    expect(next.accessToken).toBe("at-next");
+    expect(onDisk()?.accessToken).toBe("at-next");
   });
 
   it("is also what a profile that became unreadable during the round-trip gives", async () => {

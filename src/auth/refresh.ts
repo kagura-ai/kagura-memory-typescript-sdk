@@ -14,10 +14,12 @@
 import { KaguraAuthError } from "../errors.js";
 import type { OAuthCredentials, RefreshResult } from "./credentials.js";
 import {
-  getSharedState,
-  loadForUpdate,
-  profileNamed,
+  RefreshNotSavedError,
+  keepUnsaved,
+  loadCredentialsFile,
   refreshSharedState,
+  saveFailureReason,
+  sharedStateFrom,
   updateProfile,
 } from "./credentials.js";
 import { authorizeDevice, pollForToken } from "./deviceFlow.js";
@@ -66,14 +68,18 @@ function isScopeRejection(error: unknown): boolean {
  * nothing is sent — a refresh token works once (memory-cloud v0.79.0+).
  *
  * @returns the credentials now in force.
- * @throws Error if the named profile does not exist.
+ * @throws Error if the named profile does not exist — also when the
+ *   credentials file cannot be read or parsed, which reads as holding no
+ *   profile, as Python's `kagura auth refresh` reads it; nothing is sent
+ *   and the file is left as it is.
  * @throws KaguraAuthExpiredError the refresh token is no longer valid —
  *   the stored profile is left untouched so it can still be inspected.
  * @throws KaguraAuthError other protocol/response failures; also when the
- *   credentials file exists but cannot be read or parsed (before any
- *   request, and the file is left as it is), or when the refreshed profile
- *   could not be saved (the message names the file and says to log in
- *   again: the server has rotated the token by then).
+ *   credentials file became unreadable by the time the lock is held
+ *   (before any request, and the file is left as it is), or when the
+ *   refreshed profile — or the grant a widening `scope` collected — could
+ *   not be saved (the message names the file; this process keeps the new
+ *   token in memory).
  * @throws KaguraConnectionError the server was unreachable.
  */
 export async function refresh(options: RefreshOptions = {}): Promise<OAuthCredentials> {
@@ -98,24 +104,21 @@ export interface ProfileRefreshResult extends RefreshResult {
  * @internal Not exported from the package entry point.
  */
 export async function refreshProfile(options: RefreshOptions = {}): Promise<ProfileRefreshResult> {
-  // Strict: a file that exists but cannot be read is refused here, naming
-  // it, rather than read as "no profile".
-  const cf = loadForUpdate(options.credentialsPath);
+  // Lenient, as Python's CLI reads it first: a file that cannot be read
+  // holds no profile here. The refresh path refuses it under the lock,
+  // before any request, if it became unreadable after this read.
+  const cf = loadCredentialsFile(options.credentialsPath);
   const target = options.profile || cf.defaultProfile;
-  const stored = profileNamed(cf, target);
-  if (stored === undefined) {
-    throw new Error(`No profile named '${target}'.\n  Run: kagura-memory auth login`);
-  }
-
-  const httpOptions = options.fetch !== undefined ? { fetch: options.fetch } : {};
 
   // The shared state, not a copy: a client of this process holding the
   // same profile sees the rotated token, and the refresh is serialized with
   // its own on the in-process mutex.
-  const state = getSharedState(options.credentialsPath, target);
+  const state = sharedStateFrom(cf, options.credentialsPath, target);
   if (state === null) {
     throw new Error(`No profile named '${target}'.\n  Run: kagura-memory auth login`);
   }
+
+  const httpOptions = options.fetch !== undefined ? { fetch: options.fetch } : {};
 
   // Forced path, as on a 401: refresh unless the file no longer holds the
   // token read here (another process rotated it while this one waited).
@@ -140,10 +143,32 @@ export async function refreshProfile(options: RefreshOptions = {}): Promise<Prof
     // updateProfile below re-acquires it, so there is no deadlock. The
     // device flow waits on the user for minutes: holding the lock that
     // long would stall every other process's refresh.
-    const next = await consentToWiderScope(state.credentials, options.scope, options, httpOptions);
-    await updateProfile(target, next, options.credentialsPath);
+    const before = state.credentials;
+    const next = await consentToWiderScope(before, options.scope, options, httpOptions);
+    try {
+      await updateProfile(target, next, options.credentialsPath);
+    } catch (saveError) {
+      // As a refresh that could not be saved: the consented grant exists
+      // only here, so this process keeps it, and the profile on file (the
+      // one this process already marked, or the one it held) stays behind.
+      const onFile = state.usedRefreshToken
+        ? { accessToken: state.usedAccessToken ?? "", refreshToken: state.usedRefreshToken }
+        : before;
+      const error = new RefreshNotSavedError(
+        `Got consent for scope '${options.scope}' on profile '${target}', but could not save it to ` +
+          `${state.path}: ${saveFailureReason(saveError)}\n` +
+          "  The profile on file keeps its previous grant.\n" +
+          `  Fix the cause, then run: kagura-memory auth refresh --scope "${options.scope}"`,
+        next,
+        onFile,
+        { cause: saveError },
+      );
+      keepUnsaved(state, error);
+      throw error;
+    }
     state.credentials = next;
     state.usedRefreshToken = null;
+    state.usedAccessToken = null;
     return { credentials: next, refreshed: true, profile: target };
   }
 }
