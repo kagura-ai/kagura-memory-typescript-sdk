@@ -1542,43 +1542,120 @@ describe("cli: logout", () => {
   );
 
   describe("revoking on the server, best effort, as Python does (#55)", () => {
-    /** A fetch that records every request and answers `status`, or fails. */
-    function revokeServer(status: number | Error) {
-      const requests: { url: string; method?: string; body: string }[] = [];
+    type Outcome = number | Error;
+    /**
+     * A fetch that records every request, with its form body parsed, and
+     * answers `outcome`: a status, an error it throws, or a function that
+     * picks one of those per request.
+     */
+    function revokeServer(outcome: Outcome | ((url: string, form: Record<string, string>) => Outcome)) {
+      const requests: { url: string; method?: string; form: Record<string, string> }[] = [];
       const impl = async (input: string | URL | Request, init?: RequestInit) => {
-        requests.push({ url: String(input), method: init?.method, body: String(init?.body) });
-        if (status instanceof Error) throw status;
-        return new Response(null, { status });
+        const url = String(input);
+        const form = Object.fromEntries(new URLSearchParams(String(init?.body)));
+        requests.push({ url, method: init?.method, form });
+        const answer = typeof outcome === "function" ? outcome(url, form) : outcome;
+        if (answer instanceof Error) throw answer;
+        return new Response(null, { status: answer });
       };
       return { requests, fetch: impl as typeof globalThis.fetch };
     }
+    // Python CLI 0.43.0+'s warning (#81), recorded from the 0.44.0 CLI.
     const WARNING =
       "  Warning: server-side revoke failed (network or 5xx). The local profile was still deleted. " +
-      "The refresh_token may remain valid until it expires naturally.";
+      "Its tokens may stay valid on the server until they expire.";
 
-    it("revokes the access token of the profile it removes, then removes it", async () => {
-      seed({ default: creds({ server: "https://api.test/", accessToken: "at-default" }), work: creds() });
+    // #81: the Python CLI 0.43.0+ (recorded from 0.44.0 against a fake
+    // revoke endpoint) sends the refresh token alone, or the access token
+    // when there is none, with `client_id` and no `token_type_hint`. This
+    // CLI sends the access token after the refresh token too, so that a
+    // server before memory-cloud v0.82.0 revokes it as well.
+    it("revokes the refresh token, then the access token, of the profile it removes, then removes it", async () => {
+      seed({
+        default: creds({ server: "https://api.test/", accessToken: "at-default", refreshToken: "rt-default" }),
+        work: creds(),
+      });
       const server = revokeServer(200);
       const h = harness({ fetch: server.fetch });
       expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
 
-      expect(server.requests).toHaveLength(1);
-      expect(server.requests[0]).toMatchObject({ url: "https://api.test/api/v1/oauth/revoke", method: "POST" });
-      expect(Object.fromEntries(new URLSearchParams(server.requests[0]!.body))).toEqual({
-        token: "at-default",
-        client_id: "kagura-cli",
-      });
+      expect(server.requests).toEqual([
+        {
+          url: "https://api.test/api/v1/oauth/revoke",
+          method: "POST",
+          form: { token: "rt-default", client_id: "kagura-cli" },
+        },
+        {
+          url: "https://api.test/api/v1/oauth/revoke",
+          method: "POST",
+          form: { token: "at-default", client_id: "kagura-cli" },
+        },
+      ]);
       expect(h.out).toEqual(["Profile 'default' removed."]);
       expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["work"]);
+    });
+
+    it("revokes the access token alone when the profile has no refresh token", async () => {
+      seed({ default: creds({ server: "https://api.test", accessToken: "at-default", refreshToken: "" }) });
+      const server = revokeServer(200);
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+
+      expect(server.requests.map((r) => r.form)).toEqual([{ token: "at-default", client_id: "kagura-cli" }]);
+      expect(h.out).toEqual(["Profile 'default' removed."]);
+      expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+    });
+
+    it("sends nothing, and warns of nothing, for a profile with no token", async () => {
+      // Python sends the empty token, which memory-cloud answers 400, and
+      // warns; there is nothing to revoke.
+      seed({ default: creds({ accessToken: "", refreshToken: "" }) });
+      const server = revokeServer(200);
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+
+      expect(server.requests).toEqual([]);
+      expect(h.out).toEqual(["Profile 'default' removed."]);
+      expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+    });
+
+    it("sends the profile's own client_id with each token", async () => {
+      // memory-cloud v0.82.0+ requires client_id and leaves a token issued
+      // to another client alone, so it must be the one the token was
+      // issued to.
+      seed({ default: creds({ clientId: "kagura-ide", accessToken: "at-ide", refreshToken: "rt-ide" }) });
+      const server = revokeServer(200);
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+
+      expect(server.requests.map((r) => r.form)).toEqual([
+        { token: "rt-ide", client_id: "kagura-ide" },
+        { token: "at-ide", client_id: "kagura-ide" },
+      ]);
     });
 
     it.each([
       ["a 5xx", 503],
       ["a network failure", new TypeError("fetch failed")],
     ])("still removes the profile after %s, with Python's warning", async (_label, status) => {
-      seed({ default: creds() });
-      const h = harness({ fetch: revokeServer(status).fetch });
+      seed({ default: creds({ accessToken: "at-dead", refreshToken: "rt-dead" }) });
+      const server = revokeServer(status);
+      const h = harness({ fetch: server.fetch });
       expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+      expect(server.requests.map((r) => r.form.token)).toEqual(["rt-dead", "at-dead"]);
+      expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
+      expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
+    });
+
+    it.each([
+      ["the refresh token's", "rt-1"],
+      ["the access token's", "at-1"],
+    ])("warns once when only %s revoke fails, and still removes the profile", async (_label, failing) => {
+      seed({ default: creds({ accessToken: "at-1", refreshToken: "rt-1" }) });
+      const server = revokeServer((_url, form) => (form.token === failing ? 503 : 200));
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+      expect(server.requests.map((r) => r.form.token)).toEqual(["rt-1", "at-1"]);
       expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
       expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
     });
@@ -1587,24 +1664,28 @@ describe("cli: logout", () => {
       // A server that never answers: only the request's signal ends it.
       // The timer is stood in for by a signal that has already fired, so
       // the test does not wait; without the bound there is no signal at all.
+      // One deadline covers both of the profile's requests, so a dead
+      // server holds logout up for 30 s, not 60.
       const fired = AbortSignal.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
       const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(fired);
-      let signal: AbortSignal | null | undefined;
+      const signals: (AbortSignal | null | undefined)[] = [];
       const hang = (async (_input: unknown, init?: RequestInit) => {
-        signal = init?.signal;
+        const signal = init?.signal;
+        signals.push(signal);
         if (!signal) throw new Error("the revocation is unbounded");
-        const bound = signal;
         return new Promise<Response>((_resolve, reject) => {
-          if (bound.aborted) reject(bound.reason);
-          else bound.addEventListener("abort", () => reject(bound.reason));
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener("abort", () => reject(signal.reason));
         });
       }) as typeof globalThis.fetch;
       try {
         seed({ default: creds() });
         const h = harness({ fetch: hang });
         expect(await runCli(["auth", "logout", "--yes"], h.deps)).toBe(0);
+        expect(timeout).toHaveBeenCalledTimes(1);
         expect(timeout).toHaveBeenCalledWith(30_000);
-        expect(signal).toBe(fired);
+        expect(signals).toHaveLength(2);
+        for (const signal of signals) expect(signal).toBe(fired);
         expect(h.out).toEqual([WARNING, "Profile 'default' removed."]);
         expect(loadCredentialsFile(credentialsPath).profiles).toEqual({});
       } finally {
@@ -1613,11 +1694,41 @@ describe("cli: logout", () => {
     });
 
     it("revokes every profile with --all, and says nothing of a failure, as Python does", async () => {
-      seed({ default: creds({ accessToken: "at-a" }), work: creds({ accessToken: "at-b" }) });
+      // Each profile's refresh token then its access token, or its access
+      // token alone when it has no refresh token.
+      seed({
+        default: creds({ accessToken: "at-a", refreshToken: "rt-a" }),
+        work: creds({ accessToken: "at-b", refreshToken: "" }),
+      });
       const server = revokeServer(503);
       const h = harness({ fetch: server.fetch });
       expect(await runCli(["auth", "logout", "--all", "--yes"], h.deps)).toBe(0);
-      expect(server.requests.map((r) => new URLSearchParams(r.body).get("token"))).toEqual(["at-a", "at-b"]);
+      expect(server.requests.map((r) => r.form)).toEqual([
+        { token: "rt-a", client_id: "kagura-cli" },
+        { token: "at-a", client_id: "kagura-cli" },
+        { token: "at-b", client_id: "kagura-cli" },
+      ]);
+      expect(h.out).toEqual(["All profiles removed."]);
+      expect(fs.existsSync(credentialsPath)).toBe(false);
+    });
+
+    it("revokes each profile with --all on its own server with its own client_id, past a failure", async () => {
+      // As Python's `_revoke_all_best_effort`: one profile's server failing
+      // does not stop the next revoke, and no profile borrows another's
+      // client_id (memory-cloud v0.82.0+ ignores a token sent with the
+      // wrong one).
+      seed({
+        default: creds({ server: "https://down.test", clientId: "kagura-cli", accessToken: "at-a", refreshToken: "rt-a" }),
+        work: creds({ server: "https://api.test/", clientId: "kagura-ide", accessToken: "at-b", refreshToken: "" }),
+      });
+      const server = revokeServer((url) => (url.startsWith("https://down.test/") ? new TypeError("fetch failed") : 200));
+      const h = harness({ fetch: server.fetch });
+      expect(await runCli(["auth", "logout", "--all", "--yes"], h.deps)).toBe(0);
+      expect(server.requests.map(({ url, form }) => ({ url, form }))).toEqual([
+        { url: "https://down.test/api/v1/oauth/revoke", form: { token: "rt-a", client_id: "kagura-cli" } },
+        { url: "https://down.test/api/v1/oauth/revoke", form: { token: "at-a", client_id: "kagura-cli" } },
+        { url: "https://api.test/api/v1/oauth/revoke", form: { token: "at-b", client_id: "kagura-ide" } },
+      ]);
       expect(h.out).toEqual(["All profiles removed."]);
       expect(fs.existsSync(credentialsPath)).toBe(false);
     });

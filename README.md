@@ -29,8 +29,8 @@ package also includes `kagura-memory-mcp`, a transparent stdio/HTTP proxy.
 npm install kagura-memory
 ```
 
-Requires Node.js >= 18 (native `fetch`). Zero runtime dependencies —
-the one optional peer dependency, for
+Requires Node.js >= 20.19.0 (Node 18 support ended with 0.14.x). Zero
+runtime dependencies — the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
 
@@ -198,6 +198,11 @@ afterwards with `kagura-memory context update <context_id> --summary …`.
 As in Python, `resource tokens revoke` prints `Token revoked.`, and
 `resource schema` prints `No schema registered for this resource.` when
 there is none (the route's 404).
+
+**`resource list`** (`ResourceClient.listResources()`) also lists a resource
+whose contexts were all deleted while it still holds active tokens, with
+`context_id` and `context_name` null (memory-cloud v0.94.0+), so those
+tokens stay reachable; revoking its last token removes the row.
 
 **Records print as the Python CLI prints them.** `resource tokens
 list|create|update`, `resource list|stats|indexer-status|events|schema`,
@@ -838,11 +843,22 @@ current directory and each entry it hides, in the Python CLI's words
 when there is none, with non-ASCII escaped as `\uXXXX`, as Python's
 `json.dumps` default writes it. `auth list` and `auth status` without
 profiles exit 1. `auth logout`
-revokes the access
-token on the server before it deletes the profile, best effort: the
-profile is deleted even when that fails, with Python's warning (with
-`--all`, silently, as in Python). It notes when `KAGURA_API_KEY` is still
-set. Unlike the Python CLI, it asks before removing anything unless
+revokes the profile's refresh token on the server, as Python 0.43.0+
+does, and then its access token, before it deletes the profile; on
+memory-cloud v0.82.0+ revoking the refresh token revokes the access token
+issued with it too
+([memory-cloud#1741](https://github.com/kagura-ai/memory-cloud/issues/1741)),
+while an older server revokes only the token sent. Up to 0.14.1 it
+revoked only the access token, which left the refresh token valid. The
+revoke is best effort: the profile is deleted even when it fails, with
+Python's warning (with `--all`, silently, as in Python). It notes when
+`KAGURA_API_KEY` is still set. Its lines read `Profile 'NAME' removed.`
+and `All profiles removed.`, where Python prints `✓ Profile 'NAME'
+removed.` and `✓ All profiles removed; ~/.kagura/credentials.json
+deleted.`, and that note says `kagura-memory commands` where Python's
+says `kagura commands`. Unlike the Python CLI, it also revokes the
+access token, which Python leaves valid until it expires on a server
+before v0.82.0; it asks before removing anything unless
 `--yes` (`-y`) is given, rather than refusing `--all` without it; a
 logout that names no profile succeeds when nothing is stored, so
 `logout --yes` stays idempotent in setup scripts; and `--all` with
@@ -1288,6 +1304,28 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 | `getSleepReport` | One run in detail, including the per-action audit log. |
 | `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. |
 
+`getSleepReport` and `rollbackSleepRun`, and `kagura-memory sleep
+report|rollback`, send `report_id` only. Their `contextId` is ignored and
+now optional, so calls that pass it keep compiling; the CLI's
+`CONTEXT_ID` is ignored too and stays a required positional, as in the
+Python CLI, so scripts keep working. No memory-cloud release declares or
+reads a `context_id` on `get_sleep_report` or `rollback_sleep_run`, and from
+v0.82.0 the server refuses an argument a tool does not declare
+([memory-cloud#1742](https://github.com/kagura-ai/memory-cloud/issues/1742)),
+so up to 0.14.1 both methods and both commands failed every call there
+with `invalid_argument`
+([#79](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/79)).
+The server finds the run by `report_id` and, from v0.126.0
+([memory-cloud#2315](https://github.com/kagura-ai/memory-cloud/pull/2315)),
+authorizes against the report's own context: read access for a report,
+the editor or owner role for a rollback (`KaguraPermissionError` without
+it; a workspace viewer cannot roll back). A report in a context the
+caller cannot read throws `KaguraNotFoundError`, like a missing one. From
+v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
+"analysis"`), which records LLM spend and has no Sleep actions, with
+`analysis_report`, a plain `KaguraError`
+([memory-cloud#2547](https://github.com/kagura-ai/memory-cloud/issues/2547)).
+
 ### Workspace and server
 
 | Method | What it does |
@@ -1566,14 +1604,13 @@ including the whole REST surface, `fingerprint()`, and the armor codec. Call
 one of those without the package and you get a `KaguraCryptoError` naming
 the install command, not a module-resolution stack trace.
 
-> **On Node 18.** This SDK supports Node 18 and CI exercises the crypto
-> round-trip there on every push. But `age-encryption`'s `@noble/*`
-> dependencies declare `engines.node: ">= 20.19.0"`, so `npm install
-> age-encryption` on Node 18 prints `EBADENGINE` warnings, and an
-> `engine-strict=true` npmrc will refuse the install outright. It works —
-> WebCrypto is not a global before Node 19, so the SDK installs
-> `node:crypto`'s `webcrypto` itself — but if you want the warnings gone,
-> use Node 20.19+.
+> **Node version.** `age-encryption`'s `@noble/*` dependencies declare
+> `engines.node: ">= 20.19.0"`, the same floor as this SDK, so the install
+> is clean on every supported Node, `engine-strict=true` included.
+> Encryption and keygen take their randomness from the `globalThis.crypto`
+> WebCrypto global, which Node has provided since 19; the SDK no longer
+> installs `node:crypto`'s `webcrypto` there itself, as 0.14.x did for
+> Node 18.
 
 Recipients are X25519-only. `age1pq1…` (post-quantum) and plugin
 recipients are rejected even though `age-encryption` would accept them,
@@ -1707,15 +1744,12 @@ the header is `Bearer None` in both.
 
 ```bash
 npm install
-npm test                   # vitest
-npm run test:no-webcrypto  # the same suite with globalThis.crypto deleted
-npm run typecheck          # tsc --noEmit
-npm run build              # tsup → dist/ (ESM + CJS + d.ts)
+npm test           # vitest
+npm run typecheck  # tsc --noEmit
+npm run build      # tsup → dist/ (ESM + CJS + d.ts)
 ```
 
-`test:no-webcrypto` reproduces Node 18, which has no WebCrypto global —
-the crypto path installs `node:crypto`'s `webcrypto` itself, and that used
-to break in CI only. `prepublishOnly` runs all four.
+`prepublishOnly` runs all three.
 
 ## License
 

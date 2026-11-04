@@ -628,16 +628,35 @@ async function cmdUse(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promis
 const REVOKE_TIMEOUT_MS = 30_000;
 
 /**
- * Revoke a profile's access token on its server, best effort, as the
- * Python CLI does before it deletes the profile. Never throws: false when
- * the server could not be reached, timed out, or refused.
+ * The tokens `auth logout` revokes, in order: the refresh token, then the
+ * access token. Python's `_revocable_token` sends only the first of them
+ * (the access token when there is no refresh token); the access token
+ * goes too so that a server before memory-cloud v0.82.0 revokes it as
+ * well (see `revokeToken`). An empty token is skipped: there is nothing
+ * to revoke, and the server would refuse it (Python sends it and warns).
  */
-function revokeProfile(deps: CliDeps, creds: OAuthCredentials): Promise<boolean> {
+function revocableTokens(creds: OAuthCredentials): string[] {
+  return [creds.refreshToken, creds.accessToken].filter((token) => token !== "");
+}
+
+/**
+ * Revoke a profile's tokens on its server, best effort, before logout
+ * deletes the profile: each of `revocableTokens` in turn, with the
+ * profile's own `client_id`. Never throws: false when any revocation
+ * could not reach the server, timed out, or was refused; true when each
+ * succeeded or there was none to send.
+ */
+async function revokeProfile(deps: CliDeps, creds: OAuthCredentials): Promise<boolean> {
   const base = deps.fetch ?? globalThis.fetch;
-  // Bounded as Python's client is: a dead server must not hang logout.
-  const fetch: typeof globalThis.fetch = (input, init) =>
-    base(input, { ...init, signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS) });
-  return revokeToken(creds.server, { token: creds.accessToken, clientId: creds.clientId, fetch });
+  // Bounded as Python's client is: a dead server must not hang logout. One
+  // deadline covers the profile's requests, so it waits 30 s, not 60.
+  const signal = AbortSignal.timeout(REVOKE_TIMEOUT_MS);
+  const fetch: typeof globalThis.fetch = (input, init) => base(input, { ...init, signal });
+  let revoked = true;
+  for (const token of revocableTokens(creds)) {
+    if (!(await revokeToken(creds.server, { token, clientId: creds.clientId, fetch }))) revoked = false;
+  }
+  return revoked;
 }
 
 /** Python's `_warn_if_api_key_env`: the variable outlives every profile. */
@@ -654,11 +673,13 @@ function noteApiKeyEnv(deps: CliDeps): void {
  * `kagura auth logout` — revoke on the server, best effort, then delete
  * the profile.
  *
- * Three deliberate differences from Python remain: this asks before it
+ * Four deliberate differences from Python remain: this asks before it
  * removes anything (`--yes`/`-y` skips it) where Python refuses `--all`
  * without `--yes`; an untargeted logout with nothing stored succeeds (see
- * below) where Python exits 1; and `--all` with `--profile` is a usage
- * error where Python ignores `--profile` and removes every profile.
+ * below) where Python exits 1; `--all` with `--profile` is a usage
+ * error where Python ignores `--profile` and removes every profile; and
+ * it revokes the access token after the refresh token, where Python
+ * revokes only the refresh token (see `revocableTokens`).
  */
 async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
   const all = args.flags.has("all");
@@ -711,7 +732,7 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
   if (!(await revokeProfile(deps, creds))) {
     deps.write(
       "  Warning: server-side revoke failed (network or 5xx). The local profile was still deleted. " +
-        "The refresh_token may remain valid until it expires naturally.",
+        "Its tokens may stay valid on the server until they expire.",
     );
   }
   await deleteProfile(name, deps.credentialsPath);

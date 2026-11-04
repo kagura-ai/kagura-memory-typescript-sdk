@@ -31,7 +31,7 @@
   "tools_generated": true,
   "compatibility": {
     "platforms": ["win32", "darwin"],
-    "runtimes": { "node": ">=18" }
+    "runtimes": { "node": ">=20.19.0" }
   },
   "user_config": {
     "profile": {
