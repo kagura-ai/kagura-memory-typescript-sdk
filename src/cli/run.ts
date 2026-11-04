@@ -613,16 +613,30 @@ async function cmdUse(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promis
 const REVOKE_TIMEOUT_MS = 30_000;
 
 /**
- * Revoke a profile's access token on its server, best effort, as the
- * Python CLI does before it deletes the profile. Never throws: false when
- * the server could not be reached, timed out, or refused.
+ * The token `auth logout` revokes, Python's `_revocable_token`: the
+ * refresh token when the profile has one, else its access token.
+ * memory-cloud v0.82.0+ (#1741) revokes the access token issued with a
+ * refresh token together with it, while revoking the access token alone
+ * leaves the refresh token valid. A server before v0.82.0 revokes only
+ * the token sent.
+ */
+function revocableToken(creds: OAuthCredentials): string {
+  return creds.refreshToken || creds.accessToken;
+}
+
+/**
+ * Revoke a profile's tokens on its server, best effort, as the Python CLI
+ * does before it deletes the profile: the refresh token (see
+ * `revocableToken`), with the profile's `client_id`, which memory-cloud
+ * v0.82.0+ requires. Never throws: false when the server could not be
+ * reached, timed out, or refused.
  */
 function revokeProfile(deps: CliDeps, creds: OAuthCredentials): Promise<boolean> {
   const base = deps.fetch ?? globalThis.fetch;
   // Bounded as Python's client is: a dead server must not hang logout.
   const fetch: typeof globalThis.fetch = (input, init) =>
     base(input, { ...init, signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS) });
-  return revokeToken(creds.server, { token: creds.accessToken, clientId: creds.clientId, fetch });
+  return revokeToken(creds.server, { token: revocableToken(creds), clientId: creds.clientId, fetch });
 }
 
 /** Python's `_warn_if_api_key_env`: the variable outlives every profile. */
@@ -696,7 +710,7 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
   if (!(await revokeProfile(deps, creds))) {
     deps.write(
       "  Warning: server-side revoke failed (network or 5xx). The local profile was still deleted. " +
-        "The refresh_token may remain valid until it expires naturally.",
+        "Its tokens may stay valid on the server until they expire.",
     );
   }
   await deleteProfile(name, deps.credentialsPath);

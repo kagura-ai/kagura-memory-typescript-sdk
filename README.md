@@ -834,10 +834,14 @@ current directory and each entry it hides, in the Python CLI's words
 when there is none, with non-ASCII escaped as `\uXXXX`, as Python's
 `json.dumps` default writes it. `auth list` and `auth status` without
 profiles exit 1. `auth logout`
-revokes the access
-token on the server before it deletes the profile, best effort: the
-profile is deleted even when that fails, with Python's warning (with
-`--all`, silently, as in Python). It notes when `KAGURA_API_KEY` is still
+revokes the profile's refresh token on the server (its access token when
+it has none) before it deletes the profile, as Python 0.43.0+ does; on
+memory-cloud v0.82.0+ that revokes the access token issued with it too
+([memory-cloud#1741](https://github.com/kagura-ai/memory-cloud/issues/1741)),
+while an older server revokes only the token sent. Up to 0.14.1 it
+revoked only the access token, which left the refresh token valid. The
+revoke is best effort: the profile is deleted even when it fails, with
+Python's warning (with `--all`, silently, as in Python). It notes when `KAGURA_API_KEY` is still
 set. Unlike the Python CLI, it asks before removing anything unless
 `--yes` (`-y`) is given, rather than refusing `--all` without it; a
 logout that names no profile succeeds when nothing is stored, so
