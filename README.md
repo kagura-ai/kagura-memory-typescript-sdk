@@ -175,7 +175,7 @@ npx kagura-memory recall "dependency injection" --no-rerank   # skip reranking; 
 npx kagura-memory recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
 npx kagura-memory recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
 # A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
-# retry without the ones it names (all three sent when it names none), with a note on stderr.
+# retry without the ones it names (every one it sent when it names none), with a note on stderr.
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
 npx kagura-memory measure record <context-id> weight_kg 71.5 --unit kg
 npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
@@ -1194,7 +1194,7 @@ when `undefined`.
 Since memory-cloud v0.108.0 a `recall` hit is **compact** unless you pass
 `verbosity: "full"`: `memory_id`, a 160-character `summary` head
 (`summary_cut: true` when it was cut), `type`, `importance`, `score`,
-`created_at` (v0.110.0+) and `updated_at`. **`tags`, `context_summary`,
+`created_at` and `updated_at`. **`tags`, `context_summary`,
 `scope`, `version` and the uncut `summary` need `verbosity: "full"`**;
 code that reads them from a compact hit gets `undefined`. Both shapes
 carry `observed_at`, `superseded_by`, `contradicts`, `supersede_candidate`

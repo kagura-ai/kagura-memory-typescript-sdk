@@ -1059,8 +1059,7 @@ export interface RecallSelector {
  *
  * - **compact** (the server default): `memory_id`, the first 160
  *   characters of `summary` (`summary_cut: true` when it was shortened),
- *   `type`, `importance`, `score`, `created_at` (v0.110.0+) and
- *   `updated_at`.
+ *   `type`, `importance`, `score`, `created_at` and `updated_at`.
  * - **full** (`verbosity: "full"`, and every server before v0.108.0): the
  *   uncut `summary` plus `context_summary`, `scope`, `tags` and `version`
  *   (v0.113.0+).
@@ -1097,7 +1096,10 @@ export interface RecallResult {
   context_summary?: string | null;
   /** `verbosity: "full"` only. */
   scope?: string;
-  /** ISO 8601. Compact rows carry it from v0.110.0. */
+  /**
+   * ISO 8601, on both shapes: compact rows carry it from v0.108.0 (the
+   * server CHANGELOG lists it as full-only there; its code and tests do not).
+   */
   created_at?: string;
   /** ISO 8601; `null` on a memory never edited. */
   updated_at?: string | null;

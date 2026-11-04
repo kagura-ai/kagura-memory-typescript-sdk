@@ -307,7 +307,7 @@ export interface RecallOptions {
    *
    * A compact hit is `memory_id`, the first 160 characters of `summary`
    * (`summary_cut: true` when it was shortened), `type`, `importance`,
-   * `score`, `created_at` (v0.110.0+), `updated_at` and the content keys
+   * `score`, `created_at`, `updated_at` and the content keys
    * (see {@link RecallOptions.full}). `"full"` adds `context_summary`,
    * `scope`, `tags`, `version` (v0.113.0+) and the uncut `summary`; code
    * that reads those from a hit needs it. See {@link RecallResult}.
