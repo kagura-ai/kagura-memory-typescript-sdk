@@ -183,6 +183,29 @@ The context id comes from `-c/--context-id`, or from `context_id` in
 shared with the Python CLI, so either tool can create a profile the other
 then uses.
 
+**`context list`** prints the `list_contexts` reply as JSON on stdout.
+From memory-cloud v0.82.0 that is one page: 100 contexts by default, or
+`--limit N` (1-200), and a page also stops at 20,000 characters. When a
+page was cut, a line on stderr says so, as the Python CLI's does:
+`has_more: true; next_cursor: "100". For the next page, run the command
+again with the same options and --cursor "100".` The cursor is printed
+there only when it is ASCII digits, the only form the server takes back;
+any other `next_cursor` is left to the JSON (`--cursor set to next_cursor
+from the JSON`), so nothing a shell would expand or a terminal would
+interpret reaches stderr. A blank `--cursor` is unset, so a script can feed
+back `jq -r '.next_cursor // empty'`. `--details` with a `--limit` above 20
+and no non-blank `--name-contains` is a usage error (exit 2) before any
+request, since the server refuses that page. Servers before v0.82.0 return
+every context and ignore `--limit` and `--cursor`. **`contexts`**, the
+short form, takes no options and prints one page, the 100 most recently
+used contexts; when more follow, its stderr line names the
+`kagura-memory context list --cursor "100"` call for the next page.
+
+```bash
+npx kagura-memory context list --limit 50
+npx kagura-memory context list --limit 50 --cursor 50   # the next_cursor of the page before
+```
+
 **`resource setup`** names the new context after the resource, or `-n/--name`
 (lowercase letters, digits, `-` and `_`, at most 100), which a workspace
 that already has a context of that name needs. It prints Python's six
@@ -1166,8 +1189,9 @@ when no plan lifts the refusal, which is what an `allowlist` or
 including one no tier raises, so an upgrade helps only when `requiredPlan`
 is non-null. With no `gate`, a `null` `requiredPlan` means the plan is
 unknown, not that no plan lifts it. That covers an older server, and
-`createContext`'s own context-limit check, which reads `listContexts()`
-and so fills in only `quotaType`, `current` and `limit`.
+`createContext`'s own context-limit check, which reads a one-row
+`listContexts({ limit: 1 })` page and so fills in only `quotaType`,
+`current` and `limit`.
 
 `retryAfter` is the `Retry-After` header, else the retry hint in the body
 (REST `details.retry_after`, MCP `retry_after_seconds`, which is all the
@@ -1251,8 +1275,8 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | What it does |
 |--------|--------------|
-| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. From v0.82.0 the directory is paged — 100 contexts a page, 20 with `includeDetails` and no `nameContains` — with `has_more` / `next_cursor`: pass `next_cursor` back as `cursor` for the next page. |
-| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached: the SDK checks `listContexts()` first, so that error carries `quotaType`, `current` and `limit` but no `gate` or plan fields (`requiredPlan` `null` means unknown). Also throws `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). `resourceId` is deprecated and no longer sent, since the server ignores it: set it with `updateContext`, or use `setupResource`. |
+| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. `count` is quota usage and `total` the number returned; `can_create` is the quota flag, and `hint` appears when you can see no context. From v0.82.0 the directory is paged — 100 contexts a page, 20 with `includeDetails` and no `nameContains` — with `has_more` / `next_cursor`: pass `next_cursor` back as `cursor` for the next page, with the same `nameContains`. `limit` sets the page size, 1-200; more than 20 with `includeDetails` and no non-blank `nameContains` throws before any request, as the server would refuse it. Servers before v0.82.0 ignore `limit` and `cursor` and return every context. `nameContains` is sent trimmed, and not at all when blank. There is no `maxChars`: the page's 20,000-character budget is fixed, and a v0.82.0+ server refuses an argument `list_contexts` does not declare. The envelope's `limit` is the plan's context maximum, not the page size. |
+| `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached: the SDK checks a one-row `listContexts({ limit: 1 })` page first, so that error carries `quotaType`, `current` and `limit` but no `gate` or plan fields (`requiredPlan` `null` means unknown). Also throws `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). `resourceId` is deprecated and no longer sent, since the server ignores it: set it with `updateContext`, or use `setupResource`. |
 | `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed; its `provenance` (v0.79.0+) labels the items as notes context editors stored, not operator instructions. `search_config` carries `llm_selector_enabled` / `llm_selector_effective` (v0.115.0+). |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraFeatureNotAvailableError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
@@ -1266,7 +1290,7 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 
 | Method | What it does |
 |--------|--------------|
-| `setState` / `getState` | Key/value at `(contextId, key)`. A value takes at most 16,384 characters as compact JSON, measured as the server measures it; a longer one throws before any request, on every server. Omit `key` on read to list the live entries: from v0.82.0 a page at a time in key order, with `has_more` / `next_cursor` (pass it back as `cursor`) and `omitted_keys` for values too large for the page. `cursor` with `key` throws. |
+| `setState` / `getState` | Key/value at `(contextId, key)`. A value takes at most 16,384 characters as compact JSON, measured as the server measures it; a longer one throws before any request, on every server. Omit `key` on read to list the live entries: from v0.82.0 a page at a time in key order, with `has_more` / `next_cursor` (pass it back as `cursor`) and `omitted_keys` for values too large for the page. `limit` (1-200, default 50) and `maxChars` (10,000-100,000 characters, default 20,000) size the page, each checked before any request; servers before v0.82.0 ignore all three and return every entry. `cursor`, `limit` or `maxChars` with `key` throws. |
 
 ### Sleep maintenance
 
