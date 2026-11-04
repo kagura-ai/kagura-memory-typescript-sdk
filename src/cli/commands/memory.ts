@@ -12,8 +12,11 @@
  *     an omitted field there means "leave unchanged".
  */
 
-import type { KaguraClient, SourceType } from "../../client.js";
+import type { KaguraClient, RecallOptions, SourceType } from "../../client.js";
+import { KaguraError } from "../../errors.js";
+import type { RecallResponse, RecallVerbosity } from "../../models.js";
 import { pyTruthy } from "../../python.js";
+import { MAX_CHARS_MAX, MAX_CHARS_MIN, RECALL_FULL_MAX } from "../../responseBudget.js";
 import { examples, requireArg, requireOption, rejectExtraArgs, type Command } from "../command.js";
 import {
   CliError,
@@ -22,6 +25,7 @@ import {
   parseChoice,
   parseFloatOption,
   parseIntOption,
+  parseRanged,
   parseTags,
 } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
@@ -186,19 +190,147 @@ const remember: Command = {
 
 const RECALL_K = kFlag("Number of results", "5");
 
+const VERBOSITIES: readonly RecallVerbosity[] = ["compact", "full"];
+
+const VERBOSITY: FlagSpec = {
+  name: "verbosity",
+  type: "value",
+  metavar: "[compact|full]",
+  help:
+    "Result detail (server v0.108.0+). compact, the server default: 160-character " +
+    "summaries without tags; full: uncut summaries, tags, context_summary and scope.",
+};
+const FULL: FlagSpec = {
+  name: "full",
+  type: "value",
+  metavar: "INTEGER",
+  help:
+    "How many top results carry content, up to 1,500 characters each " +
+    "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only).",
+};
+const MAX_CHARS: FlagSpec = {
+  name: "max-chars",
+  type: "value",
+  metavar: "INTEGER",
+  help: "Response budget in characters, 10000-100000 (server v0.82.0+; default 20000).",
+};
+
+/**
+ * The recall shape arguments the CLI sends only when given, in the Python
+ * CLI's order, with the memory-cloud release that declares each
+ * (python-sdk #298). From 0.82.0 a server refuses an argument it does not
+ * declare (`invalid_argument`) and lists it in the envelope's
+ * `unknown_arguments`.
+ */
+const RECALL_SHAPE_ARGS = [
+  { wire: "verbosity", option: "verbosity", flag: "--verbosity", floor: "0.108.0" },
+  { wire: "full", option: "full", flag: "--full", floor: "0.114.0" },
+  { wire: "max_chars", option: "maxChars", flag: "--max-chars", floor: "0.82.0" },
+] as const;
+
+type RecallShape = Pick<RecallOptions, "verbosity" | "full" | "maxChars">;
+
+/**
+ * The argument names an `invalid_argument` refusal lists, else `undefined`
+ * — the port of `_unknown_arguments` (the Python CLI, 0.43.0).
+ *
+ * From memory-cloud 0.82.0 a tool refuses an argument it does not declare
+ * and names it in the envelope's `unknown_arguments`, which the client
+ * keeps in `KaguraError.details` (#84, the Python SDK's #299). Read from
+ * there, never from the message. `undefined` when the error carries no
+ * such list (another error, an older server, or `details` that is not an
+ * object). Read by name, as Python reads it with `getattr`, so it works on
+ * any error object, and on a client that does not keep the envelope yet.
+ */
+export function unknownArguments(err: unknown): string[] | undefined {
+  const details = (err as { details?: unknown } | null | undefined)?.details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return undefined;
+  const listed = (details as Record<string, unknown>).unknown_arguments;
+  if (!Array.isArray(listed)) return undefined;
+  return listed.filter((name): name is string => typeof name === "string");
+}
+
+/**
+ * The recall shape arguments (wire names) to retry without after `err`;
+ * `[]` means no retry — the port of `_refused_shape_args`.
+ *
+ * Only an `invalid_argument` refusal of a call that sent one of them
+ * counts, read from the error's `code` and never from the message. The
+ * server lists what it refused in `unknown_arguments`, so only those are
+ * dropped: 0.108.0-0.113.x keeps `verbosity`. A refusal that lists none of
+ * them is not about them. Without a readable list (`details` missing or
+ * without it), every one that was sent is dropped.
+ *
+ * @param sent The wire names of the shape arguments the call sent.
+ */
+export function refusedShapeArgs(err: unknown, sent: readonly string[]): string[] {
+  if ((err as { code?: unknown } | null | undefined)?.code !== "invalid_argument") return [];
+  const listed = unknownArguments(err);
+  if (listed === undefined) return [...sent];
+  return sent.filter((name) => listed.includes(name));
+}
+
+/**
+ * `client.recall`, retried once without the shape flags an older server
+ * refused — the Python CLI's `recall` `op` (0.43.0, python-sdk #298).
+ *
+ * A server below 0.114.0 refuses `--full`, and below 0.108.0
+ * `--verbosity` too; one retry without the ones it names, with a `note:`
+ * on stderr naming each dropped flag and its floor. The retry's own error
+ * propagates unchanged, and no other error is retried. `KaguraClient.recall`
+ * itself never retries. The refusal is recognized by `KaguraError.code`
+ * (#84); an error without it is not retried.
+ */
+async function recallWithShapeFallback(
+  writeError: (line: string) => void,
+  call: (shape: RecallShape) => Promise<RecallResponse>,
+  shape: RecallShape,
+): Promise<RecallResponse> {
+  let dropped: (typeof RECALL_SHAPE_ARGS)[number][];
+  try {
+    return await call(shape);
+  } catch (e) {
+    if (!(e instanceof KaguraError)) throw e;
+    const sent = RECALL_SHAPE_ARGS.filter((arg) => shape[arg.option] !== undefined);
+    const refused = refusedShapeArgs(
+      e,
+      sent.map((arg) => arg.wire),
+    );
+    if (refused.length === 0) throw e;
+    dropped = sent.filter((arg) => refused.includes(arg.wire));
+  }
+  const flags = dropped.map((arg) => arg.flag).join(", ");
+  const needs = dropped.map((arg) => `${arg.flag} needs memory-cloud ${arg.floor}+`).join(", ");
+  writeError(
+    `note: the server refused the recall (invalid_argument); retried without ${flags} (${needs}).`,
+  );
+  const retry: RecallShape = { ...shape };
+  for (const arg of dropped) delete retry[arg.option];
+  return call(retry);
+}
+
 const recall: Command = {
   summary: "Search memories directly (without AI analysis).",
   args: "QUERY",
   description:
-    "  Without --rerank/--no-rerank the server follows the context's search\n" +
-    "  config (memory-cloud v0.69.0+). --rerank applies only when the context\n" +
-    "  enables reranking; --no-rerank always skips it.\n\n" +
-    "  Examples:\n" +
-    '    kagura-memory recall "FastAPI dependency injection"\n' +
-    '    kagura-memory recall "OAuth2 implementation" -k 10\n' +
-    '    kagura-memory recall -c dev "error handling pattern"\n' +
-    '    kagura-memory recall "latency-sensitive lookup" --no-rerank\n' +
-    '    kagura-memory recall "project context" --trusted-only',
+    "  Without --rerank/--no-rerank the server follows the context's search config\n" +
+    "  (memory-cloud v0.69.0+). --rerank applies only when the context enables\n" +
+    "  reranking; --no-rerank always skips it.\n\n" +
+    "  The reply is printed as JSON, with each hit's content (when the server sends\n" +
+    "  it) right after its summary. --verbosity, --full and --max-chars are sent\n" +
+    "  only when given. A server from v0.82.0 that predates one of them refuses it\n" +
+    "  (invalid_argument); the command then retries once without the ones the\n" +
+    "  server lists as refused (all three it sent when the reply does not list\n" +
+    "  them) and says so on stderr.\n\n" +
+    examples(
+      'recall "FastAPI dependency injection"',
+      'recall "OAuth2 implementation" -k 10',
+      'recall -c dev "error handling pattern"',
+      'recall "latency-sensitive lookup" --no-rerank',
+      'recall "project context" --trusted-only --verbosity full',
+      'recall "deploy runbook" --full 1 --max-chars 40000',
+      'recall "release notes" --full 0',
+    ),
   spec: {
     flags: [
       CONTEXT_ID,
@@ -222,6 +354,9 @@ const recall: Command = {
           "Exclude external / connector-ingested memories (filters.trust_tier=trusted; " +
           "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook.",
       },
+      VERBOSITY,
+      FULL,
+      MAX_CHARS,
     ],
   },
   run: async (deps, args) => {
@@ -235,14 +370,43 @@ const recall: Command = {
       "--no-rerank",
     ]);
     const trustedOnly = args.flags.has("trusted-only");
+    // click.Choice / click.IntRange: a bad value is a usage error (exit 2)
+    // before anything is sent.
+    const rawVerbosity = args.values.verbosity;
+    const rawFull = args.values.full;
+    const rawMaxChars = args.values["max-chars"];
+    const shape: RecallShape = {};
+    if (rawVerbosity !== undefined) shape.verbosity = parseChoice(VERBOSITY, rawVerbosity, VERBOSITIES);
+    if (rawFull !== undefined) {
+      shape.full = parseRanged(FULL, rawFull, {
+        min: 0,
+        max: RECALL_FULL_MAX,
+        rangeLabel: `0<=x<=${RECALL_FULL_MAX}`,
+        integer: true,
+      });
+    }
+    if (rawMaxChars !== undefined) {
+      shape.maxChars = parseRanged(MAX_CHARS, rawMaxChars, {
+        min: MAX_CHARS_MIN,
+        max: MAX_CHARS_MAX,
+        rangeLabel: `${MAX_CHARS_MIN}<=x<=${MAX_CHARS_MAX}`,
+        integer: true,
+      });
+    }
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
-      client.recall({
-        contextId,
-        query,
-        k,
-        ...(useRerank !== undefined ? { useRerank } : {}),
-        ...(trustedOnly ? { filters: { trust_tier: "trusted" } } : {}),
-      }),
+      recallWithShapeFallback(
+        deps.writeError,
+        (shapeArgs) =>
+          client.recall({
+            contextId,
+            query,
+            k,
+            ...(useRerank !== undefined ? { useRerank } : {}),
+            ...(trustedOnly ? { filters: { trust_tier: "trusted" } } : {}),
+            ...shapeArgs,
+          }),
+        shape,
+      ),
     );
   },
 };
