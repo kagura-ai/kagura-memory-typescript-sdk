@@ -937,7 +937,8 @@ or when the version is unknown, as after the OAuth `info` line). A
 `tools/list` that fails fails the check, never doctor, with the view in
 the message (`tools allowlist (empty)` for a `?tools=` naming no tool, and
 `profile (empty)` for a blank `?profile=`, both of which the server
-refuses); a 401 for a static key without the `kagura_` prefix carries the
+refuses), and so does a reply that is no `tools/list` result, with
+`getToolDefinitions`' `KaguraResponseError` message; a 401 for a static key without the `kagura_` prefix carries the
 bearer-routing hint above. It is skipped when the server check fails or
 finds the server below the minimum. A Claude Code entry's own tool view
 (its URL's query) is not this one. `--json` details carry `mcp_url`, the
@@ -1617,7 +1618,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 | `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
-| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, and `?tools=a,b` is an allowlist. `tools/call` never reads the view, so every method of this client works on any URL; only `recall`'s `explore_hints` need `explore` listed. |
+| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, and `?tools=a,b` is an allowlist. `tools/call` never reads the view, so every method of this client works on any URL; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 

@@ -1379,6 +1379,37 @@ describe("doctor's tools check (#83)", () => {
     expect(code).toBe(1);
   });
 
+  // Recorded from Python 0.44.0's _check_tool_listing on a client whose
+  // tools/list returns the same result (python-sdk#319's ToolListResponse).
+  it.each<[string, Record<string, unknown>, string]>([
+    ["tools a string", { tools: "oops" }, "tools: Input should be a valid list"],
+    ["an item not an object", { tools: [1] }, "tools.0: Input should be a valid dictionary"],
+  ])("fails the check with KaguraResponseError's message for a tools/list result with %s", async (_label, result, problem) => {
+    const reply = Response.json({ jsonrpc: "2.0", id: 1, result });
+    const { h } = tooling(BASE, "0.143.0", reply);
+    const { code, last } = await toolsChecks(h);
+    expect(last).toEqual({
+      section: "tools",
+      status: "fail",
+      message:
+        "tools/list on the CLI's MCP URL failed (profile core (default)): KaguraClient.get_tool_definitions: " +
+        `unexpected server response for ToolListResponse (${problem}). The server may be newer than this SDK; ` +
+        "upgrading kagura-memory may help.",
+      details: { mcp_url: BASE, profile: "core (default)" },
+    });
+    expect(code).toBe(1);
+  });
+
+  it("passes with 0 tools for a result without tools, as Python's model reads it", async () => {
+    const { h } = tooling(BASE, "0.143.0", Response.json({ jsonrpc: "2.0", id: 1, result: {} }));
+    const { code, last } = await toolsChecks(h);
+    expect(last).toMatchObject({
+      status: "pass",
+      message: "tools/list on the CLI's MCP URL: 0 tools (profile core (default))",
+    });
+    expect(code).toBe(0);
+  });
+
   it("fails the check, never doctor, when tools/list throws something no Kagura error wraps", async () => {
     const h = harness({ api_key: "kagura_k", mcp_url: BASE });
     h.server.restResults[INFO_PATH] = { name: "Kagura Memory Cloud", version: "0.143.0" };
