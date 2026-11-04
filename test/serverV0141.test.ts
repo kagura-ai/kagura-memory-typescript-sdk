@@ -450,6 +450,61 @@ describe("getSleepHistory source (v0.138.0+)", () => {
   });
 });
 
+describe("every new argument is one memory-cloud v0.143.0 declares", () => {
+  // The `inputSchema` properties of memory-cloud v0.143.0
+  // (backend/src/mcp_server/tools/_definitions.py). From v0.82.0
+  // (memory-cloud#1742) a tool refuses an argument its schema does not
+  // declare with invalid_argument, so a wrong wire name fails every call.
+  const DECLARED: Record<string, readonly string[]> = {
+    get_sleep_report: ["actions_cursor", "actions_limit", "max_chars", "report_id"],
+    get_sleep_history: ["context_id", "limit", "source"],
+    list_contexts: ["cursor", "include_details", "include_stats", "include_summary", "limit", "name_contains"],
+    get_state: ["context_id", "cursor", "key", "limit", "max_chars"],
+    list_agents: ["cursor", "limit"],
+    list_edges: ["context_id", "edge_types", "limit", "memory_id", "min_weight"],
+  };
+
+  it("a strict v0.143.0 fake accepts each method with every new option set", async () => {
+    const server = new FakeServer();
+    server.declaredArguments = DECLARED;
+    server.toolResults.get_sleep_report = {
+      status: "success",
+      report: { report_id: "r-9", status: "completed" },
+      actions: [],
+      action_count: 0,
+    };
+    server.toolResults.get_sleep_history = { status: "success", reports: [], count: 0 };
+    paged(server, "list_agents", [agentsPage(["a"], "1"), agentsPage(["b"])]);
+    server.toolResults.list_edges = { status: "success", edges: [] };
+    const client = makeClient(server);
+
+    await client.getSleepReport({ contextId: CTX, reportId: "r-9", actionsCursor: "57", actionsLimit: 20, maxChars: 50_000 });
+    await client.getSleepHistory({ contextId: CTX, limit: 5, source: "all" });
+    await client.listContexts({ cursor: "100", nameContains: "dev", includeSummary: true, includeDetails: true });
+    await client.getState({ contextId: CTX, cursor: "a" });
+    expect(await client.listAgents()).toHaveLength(2);
+    await client.listEdges({ contextId: CTX, memoryId: "m-1", minWeight: 0.1, edgeTypes: ["related_to"], limit: 10 });
+
+    expect(toolCalls(server).map((c) => c.name)).toEqual([
+      "get_sleep_report",
+      "get_sleep_history",
+      "list_contexts",
+      "get_state",
+      "list_agents",
+      "list_agents",
+      "list_edges",
+    ]);
+  });
+
+  it("the strict fake refuses an argument v0.143.0 does not declare", async () => {
+    const server = new FakeServer();
+    server.declaredArguments = DECLARED;
+    await expect(makeClient(server).callRawTool("get_sleep_history", { context_id: CTX, sources: "all" })).rejects.toThrow(
+      "get_sleep_history does not accept the argument 'sources'",
+    );
+  });
+});
+
 // ===========================================================================
 // Cursor paging
 // ===========================================================================
