@@ -484,10 +484,13 @@ one entry per plan dimension (`memories`, `memories_per_day`,
 `mcp_calls_per_day`) at 80 % (`warning`) or 95 % (`critical`) of its
 effective limit, with `used`, `limit`, `percentage`, `remedies`, `help`,
 `plan` when the server knows it and `resets_at` on the daily caps. It is
-absent below 80 %. `bootstrap` and `rememberBatch` type it as
-`PlanHeadroomNotice[]`, read fail-open: an entry the SDK cannot read is
-dropped and the call still succeeds. `remember` / `updateMemory` return it
-as sent. `supersede_candidate.acceptance` (`{ allowed, reason? }`, the
+absent below 80 %. All four type it as `PlanHeadroomNotice[]`, read
+fail-open: an entry the SDK cannot read is dropped and the call still
+succeeds. The Python SDK's `remember` / `update_memory` return their reply
+as an unchecked dict, so for a malformed notice only, Python keeps what
+`remember` / `updateMemory` drop here; the CLI's `remember`,
+`update-memory` and `files upload --remember` print the reply as sent.
+`supersede_candidate.acceptance` (`{ allowed, reason? }`, the
 `SupersedeAcceptance` type) says whether the caller may accept the
 suggestion: on `reference` from 0.137.0
 ([memory-cloud#2427](https://github.com/kagura-ai/memory-cloud/issues/2427);

@@ -210,7 +210,8 @@ numeric-string id such as `"7"` now stays a string.
 - **Typed write replies `RememberResult` / `UpdateMemoryResult`**
   ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
   memory-cloud v0.108.0 / v0.113.0, memory-cloud#2003, #2043;
-  python-sdk#302), returned as sent, every key optional, with `version`,
+  python-sdk#302), returned as sent (apart from a `plan_headroom` entry
+  the model cannot read, see below), every key optional, with `version`,
   `session_id` (v0.113.0) and `summary_truncated` /
   `summary_original_length` (v0.108.0).
 - **`plan_headroom` notices**
@@ -221,15 +222,17 @@ numeric-string id such as `"7"` now stays a string.
   `memories_per_day`, `mcp_calls_per_day`) is at 80 % (`warning`) or 95 %
   (`critical`) of its effective limit. It holds one `PlanHeadroomNotice`
   per dimension, with `used`, `limit`, `percentage`, `plan`, `remedies`,
-  `help` and, on the daily caps, `resets_at`.
-  `BootstrapResponse.plan_headroom` and `RememberBatchResult.plan_headroom`
-  are typed `PlanHeadroomNotice[]` and read fail-open, like the Python
-  SDK's `PlanHeadroom` field: an entry the model cannot read is dropped
-  and the call still succeeds, and a value that is not a list, or has no
-  readable entry, is left out. `remember` / `updateMemory` return it as
-  sent, unchecked. `kagura-memory bootstrap` prints each notice as the
-  Python CLI does (defaults filled, unreadable entries dropped). Older
-  servers do not send it.
+  `help` and, on the daily caps, `resets_at`. All four type it
+  `PlanHeadroomNotice[]` and read it fail-open, like the Python SDK's
+  `PlanHeadroom` field: an entry the model cannot read is dropped and the
+  call still succeeds, and a value that is not a list, or has no readable
+  entry, is left out. The Python SDK's `remember` / `update_memory` return
+  their reply as an unchecked dict, so for a malformed notice only, Python
+  keeps what `remember` / `updateMemory` drop here. `kagura-memory
+  bootstrap` prints each notice as the Python CLI does (defaults filled,
+  unreadable entries dropped); `remember`, `update-memory` and `files
+  upload --remember` print the reply as sent, as the Python CLI does.
+  Older servers do not send it.
 - **`supersede_candidate.acceptance` on recall rows**
   ([#88](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/88);
   memory-cloud v0.142.0+, memory-cloud#2508; on `reference` since
