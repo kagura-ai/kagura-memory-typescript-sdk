@@ -1598,6 +1598,19 @@ describe("kagura-memory setup claude", () => {
       expect(JSON.parse(h.out.join("\n"))).toMatchObject({ mcp_url: B.mcp_url, context_id: B.context_id });
       expect(readJson(path.join(projA, ".kagura.json"))).toEqual(A);
       expect(fs.existsSync(path.join(projA, ".mcp.json"))).toBe(false);
+      // "ctx-b" is a name, so setup looks it up (#90): with projB's key, on
+      // projB's URL, never projA's or ~/.kagura.json's. This fake lists no
+      // contexts, so the name is written as given, after Python's warning.
+      const lookups = h.server.requests.filter((r) => r.body?.method === "tools/call");
+      expect(lookups.map((r) => [r.url, r.headers.authorization, (r.body?.params as { name: string }).name])).toEqual([
+        [B.mcp_url, `Bearer ${B.api_key}`, "list_contexts"],
+      ]);
+      expect(h.server.requests.every((r) => r.url === B.mcp_url && r.headers.authorization === `Bearer ${B.api_key}`)).toBe(
+        true,
+      );
+      expect(h.err).toEqual([
+        "  Warning: no context named 'ctx-b' is visible to this credential; using it as a raw context id.",
+      ]);
     });
 
     it("or else KAGURA_API_KEY, never the current directory's key or ~/.kagura.json's", async () => {

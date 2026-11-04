@@ -88,3 +88,26 @@ export function normalizeUuid(value: unknown, label: string): string {
   }
   return canonical;
 }
+
+/**
+ * `value` as {@link normalizeUuid} returns it, or `null` where that throws
+ * — the Python SDK's `uuid_or_none`.
+ */
+export function uuidOrNone(value: string): string | null {
+  return pythonUuid(value);
+}
+
+/** The dashed 8-4-4-4-12 form, either case, ASCII hex only (Python's `re.ASCII`). */
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True when `value` is a UUID in the dashed 8-4-4-4-12 form, either case —
+ * the Python SDK's `is_canonical_uuid`. Every such value is one
+ * {@link uuidOrNone} reads; its other spellings (dashless, `{braces}`,
+ * `urn:uuid:`) are not this form, and neither is a padded one. `setup`
+ * takes this form as a context id without looking it up by name, since a
+ * dashless 32-hex string can be a context name too.
+ */
+export function isCanonicalUuid(value: string): boolean {
+  return CANONICAL_UUID_RE.test(value);
+}
