@@ -479,8 +479,9 @@ unlisted tool stays callable and every `KaguraClient` method works on any
 URL. `--tool-profile NAME` (every harness; memory-cloud v0.73.0+) sets
 `profile`; the server knows only `core` and `full` (case-sensitive) and
 fails `tools/list` for any other name, which leaves the harness with no
-Kagura tools, so a blank name or one starting with `-` is refused here
-(exit 2). `--add-tools NAME[,NAME…]` (every harness; v0.129.0+; may
+Kagura tools. Setup leaves that check to the server and refuses only a
+blank name or one starting with `-` (exit 2), as Python does.
+`--add-tools NAME[,NAME…]` (every harness; v0.129.0+; may
 repeat) lists more tools on top of the profile: trimmed, de-duplicated,
 at most 100, unknown names ignored by the server. `recall`'s
 `explore_hints` need `explore` listed (v0.135.0 took it out of `core`),
