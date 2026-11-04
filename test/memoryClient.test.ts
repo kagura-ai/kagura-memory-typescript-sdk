@@ -521,8 +521,9 @@ describe("getGuardrailDigest", () => {
     const server = new FakeRest();
     server.status = 404;
     server.body = JSON.stringify({ error: "HTTP-404", message: "Not Found", details: {} });
+    // The error keeps the body's code (#84), so the expected one names it.
     await expect(makeClient(server).getGuardrailDigest(CTX)).rejects.toThrow(
-      new KaguraNotFoundError("Not Found"),
+      new KaguraNotFoundError("Not Found", { code: "HTTP-404" }),
     );
   });
 

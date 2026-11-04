@@ -13,18 +13,24 @@ import {
   KaguraPermissionError,
   KaguraResponseError,
   // Referenced only from JSDoc {@link} on the plan-gated options.
+  KaguraCapacityLockedError,
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
 } from "./errors.js";
 import {
+  annotateServerError,
   baseUrlFromMcp,
   bodyRetryAfter,
-  extractDetail,
+  detailOf,
   gateError,
+  isRecord,
   MCP_GATE_CODES,
+  mcpEnvelopeFields,
   mcpSessionExpired,
   mcpSessionHeader,
+  parseJsonBody,
   SDK_VERSION,
+  serverErrorFieldsOf,
   throwForKaguraStatus,
   validateHttpsUrl,
 } from "./http.js";
@@ -804,6 +810,44 @@ function readRollbackSummary(raw: unknown, operation: string): RollbackSummary {
   return raw as RollbackSummary;
 }
 
+/** `CapacityLock`'s counts, in the Python model's declaration order. */
+const CAPACITY_LOCK_COUNTS = [
+  "memory_count",
+  "memory_limit",
+  "over_memories",
+  "used_bytes",
+  "storage_limit_bytes",
+  "over_bytes",
+] as const;
+
+/**
+ * A `get_usage` reply's `capacity_lock` checked as the Python SDK's
+ * `UsageInfo.capacity_lock: CapacityLock | None` checks it, and the reply
+ * returned as it arrived: absent or `null` is no lock (a server older
+ * than v0.99.0, or a workspace within its capacity); an object has every
+ * field optional and nullable, the counts integers and `purge_at` a
+ * timestamp. The rest of the reply is not checked, as before.
+ *
+ * @throws KaguraResponseError in the Python SDK's words.
+ */
+function readUsageInfo(result: ToolResult): UsageInfo {
+  const lock = result.capacity_lock;
+  if (lock === undefined || lock === null) {
+    return result as unknown as UsageInfo;
+  }
+  const r = new ResponseReader("get_usage", "UsageInfo");
+  const at: Loc = ["capacity_lock"];
+  const obj = r.object(lock, at, "CapacityLock");
+  if (obj !== null) {
+    for (const key of CAPACITY_LOCK_COUNTS) r.field(obj, key, nullable(laxInt), { at, default: null });
+    r.field(obj, "cleanup_url", nullable(laxStr), { at, default: null });
+    r.field(obj, "help", nullable(laxStr), { at, default: null });
+    r.field(obj, "purge_at", nullable(datetimeText), { at, default: null });
+  }
+  r.check();
+  return result as unknown as UsageInfo;
+}
+
 // ---------------------------------------------------------------------------
 // memory-cloud v0.82.0 bounds (#1743): write caps and cursor paging
 // ---------------------------------------------------------------------------
@@ -981,15 +1025,22 @@ function validateBound(label: string, value: unknown, limit: number): void {
 /**
  * Low-level client for Kagura Memory Cloud MCP tools.
  *
- * All methods may throw KaguraAuthError (authentication failed),
- * KaguraConnectionError (connection failed), or KaguraRateLimitError.
+ * All methods may throw KaguraAuthError (authentication failed — also an
+ * OAuth token that lacks the scope a tool needs, HTTP 403
+ * `insufficient_scope`, memory-cloud v0.79.0+, whose message names the
+ * scope), KaguraConnectionError (connection failed; its subclass
+ * KaguraServiceUnavailableError for an HTTP 503, with `retryAfter` and
+ * `reason`), or KaguraRateLimitError.
  *
  * MCP tool methods additionally translate the server's structured domain
  * errors (`{"status": "error", ...}`) into exceptions rather than
  * returning them as data: a missing context/memory/report throws
- * {@link KaguraNotFoundError}, any other domain error throws
- * {@link KaguraError}. Use try/catch rather than inspecting
- * `result.status`.
+ * {@link KaguraNotFoundError}, a plan, quota or capacity refusal its typed
+ * error ({@link KaguraFeatureNotAvailableError}, {@link KaguraQuotaError},
+ * {@link KaguraCapacityLockedError}), any other domain error throws
+ * {@link KaguraError}. Every one keeps the envelope's `error` as `code` and
+ * its other fields in `details`; branch on `code`, never on the message.
+ * Use try/catch rather than inspecting `result.status`.
  *
  * Authentication resolution order when `apiKey` is omitted:
  * 1. `KAGURA_API_KEY` env var (CI / service accounts always win).
@@ -1188,11 +1239,14 @@ export class KaguraClient {
       response = await this.post(this.mcpUrl, body, mcpSessionHeader(retrySessionId));
       text = await this.safeText(response);
       if (mcpSessionExpired(response.status, text, retrySessionId)) {
-        const detail = extractDetail(text);
-        throw new KaguraConnectionError(
+        const expired = parseJsonBody(text);
+        const detail = detailOf(expired);
+        const err = new KaguraConnectionError(
           "MCP session expired; the client re-initialized once and the retry still got " +
             (detail ? `HTTP 404: ${detail}` : "HTTP 404"),
         );
+        const fields = serverErrorFieldsOf(expired);
+        throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
       }
     }
     if (!response.ok) {
@@ -1216,7 +1270,15 @@ export class KaguraClient {
         typeof error === "object" && error !== null && Object.prototype.hasOwnProperty.call(error, "message")
           ? (error as Record<string, unknown>).message
           : error;
-      throw new KaguraConnectionError(`MCP error: ${pyStr(message)}`);
+      // Streamable HTTP answers a JSON-RPC error in a 200 too: memory-cloud
+      // sends a tools/call whose plumbing failed that way, its `data` in
+      // the tool-error vocabulary (`error`, `help`, `cause`,
+      // `correlation_id`, `retryable`, `outcome`). The class stays
+      // Python's, KaguraConnectionError; only a JSON-RPC error object's
+      // `data` is read for `code` / `details`.
+      const err = new KaguraConnectionError(`MCP error: ${pyStr(message)}`);
+      const fields = isRecord(error) ? serverErrorFieldsOf(data) : null;
+      throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
     }
 
     const result = data.result;
@@ -1231,16 +1293,17 @@ export class KaguraClient {
    * An array param is sent as one repeated key per item (`?k=a&k=b`), which
    * is how FastAPI reads a `list[str]` query; joined, `a,b` is one value.
    *
-   * Without `operation`, every non-2xx goes through the standard status
+   * Without `mcpTool`, every non-2xx goes through the standard status
    * mapping (a 404 is a {@link KaguraConnectionError}). With it, a 404 and a
    * 422 get the classes and messages the MCP path gives that tool's
-   * `*_not_found` and `invalid_argument` errors, so a method that moved
-   * from MCP to REST throws what it always threw.
+   * not-found code (`mcpTool.notFoundCode`, e.g. `list_tags`'s
+   * `context_not_found`) and `invalid_argument` errors, so a method that
+   * moved from MCP to REST throws what it always threw, with that code.
    */
   private async restGet<T>(
     path: string,
     params?: Record<string, unknown>,
-    operation?: string,
+    mcpTool?: { operation: string; notFoundCode: string },
   ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
     if (params) {
@@ -1279,13 +1342,25 @@ export class KaguraClient {
 
     const text = await this.safeText(response);
     if (!response.ok) {
-      if (operation !== undefined) {
-        const detail = extractDetail(text);
+      if (mcpTool !== undefined) {
+        const { operation, notFoundCode } = mcpTool;
+        const body = parseJsonBody(text);
+        const detail = detailOf(body);
+        let mapped: KaguraError | null = null;
         if (response.status === 404) {
-          throw new KaguraNotFoundError(`${operation}: ${detail || "Not found"}`);
+          mapped = new KaguraNotFoundError(`${operation}: ${detail || "Not found"}`, {
+            code: notFoundCode,
+          });
+        } else if (response.status === 422) {
+          mapped = new KaguraError(`${operation} failed (invalid_argument): ${detail || "HTTP 422"}`, {
+            code: "invalid_argument",
+          });
         }
-        if (response.status === 422) {
-          throw new KaguraError(`${operation} failed (invalid_argument): ${detail || "HTTP 422"}`);
+        if (mapped !== null) {
+          // `code` stays the MCP tool's; the REST body's fields are what
+          // the server sent with it (Python's `_rest_get_json`).
+          const fields = serverErrorFieldsOf(body);
+          throw fields === null ? mapped : annotateServerError(mapped, fields[0], fields[1]);
         }
       }
       throwForKaguraStatus(response.status, response.headers, text);
@@ -1394,10 +1469,11 @@ export class KaguraClient {
    * throws rather than coming back as data — but only error codes the SDK
    * recognizes get a specific class. A code from a tool with no wrapper
    * (`secret_not_found`, say) lands on the generic {@link KaguraError}, so
-   * match on the message or add the code to `raiseForMcpError` when you
-   * confirm it against the server. Plan and quota refusals are the
-   * exception: a v0.75.0+ server tags them with a `gate`, so they get
-   * {@link KaguraFeatureNotAvailableError} / {@link KaguraQuotaError} from any tool.
+   * branch on its `code` (the envelope's `error`) or add the code to
+   * `raiseForMcpError` when you confirm it against the server. Plan, quota
+   * and capacity refusals are the exception: a v0.75.0+ server tags them
+   * with a `gate`, so they get {@link KaguraFeatureNotAvailableError} /
+   * {@link KaguraQuotaError} / {@link KaguraCapacityLockedError} from any tool.
    *
    * Use `getToolDefinitions()` to discover what the connected server offers.
    *
@@ -1426,7 +1502,18 @@ export class KaguraClient {
    * The in-band daily MCP call cap, `rate_limit_exceeded`, is a
    * {@link KaguraQuotaError} too: `quotaType` `api_mcp_daily`, `current` /
    * `limit` from its `used_today` / `daily_limit`, and `resetsAt` the next
-   * UTC midnight, when the cap resets.
+   * UTC midnight, when the cap resets. The Free capacity lock
+   * (`capacity_locked`, memory-cloud v0.99.0+) is
+   * {@link KaguraCapacityLockedError}. Every other code is a plain
+   * {@link KaguraError} — `payload_too_large` among them (a memory over
+   * 1 MB, v0.108.0+, with `limit` / `actual` in `details`).
+   *
+   * Every error keeps the envelope: `code` is its `error` (`undefined` for
+   * an envelope without one, whose message still says `failed (unknown)`)
+   * and `details` everything but `status` / `error` / `message` — `help` and, on a server
+   * failure, `cause`, `correlation_id`, `retryable` and for a write
+   * `outcome` (all v0.78.0+, #1684), which {@link KaguraError} reads as
+   * getters.
    */
   private static raiseForMcpError(result: ToolResult, operation: string): void {
     if (result.status !== "error") {
@@ -1435,8 +1522,24 @@ export class KaguraClient {
     // Python: result.get(key, default), then str() of it -- a present null
     // is "None", a number or an object its repr.
     const has = (key: string) => Object.prototype.hasOwnProperty.call(result, key);
-    const code = has("error") ? pyStr(result.error) : "unknown";
+    // An envelope without `error` names no code: the message says
+    // `(unknown)`, as before, but `code` stays undefined.
+    const code = has("error") ? pyStr(result.error) : undefined;
     const message = has("message") ? pyStr(result.message) : "Unknown error";
+    throw annotateServerError(
+      KaguraClient.mcpError(result, code, message, operation),
+      code,
+      mcpEnvelopeFields(result),
+    );
+  }
+
+  /** The error {@link raiseForMcpError} throws, before it keeps the envelope on it. */
+  private static mcpError(
+    result: ToolResult,
+    code: string | undefined,
+    message: string,
+    operation: string,
+  ): KaguraError {
     if (
       code === "report_not_found" ||
       code === "context_not_found" ||
@@ -1444,9 +1547,9 @@ export class KaguraClient {
       code === "agent_not_found" ||
       code === "binding_not_found"
     ) {
-      throw new KaguraNotFoundError(`${operation}: ${message}`);
+      return new KaguraNotFoundError(`${operation}: ${message}`);
     }
-    const failure = `${operation} failed (${code}): ${message}`;
+    const failure = `${operation} failed (${code ?? "unknown"}): ${message}`;
     if (code === "partial_rollback") {
       const reportId = typeof result.report_id === "string" ? result.report_id : null;
       let summary: RollbackSummary;
@@ -1456,29 +1559,30 @@ export class KaguraClient {
         if (!(drift instanceof KaguraResponseError)) throw drift;
         // The partial reversal is already committed; a summary the SDK
         // cannot read must not hide that (Python's #256).
-        throw new KaguraPartialRollbackError(`${failure} (rollback_summary could not be read)`, reportId, {}, {
+        return new KaguraPartialRollbackError(`${failure} (rollback_summary could not be read)`, reportId, {}, {
           cause: drift,
         });
       }
-      throw new KaguraPartialRollbackError(failure, reportId, summary);
+      return new KaguraPartialRollbackError(failure, reportId, summary);
     }
     const gated = gateError(
       result,
-      code,
+      code ?? null,
       MCP_GATE_CODES,
       failure,
       bodyRetryAfter(result, "retry_after_seconds"),
+      mcpEnvelopeFields(result),
     );
     if (gated !== null) {
-      throw gated;
+      return gated;
     }
     if (code === "permission_denied") {
-      throw new KaguraPermissionError(
+      return new KaguraPermissionError(
         failure,
         typeof result.required_role === "string" ? result.required_role : null,
       );
     }
-    throw new KaguraError(failure);
+    return new KaguraError(failure);
   }
 
   /**
@@ -2385,7 +2489,7 @@ export class KaguraClient {
     const body = await this.restGet<unknown>(
       `/api/v1/contexts/${contextSegment(contextId)}/tags`,
       params,
-      "list_tags",
+      { operation: "list_tags", notFoundCode: "context_not_found" },
     );
     const record =
       typeof body === "object" && body !== null && !Array.isArray(body)
@@ -2918,10 +3022,19 @@ export class KaguraClient {
     return result.deleted === undefined ? true : Boolean(result.deleted);
   }
 
-  /** Get workspace usage and quota limits. */
+  /**
+   * Get workspace usage and quota limits.
+   *
+   * `capacity_lock` is `null` unless the workspace is over its Free
+   * capacity (memory-cloud v0.99.0+), and absent on older servers; while
+   * it is set, search and saving throw {@link KaguraCapacityLockedError}.
+   *
+   * @throws KaguraResponseError when `capacity_lock` does not read as the
+   *   Python SDK's `CapacityLock`.
+   */
   async getUsage(): Promise<UsageInfo> {
     const result = await this.callToolChecked("get_usage", {});
-    return result as unknown as UsageInfo;
+    return readUsageInfo(result);
   }
 
   /** Get context information, usage guidelines, and search config. */

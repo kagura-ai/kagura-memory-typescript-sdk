@@ -13,6 +13,9 @@ import { describe, expect, it } from "vitest";
 
 import * as sdk from "../src/index.js";
 import type {
+  CapacityLock,
+  KaguraCapacityLockedErrorOptions,
+  KaguraServiceUnavailableErrorOptions,
   ContextGuardrails,
   GetGuardrailDigestOptions,
   GuardrailDigest,
@@ -85,6 +88,26 @@ describe("public surface: existing entry points", () => {
     expect(typeof sdk.WorkspaceClient).toBe("function");
     expect(typeof sdk.AgentsClient).toBe("function");
     expect(typeof sdk.resolveAuth).toBe("function");
+  });
+});
+
+describe("public surface: typed capacity and 503 errors (#84)", () => {
+  it("exports the classes and their options types", () => {
+    const lockOptions: KaguraCapacityLockedErrorOptions = { cleanupUrl: "https://x.test", overMemories: 1 };
+    const unavailableOptions: KaguraServiceUnavailableErrorOptions = { retryAfter: 5, reason: "deadlock" };
+    const lock = new sdk.KaguraCapacityLockedError("locked", lockOptions);
+    const unavailable = new sdk.KaguraServiceUnavailableError("HTTP 503", unavailableOptions);
+    expect(lock).toBeInstanceOf(sdk.KaguraError);
+    expect(unavailable).toBeInstanceOf(sdk.KaguraConnectionError);
+    // The usage model's lock, re-exported with the other models.
+    const usageLock: CapacityLock = { over_memories: 1, purge_at: null };
+    expect([lock.overMemories, unavailable.retryAfter, usageLock.over_memories]).toEqual([1, 5, 1]);
+  });
+
+  it("keeps the error-mapping helpers internal", () => {
+    for (const name of ["annotateServerError", "serverErrorFields", "insufficientScopeError", "serviceUnavailableError"]) {
+      expect(name in sdk).toBe(false);
+    }
   });
 });
 
