@@ -418,7 +418,7 @@ describe("kagura-memory measure record", () => {
   });
 
   it("adds the server's help and correlation id, as Python's CLI does (#84)", async () => {
-    // memory-cloud v0.82.0+ (#1742): a write that failed server-side, its
+    // memory-cloud v0.78.0+ (#1684): a write that failed server-side, its
     // outcome unknown. Python 0.43.0's _cli_error_message adds both lines.
     const { code, err } = await run(["measure", "record", C, "m", "5"], (h) => {
       h.server.toolResults.record_measurement = {

@@ -114,7 +114,7 @@ const MCP_PAYLOAD_TOO_LARGE = {
     "summary to one or two sentences.",
 };
 
-/** A write that failed on the server side with an unknown outcome (v0.82.0+, #1742). */
+/** A write that failed on the server side with an unknown outcome (v0.78.0+, #1684). */
 const MCP_WRITE_FAILURE = {
   status: "error",
   error: "remember_error",
@@ -554,7 +554,7 @@ describe("MCP envelope → class", () => {
     expect(e.help).toBe(MCP_PAYLOAD_TOO_LARGE.help);
   });
 
-  it("a server failure keeps cause, correlation_id, retryable and outcome (v0.82.0+)", async () => {
+  it("a server failure keeps cause, correlation_id, retryable and outcome (v0.78.0+)", async () => {
     const server = new FakeServer();
     server.toolResults.remember = MCP_WRITE_FAILURE;
     const e = await rejection(remember(makeClient(server)));

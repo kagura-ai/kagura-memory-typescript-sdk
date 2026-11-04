@@ -136,9 +136,11 @@ export class KaguraError extends Error {
   }
 
   /**
-   * Why a server failure happened (memory-cloud v0.82.0+, #1742):
-   * `"timeout"`, `"service_unavailable"` or `"internal_error"`; `null` on a
-   * refusal, which is the caller's to fix.
+   * Why a server failure happened: `"timeout"`, `"service_unavailable"` or
+   * `"internal_error"`; `null` on a refusal, which is the caller's to fix.
+   * A failed MCP tool sends it from memory-cloud v0.78.0 (#1684), the
+   * `/mcp` transport's own JSON-RPC errors from v0.82.0 (#1742); the same
+   * holds for {@link correlationId}, {@link retryable} and {@link outcome}.
    *
    * The Python SDK's `cause` property. JavaScript's `Error.cause` already
    * holds the chained error (the `fetch` failure, the parse error), so the
@@ -148,13 +150,13 @@ export class KaguraError extends Error {
     return strDetail(this.details, "cause");
   }
 
-  /** The id the server logged a failure under — quote it in a report (v0.82.0+). */
+  /** The id the server logged a failure under — quote it in a report (v0.78.0+). */
   get correlationId(): string | null {
     return strDetail(this.details, "correlation_id");
   }
 
   /**
-   * Whether repeating the call is safe, on a server failure (v0.82.0+).
+   * Whether repeating the call is safe, on a server failure (v0.78.0+).
    * `false` for a write whose {@link outcome} is `"unknown"`: check with the
    * read {@link help} names before calling it again.
    */
@@ -163,7 +165,7 @@ export class KaguraError extends Error {
     return typeof value === "boolean" ? value : null;
   }
 
-  /** `"unknown"` when a failed write may or may not have been applied (v0.82.0+). */
+  /** `"unknown"` when a failed write may or may not have been applied (v0.78.0+). */
   get outcome(): string | null {
     return strDetail(this.details, "outcome");
   }

@@ -671,6 +671,50 @@ describe("pollForToken: temporarily_unavailable (memory-cloud v0.84.0+)", () => 
       vi.useRealTimers();
     }
   });
+
+  it.each([
+    ["without Retry-After", null, 12, 5_000],
+    ["with a Retry-After shorter than the interval", "1", 12, 5_000],
+    ["with a Retry-After longer than the interval", "20", 3, 20_000],
+  ])(
+    "stops at the expiry on a server that always answers temporarily_unavailable, %s",
+    async (_label, retryAfter, waits, wait) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const start = new Date("2026-11-04T00:00:00Z").getTime();
+        vi.setSystemTime(start);
+        let calls = 0;
+        const alwaysUnavailable = (async () => {
+          calls += 1;
+          if (calls > 100) throw new Error("pollForToken kept polling past the device code's lifetime");
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (retryAfter !== null) headers["Retry-After"] = retryAfter;
+          return new Response(JSON.stringify(UNAVAILABLE), { status: 503, headers });
+        }) as typeof fetch;
+        const sleeps: number[] = [];
+        const err = await pollForToken(SERVER, {
+          clientId: DEFAULT_CLIENT_ID,
+          deviceCode: "dc",
+          interval: 5,
+          expiresAt: new Date(start + 60_000),
+          fetch: alwaysUnavailable,
+          // Each wait really passes: the clock moves on by what was slept.
+          sleep: async (ms) => {
+            sleeps.push(ms);
+            vi.setSystemTime(Date.now() + ms);
+          },
+        }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(KaguraAuthExpiredError);
+        // Polls at 0, wait, 2 × wait … and once more after the last wait,
+        // which ends at the expiry; never sleeps past it.
+        expect(calls).toBe(waits + 1);
+        expect(sleeps).toEqual(Array<number>(waits).fill(wait));
+        expect(Date.now()).toBe(start + 60_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

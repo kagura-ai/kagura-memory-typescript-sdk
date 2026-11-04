@@ -1341,9 +1341,10 @@ export class KaguraClient {
    * 1 MB, v0.108.0+, with `limit` / `actual` in `details`).
    *
    * Every error keeps the envelope: `code` is its `error` and `details`
-   * everything but `status` / `error` / `message` — `help` (v0.78.0+) and,
-   * on a server failure, `cause`, `correlation_id`, `retryable` and for a
-   * write `outcome` (v0.82.0+), which {@link KaguraError} reads as getters.
+   * everything but `status` / `error` / `message` — `help` and, on a server
+   * failure, `cause`, `correlation_id`, `retryable` and for a write
+   * `outcome` (all v0.78.0+, #1684), which {@link KaguraError} reads as
+   * getters.
    */
   private static raiseForMcpError(result: ToolResult, operation: string): void {
     if (result.status !== "error") {
