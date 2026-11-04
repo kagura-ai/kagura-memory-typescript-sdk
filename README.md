@@ -1103,8 +1103,9 @@ in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
 already rotated it to a token that has not expired, uses that profile and
 sends nothing; otherwise it refreshes from the refresh token on file and
 saves the result before it releases the lock. (Python 0.44.0 also adopts a
-different token that has expired; this SDK refreshes it instead.) The device flow a widening `--scope` falls back to runs
-after the lock is released, since it waits on the user. The Python SDK
+different token that has expired; this SDK refreshes it instead.) The
+device flow a widening `--scope` falls back to runs after the lock is
+released, since it waits on the user. The Python SDK
 locks the same `credentials.json.lock` with an OS lock, which Node does not
 have, so the two SDKs' locks do not exclude each other: between them only
 the re-read applies. This is client-side and works against every server. As
@@ -1119,25 +1120,27 @@ in Python SDK 0.44.0 (kagura-ai/kagura-memory-python-sdk#313):
   before any refresh request or write, and left as it is: `KaguraAuthError`
   `Cannot update <path>: it is not valid JSON.` (or why else it cannot be
   read), with `Fix the file, or move it aside and run: kagura-memory auth
-  login`. This holds for a refresh, the save at the end of `login()`,
-  `updateProfile`, `setDefaultProfile` and `deleteProfile`;
-  `kagura-memory-mcp` refuses it at startup and before any login. A missing
-  file is still "no profile".
-  `loadCredentialsFile()` and client construction still read such a file as
-  empty, as Python's do. One difference: the Python CLI's `auth refresh` and
-  `auth token` read the file as "no profile" first (`No profile named
-  'default'.`), and give this refusal only when the file became unreadable
-  by the time they hold the lock; `kagura-memory` gives it from the first
-  read.
+  login`. This holds for a refresh (checked under the lock), the save at
+  the end of `login()`, `updateProfile`, `setDefaultProfile` and
+  `deleteProfile`; `kagura-memory-mcp` refuses it at startup and before any
+  login. "Exists" includes a dangling symlink, and a file in a directory
+  this process cannot search. A missing file is still "no profile".
+  `loadCredentialsFile()`, client construction, `refresh()` and the CLI's
+  `auth refresh` / `auth token` read such a file as holding no profile first,
+  as Python's do (`No profile named 'default'.`); the refusal comes when it
+  became unreadable by the time the lock is held.
 - When the server refreshed but the profile cannot be saved (a full disk, a
   read-only directory), the refresh throws `KaguraAuthError` `Refreshed
   profile 'NAME', but could not save it to <path>: <reason>`, saying the
   refresh used up the refresh token on file and to run `kagura-memory auth
   login` after fixing the cause. The process that refreshed keeps the
   rotated token in memory (its next refresh sends the new refresh token,
-  until another process saves the profile), so a client or
-  `kagura-memory-mcp` stays usable until it expires. `auth refresh` and
-  `auth token` exit 1, and `auth token` prints no token.
+  until another process saves the profile), so a client stays usable until
+  it expires; `kagura-memory-mcp` goes on serving the request with it and
+  logs the message once. A widening `--scope` whose device-flow grant
+  cannot be saved gives the same kind of error (`Got consent for scope
+  …`), and the grant is kept the same way. `auth refresh` and `auth token`
+  exit 1, and `auth token` prints no token.
 
 ### Error handling
 
