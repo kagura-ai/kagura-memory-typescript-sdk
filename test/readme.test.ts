@@ -198,11 +198,48 @@ describe("wording memory-cloud v0.77.0 made stale (python-sdk 0.41.0)", () => {
 });
 
 describe("README parity target", () => {
-  it("names the Python CLI 0.42.0 and memory-cloud v0.77.0", () => {
+  it("names the Python CLI 0.44.0 and memory-cloud v0.143.0 (#93)", () => {
     // Line breaks fall anywhere in prose, so compare with whitespace folded.
     const flat = readme.split(/\s+/).join(" ");
-    expect(flat).toContain("parity target is the Python CLI **0.42.0**");
-    expect(flat).toContain("checked against memory-cloud up to **v0.77.0**");
-    expect(flat).toContain("**Differences from the Python CLI 0.42.0");
+    expect(flat).toContain("parity target is the Python CLI **0.44.0**");
+    expect(flat).toContain("parity target is the Python SDK and CLI **0.44.0**");
+    expect(flat).toContain("checked against memory-cloud up to **v0.143.0**");
+    expect(flat).toContain("**Differences from the Python CLI 0.42.0–0.44.0");
+    expect(flat).not.toContain("**0.42.0**");
+    expect(flat).not.toContain("**v0.77.0**");
+  });
+});
+
+describe("docs/compatibility.md (#93)", () => {
+  const compat = fs.readFileSync(path.join(repoRoot, "docs", "compatibility.md"), "utf8");
+  const flat = compat.split(/\s+/).join(" ");
+  const minServer = /export const MIN_SERVER_VERSION = "([^"]+)";/.exec(clientSource)?.[1];
+
+  it("states the MIN_SERVER_VERSION src/client.ts defines", () => {
+    expect(minServer).toBeDefined();
+    expect(flat).toContain(`\`MIN_SERVER_VERSION\` (exported from the package, defined in \`src/client.ts\`) is **${minServer}**`);
+  });
+
+  it("opens with a section no older than the package version", () => {
+    // A release adds its section at the top; one that forgets fails here.
+    const triple = (v: string) => v.split(".").map(Number);
+    const first = /^## (\d+\.\d+\.\d+)$/m.exec(compat)?.[1];
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+      version: string;
+    };
+    expect(first).toBeDefined();
+    const [a, b] = [triple(first ?? ""), triple(pkg.version)];
+    const cmp = a[0]! - b[0]! || a[1]! - b[1]! || a[2]! - b[2]!;
+    expect(cmp).toBeGreaterThanOrEqual(0);
+  });
+
+  it("gives 0.15.0 the README's memory-cloud", () => {
+    expect(flat).toContain(
+      `## 0.15.0 **Min memory-cloud:** ${minServer} — checked against memory-cloud up to **0.143.0**`,
+    );
+  });
+
+  it("is linked from the README", () => {
+    expect(readme).toContain("[`docs/compatibility.md`](docs/compatibility.md)");
   });
 });
