@@ -530,6 +530,8 @@ describe("member API keys", () => {
   });
 
   it("reads the mint response as pydantic's lax MemberAPIKey: coerced, defaults filled, extras dropped", async () => {
+    // `id: int | str` (Python SDK 0.42.1+): pydantic's smart-mode union
+    // keeps the string `"42"` a string, where the `int` field made it 42.
     const server = new FakeRest();
     server.status = 201;
     server.body = JSON.stringify({
@@ -545,7 +547,7 @@ describe("member API keys", () => {
     const client = makeClient(server);
 
     expect(await client.mintMemberKey(WS, "u2", "n", 30)).toEqual({
-      id: 42,
+      id: "42",
       name: "n",
       key_prefix: "p",
       plaintext_key: "kp",
@@ -566,8 +568,7 @@ describe("member API keys", () => {
   it("reads a v0.141.0 key row's default context, agent and connector (memory-cloud v0.118.0+ / v0.129.0+)", async () => {
     const server = new FakeRest();
     server.status = 201;
-    // An integer id: `readMemberKey` still reads `id` as an int only (a
-    // v0.89.0+ `akey_…` id is a separate follow-up of #85).
+    // An integer id, as a server before v0.89.0 sends it.
     server.body = JSON.stringify({
       id: 7,
       name: "connector:github",
@@ -666,6 +667,81 @@ describe("member API keys", () => {
     expect(keys).toHaveLength(1);
     expect(keys[0]!.id).toBe(42);
     expect(keys[0]!.plaintext_key).toBeNull();
+  });
+
+  // memory-cloud v0.89.0+ (memory-cloud#1008) sends `akey_…` ids (#102).
+  const AKEY = "akey_3fJ0kQ7xWm2Lp9RtZa4bNc";
+  const V089_KEY = {
+    id: AKEY,
+    name: "ci-bot",
+    key_prefix: "kagura_3fJ0",
+    plaintext_key: "kagura_3fJ0_secret",
+    is_visible: false,
+    visibility_expires_at: null,
+    created_at: "2026-11-01T00:00:00Z",
+    last_used_at: null,
+    revoked_at: null,
+    expires_at: "2027-01-30T00:00:00Z",
+    bound_context_id: null,
+    default_context_id: null,
+    default_context_name: null,
+    agent_id: null,
+    connector_id: null,
+  };
+
+  it("mintMemberKey returns a v0.89.0 `akey_…` id as the string (#102)", async () => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify(V089_KEY);
+    const client = makeClient(server);
+
+    const key = await client.mintMemberKey(WS, "google_2", "ci-bot", 90);
+    expect(key).toEqual(V089_KEY);
+    expect(key.id).toBe(AKEY);
+  });
+
+  it("mintMemberKey keeps an integer id an integer, as before v0.89.0", async () => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify({ ...V089_KEY, id: 42 });
+    const key = await makeClient(server).mintMemberKey(WS, "google_2", "ci-bot", 90);
+    expect(key.id).toBe(42);
+  });
+
+  it.each([
+    ["7.5", 7.5],
+    ["null", null],
+  ])("mintMemberKey salvages the plaintext when the id is %s, which neither int nor str takes", async (_label, id) => {
+    const server = new FakeRest();
+    server.status = 201;
+    server.body = JSON.stringify({ ...V089_KEY, id });
+    const err = await caught(makeClient(server).mintMemberKey(WS, "u2", "ci-bot", 30));
+    expect(err).toBeInstanceOf(KaguraError);
+    expect((err as KaguraError).message).toBe(
+      "WorkspaceClient.mint_member_key: server returned an unexpected mint response shape, " +
+        "but the key WAS created. Save the plaintext now: kagura_3fJ0_secret",
+    );
+  });
+
+  it("readMemberKey names both members of `int | str` for an id neither takes", () => {
+    expect(() => readMemberKey({ id: 7.5, name: "n", key_prefix: "p" }, "WorkspaceClient.list_member_keys")).toThrow(
+      "WorkspaceClient.list_member_keys: unexpected server response for MemberAPIKey " +
+        "(id.int: Input should be a valid integer, got a number with a fractional part; " +
+        "id.str: Input should be a valid string).",
+    );
+  });
+
+  it("listMemberKeys returns v0.89.0 `akey_…` ids as the strings (#102)", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({
+      api_keys: [
+        { ...V089_KEY, plaintext_key: null },
+        { ...V089_KEY, id: "akey_9ZyXwVuTsRqPoNmLkJiHgF", plaintext_key: null },
+      ],
+      target_user_role: "member",
+    });
+    const keys = await makeClient(server).listMemberKeys(WS, "google_2");
+    expect(keys.map((k) => k.id)).toEqual([AKEY, "akey_9ZyXwVuTsRqPoNmLkJiHgF"]);
   });
 
   it("listMemberKeys guards the api_keys FIELD, not just the envelope", async () => {

@@ -867,7 +867,7 @@ function readRollbackSummary(raw: unknown, operation: string): RollbackSummary {
       "errors",
       (item, at) => {
         const checked = laxStr(item);
-        if (!checked.ok) r.issue(at, checked.msg);
+        if (!checked.ok) r.refuse(at, checked);
       },
       { default: [] },
     );
