@@ -11,6 +11,7 @@ import {
   readModel,
   RESOURCE_EVENT_BATCH_RESPONSE,
   RESOURCE_EVENTS_LIST_RESPONSE,
+  RESOURCE_LIST_RESPONSE,
   RESOURCE_SCHEMA_RESPONSE,
 } from "../../src/pyModels.js";
 import { parseJsonLossless } from "../../src/losslessJson.js";
@@ -220,6 +221,53 @@ describe("readModel: a payload as the Python model reads it", () => {
     const b = readModel({ resource_id: "r" }, INDEXER_STATUS_RESPONSE, "op");
     expect(a.recent_events).toEqual([]);
     expect(a.recent_events).not.toBe(b.recent_events);
+  });
+
+  it("reads a context-less resource row, its context fields null (#80)", () => {
+    // memory-cloud v0.94.0+ (memory-cloud#1863): a resource whose contexts
+    // were all deleted is listed while it holds active tokens. The Python
+    // model declares both fields `str | None = None`.
+    const ROW = { resource_id: "orphaned", token_count: 1, memory_count: 0, created_at: "2026-04-01T00:00:00Z", updated_at: "2026-04-27T00:00:00Z" };
+    const page = readModel(
+      { resources: [{ ...ROW, context_id: null, context_name: null, context_display_name: null }, ROW], total: 2 },
+      RESOURCE_LIST_RESPONSE,
+      "ResourceClient.list_resources",
+    );
+    const [sent, absent] = page.resources as Array<Record<string, unknown>>;
+    expect(sent).toMatchObject({ context_id: null, context_name: null, context_display_name: null });
+    expect(absent).toMatchObject({ context_id: null, context_name: null, context_display_name: null });
+    expect(Object.keys(absent!)).toEqual([
+      "resource_id",
+      "context_id",
+      "context_name",
+      "context_display_name",
+      "token_count",
+      "memory_count",
+      "current_schema_version",
+      "created_at",
+      "updated_at",
+    ]);
+  });
+
+  it("still refuses a context field that is neither a string nor null (#80)", () => {
+    // What the Python CLI 0.44.0 (pydantic 2.13.4) reports for the same row.
+    const error = failure(() =>
+      readModel(
+        {
+          resources: [
+            { resource_id: "r", context_id: 7, context_name: [], token_count: 1, memory_count: 0, created_at: "2026-04-01T00:00:00Z", updated_at: "2026-04-27T00:00:00Z" },
+          ],
+          total: 1,
+        },
+        RESOURCE_LIST_RESPONSE,
+        "ResourceClient.list_resources",
+      ),
+    );
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect(error.message).toBe(
+      "ResourceClient.list_resources: unexpected server response for ResourceListResponse " +
+        `(resources.0.context_id: Input should be a valid string; resources.0.context_name: Input should be a valid string). ${HINT}`,
+    );
   });
 
   it("lists every problem in pydantic's words and order, nested locations included", () => {
