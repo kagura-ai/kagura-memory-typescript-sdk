@@ -175,6 +175,12 @@ export interface RunClientCommandOptions {
    * helper's `needs_context` keyword.
    */
   needsContext?: boolean;
+  /**
+   * A line built from the result, printed on stderr after the JSON so
+   * stdout stays parseable — the Python helper's `footer` keyword. `null`
+   * (or an empty string) prints nothing.
+   */
+  footer?: (result: unknown) => string | null;
 }
 
 /**
@@ -203,6 +209,8 @@ export async function runClientCommand(
   try {
     const result = await operation(client, resolvedContext);
     ctx.write(formatJson(result));
+    const note = options.footer?.(result);
+    if (note) ctx.writeError(note);
     return 0;
   } catch (e) {
     throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));

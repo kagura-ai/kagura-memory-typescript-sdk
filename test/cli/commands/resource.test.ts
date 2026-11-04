@@ -571,8 +571,10 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
     expect(r.code).toBe(0);
     const text = r.out.join("\n");
     expect(Object.keys(JSON.parse(text))).toEqual(MODEL_KEYS);
-    // pydantic reads "7" as the int 7, and the dump leaves the dash unescaped.
-    expect(JSON.parse(text)).toMatchObject({ token_id: 7, warning });
+    // `token_id: int | str` keeps "7" the string, as the Python CLI 0.44.0
+    // prints it, and the dump leaves the dash unescaped.
+    expect(JSON.parse(text)).toMatchObject({ token_id: "7", warning });
+    expect(text).toContain('\n  "token_id": "7",\n');
     expect(text).toContain("—");
   });
 
