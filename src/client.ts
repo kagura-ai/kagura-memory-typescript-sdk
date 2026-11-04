@@ -74,6 +74,7 @@ import {
 } from "./pyModels.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
+import { pyStrip } from "./pyCompat.js";
 import { pyFloatRepr, pyRepr, pyStr, pyTypeName } from "./python.js";
 import {
   ResponseReader,
@@ -348,7 +349,8 @@ export interface UpdateMemoryOptions {
 export interface ListContextsOptions {
   /**
    * Only contexts whose name or display name contains this text
-   * (case-insensitive, max 100 chars; blank means no filter).
+   * (case-insensitive, max 100 chars). Sent trimmed, as the server reads
+   * it (Python's `str.strip()`), and not at all when blank.
    *
    * Server v0.73.0+. Older servers ignore it without an error and return
    * every context, so do not rely on it to narrow the list there.
@@ -368,11 +370,26 @@ export interface ListContextsOptions {
   /** Add `memory_count` per context. Works on every supported server. */
   includeStats?: boolean;
   /**
-   * The `next_cursor` of the previous page. Sent only when set
+   * The `next_cursor` of the previous page, with the same `nameContains`
+   * (the cursor counts rows of the filtered list). Sent only when set
    * (memory-cloud v0.82.0+; an older server sends every context in one
    * reply and no cursor).
    */
   cursor?: string;
+  /**
+   * Contexts per page, 1-200 (the server's default is 100). With
+   * `includeDetails` and no non-blank `nameContains` the server allows at
+   * most 20 (and defaults to 20), and refuses a larger page with
+   * `validation_error` rather than clamping it, so that throws here. A
+   * page can hold fewer: it also stops at 20,000 characters. Checked
+   * before any request and sent only when set.
+   *
+   * Memory-cloud v0.82.0+ (#1743); an older server ignores it and returns
+   * every context. There is no `maxChars` here: no server release declares
+   * one on `list_contexts`, and from v0.82.0 an undeclared argument is
+   * refused with `invalid_argument`.
+   */
+  limit?: number;
 }
 
 export interface CreateContextOptions {
@@ -976,6 +993,75 @@ function validateBound(label: string, value: unknown, limit: number): void {
   if (!(value >= -limit && value <= limit)) {
     throw new Error(`${label} must be between -${limit} and ${limit}, got ${pyRepr(value)}`);
   }
+}
+
+/** `list_contexts`' largest page (server `_LIST_CONTEXTS_MAX_LIMIT`). */
+const LIST_CONTEXTS_MAX_LIMIT = 200;
+/**
+ * `list_contexts`' largest `include_details` page without a `name_contains`
+ * filter (server `_LIST_CONTEXTS_DETAILS_MAX_LIMIT`); a larger one is
+ * refused with `validation_error`, not clamped.
+ */
+const LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20;
+/** `get_state`'s largest list-mode page (server `STATE_LIST_MAX_LIMIT`). */
+const STATE_LIST_MAX_LIMIT = 200;
+/**
+ * `get_state`'s list-mode `max_chars` bounds (server `parse_max_chars`,
+ * which every budgeted tool shares).
+ */
+const STATE_MAX_CHARS_MIN = 10_000;
+const STATE_MAX_CHARS_MAX = 100_000;
+
+/**
+ * Refuse a request integer the server would refuse, before any request —
+ * the Python SDK's `_validate_int_range`, with its sentence and the
+ * option's TypeScript name. A boolean, a string or a fractional number is
+ * not an integer, as on the server (`type(x) is int`); a `bigint` is.
+ *
+ * @returns The value to send, as a `number`.
+ */
+function requireIntInRange(name: string, value: unknown, lo: number, hi: number): number {
+  const number = typeof value === "bigint" ? Number(value) : value;
+  if (typeof number !== "number" || !Number.isInteger(number) || number < lo || number > hi) {
+    throw new Error(`${name} must be an integer between ${lo} and ${hi}, got ${pyRepr(value)}`);
+  }
+  return number;
+}
+
+/**
+ * `list_contexts`' `name_contains` as the server reads it — the Python
+ * SDK's `_normalize_name_contains`: a string is stripped as Python strips
+ * it and a blank one is no filter (`undefined`); `null` is unset; any
+ * other value is returned as is, for the server to refuse.
+ */
+function normalizeNameContains(value: unknown): unknown {
+  if (typeof value === "string") {
+    const stripped = pyStrip(value);
+    return stripped === "" ? undefined : stripped;
+  }
+  return value === null ? undefined : value;
+}
+
+/**
+ * Whether memory-cloud refuses this `list_contexts` page (v0.82.0+, #1743)
+ * — the Python SDK's `_details_page_over_cap`: with `include_details` and
+ * no filter (a non-blank string `name_contains`), more than 20 contexts.
+ *
+ * @internal Shared with the CLI's `context list`, which names its own
+ *   flags in the usage error.
+ */
+export function detailsPageOverCap(
+  includeDetails: boolean | undefined,
+  nameContains: unknown,
+  limit: number | undefined,
+): boolean {
+  const filtered = typeof normalizeNameContains(nameContains) === "string";
+  return (
+    Boolean(includeDetails) &&
+    !filtered &&
+    limit !== undefined &&
+    limit > LIST_CONTEXTS_DETAILS_MAX_LIMIT
+  );
 }
 
 /**
@@ -1899,15 +1985,17 @@ export class KaguraClient {
    * Read ephemeral agent run-state. Supply `key` to read one value, omit
    * it to list the context's live entries.
    *
-   * Since memory-cloud v0.82.0 (#1743) the list is paged in key order, at
-   * the server's page size and within its response budget. The reply
-   * then carries `has_more` and `next_cursor`; pass `next_cursor` back as
-   * `cursor` for the next page. A value too large for the page is named
-   * in `omitted_keys` instead (read it by `key`). Older servers return
-   * every entry and no paging fields.
+   * Since memory-cloud v0.82.0 (#1743) the list is paged in key order, 50
+   * entries a page by default (`limit`) within a 20,000-character budget
+   * by default (`maxChars`). The reply then carries `has_more` and
+   * `next_cursor`; pass `next_cursor` back as `cursor` for the next page.
+   * A value too large for the page is named in `omitted_keys` instead
+   * (read it by `key`). Older servers return every entry and no paging
+   * fields, and ignore `cursor`, `limit` and `maxChars`.
    *
-   * @throws Error if `cursor` is given together with `key`, before any
-   *   request.
+   * @throws Error before any request if `cursor`, `limit` or `maxChars`
+   *   is given together with `key`, or `limit` / `maxChars` is not an
+   *   integer in range.
    */
   async getState(options: {
     contextId: string;
@@ -1918,18 +2006,45 @@ export class KaguraClient {
      * when set (memory-cloud v0.82.0+).
      */
     cursor?: string;
+    /**
+     * List mode only: entries per page, 1-200 (the server's default is
+     * 50). Checked before any request and sent only when set
+     * (memory-cloud v0.82.0+).
+     */
+    limit?: number;
+    /**
+     * List mode only: the page's budget in characters, not tokens,
+     * 10,000-100,000 (the server's default is 20,000). Checked before any
+     * request and sent only when set (memory-cloud v0.82.0+).
+     */
+    maxChars?: number;
   }): Promise<ToolResult> {
-    if (options.key !== undefined && options.cursor !== undefined) {
-      // The Python SDK 0.44.0's ValueError text (#317 names each list-mode
-      // argument given, `cursor, limit: …`).
-      throw new Error("cursor: list mode only; omit key to list the entries");
+    // `null` is unset, as Python's `None` is.
+    const { cursor, limit, maxChars } = options;
+    const given: Array<[string, unknown]> = [
+      ["cursor", cursor],
+      ["limit", limit],
+      ["maxChars", maxChars],
+    ];
+    const sent = given.filter(([, value]) => value !== undefined && value !== null).map(([name]) => name);
+    if (options.key !== undefined && sent.length > 0) {
+      // The Python SDK 0.44.0's ValueError text, which names each list-mode
+      // argument given (`cursor, limit: …`): the server reads them in list
+      // mode only, so with a key they would be dropped.
+      throw new Error(`${sent.join(", ")}: list mode only; omit key to list the entries`);
     }
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.key !== undefined) {
       args.key = options.key;
     }
-    if (options.cursor !== undefined) {
-      args.cursor = options.cursor;
+    if (cursor !== undefined && cursor !== null) {
+      args.cursor = cursor;
+    }
+    if (limit !== undefined && limit !== null) {
+      args.limit = requireIntInRange("limit", limit, 1, STATE_LIST_MAX_LIMIT);
+    }
+    if (maxChars !== undefined && maxChars !== null) {
+      args.max_chars = requireIntInRange("maxChars", maxChars, STATE_MAX_CHARS_MIN, STATE_MAX_CHARS_MAX);
     }
     return this.callToolChecked("get_state", args);
   }
@@ -2278,15 +2393,36 @@ export class KaguraClient {
    * to create one or get access.
    *
    * Since server v0.82.0 (memory-cloud#1743) the directory is paged: 100
-   * contexts a page (20 with `includeDetails` and no `nameContains`), and
-   * a page also stops at the server's 20,000-character budget. `has_more`
-   * says more contexts follow; pass `next_cursor` back as `cursor` for the
-   * next page.
+   * contexts a page by default (20 with `includeDetails` and no
+   * `nameContains`), or `limit`, and a page also stops at the server's
+   * 20,000-character budget. That budget is fixed: `list_contexts`
+   * declares no `max_chars`. `has_more` says more contexts follow; pass
+   * `next_cursor` back as `cursor` for the next page, with the same
+   * `nameContains`.
+   *
+   * The envelope's `limit` is the plan's context maximum, not the page
+   * size option of the same name.
+   *
+   * @throws Error before any request if `limit` is not an integer in
+   *   1-200, or is above 20 with `includeDetails` and no non-blank
+   *   `nameContains` (the server refuses that page with
+   *   `validation_error`).
    */
   async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
+    const nameContains = normalizeNameContains(options.nameContains);
+    let limit: number | undefined;
+    if (options.limit !== undefined && options.limit !== null) {
+      limit = requireIntInRange("limit", options.limit, 1, LIST_CONTEXTS_MAX_LIMIT);
+      if (detailsPageOverCap(options.includeDetails, nameContains, limit)) {
+        throw new Error(
+          "includeDetails returns full summaries: pass nameContains or a limit of at most " +
+            `${LIST_CONTEXTS_DETAILS_MAX_LIMIT}, got ${limit}`,
+        );
+      }
+    }
     const args: Record<string, unknown> = {};
-    if (options.nameContains !== undefined) {
-      args.name_contains = options.nameContains;
+    if (nameContains !== undefined) {
+      args.name_contains = nameContains;
     }
     if (options.includeSummary) {
       args.include_summary = true;
@@ -2299,6 +2435,9 @@ export class KaguraClient {
     }
     if (options.cursor !== undefined) {
       args.cursor = options.cursor;
+    }
+    if (limit !== undefined) {
+      args.limit = limit;
     }
     const result = await this.callToolChecked("list_contexts", args);
     return result as unknown as ListContextsResponse;
@@ -2614,9 +2753,9 @@ export class KaguraClient {
   /**
    * Create a new context in the current workspace.
    *
-   * Checks the workspace's context limit first, with {@link listContexts},
-   * and throws without calling `create_context` when `can_create` is false
-   * — unless `limit` is 0, which is how the server reports that it could
+   * Checks the workspace's context limit first, with a one-row
+   * {@link listContexts} page, and throws without calling `create_context`
+   * when `can_create` is false — unless `limit` is 0, which is how the server reports that it could
    * not read the quota; `create_context` then decides.
    * That error comes from the SDK, not the server: it carries
    * `quotaType: "contexts"` with `current` / `limit`, but `gate` and the
@@ -2635,8 +2774,10 @@ export class KaguraClient {
     // default ONLY when the key is absent, so a present null/0/""/false
     // (server schema drift, #183) must pass through and be negated as
     // "cannot create" — a nullish-coalescing `?? true` would wrongly treat
-    // a present `null` as "can create".
-    const contexts = await this.listContexts();
+    // a present `null` as "can create". count / limit / can_create do not
+    // depend on the page, so one row is enough (an older server ignores
+    // `limit` and sends every context, as before).
+    const contexts = await this.listContexts({ limit: 1 });
     const canCreate = "can_create" in contexts ? contexts.can_create : true;
     // `limit: 0` with `can_create: false` is how list_contexts reports a
     // failed quota lookup (every plan allows at least one context), so the
