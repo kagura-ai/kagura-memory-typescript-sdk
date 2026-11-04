@@ -17,10 +17,15 @@ import {
   type Command,
   type CommandGroup,
 } from "../command.js";
-import { detailsPageOverCap } from "../../client.js";
+import {
+  detailsPageOverCap,
+  LIST_CONTEXTS_DETAILS_MAX_LIMIT,
+  LIST_CONTEXTS_MAX_LIMIT,
+  normalizeNameContains,
+} from "../../client.js";
 import { pyStrip } from "../../pyCompat.js";
 import { formatJson } from "../output.js";
-import { CliError, CliUsageError, pairedFlag, parseChoice, parseRanged } from "../parse.js";
+import { CliError, CliUsageError, optionalRanged, pairedFlag, parseChoice } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
 
@@ -124,15 +129,17 @@ const list: Command = {
   },
   run: async (deps, args) => {
     // click converts the options before it looks for extra arguments.
-    const rawLimit = args.values.limit;
-    const limit =
-      rawLimit === undefined
-        ? undefined
-        : parseRanged(LIMIT, rawLimit, { min: 1, max: 200, rangeLabel: "1<=x<=200", integer: true });
+    const limit = optionalRanged(args, LIMIT, {
+      min: 1,
+      max: LIST_CONTEXTS_MAX_LIMIT,
+      rangeLabel: `1<=x<=${LIST_CONTEXTS_MAX_LIMIT}`,
+      integer: true,
+    });
     rejectExtraArgs(args);
-    // Python forwards the filter only when truthy (`if name_contains:`), so
-    // an empty `--name-contains=` lists everything; the client would send "".
-    const nameContains = args.values["name-contains"] || undefined;
+    // The filter as the server reads it, by the rule `listContexts` applies:
+    // stripped the Python way, and a blank one (`--name-contains=`
+    // included) is no filter, so the cap below judges what is sent.
+    const nameContains = normalizeNameContains(args.values["name-contains"]);
     const details = args.flags.has("details");
     // Blank is unset, as for --name-contains: a script feeding back the last
     // page's next_cursor (`jq -r '.next_cursor // empty'`) passes "".
@@ -143,7 +150,7 @@ const list: Command = {
       // names its flags, as the Python CLI does.
       throw new CliUsageError(
         "--details returns full summaries: pass --name-contains or " +
-          `--limit 20 or less (got ${limit}).`,
+          `--limit ${LIST_CONTEXTS_DETAILS_MAX_LIMIT} or less (got ${limit}).`,
       );
     }
     const options = {
@@ -311,15 +318,14 @@ const searchConfig: Command = {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
     rejectExtraArgs(args, 1);
 
-    const ranged = (flag: FlagSpec, min: number, max: number, label: string, integer = false) => {
-      const raw = args.values[flag.name];
-      return raw === undefined
-        ? undefined
-        : parseRanged(flag, raw, { min, max, rangeLabel: label, integer });
-    };
-    const semanticWeight = ranged(SEMANTIC, 0, 1, "0.0<=x<=1.0");
-    const bm25Weight = ranged(BM25, 0, 1, "0.0<=x<=1.0");
-    const fetchFactor = ranged(FETCH_FACTOR, 1, 10, "1<=x<=10", true);
+    const semanticWeight = optionalRanged(args, SEMANTIC, { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" });
+    const bm25Weight = optionalRanged(args, BM25, { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" });
+    const fetchFactor = optionalRanged(args, FETCH_FACTOR, {
+      min: 1,
+      max: 10,
+      rangeLabel: "1<=x<=10",
+      integer: true,
+    });
     const useRerank = pairedFlag(args.flags.has("rerank"), args.flags.has("no-rerank"), [
       "--rerank",
       "--no-rerank",

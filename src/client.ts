@@ -1088,14 +1088,23 @@ function validateBound(label: string, value: unknown, limit: number): void {
   }
 }
 
-/** `list_contexts`' largest page (server `_LIST_CONTEXTS_MAX_LIMIT`). */
-const LIST_CONTEXTS_MAX_LIMIT = 200;
+/**
+ * `list_contexts`' largest page (server `_LIST_CONTEXTS_MAX_LIMIT`).
+ *
+ * @internal Shared with the CLI's `context list --limit` range, as the
+ *   Python CLI imports `_LIST_CONTEXTS_MAX_LIMIT`; not a package export.
+ */
+export const LIST_CONTEXTS_MAX_LIMIT = 200;
 /**
  * `list_contexts`' largest `include_details` page without a `name_contains`
  * filter (server `_LIST_CONTEXTS_DETAILS_MAX_LIMIT`); a larger one is
  * refused with `validation_error`, not clamped.
+ *
+ * @internal Shared with the CLI's `context list` usage error, as the
+ *   Python CLI imports `_LIST_CONTEXTS_DETAILS_MAX_LIMIT`; not a package
+ *   export.
  */
-const LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20;
+export const LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20;
 /** `get_state`'s largest list-mode page (server `STATE_LIST_MAX_LIMIT`). */
 const STATE_LIST_MAX_LIMIT = 200;
 
@@ -1104,8 +1113,13 @@ const STATE_LIST_MAX_LIMIT = 200;
  * SDK's `_normalize_name_contains`: a string is stripped as Python strips
  * it and a blank one is no filter (`undefined`); `null` is unset; any
  * other value is returned as is, for the server to refuse.
+ *
+ * @internal Shared with the CLI's `context list`, so the 20-row cap judges
+ *   `--name-contains` by the same rule as `listContexts`.
  */
-function normalizeNameContains(value: unknown): unknown {
+export function normalizeNameContains(value: string | undefined): string | undefined;
+export function normalizeNameContains(value: unknown): unknown;
+export function normalizeNameContains(value: unknown): unknown {
   if (typeof value === "string") {
     const stripped = pyStrip(value);
     return stripped === "" ? undefined : stripped;
@@ -1116,8 +1130,10 @@ function normalizeNameContains(value: unknown): unknown {
 /**
  * Whether memory-cloud refuses this `list_contexts` page (v0.82.0+, #1743)
  * — the Python SDK's `_details_page_over_cap`: with `include_details` and
- * no filter (a non-blank string `name_contains`), more than 20 contexts.
+ * no filter, more than 20 contexts.
  *
+ * @param nameContains The filter as {@link normalizeNameContains} returned
+ *   it: only a string is a filter (a blank one is already `undefined`).
  * @internal Shared with the CLI's `context list`, which names its own
  *   flags in the usage error.
  */
@@ -1126,10 +1142,9 @@ export function detailsPageOverCap(
   nameContains: unknown,
   limit: number | undefined,
 ): boolean {
-  const filtered = typeof normalizeNameContains(nameContains) === "string";
   return (
     Boolean(includeDetails) &&
-    !filtered &&
+    typeof nameContains !== "string" &&
     limit !== undefined &&
     limit > LIST_CONTEXTS_DETAILS_MAX_LIMIT
   );
