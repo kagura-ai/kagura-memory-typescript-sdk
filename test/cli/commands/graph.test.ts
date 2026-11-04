@@ -250,13 +250,15 @@ describe("kagura-memory sleep rollback", () => {
  * it, where Python prints the model (`model_dump`), so only such a reply
  * prints the same in both.
  *
- * The Python CLI 0.44.0, given the same replies, prints the two
- * `report_not_found` cases identically and the others differently, for
- * gaps this fix leaves alone: its dumps add the model fields of 0.43.0
- * (`source`, `details_omitted`, `details_total_chars`, `actions_has_more`,
+ * The Python CLI 0.44.0, given the same replies, prints the error cases
+ * identically and the success replies differently, for a gap this fix
+ * leaves alone: its dumps add the model fields of 0.43.0 (`source`,
+ * `details_omitted`, `details_total_chars`, `actions_has_more`,
  * `actions_next_cursor`, `note`; `chunks_requeued`, `points_requeued`;
- * #85), and its stderr adds a `  Help: <help>` line for an envelope that
- * carries `help` (python-sdk#299).
+ * #85). The two refusals whose envelope carries `help` print the
+ * `  Help: <help>` line the Python CLI adds from 0.43.0 (python-sdk#299,
+ * this bin's #84): their stderr is recorded from the Python CLI 0.44.0
+ * with the same `_call_tool` stand-in (same exit code, stdout and call).
  */
 interface SleepCase {
   name: string;
@@ -314,7 +316,7 @@ const PYTHON_SLEEP_CASES: SleepCase[] = [
     calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
     code: 1,
     stdout: "",
-    stderr: "Error: rollback_sleep_run failed (analysis_report): Report 11111111-2222-4333-8444-555555555555 is an analysis report: it records the LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.\n",
+    stderr: "Error: rollback_sleep_run failed (analysis_report): Report 11111111-2222-4333-8444-555555555555 is an analysis report: it records the LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.\n  Help: get_sleep_history lists the context's Sleep runs (source 'sleep', its default); roll back one of those.\n",
   },
   {
     name: "rollback --yes: permission_denied",
@@ -323,7 +325,7 @@ const PYTHON_SLEEP_CASES: SleepCase[] = [
     calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
     code: 1,
     stdout: "",
-    stderr: "Error: rollback_sleep_run failed (permission_denied): Cannot roll back sleep runs: you need the editor or owner role on this context.\n",
+    stderr: "Error: rollback_sleep_run failed (permission_denied): Cannot roll back sleep runs: you need the editor or owner role on this context.\n  Help: Ask a context owner for the editor role.\n",
   },
 ];
 
