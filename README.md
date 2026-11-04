@@ -29,8 +29,8 @@ package also includes `kagura-memory-mcp`, a transparent stdio/HTTP proxy.
 npm install kagura-memory
 ```
 
-Requires Node.js >= 18 (native `fetch`). Zero runtime dependencies —
-the one optional peer dependency, for
+Requires Node.js >= 20.19.0 (Node 18 support ended with 0.14.x). Zero
+runtime dependencies — the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
 

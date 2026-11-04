@@ -22,8 +22,8 @@ name: Release
 # Two consequences for the steps below:
 #
 #   - npm must be **>= 11.5.1** (the first release that speaks OIDC), which
-#     needs Node >= 20.17. The job therefore runs a newer Node than the
-#     package's floor — see the note on `node-version`.
+#     needs Node >= 20.17. The package's floor (20.19.0) meets that; the
+#     job runs Node 22 all the same — see the note on `node-version`.
 #   - `setup-node` must NOT be given a `registry-url`. That writes an
 #     .npmrc line `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`,
 #     and with the variable unset npm sends the literal string as a token
@@ -105,12 +105,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Not the package's floor (18). npm >= 11.5.1 is what speaks
-          # OIDC, and it needs Node >= 20.17. Building on a newer engine
-          # does not change the artifact: tsup pins `target: "node18"`
-          # explicitly for both entries, so the output is the same bytes
-          # whichever Node runs the build. Node 18 support is proven by the
-          # CI matrix, which still runs the suite there.
+          # Not the package's floor (20.19.0), though the floor would also
+          # run npm >= 11.5.1 (it needs Node >= 20.17); 22 matches the
+          # desktop job above. Building on a newer engine does not change
+          # the artifact: tsup pins `target: "node20"` explicitly for every
+          # entry, so the output is the same bytes whichever Node runs the
+          # build. Node 20 support is proven by the CI matrix, which still
+          # runs the suite there.
           node-version: 22
           cache: npm
           # Deliberately no `registry-url` — see the header.

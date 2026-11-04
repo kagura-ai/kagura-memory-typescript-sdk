@@ -209,8 +209,10 @@ function launch(extra = []) {
       cwd: temporary,
       env: {
         ...process.env, PATH: "", NODE_PATH: "", NODE_OPTIONS: "",
-        // Early Node 18 emits an experimental-fetch warning. Application
-        // diagnostics and the stdout/stderr hygiene assertions still apply.
+        // Runtime notices (ExperimentalWarning, DeprecationWarning) are the
+        // host Node's, not the bundle's; Node 18.0.0's experimental-fetch
+        // warning is why this is here. Application diagnostics and the
+        // stdout/stderr hygiene assertions still apply.
         NODE_NO_WARNINGS: "1",
       },
       stdio: "pipe",
