@@ -1257,8 +1257,9 @@ export interface RecallConfidence {
 
 /**
  * A near-duplicate this memory may supersede — a suggestion, never an edge.
- * Accept it by creating a `"supersedes"` edge; reject it with
- * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
+ * Accept it with `updateMemory({ memoryId, acceptSupersedeCandidate: true })`
+ * (memory-cloud v0.126.0+) or by creating a `"supersedes"` edge; reject it
+ * with `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
  *
  * Since memory-cloud v0.109.0 (#2016) `detected_at` is absent rather than
  * `null` when it has no value, and `verified` is a key only when `true`:
@@ -1411,6 +1412,175 @@ export interface RecallResponse {
   context_display_name?: string | null;
   context_is_private?: boolean | null;
   context_is_locked?: boolean | null;
+  [key: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Memory writes and reference (memory-cloud v0.78.0–v0.140.0, SDK issue #87)
+// ---------------------------------------------------------------------------
+
+/**
+ * `remember`'s duplicate check (memory-cloud v0.93.0+, #1853): `"suggest"`
+ * (the server default) writes and flags a near-duplicate later, `"check"`
+ * writes nothing when one exists and answers `duplicate_candidate`, and
+ * `"off"` writes and opts the memory out of supersede suggestions for good
+ * (#2024).
+ */
+export type DedupeMode = "suggest" | "check" | "off";
+
+/** The heavy fields `reference({ fields })` selects (memory-cloud v0.78.0+, #1685). */
+export type ReferenceField = "content" | "details" | "context" | "links";
+
+/**
+ * The reply of a successful `remember` — or, with `dedupe: "check"`, of
+ * one that found a near-duplicate and wrote nothing: then `status` is
+ * `"duplicate_candidate"` and `candidate` names it, so check `status`
+ * before reading `memory_id`.
+ *
+ * The reply as the server sent it, unchecked, as the Python SDK returns
+ * its dict — so every key is typed optional: an empty tool result comes
+ * back as `{}`. The server's optional keys are absent, never `null`, when
+ * they do not apply. Keys a newer server adds pass through.
+ */
+export interface RememberResult {
+  /** `"success"`, or `"duplicate_candidate"` with `dedupe: "check"`; memory-cloud always sends it. */
+  status?: string;
+  memory_id?: string;
+  scope?: string;
+  /** The memory's version, `updateMemory`'s `expectedVersion` (v0.113.0+, #2043). */
+  version?: number;
+  /** The session the write was recorded under (v0.113.0+, #2044). */
+  session_id?: string;
+  /** `true` when a summary over 500 characters was cut at a sentence end (v0.108.0+, #2003). */
+  summary_truncated?: boolean;
+  /** The cut summary's length before the cut; its full text heads `content`. */
+  summary_original_length?: number;
+  /**
+   * `{scope, committed, promotes_via, consolidation_archive_min_age_days}`,
+   * plus `detail` with `verbose: true` (v0.93.0+, #1851).
+   */
+  persistence?: Record<string, unknown>;
+  /** Advisory hints about a write that will recall poorly (v0.65.0+). */
+  lint?: Array<Record<string, unknown>>;
+  /**
+   * With `dedupe: "check"`: the near-duplicate, `{memory_id, summary,
+   * similarity, supersedable?}`; nothing was written.
+   */
+  candidate?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/**
+ * The reply of `updateMemory` as the server sent it, unchecked, as the
+ * Python SDK returns its dict — so every key is typed optional: an empty
+ * tool result comes back as `{}`. Keys a newer server adds pass through.
+ */
+export interface UpdateMemoryResult {
+  /** memory-cloud always sends it. */
+  status?: string;
+  memory_id?: string;
+  /** `"updated"`, or for an `externalId` upsert `"created"` / `"replaced"`. */
+  operation?: string;
+  re_embedded?: boolean;
+  scope?: string;
+  /**
+   * The version after the call — unchanged when it changed no versioned
+   * field (v0.113.0+, #2043). Only a server before v0.82.0 answers a call
+   * that carried a newer argument without it, having ignored that argument.
+   */
+  version?: number;
+  /** The session the write was recorded under (v0.113.0+, #2044). */
+  session_id?: string;
+  /** The rejected candidate, when a `dismissSupersedeCandidate` applied (v0.65.0+). */
+  supersede_candidate_dismissed?: string;
+  /** The memory an `acceptSupersedeCandidate` shadowed (v0.126.0+, #2308). */
+  superseded_memory_id?: string;
+  persistence?: Record<string, unknown>;
+  lint?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+/**
+ * `result.memory` of `reference`.
+ *
+ * Since memory-cloud v0.78.0 (#1685) the reply is bounded (`maxChars`,
+ * 20,000 characters by default). `content` that does not fit is sliced:
+ * `content_truncated: true` and `content_next_offset`, the
+ * `contentOffset` to read on from (with `contentOffset` the reply also
+ * carries `content_offset` and `content_total_chars`). `details`,
+ * `context` and the links come back whole or are left out with
+ * `<field>_omitted: true` and `<field>_total_chars`; `details` and
+ * `context` then page as their compact JSON text: `detailsOffset: 0` (or
+ * `contextOffset`) returns `details_json` (`context_json`) with
+ * `details_offset`, `details_total_chars`, `details_truncated` and
+ * `details_next_offset` (`null` on the last page). A memory that fits
+ * comes back whole, as before v0.78.0.
+ *
+ * With `version`, the memory as it stood then (v0.113.0+): `historical:
+ * true`, `current_version` and, when the log could not rebuild some
+ * fields, `unavailable_fields`; the links and `supersede_candidate`, which
+ * describe the memory now, are left out.
+ */
+export interface ReferenceMemory {
+  /** Always sent by memory-cloud; not checked, so typed optional. */
+  memory_id?: string;
+  summary?: string;
+  context_summary?: string | null;
+  content?: string;
+  details?: Record<string, unknown> | null;
+  type?: string;
+  scope?: string;
+  importance?: number;
+  tags?: string[];
+  context?: Record<string, unknown> | null;
+  created_at?: string;
+  updated_at?: string | null;
+  /** When the fact held, a date or a UTC datetime; absent when unset (v0.127.0+, #2330). */
+  observed_at?: string;
+  /** `updateMemory`'s `expectedVersion` (v0.113.0+, #2043). */
+  version?: number;
+  supersede_candidate?: SupersedeCandidate | null;
+  /** `true` when `content` is cut; read on from `content_next_offset`. */
+  content_truncated?: boolean;
+  content_offset?: number;
+  content_total_chars?: number;
+  /** The `contentOffset` of the next page; `null` on the last. */
+  content_next_offset?: number | null;
+  /** `true` when not even a slice of `content` fit. */
+  content_omitted?: boolean;
+  /** `true` when `details` was left out; page it from `details_next_offset`. */
+  details_omitted?: boolean;
+  /** A page of `details` as compact JSON text, with `detailsOffset`. */
+  details_json?: string;
+  details_offset?: number;
+  details_total_chars?: number;
+  details_truncated?: boolean;
+  details_next_offset?: number | null;
+  context_omitted?: boolean;
+  /** A page of `context` as compact JSON text, with `contextOffset`. */
+  context_json?: string;
+  context_offset?: number;
+  context_total_chars?: number;
+  context_truncated?: boolean;
+  context_next_offset?: number | null;
+  /** `true` when the links did not fit; `listEdges` pages them. */
+  links_omitted?: boolean;
+  links_total_chars?: number;
+  /** With `version`: an earlier version (v0.113.0+). */
+  historical?: boolean;
+  current_version?: number;
+  unavailable_fields?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * The reply of `reference`, as the server sent it once `status` (a string)
+ * and `memory` (an object) are checked. Keys a newer server adds pass
+ * through.
+ */
+export interface ReferenceResponse {
+  status: string;
+  memory: ReferenceMemory;
   [key: string]: unknown;
 }
 

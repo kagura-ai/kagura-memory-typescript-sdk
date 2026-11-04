@@ -4,7 +4,9 @@
  * recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
  * `kagura <command> --help`, with `kagura ` written `kagura-memory `.
  * `setup claude`'s is the Python CLI 0.44.0's, which adds the `--add-tools`
- * / `--context` example (python-sdk#300).
+ * / `--context` example (python-sdk#300); so are the `remember`,
+ * `update-memory` and `context search-config` blocks, which add examples
+ * for their new flags (python-sdk#302, #87).
  *
  * Not here: `ingest`, which this bin does not have.
  */
@@ -66,6 +68,9 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory context search-config CTX_UUID --semantic 0.5 --bm25 0.5",
     "    kagura-memory context search-config CTX_UUID --rerank --reranker voyage",
     "    kagura-memory context search-config CTX_UUID --rerank --reranker self_hosted",
+    // From the Python CLI 0.44.0 (python-sdk #302).
+    "    kagura-memory context search-config CTX_UUID --content-chunks",
+    "    kagura-memory context search-config CTX_UUID --no-llm-selector",
   ]],
   ["context update", [
     "  Examples:",
@@ -167,6 +172,9 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "      --source-uri file:///spec.md --source-type file",
     "    kagura-memory remember -s \"Coffee with Sato\" --content \"...\" \\",
     "      --location \"35.68,139.76,Tokyo HQ\"",
+    // From the Python CLI 0.44.0 (python-sdk #302).
+    "    kagura-memory remember -s \"Release 2.0 shipped\" --content \"...\" --observed-at 2026-11-01",
+    "    kagura-memory remember -s \"Deploy key rotated\" --content \"...\" --dedupe check",
   ]],
   ["resource events", [
     "  Examples:",
@@ -273,6 +281,10 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory update-memory -m MEM_UUID -s \"updated summary\"",
     "    kagura-memory update-memory --external-id ext-key -s \"summary\" --content \"...\" -t note",
     "    kagura-memory update-memory -m MEM_UUID --dismiss-supersede-candidate",
+    // From the Python CLI 0.44.0 (python-sdk #302).
+    "    kagura-memory update-memory -m MEM_UUID --accept-supersede-candidate",
+    "    kagura-memory update-memory -m MEM_UUID --add-tag status:done --remove-tag status:open \\",
+    "      --details-patch '{\"status\": \"done\"}' --expected-version 3",
     "    kagura-memory update-memory -m MEM_UUID \\",
     "      --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'",
     "    kagura-memory update-memory -m MEM_UUID --merge-details \\",

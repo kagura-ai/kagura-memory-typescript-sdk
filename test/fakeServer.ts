@@ -83,8 +83,16 @@ export class FakeServer {
   declaredArguments: Record<string, readonly string[]> = {};
   /** Tool name → content[0].text as sent, beating {@link toolResults}. */
   toolTexts: Record<string, string> = {};
+  /**
+   * Tool name → the content[0].text of each call in turn, beating
+   * {@link toolTexts} until it runs out. A text whose `status` is `"error"`
+   * comes in a result flagged `isError`, as the server sends it.
+   */
+  toolTextQueues: Record<string, string[]> = {};
   /** URL path → REST GET JSON response. */
   restResults: Record<string, unknown> = {};
+  /** URL path → the REST GET status and exact body, beating {@link restResults}. */
+  restResponses: Record<string, { status: number; body: string }> = {};
   /** When set, every request returns this raw response. */
   forcedResponse: Response | null = null;
   sessionId: string | null = "session-123";
@@ -133,6 +141,23 @@ export class FakeServer {
           { status: 200 },
         );
       }
+      const queued = this.toolTextQueues[params.name]?.shift();
+      if (queued !== undefined) {
+        let isError = false;
+        try {
+          isError = (JSON.parse(queued) as { status?: unknown } | null)?.status === "error";
+        } catch {
+          // A text that is not JSON is sent as given, for the client to refuse.
+        }
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { content: [{ type: "text", text: queued }], ...(isError ? { isError: true } : {}) },
+          }),
+          { status: 200 },
+        );
+      }
       const payload = this.toolResults[params.name] ?? { status: "success" };
       const text = this.toolTexts[params.name] ?? JSON.stringify(payload);
       return new Response(
@@ -153,6 +178,10 @@ export class FakeServer {
 
     // REST GET
     const path = new URL(url).pathname;
+    const raw = this.restResponses[path];
+    if (raw !== undefined) {
+      return new Response(raw.body, { status: raw.status, headers: { "content-type": "application/json" } });
+    }
     const payload = this.restResults[path];
     if (payload === undefined) {
       return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });

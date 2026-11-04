@@ -23,6 +23,7 @@ import {
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraServiceUnavailableError,
+  KaguraVersionConflictError,
   excMessage,
 } from "../errors.js";
 
@@ -346,7 +347,8 @@ export function pyFormatG(n: number): string {
  * The plan reads `display (key)` when the server sent both and they
  * differ, else whichever it sent. The capacity lock adds its cleanup page
  * (unless the server's `help` already names it), a 503 how long to wait,
- * and any server error its `help` and `correlation_id`. `firstLine`
+ * a refused `expectedVersion` the memory's current version (python-sdk
+ * #302), and any server error its `help` and `correlation_id`. `firstLine`
  * replaces the message when a command words the failure itself, keeping
  * the other lines. As in Python, a `KaguraRateLimitError` (an HTTP 429 on
  * `KaguraClient`'s transport) adds no gate lines.
@@ -369,6 +371,9 @@ export function cliErrorMessage(e: unknown, firstLine?: string): string {
   }
   if (e instanceof KaguraServiceUnavailableError && e.retryAfter !== null) {
     lines.push(`  Retry after: ${pyFormatG(e.retryAfter)} s`);
+  }
+  if (e instanceof KaguraVersionConflictError && e.currentVersion !== null) {
+    lines.push(`  Current version: ${e.currentVersion}`);
   }
   if (e instanceof KaguraError) {
     if (e.help) lines.push(`  Help: ${e.help}`);
