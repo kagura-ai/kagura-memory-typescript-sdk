@@ -2716,6 +2716,50 @@ describe("tool definitions", () => {
     const tools = await client.getToolDefinitions();
     expect(tools).toEqual([{ name: "recall" }]);
   });
+
+  /** A client whose tools/list replies with `reply` (the whole JSON-RPC body). */
+  function listing(reply: Record<string, unknown>): KaguraClient {
+    const server = new FakeServer();
+    const served = server.fetch;
+    server.fetch = async (input, init) => {
+      const method = typeof init?.body === "string" ? (JSON.parse(init.body) as { method?: string }).method : undefined;
+      if (method !== "tools/list") return served(input, init);
+      return Response.json({ jsonrpc: "2.0", id: 1, ...reply });
+    };
+    return makeClient(server);
+  }
+
+  // Each as the Python SDK 0.44.0's ToolListResponse reads the same result
+  // (`data.get("result", {})`): the definitions pass through unread, and a
+  // result without `tools` lists none.
+  it.each<[string, Record<string, unknown>, unknown[]]>([
+    ["no tools key", { result: {} }, []],
+    ["no result", {}, []],
+    ["definitions without a string name", { result: { tools: [{}, { name: 5 }] } }, [{}, { name: 5 }]],
+    ["extra keys", { result: { tools: [{ name: "a", extra: [1] }], next: null } }, [{ name: "a", extra: [1] }]],
+  ])("reads %s as Python does", async (_label, reply, expected) => {
+    await expect(listing(reply).getToolDefinitions()).resolves.toEqual(expected);
+  });
+
+  // Python 0.44.0's KaguraResponseError for the same result, word for word.
+  it.each<[string, Record<string, unknown>, string]>([
+    ["tools a string", { result: { tools: "oops" } }, "tools: Input should be a valid list"],
+    ["tools null", { result: { tools: null } }, "tools: Input should be a valid list"],
+    ["tools an object", { result: { tools: { a: 1 } } }, "tools: Input should be a valid list"],
+    ["an item not an object", { result: { tools: [{ name: "a" }, "x"] } }, "tools.1: Input should be a valid dictionary"],
+    ["null and list items", { result: { tools: [null, []] } }, "tools.0: Input should be a valid dictionary; tools.1: Input should be a valid dictionary"],
+    ["result null", { result: null }, "Input should be a valid dictionary or instance of ToolListResponse"],
+    ["result a list", { result: [] }, "Input should be a valid dictionary or instance of ToolListResponse"],
+    ["result a string", { result: "oops" }, "Input should be a valid dictionary or instance of ToolListResponse"],
+  ])("refuses %s with KaguraResponseError", async (_label, reply, problem) => {
+    const error = await listing(reply).getToolDefinitions().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as KaguraResponseError).operation).toBe("KaguraClient.get_tool_definitions");
+    expect((error as Error).message).toBe(
+      `KaguraClient.get_tool_definitions: unexpected server response for ToolListResponse (${problem}). ` +
+        "The server may be newer than this SDK; upgrading kagura-memory may help.",
+    );
+  });
 });
 
 describe("callRawTool (#28)", () => {

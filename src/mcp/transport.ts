@@ -56,6 +56,16 @@ export interface TransportOptions {
   url: string;
   auth: { getAuthHeader(): Promise<string>; forceRefresh(): Promise<void> };
   signal: AbortSignal;
+  /**
+   * Sent as `Kagura-Session-Id` on every upstream request when set
+   * (memory-cloud v0.114.0+, #2122), so the server records the writes under
+   * that session. Never invented: the host speaks stdio, so there is no
+   * incoming header to pass on, and a fixed value would put every
+   * conversation in one session. A message's
+   * `params._meta["ai.kagura/sessionId"]` is forwarded untouched and wins
+   * over the header for that call.
+   */
+  sessionId?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
@@ -241,6 +251,7 @@ export class McpTransport {
             "User-Agent": `kagura-memory-mcp/${SDK_VERSION}`,
             Authorization: authorization,
             ...(session ? { "Mcp-Session-Id": session } : {}),
+            ...(options.sessionId ? { "Kagura-Session-Id": options.sessionId } : {}),
             ...(this.protocol ? { "MCP-Protocol-Version": this.protocol } : {}),
           },
           body: JSON.stringify(message),

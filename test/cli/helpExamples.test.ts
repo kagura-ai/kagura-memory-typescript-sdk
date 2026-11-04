@@ -2,9 +2,11 @@
  * Every command's `--help` shows its examples one per line, as the Python
  * CLI's `\b` blocks do from 0.41.1 (python-sdk #285). The blocks are
  * recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
- * `kagura <command> --help`, with `kagura ` written `kagura-memory `; the
- * `remember`, `update-memory` and `context search-config` blocks from the
- * Python CLI 0.44.0, which added examples for its new flags (#87).
+ * `kagura <command> --help`, with `kagura ` written `kagura-memory `.
+ * `setup claude`'s is the Python CLI 0.44.0's, which adds the `--add-tools`
+ * / `--context` example (python-sdk#300); so are the `remember`,
+ * `update-memory` and `context search-config` blocks, which add examples
+ * for their new flags (python-sdk#302, #87).
  *
  * Not here: `ingest`, which this bin does not have.
  */
@@ -244,6 +246,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory setup claude --profile default        # OAuth via kagura-mcp (recommended)",
     "    kagura-memory setup claude --profile default --scope user   # one entry for every project",
     "    kagura-memory setup claude --profile default --guardrails off --tool-profile core",
+    "    kagura-memory setup claude --profile default --add-tools explore --context CTX_UUID",
     "    kagura-memory setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}",
     "    kagura-memory setup claude -y --api-key kagura_xxx --context-id my-project",
     "    kagura-memory setup claude --no-commands      # plugin users: its /kagura-memory:* instead",

@@ -22,10 +22,10 @@ import {
   profileNamed,
 } from "../../auth/credentials.js";
 import type { ResolvedAuth } from "../../auth/types.js";
-import { MIN_SERVER_VERSION, warnBelowMinimum, type KaguraClientOptions } from "../../client.js";
+import { MIN_SERVER_VERSION, warnBelowMinimum, type KaguraClient, type KaguraClientOptions } from "../../client.js";
 import { isEnvFallbackConfig, jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import { excMessage, KaguraAuthError, KaguraConnectionError, KaguraResponseError } from "../../errors.js";
-import { normalizeUrl, validateHttpsUrl } from "../../http.js";
+import { mcpUrlToolView, normalizeUrl, validateHttpsUrl } from "../../http.js";
 import type { ServerInfo } from "../../models.js";
 import { pyRepr } from "../../python.js";
 import { meetsMinimum, requireVersion } from "../../versionCheck.js";
@@ -499,6 +499,81 @@ function checkApiKeyShape(resolved: ResolvedAuth): DoctorCheck[] {
   ];
 }
 
+/**
+ * memory-cloud lists the `core` profile for a URL without `?profile=` since
+ * 0.93.0 (memory-cloud#1849); an older server lists every tool.
+ */
+const CORE_DEFAULT_SINCE = requireVersion("0.93.0", "CORE_DEFAULT_SINCE");
+const NO_PROFILE = "(no ?profile=)";
+
+/**
+ * What the MCP URL's query asks `tools/list` for — Python's `_tool_view`,
+ * read by {@link mcpUrlToolView} as memory-cloud reads it. `tools` is an
+ * allowlist that replaces the profile and ignores `add_tools`. With no
+ * `profile`, `version` (the server's, when known) decides the label:
+ * `core (default)` from 0.93.0, else {@link NO_PROFILE}. A blank
+ * `profile=` is not the default, and a `tools=` naming no tool is no
+ * allowlist: the server fails `tools/list` for both, shown as `(empty)`.
+ */
+function toolView(mcpUrl: string, version: unknown): { tools: string } | { profile: string; add_tools?: string[] } {
+  const asked = mcpUrlToolView(mcpUrl);
+  if (asked.tools !== null) return { tools: asked.tools.join(",") || "(empty)" };
+  const profile =
+    asked.profile !== null
+      ? asked.profile || "(empty)"
+      : meetsMinimum(version, CORE_DEFAULT_SINCE)
+        ? "core (default)"
+        : NO_PROFILE;
+  return asked.addTools.length > 0 ? { profile, add_tools: asked.addTools } : { profile };
+}
+
+/**
+ * Python's `_check_tool_listing` (python-sdk#300): `tools/list` on the
+ * client the server check opened — how many tools, and which view. It
+ * reads the CLI's MCP URL, not a Claude Code entry's. A profile is a view,
+ * not an authorization boundary: `tools/call` reaches an unlisted tool
+ * too, so a short list never breaks a `KaguraClient` method; it decides
+ * what an MCP client following `tools/list` sees.
+ *
+ * Any failure fails the check, never doctor; a 401 for a static key
+ * without the `kagura_` prefix gets the bearer-routing hint, the key
+ * itself never shown.
+ */
+async function checkToolListing(
+  client: Pick<KaguraClient, "getToolDefinitions">,
+  resolved: ResolvedAuth,
+  version: unknown,
+): Promise<DoctorCheck[]> {
+  const view = toolView(resolved.mcpUrl, version);
+  let shown: string;
+  if ("tools" in view) {
+    shown = `tools allowlist ${view.tools}`;
+  } else {
+    shown = view.profile === NO_PROFILE ? "no ?profile=" : `profile ${view.profile}`;
+    if (view.add_tools !== undefined) shown += ` + add_tools ${view.add_tools.join(", ")}`;
+  }
+  const details: Record<string, unknown> = { mcp_url: resolved.mcpUrl, ...view };
+  let tools: unknown[];
+  try {
+    tools = await client.getToolDefinitions();
+  } catch (e) {
+    let message = `tools/list on the CLI's MCP URL failed (${shown}): ${excMessage(e)}`;
+    if (e instanceof KaguraAuthError && resolved.kind === "static" && !resolved.apiKey.startsWith(KAGURA_KEY_PREFIX)) {
+      message = `${message} ${NOT_A_KAGURA_KEY_HINT}`;
+    }
+    return [{ section: "tools", status: "fail", message, details }];
+  }
+  const count = tools.length;
+  return [
+    {
+      section: "tools",
+      status: "pass",
+      message: `tools/list on the CLI's MCP URL: ${count} tool${count === 1 ? "" : "s"} (${shown})`,
+      details: { ...details, tool_count: count },
+    },
+  ];
+}
+
 /** Python's message for an OAuth bearer the REST info route refuses. */
 const OAUTH_VERSION_UNVERIFIED =
   "Could not verify server version over REST with an OAuth profile " +
@@ -608,21 +683,32 @@ async function checkResolvedServer(
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
   let info: ServerInfo;
+  let meets: boolean | null;
+  let listing: DoctorCheck[] = [];
   try {
-    info = await client.getServerInfo();
-  } catch (e) {
-    if (e instanceof KaguraAuthError) {
-      return [
-        resolved.kind === "oauth"
-          ? { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED }
-          : { section: "server", status: "fail", message: excMessage(e) },
-      ];
+    try {
+      info = await client.getServerInfo();
+    } catch (e) {
+      if (e instanceof KaguraAuthError) {
+        // An OAuth bearer reaches MCP where REST refuses it, so its tool view
+        // is still checked, the server's version unknown.
+        return resolved.kind === "oauth"
+          ? [
+              { section: "server", status: "info", message: OAUTH_VERSION_UNVERIFIED },
+              ...(await checkToolListing(client, resolved, null)),
+            ]
+          : [{ section: "server", status: "fail", message: excMessage(e) }];
+      }
+      if (e instanceof KaguraConnectionError) {
+        return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
+      }
+      if (e instanceof KaguraResponseError) return [serverUnreadable(e)];
+      return [{ section: "server", status: "fail", message: excMessage(e) }];
     }
-    if (e instanceof KaguraConnectionError) {
-      return [{ section: "server", status: "fail", message: `Server unreachable: ${excMessage(e)}` }];
-    }
-    if (e instanceof KaguraResponseError) return [serverUnreadable(e)];
-    return [{ section: "server", status: "fail", message: excMessage(e) }];
+    meets = meetsMinimum(info.version, MIN_SERVER_VERSION_TRIPLE);
+    // tools/list on the same client, before it closes (python-sdk#300),
+    // unless the server is below the minimum. It never throws.
+    if (meets !== false) listing = await checkToolListing(client, resolved, info.version);
   } finally {
     await client.close();
   }
@@ -632,7 +718,6 @@ async function checkResolvedServer(
 
   const checks: DoctorCheck[] = [{ section: "server", status: "pass", message: "Server reachable" }];
   const shown = typeof version === "string" ? version : pyRepr(version);
-  const meets = meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE);
   if (meets === null) {
     checks.push({ section: "server", status: "info", message: `Version: ${shown}`, details: { version } });
   } else if (!meets) {
@@ -645,7 +730,7 @@ async function checkResolvedServer(
   } else {
     checks.push({ section: "server", status: "pass", message: `Version: ${shown}`, details: { version } });
   }
-  return checks;
+  return [...checks, ...listing];
 }
 
 export const DOCTOR: Command = {
