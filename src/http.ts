@@ -123,14 +123,10 @@ function joinUrl(base: string, params: string[], fragment: string): string {
   return `${scheme}${params.length > 0 ? `?${params.join("&")}` : ""}${fragment.length > 1 ? fragment : ""}`;
 }
 
-/**
- * The first value of each parameter in the URL's query, by decoded name —
- * Python's `mcp_url_query_values`. A blank value is kept: `?profile=` is
- * present (and refused by the server), not absent.
- */
-export function mcpUrlQueryValues(url: string): Map<string, string> {
+/** The first value of each parameter in `params`, by decoded name; see {@link mcpUrlQueryValues}. */
+function firstValues(params: readonly string[]): Map<string, string> {
   const values = new Map<string, string>();
-  for (const param of splitUrl(url).params) {
+  for (const param of params) {
     const name = paramName(param);
     if (!values.has(name)) values.set(name, paramValue(param));
   }
@@ -138,11 +134,63 @@ export function mcpUrlQueryValues(url: string): Map<string, string> {
 }
 
 /**
+ * The first value of each parameter in the URL's query, by decoded name —
+ * Python's `mcp_url_query_values`. A blank value is kept: `?profile=` is
+ * present (and refused by the server), not absent.
+ */
+export function mcpUrlQueryValues(url: string): Map<string, string> {
+  return firstValues(splitUrl(url).params);
+}
+
+/**
+ * An MCP URL split once ({@link parseMcpUrl}). The composer and the
+ * readers below take one in place of the URL, so a command that reads a
+ * URL's query and then sets it splits the URL once.
+ */
+export interface ParsedMcpUrl {
+  /** The URL as given. */
+  readonly url: string;
+  /** The URL before its query and fragment. */
+  readonly base: string;
+  /** The query's `&`-separated parameters as written, empty ones dropped. */
+  readonly params: readonly string[];
+  /** `#` and the fragment; `""` without one. */
+  readonly fragment: string;
+  /** {@link mcpUrlQueryValues} of the URL: each decoded name's first value. */
+  readonly query: ReadonlyMap<string, string>;
+}
+
+/** An MCP URL, as written or already split by {@link parseMcpUrl}. */
+export type McpUrl = string | ParsedMcpUrl;
+
+/**
+ * The URL split for {@link mcpUrlWithQuery} and the readers, as the server
+ * splits it (see above); an already parsed one comes back as it is.
+ */
+export function parseMcpUrl(url: McpUrl): ParsedMcpUrl {
+  if (typeof url !== "string") return url;
+  const { base, params, fragment } = splitUrl(url);
+  return { url, base, params, fragment, query: firstValues(params) };
+}
+
+/**
  * The decoded value of the first `key` in the URL's query — the one the
  * server reads — or undefined. Names compare decoded.
  */
-export function queryParam(url: string, key: string): string | undefined {
-  return mcpUrlQueryValues(url).get(key);
+export function queryParam(url: McpUrl, key: string): string | undefined {
+  return parseMcpUrl(url).query.get(key);
+}
+
+/**
+ * Whether the URL's first `guardrails` value is `off`, in any case and
+ * trimmed — Python's `mcp_url_guardrails_off`, as memory-cloud's
+ * `select_guardrail_context` reads it. `off` turns off both guardrail
+ * lanes: the server's digest, and the `guardrails` block of
+ * `get_context_info`.
+ */
+export function mcpUrlGuardrailsOff(url: McpUrl): boolean {
+  const first = queryParam(url, "guardrails");
+  return first !== undefined && pyStrip(first).toLowerCase() === "off";
 }
 
 /**
@@ -152,16 +200,16 @@ export function queryParam(url: string, key: string): string | undefined {
  * key comes back as written, and one it rewrites is rebuilt as Python's is
  * ({@link joinUrl}).
  */
-export function withoutQueryParam(url: string, key: string): string {
-  const { base, params, fragment } = splitUrl(url);
+export function withoutQueryParam(url: McpUrl, key: string): string {
+  const { url: given, base, params, fragment } = parseMcpUrl(url);
   const kept = params.filter((param) => paramName(param) !== key);
-  if (kept.length === params.length) return url;
+  if (kept.length === params.length) return given;
   return joinUrl(base, kept, fragment);
 }
 
 /** The URL with its query and fragment dropped. */
-export function withoutQuery(url: string): string {
-  return splitUrl(url).base;
+export function withoutQuery(url: McpUrl): string {
+  return parseMcpUrl(url).base;
 }
 
 /**
@@ -315,6 +363,9 @@ export interface McpUrlQuery {
  * context VALUE>` placeholder, as the Python CLI shows it. Such a URL is
  * never written or run.
  *
+ * `url` may be one {@link parseMcpUrl} already split, so a caller that has
+ * read its query (a `?tools=` warning, a `guardrails` check) splits it once.
+ *
  * @throws Error `guardrails` is neither `off` nor a context UUID
  *   ({@link normalizeGuardrails}), `profile` is blank or starts with `-`, a
  *   tool name starts with `-` or a list names more than 100, or `context`
@@ -322,7 +373,7 @@ export interface McpUrlQuery {
  * @throws TypeError `tools` / `addTools` is not an array of strings.
  */
 export function mcpUrlWithQuery(
-  url: string,
+  url: McpUrl,
   updates: McpUrlQuery,
   shown: { guardrailsAsIs?: boolean } = {},
 ): string {
@@ -337,9 +388,9 @@ export function mcpUrlWithQuery(
   const added = updates.addTools !== undefined ? normalizeAddTools(updates.addTools) : "";
   if (added) set.push(["add_tools", added]);
   if (updates.context !== undefined) set.push(["context", normalizeUuid(updates.context, "context")]);
-  if (set.length === 0) return url;
+  if (set.length === 0) return typeof url === "string" ? url : url.url;
   const keys = set.map(([key]) => key);
-  const { base, params, fragment } = splitUrl(url);
+  const { base, params, fragment } = parseMcpUrl(url);
   const kept = params.filter((param) => !keys.includes(paramName(param)));
   const encode = (key: string, value: string): string =>
     key === "guardrails" && shown.guardrailsAsIs === true ? value : quotePlus(value);
@@ -367,9 +418,12 @@ export interface McpToolView {
  * comma-separated items, trimmed, blank names dropped, duplicates removed
  * in order. Which parameter wins (`tools` over the other two) is left to
  * the caller.
+ *
+ * `url` may be one {@link parseMcpUrl} already split: the proxy and
+ * `setup` read the view and then compose the same URL.
  */
-export function mcpUrlToolView(url: string): McpToolView {
-  return mcpQueryToolView(mcpUrlQueryValues(url));
+export function mcpUrlToolView(url: McpUrl): McpToolView {
+  return mcpQueryToolView(parseMcpUrl(url).query);
 }
 
 /**

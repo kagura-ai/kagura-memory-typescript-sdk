@@ -6,6 +6,7 @@ import {
   mcpUrlWithQuery,
   normalizeGuardrails,
   normalizeToolProfile,
+  parseMcpUrl,
   readAddToolsFlag,
   type McpUrlQuery,
 } from "../http.js";
@@ -138,20 +139,22 @@ function upstreamOptions(
  * the query flags set by the one composer, `mcpUrlWithQuery`, at run time
  * — never stored, so the profile's URL is shared unchanged with the other
  * clients. A `?tools=` allowlist already there wins over the tool view
- * flags, which gets a warning, as in Python's `kagura-mcp`.
+ * flags, which gets a warning, as in Python's `kagura-mcp`. The URL is
+ * split once, for that check and the composer alike.
  */
 function upstreamUrl(base: string, query: McpUrlQuery, log: (line: string) => void): string {
+  const url = parseMcpUrl(base);
   const viewFlags = [
     ...(query.profile !== undefined ? ["--tool-profile"] : []),
     ...(query.addTools !== undefined && query.addTools.length > 0 ? ["--add-tools"] : []),
   ];
-  if (viewFlags.length > 0 && mcpUrlToolView(base).tools !== null) {
+  if (viewFlags.length > 0 && mcpUrlToolView(url).tools !== null) {
     log(
       "warning: the upstream URL has a ?tools= allowlist, which the server applies instead of " +
         `${viewFlags.join(" and ")}.`,
     );
   }
-  return mcpUrlWithQuery(base, query);
+  return mcpUrlWithQuery(url, query);
 }
 
 export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {

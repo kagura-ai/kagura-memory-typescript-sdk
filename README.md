@@ -546,7 +546,10 @@ keys go at the end of the query in Python's order (`guardrails`,
 `profile`, `add_tools`, `context`), replacing any value already there,
 with commas left literal, as the Python CLI writes them. A `setup claude`
 run that leaves out a `guardrails`, `profile`, `add_tools` or `context`
-value the entry it replaces had says so in a note. Servers older than a
+value the entry it replaces had, or its `?tools=` allowlist (which goes
+back on `--mcp-url`), says so in a note, reading the old URL as the
+server does: the first value of each key, trimmed, a blank one left out,
+as Python 0.44.0's does. Servers older than a
 parameter ignore it. `--name`, `--force` and
 `--dry-run` (codex, hermes, openclaw) name the entry, replace an existing
 one, and show the command or block without changing anything. A name is

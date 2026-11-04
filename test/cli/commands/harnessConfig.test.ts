@@ -234,6 +234,20 @@ describe("pluginServerUrl", () => {
     // Python strips the value before comparing it.
     expect(pluginServerUrl("https://x.test/mcp?guardrails=+off")).toBe("https://x.test/mcp?guardrails=off");
   });
+
+  // [query, Python 0.44.0's _plugin_server_url("https://x.test/mcp" + query)]:
+  // the first guardrails value, read by mcp_url_guardrails_off — str.strip(),
+  // which takes \x1c-\x1f and U+0085 and keeps U+FEFF, unlike String.trim.
+  it.each([
+    ["?guardrails=%1Foff%1C&profile=core", "https://x.test/mcp?guardrails=off"],
+    ["?guardrails=%C2%85OFF", "https://x.test/mcp?guardrails=off"],
+    ["?guardrails=%EF%BB%BFoff", "https://x.test/mcp"],
+    ["?guardrails=%E3%80%80off&context=x", "https://x.test/mcp?guardrails=off"],
+    ["?guardrails=&guardrails=off", "https://x.test/mcp"],
+    ["?guardrails=off&guardrails=x#f", "https://x.test/mcp?guardrails=off"],
+  ])("reads %s as Python does", (query, expected) => {
+    expect(pluginServerUrl(`https://x.test/mcp${query}`)).toBe(expected);
+  });
 });
 
 describe("tomlHasServer", () => {

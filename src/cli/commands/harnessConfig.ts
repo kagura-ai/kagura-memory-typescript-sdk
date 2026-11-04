@@ -14,7 +14,7 @@
 
 import * as net from "node:net";
 
-import { queryParam, withoutQuery } from "../../http.js";
+import { mcpUrlGuardrailsOff, parseMcpUrl, withoutQuery, type McpUrl } from "../../http.js";
 
 /**
  * The variable Codex and OpenClaw entries read the key from unless
@@ -95,11 +95,13 @@ export function isHttpUrl(url: string): boolean {
  * `context` and guardrails context mean nothing there; they stay on the MCP
  * entry. `guardrails=off` is the one parameter kept: it is what stops the
  * server from also sending a digest of the memories the hooks already
- * deliver.
+ * deliver. It is read as the server reads it ({@link mcpUrlGuardrailsOff}):
+ * the first value, trimmed as Python trims it, in any case.
  */
-export function pluginServerUrl(url: string): string {
-  const base = withoutQuery(url);
-  return queryParam(url, "guardrails")?.trim().toLowerCase() === "off" ? `${base}?guardrails=off` : base;
+export function pluginServerUrl(url: McpUrl): string {
+  const parsed = parseMcpUrl(url);
+  const base = withoutQuery(parsed);
+  return mcpUrlGuardrailsOff(parsed) ? `${base}?guardrails=off` : base;
 }
 
 function escapeRegExp(text: string): string {
