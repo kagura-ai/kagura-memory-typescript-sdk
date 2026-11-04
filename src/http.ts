@@ -207,9 +207,13 @@ export function withoutQueryParam(url: McpUrl, key: string): string {
   return joinUrl(base, kept, fragment);
 }
 
-/** The URL with its query and fragment dropped. */
+/**
+ * The URL with its query and fragment dropped, rebuilt as Python's
+ * `urlunsplit` rebuilds it ({@link joinUrl}): `HTTPS://` is written
+ * `https://`, the rest as written.
+ */
 export function withoutQuery(url: McpUrl): string {
-  return parseMcpUrl(url).base;
+  return joinUrl(parseMcpUrl(url).base, [], "");
 }
 
 /**

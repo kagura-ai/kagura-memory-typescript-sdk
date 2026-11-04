@@ -96,7 +96,9 @@ export function isHttpUrl(url: string): boolean {
  * entry. `guardrails=off` is the one parameter kept: it is what stops the
  * server from also sending a digest of the memories the hooks already
  * deliver. It is read as the server reads it ({@link mcpUrlGuardrailsOff}):
- * the first value, trimmed as Python trims it, in any case.
+ * the first value, trimmed as Python trims it, in any case. The rest is
+ * rebuilt as Python's `urlunsplit` rebuilds it ({@link withoutQuery}), the
+ * scheme lower-cased, as the entry's own URL is when setup rewrites it.
  */
 export function pluginServerUrl(url: McpUrl): string {
   const parsed = parseMcpUrl(url);
