@@ -548,7 +548,7 @@ export class KaguraRestClient {
     context: RequestContext,
     fields: ServerErrorFields | null = serverErrorFields(response.text),
   ): KaguraError {
-    const conflict = this.versionConflictRefusal(response);
+    const conflict = this.versionConflictRefusal(response, fields);
     if (conflict !== null) {
       return conflict;
     }
@@ -661,16 +661,19 @@ export class KaguraRestClient {
    * dedup `409 RES-002` has no such reason and stays the generic error
    * `FilesClient.upload` reads its `existing_file` from. The message is the
    * server's own, scrubbed of credential markers.
+   *
+   * @param fields The body's decoded `[code, details]`
+   *   ({@link mapStatusError}'s), so any other error returns here without
+   *   reading the body again; only a conflict reads its message.
    */
-  protected versionConflictRefusal(response: RestResponse): KaguraError | null {
-    const envelope = parseErrorEnvelope(response.text);
-    if (envelope === null) {
+  protected versionConflictRefusal(response: RestResponse, fields: ServerErrorFields | null): KaguraError | null {
+    if (fields === null || fields[0] !== "RES-002" || fields[1].reason !== "version_conflict") {
       return null;
     }
     return versionConflictError(
-      envelope.code,
+      fields[0],
       sanitizeServerDetail(extractDetail(response.text)) ?? `HTTP ${response.status}`,
-      envelope.details,
+      fields[1],
     );
   }
 

@@ -438,8 +438,9 @@ describe("update-memory --merge-details, as the Python CLI 0.44.0", () => {
 
   it("does not change the details it read", async () => {
     const current = { location: { lat: 1, lon: 2 }, n: 1 };
+    // The raw reference reply (callRawTool), which the CLI reads as Python's does.
     const client = {
-      reference: async () => ({ status: "success", memory: { memory_id: "mem-1", details: current } }),
+      callRawTool: async () => ({ status: "success", memory: { memory_id: "mem-1", details: current } }),
     } as unknown as Parameters<typeof currentDetailsForMerge>[0];
     const read = await currentDetailsForMerge(client, "ctx", "mem-1");
     expect(read).toBe(current);

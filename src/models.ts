@@ -1437,12 +1437,14 @@ export type ReferenceField = "content" | "details" | "context" | "links";
  * `"duplicate_candidate"` and `candidate` names it, so check `status`
  * before reading `memory_id`.
  *
- * The optional keys are absent, never `null`, when they do not apply.
- * Keys a newer server adds pass through.
+ * The reply as the server sent it, unchecked, as the Python SDK returns
+ * its dict — so every key is typed optional: an empty tool result comes
+ * back as `{}`. The server's optional keys are absent, never `null`, when
+ * they do not apply. Keys a newer server adds pass through.
  */
 export interface RememberResult {
-  /** `"success"`, or `"duplicate_candidate"` with `dedupe: "check"`. */
-  status: string;
+  /** `"success"`, or `"duplicate_candidate"` with `dedupe: "check"`; memory-cloud always sends it. */
+  status?: string;
   memory_id?: string;
   scope?: string;
   /** The memory's version, `updateMemory`'s `expectedVersion` (v0.113.0+, #2043). */
@@ -1468,9 +1470,14 @@ export interface RememberResult {
   [key: string]: unknown;
 }
 
-/** The reply of `updateMemory`. Keys a newer server adds pass through. */
+/**
+ * The reply of `updateMemory` as the server sent it, unchecked, as the
+ * Python SDK returns its dict — so every key is typed optional: an empty
+ * tool result comes back as `{}`. Keys a newer server adds pass through.
+ */
 export interface UpdateMemoryResult {
-  status: string;
+  /** memory-cloud always sends it. */
+  status?: string;
   memory_id?: string;
   /** `"updated"`, or for an `externalId` upsert `"created"` / `"replaced"`. */
   operation?: string;
@@ -1515,7 +1522,8 @@ export interface UpdateMemoryResult {
  * describe the memory now, are left out.
  */
 export interface ReferenceMemory {
-  memory_id: string;
+  /** Always sent by memory-cloud; not checked, so typed optional. */
+  memory_id?: string;
   summary?: string;
   context_summary?: string | null;
   content?: string;
@@ -1565,7 +1573,11 @@ export interface ReferenceMemory {
   [key: string]: unknown;
 }
 
-/** The reply of `reference`. Keys a newer server adds pass through. */
+/**
+ * The reply of `reference`, as the server sent it once `status` (a string)
+ * and `memory` (an object) are checked. Keys a newer server adds pass
+ * through.
+ */
 export interface ReferenceResponse {
   status: string;
   memory: ReferenceMemory;

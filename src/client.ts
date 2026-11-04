@@ -1322,6 +1322,30 @@ function detailsWithToolTrigger(
 /** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
 const REFERENCE_FIELDS: readonly ReferenceField[] = ["content", "details", "context", "links"];
 
+/**
+ * Check `reference`'s reply before returning it as the server sent it:
+ * `status` a string and `memory` an object, the two fields
+ * {@link ReferenceResponse} declares required. Nothing else is read or
+ * changed, so every other key passes through. (The Python SDK returns the
+ * dict unchecked; the `kagura-memory` CLI reads the raw reply, as the
+ * Python CLI does.)
+ *
+ * @throws KaguraResponseError naming the tool and the failing fields,
+ *   e.g. `reference: unexpected server response for ReferenceResponse
+ *   (memory: Field required)`.
+ */
+function checkReferenceReply(result: ToolResult): void {
+  const r = new ResponseReader("reference", "ReferenceResponse");
+  r.field(result, "status", laxStr);
+  const memory = Object.prototype.hasOwnProperty.call(result, "memory") ? result.memory : undefined;
+  if (memory === undefined) {
+    r.issue(["memory"], "Field required");
+  } else {
+    r.object(memory, ["memory"], "ReferenceMemory");
+  }
+  r.check();
+}
+
 /** The `remember` arguments {@link checkRememberOptions} prepares. */
 interface RememberPrepared {
   details: Record<string, unknown> | null | undefined;
@@ -2372,7 +2396,8 @@ export class KaguraClient {
     if (options.verbose) {
       args.verbose = true;
     }
-    // The reply as sent: Python returns the dict unchecked too.
+    // The reply as sent, as Python returns its dict: `RememberResult` types
+    // every key optional, since `{}` (an empty tool result) comes back too.
     return (await this.callToolChecked("remember", args)) as RememberResult;
   }
 
@@ -3533,16 +3558,14 @@ export class KaguraClient {
    *   `fields` is not a list of `"content"`, `"details"`, `"context"`,
    *   `"links"`, or leaves out the field an offset pages; or if `maxChars`
    *   is not an integer in [10,000, 100,000]. A boolean is no integer, as
-   *   on the server.
+   *   on the server. More than one offset is refused before any offset's
+   *   range is checked.
+   * @throws KaguraResponseError when the reply's `status` is not a string
+   *   or its `memory` not an object.
    */
   async reference(options: ReferenceOptions): Promise<ReferenceResponse> {
-    const args: Record<string, unknown> = {
-      context_id: options.contextId,
-      memory_id: options.memoryId,
-    };
-    if (isSet(options.version)) {
-      args.version = validateIntRange("version", options.version, 1);
-    }
+    // Every check first; the arguments are built only for a call that goes out.
+    const version = isSet(options.version) ? validateIntRange("version", options.version, 1) : undefined;
     const offsets = (
       [
         ["content", "contentOffset", "content_offset"],
@@ -3550,28 +3573,43 @@ export class KaguraClient {
         ["context", "contextOffset", "context_offset"],
       ] as const
     ).filter(([, option]) => isSet(options[option]));
-    for (const [, option, wire] of offsets) {
-      args[wire] = validateIntRange(option, options[option], 0);
-    }
     if (offsets.length > 1) {
       throw new Error(`Pass only one of contentOffset, detailsOffset, contextOffset per call, got ${offsets.map(([, option]) => option).join(", ")}`);
     }
+    const paged = offsets[0];
+    const offset = paged === undefined ? undefined : validateIntRange(paged[1], options[paged[1]], 0);
+    let fields: ReferenceField[] | undefined;
     if (isSet(options.fields)) {
-      const fields: unknown = options.fields;
-      if (!Array.isArray(fields) || fields.some((field) => !REFERENCE_FIELDS.includes(field as ReferenceField))) {
-        throw new Error(`fields must be a list of: ${REFERENCE_FIELDS.join(", ")}, got ${pyRepr(fields)}`);
+      const given: unknown = options.fields;
+      if (!Array.isArray(given) || given.some((field) => !REFERENCE_FIELDS.includes(field as ReferenceField))) {
+        throw new Error(`fields must be a list of: ${REFERENCE_FIELDS.join(", ")}, got ${pyRepr(given)}`);
       }
-      const paged = offsets[0];
-      if (paged !== undefined && !fields.includes(paged[0])) {
+      if (paged !== undefined && !given.includes(paged[0])) {
         throw new Error(`${paged[1]} needs '${paged[0]}' in fields`);
       }
+      fields = given as ReferenceField[];
+    }
+    const maxChars = isSet(options.maxChars) ? validateMaxChars(options.maxChars) : undefined;
+
+    const args: Record<string, unknown> = {
+      context_id: options.contextId,
+      memory_id: options.memoryId,
+    };
+    if (version !== undefined) {
+      args.version = version;
+    }
+    if (paged !== undefined) {
+      args[paged[2]] = offset;
+    }
+    if (fields !== undefined) {
       args.fields = fields;
     }
-    if (isSet(options.maxChars)) {
-      args.max_chars = validateMaxChars(options.maxChars);
+    if (maxChars !== undefined) {
+      args.max_chars = maxChars;
     }
-    // The reply as sent: Python returns the dict unchecked too.
-    return (await this.callToolChecked("reference", args)) as ReferenceResponse;
+    const result = await this.callToolChecked("reference", args);
+    checkReferenceReply(result);
+    return result as ReferenceResponse;
   }
 
   /**
@@ -3670,7 +3708,8 @@ export class KaguraClient {
     if (options.verbose) {
       args.verbose = true;
     }
-    // The reply as sent: Python returns the dict unchecked too.
+    // The reply as sent, as Python returns its dict: `UpdateMemoryResult`
+    // types every key optional, since `{}` (an empty tool result) comes back too.
     return (await this.callToolChecked("update_memory", args)) as UpdateMemoryResult;
   }
 

@@ -120,7 +120,7 @@ function blankToUndefined(value: string | undefined): string | undefined {
   return value !== undefined && pyStrip(value) ? value : undefined;
 }
 
-const REMEMBER_OBSERVED_AT: FlagSpec = {
+const OBSERVED_AT: FlagSpec = {
   name: "observed-at",
   type: "value",
   help:
@@ -193,7 +193,7 @@ const remember: Command = {
         type: "value",
         help: "Shorthand for details.location: 'lat,lon' or 'lat,lon,label'",
       },
-      REMEMBER_OBSERVED_AT,
+      OBSERVED_AT,
       DEDUPE,
       {
         name: "tags-normalize",
@@ -482,8 +482,10 @@ const reference: Command = {
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const memoryId = requireOption(args, MEMORY_ID);
+    // The raw reply, printed as the Python CLI prints its unchecked dict;
+    // `reference()` would refuse one without a `memory` object.
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
-      client.reference({ contextId, memoryId }),
+      client.callRawTool("reference", { context_id: contextId, memory_id: memoryId }),
     );
   },
 };
@@ -583,9 +585,12 @@ export async function currentDetailsForMerge(
   memoryId: string,
   flag = "--merge-details",
 ): Promise<Record<string, unknown>> {
-  // `reference()` returns the tool's structured object (`callToolChecked`),
-  // unchecked: `memory` may be anything the server sent.
-  const memory: unknown = (await client.reference({ contextId, memoryId })).memory;
+  // The raw reply (domain errors still thrown), so the refusals below word
+  // a reply without a memory object as the Python CLI does, where
+  // `reference()` would throw its own KaguraResponseError first. No
+  // `fields` selection is sent (see above).
+  const memory: unknown = (await client.callRawTool("reference", { context_id: contextId, memory_id: memoryId }))
+    .memory;
   if (!isPlainObject(memory)) {
     throw new CliError(`${flag}: the reference reply carried no memory object`);
   }
@@ -869,8 +874,7 @@ const updateMemory: Command = {
       },
       EXPECTED_VERSION,
       {
-        name: "observed-at",
-        type: "value",
+        ...OBSERVED_AT,
         help:
           "When the fact held: YYYY-MM-DD or an ISO 8601 datetime (naive = UTC). " +
           "Alone it changes only details.observed_at (server v0.127.0+)",

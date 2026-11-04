@@ -22,7 +22,13 @@ import {
   type RememberOptions,
   type UpdateMemoryOptions,
 } from "../src/client.js";
-import { KaguraConnectionError, KaguraError, KaguraVersionConflictError } from "../src/errors.js";
+import {
+  KaguraConnectionError,
+  KaguraError,
+  KaguraResponseError,
+  KaguraVersionConflictError,
+} from "../src/errors.js";
+import { runCli, type CliDeps } from "../src/cli/run.js";
 import * as sdk from "../src/index.js";
 import type { HttpMethod, RestResponse } from "../src/restBase.js";
 import { KaguraRestClient } from "../src/restBase.js";
@@ -569,6 +575,8 @@ describe("reference: version, the offsets, fields and maxChars", () => {
     [{ detailsOffset: 1.5 }, "detailsOffset must be an integer of at least 0, got 1.5"],
     [{ contextOffset: "0" as unknown as number }, "contextOffset must be an integer of at least 0, got '0'"],
     [{ contentOffset: 0, detailsOffset: 0 }, "Pass only one of contentOffset, detailsOffset, contextOffset per call, got contentOffset, detailsOffset"],
+    // The count before either offset's range.
+    [{ contentOffset: -1, contextOffset: 1.5 }, "Pass only one of contentOffset, detailsOffset, contextOffset per call, got contentOffset, contextOffset"],
     [{ fields: ["content", "summary"] as unknown as ReferenceOptions["fields"] }, "fields must be a list of: content, details, context, links, got ['content', 'summary']"],
     [{ fields: "content" as unknown as ReferenceOptions["fields"] }, "fields must be a list of: content, details, context, links, got 'content'"],
     [{ detailsOffset: 0, fields: ["content"] }, "detailsOffset needs 'details' in fields"],
@@ -592,6 +600,64 @@ describe("reference: version, the offsets, fields and maxChars", () => {
     const result = await makeClient(server).reference({ contextId: CTX, memoryId: MEM });
     expect(result.memory).toEqual(memory);
     expect(result.memory.content_next_offset).toBe(3);
+  });
+});
+
+// ============================================================================
+// The typed replies: status (and reference's memory) checked, the rest as sent
+// ============================================================================
+
+describe("the replies remember, updateMemory and reference type", () => {
+  const UPGRADE = "The server may be newer than this SDK; upgrading kagura-memory may help.";
+
+  it.each([
+    [{ status: "success" }, "memory: Field required"],
+    [{ status: "success", memory: "mem-1" }, "memory: Input should be a valid dictionary or instance of ReferenceMemory"],
+    [{ status: 1, memory: {} }, "status: Input should be a valid string"],
+    [{ memory: null }, "status: Field required; memory: Input should be a valid dictionary or instance of ReferenceMemory"],
+    [{}, "status: Field required; memory: Field required"],
+  ])("reference refuses %j, naming the tool", async (reply, problems) => {
+    const server = new FakeServer();
+    server.toolTexts.reference = JSON.stringify(reply);
+    const err = await makeClient(server)
+      .reference({ contextId: CTX, memoryId: MEM })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraResponseError);
+    expect((err as KaguraResponseError).operation).toBe("reference");
+    expect((err as Error).message).toBe(
+      `reference: unexpected server response for ReferenceResponse (${problems}). ${UPGRADE}`,
+    );
+  });
+
+  it("returns a reference reply that passes as sent, keys the types do not name included", async () => {
+    const server = new FakeServer();
+    const reply = { status: "success", memory: { details: null, plan_headroom: [] }, extra: { a: 1 } };
+    server.toolResults.reference = reply;
+    expect(await makeClient(server).reference({ contextId: CTX, memoryId: MEM })).toEqual(reply);
+  });
+
+  it("returns the write replies unchecked, as Python returns its dict", async () => {
+    // RememberResult / UpdateMemoryResult type every key optional for this.
+    const server = new FakeServer();
+    server.toolTexts.remember = '{"memory_id": "m-1"}';
+    server.toolTexts.update_memory = "{}";
+    const client = makeClient(server);
+    expect(await client.remember(BASE)).toEqual({ memory_id: "m-1" });
+    expect(await client.updateMemory({ contextId: CTX, memoryId: MEM, summary: "A summary of ten" })).toEqual({});
+  });
+
+  it("the CLI's reference prints the raw reply, as the Python CLI prints its dict", async () => {
+    const server = new FakeServer();
+    server.toolTexts.reference = '{"status": "success"}';
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runCli(["reference", "-m", MEM], {
+      write: (line: string) => void out.push(line),
+      writeError: (line: string) => void err.push(line),
+      loadConfig: () => ({ context_id: CTX, api_key: "k" }),
+      makeClient: (options: Record<string, unknown>) => makeClient(server, options),
+    } as unknown as CliDeps);
+    expect({ code, out, err }).toEqual({ code: 0, out: ['{\n  "status": "success"\n}'], err: [] });
   });
 });
 
