@@ -2320,9 +2320,14 @@ export interface BootstrapResponse extends ContextEcho {
   context_summary_omitted?: boolean;
   /**
    * Every plan dimension at 80 % or more of its limit (memory-cloud
-   * v0.142.0+, #2615), as the server sent it; absent otherwise.
+   * v0.142.0+, #2615); absent otherwise. Passed through exactly as the
+   * server sent it and not checked, so `unknown`: the server sends a list
+   * of notices, but nothing here refuses another shape. The Python SDK
+   * reads it fail-open as `PlanHeadroomNotice` rows (an unreadable entry
+   * dropped, an unreadable value `None`); a typed reading of it is
+   * kagura-memory-typescript-sdk#88.
    */
-  plan_headroom?: unknown[];
+  plan_headroom?: unknown;
 }
 
 /**
@@ -2461,10 +2466,12 @@ export interface RememberBatchResult extends ContextEcho {
   session_id?: string | null;
   /**
    * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
-   * #2615), once per call, throttled hourly per workspace and dimension; as
-   * the server sent it.
+   * #2615), once per call, throttled hourly per workspace and dimension.
+   * Passed through exactly as the server sent it and not checked, so
+   * `unknown`, as on {@link BootstrapResponse.plan_headroom}; a typed
+   * reading of it is kagura-memory-typescript-sdk#88.
    */
-  plan_headroom?: unknown[];
+  plan_headroom?: unknown;
 }
 
 /**

@@ -773,9 +773,11 @@ const CONTEXT_ECHO_FIELDS: readonly Field[] = [
 ];
 
 /**
- * `plan_headroom` (memory-cloud v0.142.0+, #2615), passed through as sent:
- * the Python SDK reads it fail-open as `PlanHeadroomNotice` rows, which
- * this reader does not model yet.
+ * `plan_headroom` (memory-cloud v0.142.0+, #2615), passed through as sent
+ * and printed so by the CLI's dumps: the Python SDK reads it fail-open as
+ * `PlanHeadroomNotice` rows, filling a field an entry leaves out with its
+ * default (`remedies: []`, `help: null`, …) and dropping an unreadable
+ * entry, which this reader does not do yet (#88).
  */
 const PLAN_HEADROOM: Field = optional("plan_headroom", "any");
 
