@@ -653,15 +653,18 @@ export interface ResourceSchemaResponse {
  * `context_id` and `context_name` are `null` for a resource whose contexts
  * have all been deleted while it still holds active tokens (server
  * v0.94.0+, kagura-ai/memory-cloud#1863): the server lists such a row only
- * so those tokens stay reachable, and revoking the resource's last token
+ * so those tokens stay reachable (`ResourceClient.listTokens`), and
+ * revoking the resource's last token (`ResourceClient.revokeToken`)
  * removes the row. `context_display_name` is `null` then too, and whenever
- * the context has no display name.
+ * the context has no display name. The server resolves such a resource's
+ * impact, schema and indexer-status reads through a live context, so they
+ * answer 404: `getResourceImpact` and `getIndexerStatus` throw
+ * `KaguraNotFoundError` and `getResourceSchema` returns `null`.
+ * `listResourceEvents` still returns its events.
  */
 export interface ResourceListItem {
   resource_id: string;
-  /** `null` for a resource whose contexts were all deleted (server v0.94.0+). */
   context_id?: string | null;
-  /** `null` for a resource whose contexts were all deleted (server v0.94.0+). */
   context_name?: string | null;
   context_display_name?: string | null;
   token_count: number;
