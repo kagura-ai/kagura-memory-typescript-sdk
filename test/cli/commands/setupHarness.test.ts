@@ -668,7 +668,7 @@ describe("setup codex", () => {
     it("rejects an empty --tool-profile", async () => {
       const h = harness(codex);
       expect(await runCli(setup("codex", "--tool-profile="), h.deps)).toBe(2);
-      expect(h.err).toContain("Error: Invalid value for '--tool-profile': must not be empty");
+      expect(h.err).toContain("Error: Invalid value for '--tool-profile': tool_profile must not be empty");
       expect(h.runs).toEqual([]);
     });
 
@@ -1134,9 +1134,19 @@ describe("setup hermes", () => {
     expect(h.rest.requests).toEqual([]);
   });
 
-  it("does not take --tool-profile", async () => {
+  // Python 0.43.0 gave every harness --tool-profile and --add-tools
+  // (python-sdk#300); before, only codex took --tool-profile here.
+  it("takes --tool-profile and --add-tools, after the guardrails edit, as Python's dry run prints them", async () => {
     const h = harness({});
-    expect(await runCli(setup("hermes", "--tool-profile", "core"), h.deps)).toBe(2);
+    expect(
+      await runCli(
+        setup("hermes", "--tool-profile", "core", "--add-tools", "explore,list_edges", "--add-tools", "explore", "-y", "--dry-run"),
+        h.deps,
+      ),
+    ).toBe(0);
+    // Python 0.44.0 writes the same query: url: "…?profile=core&add_tools=explore,list_edges".
+    expect(report(h).mcp_url).toBe(`${MCP_URL}?profile=core&add_tools=explore,list_edges`);
+    expect(h.err.join("\n")).toContain(`url: "${MCP_URL}?profile=core&add_tools=explore,list_edges"`);
   });
 
   it("describes itself and --guardrails in Python's words", async () => {
@@ -2719,5 +2729,126 @@ describe("help (python-sdk#279, #57)", () => {
       "The variable the Authorization header references, kept in OpenClaw's .env ($OPENCLAW_STATE_DIR, " +
         "else ~/.openclaw; default KAGURA_API_KEY)",
     );
+  });
+});
+
+// Python 0.43.0 gave every harness --tool-profile and --add-tools
+// (python-sdk#300). The URL each entry gets is the one the Python CLI
+// 0.44.0 prints for the same flags (`kagura setup <harness> --url-form
+// --mcp-url https://memory.example.com/mcp/w/ws --tool-profile core
+// --add-tools explore,list_edges --add-tools explore -y --dry-run`:
+// `…/ws?profile=core&add_tools=explore,list_edges`), on this file's URL.
+describe("the tool view on every harness (#83)", () => {
+  const CONTEXT_ID = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
+  const VIEW = ["--tool-profile", "core", "--add-tools", "explore,list_edges", "--add-tools", "explore"];
+  const viewed = `${MCP_URL}?profile=core&add_tools=explore,list_edges`;
+
+  it("codex: the dry run's command and table carry ?profile= and ?add_tools=", async () => {
+    const h = harness({ onPath: { codex: "/usr/bin/codex" } });
+    expect(await runCli(setup("codex", ...VIEW, "--dry-run"), h.deps)).toBe(0);
+    expect(notes(h)).toContain(
+      `Would run: codex mcp add kagura-memory --url '${viewed}' --bearer-token-env-var KAGURA_API_KEY`,
+    );
+    expect(h.err.join("\n")).toContain(`url = "${viewed}"`);
+    expect(report(h).mcp_url).toBe(viewed);
+    expect(h.runs).toEqual([]);
+  });
+
+  it("codex: the add runs with that URL", async () => {
+    const h = harness({ onPath: { codex: "/usr/bin/codex" } });
+    expect(await runCli(setup("codex", ...VIEW), h.deps)).toBe(0);
+    expect(h.runs[0]).toEqual([
+      "/usr/bin/codex", "mcp", "add", "kagura-memory", "--url", viewed, "--bearer-token-env-var", "KAGURA_API_KEY",
+    ]);
+  });
+
+  it("hermes: the printed block carries them, after the guardrails edit", async () => {
+    const h = harness({});
+    expect(
+      await runCli(setup("hermes", "--mcp-url", `${MCP_URL}?guardrails=${CONTEXT_ID}`, ...VIEW, "-y"), h.deps),
+    ).toBe(0);
+    expect(report(h).mcp_url).toBe(viewed);
+    expect(h.err.join("\n")).toContain(`url: "${viewed}"`);
+  });
+
+  it("openclaw: the add runs with them, and a first guardrails=off stays before them", async () => {
+    const h = harness({ onPath: { openclaw: "/usr/bin/openclaw" } });
+    expect(await runCli(setup("openclaw", "--mcp-url", `${MCP_URL}?guardrails=off`, ...VIEW), h.deps)).toBe(0);
+    expect(h.runs[0]![5]).toBe(`${MCP_URL}?guardrails=off&profile=core&add_tools=explore,list_edges`);
+  });
+
+  it("openclaw without openclaw on PATH prints the block with them", async () => {
+    const h = harness({});
+    expect(await runCli(setup("openclaw", ...VIEW), h.deps)).toBe(0);
+    expect(h.err.join("\n")).toContain(`"url": "${viewed}"`);
+  });
+
+  // Python 0.44.0's text, from the same flags on `…?tools=recall`.
+  it.each(["codex", "hermes", "openclaw"])("%s warns that a ?tools= allowlist wins over both", async (name) => {
+    const h = harness({});
+    expect(
+      await runCli(
+        setup(name, "--mcp-url", `${MCP_URL}?tools=recall`, "--tool-profile", "core", "--add-tools", "explore", "-y"),
+        h.deps,
+      ),
+    ).toBe(0);
+    expect(notes(h)).toContain(
+      "Warning: the MCP URL has a ?tools= allowlist, which the server applies instead of --tool-profile core " +
+        "and --add-tools explore.",
+    );
+    expect(report(h).mcp_url).toBe(`${MCP_URL}?tools=recall&profile=core&add_tools=explore`);
+  });
+
+  it("codex's guardrails preview carries the entry's tool view, as Python 0.44.0 prints it", async () => {
+    const h = harness({});
+    expect(
+      await runCli(setup("codex", "-c", CONTEXT_ID, "--tool-profile", "full", "--add-tools", "explore"), h.deps),
+    ).toBe(0);
+    const url = `${MCP_URL}?guardrails=${CONTEXT_ID}&profile=full&add_tools=explore`;
+    expect(notes(h).join("\n")).toContain(
+      `Preview what it sends: KAGURA_MCP_URL='${url}' kagura-memory guardrails digest ${CONTEXT_ID} ` +
+        "--target instructions --profile full --add-tools explore",
+    );
+  });
+
+  it("codex's preview reads a tool view already in --mcp-url as the server does", async () => {
+    // Python 0.44.0: `… --target instructions --tools recall,remember --add-tools x`.
+    const h = harness({});
+    const given = `${MCP_URL}?tools=recall,remember&add_tools=x`;
+    expect(await runCli(setup("codex", "--mcp-url", given, "--guardrails", CONTEXT_ID), h.deps)).toBe(0);
+    expect(notes(h).join("\n")).toContain(
+      `kagura-memory guardrails digest ${CONTEXT_ID} --target instructions --tools recall,remember --add-tools x`,
+    );
+  });
+
+  // Recorded from the Python CLI 0.44.0 (`setup codex --url-form …`, exit 2 each).
+  it.each([
+    [["--add-tools="], "Error: Invalid value for '--add-tools': must name at least one tool"],
+    [["--add-tools", " , "], "Error: Invalid value for '--add-tools': must name at least one tool"],
+    [["--add-tools=-x"], "Error: Invalid value for '--add-tools': add_tools names cannot start with '-': '-x'"],
+    [["--add-tools", "a,-b"], "Error: Invalid value for '--add-tools': add_tools names cannot start with '-': '-b'"],
+    [
+      ["--add-tools", Array.from({ length: 101 }, (_, i) => `t${i}`).join(",")],
+      "Error: Invalid value for '--add-tools': add_tools accepts at most 100 tool names, got 101",
+    ],
+    [["--tool-profile=-x"], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
+    [["--tool-profile="], "Error: Invalid value for '--tool-profile': tool_profile must not be empty"],
+  ])("refuses %j with exit 2 on every harness, running nothing", async (extra, message) => {
+    for (const name of ["codex", "hermes", "openclaw"]) {
+      const h = harness({ onPath: { codex: "/usr/bin/codex", openclaw: "/usr/bin/openclaw" } });
+      expect(await runCli(setup(name, ...extra), h.deps)).toBe(2);
+      expect(h.err).toContain(message);
+      expect(h.runs).toEqual([]);
+    }
+  });
+
+  it.each(["codex", "hermes", "openclaw"])("%s documents --tool-profile and --add-tools in Python's words", async (name) => {
+    const h = harness({});
+    expect(await runCli(["setup", name, "--help"], h.deps)).toBe(0);
+    const text = h.out.join("\n").replace(/\s+/g, " ");
+    expect(text).toContain("--tool-profile NAME Add ?profile=NAME to the upstream MCP URL (server v0.73.0+)");
+    expect(text).toContain("Without it memory-cloud 0.93.0+ lists 'core'");
+    expect(text).toContain("--add-tools NAME[,NAME...] Add ?add_tools= to the upstream MCP URL (server v0.129.0+)");
+    expect(text).toContain("An ?add_tools= already in --mcp-url is kept without it.");
   });
 });

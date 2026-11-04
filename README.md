@@ -183,7 +183,9 @@ npx kagura-memory recall "deploy runbook" --full 1 --max-chars 40000   # content
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
 npx kagura-memory measure record <context-id> weight_kg 71.5 --unit kg
 npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
-npx kagura-memory doctor
+npx kagura-memory setup claude --add-tools explore --context <context-id>   # ?add_tools= (v0.129.0+), ?context= (v0.114.0+)
+npx kagura-memory guardrails digest <context-id> --target instructions --add-tools explore  # …for ?add_tools=explore
+npx kagura-memory doctor   # ends with the tools/list view of the CLI's MCP URL
 ```
 
 The context id comes from `-c/--context-id`, or from `context_id` in
@@ -348,8 +350,8 @@ URL likewise from `--mcp-url`, else that file's `mcp_url`, else
 reads it. It never takes them from `~/.kagura.json`, nor, with
 `--project-dir`, from the current directory's `.kagura.json`: those are
 another project's credentials. `.kagura.json` gets the URL as given; the
-parameters that `--guardrails` and `--tool-profile` set go on the entry's
-URL only. A plain-HTTP URL to a host other than localhost is refused,
+parameters that `--guardrails`, `--tool-profile`, `--add-tools` and
+`--context` set go on the entry's URL only. A plain-HTTP URL to a host other than localhost is refused,
 whichever of the three it came from, before anything is written or run
 (exit 1, `Connection failed: MCP URL must use HTTPS for security …`, the
 Python CLI's words, whose connection test refuses it).
@@ -514,16 +516,38 @@ written, whether it comes from the flag or from the URL: one warning
 names what was dropped. A first `?guardrails=off` in the URL, the value
 the server reads, is kept, alone and with a warning of its own. Names
 compare decoded, as the server reads them (`guard%72ails` is
-`guardrails`). All of this is as in Python. `--tool-profile` (claude,
-codex; memory-cloud v0.73.0+) sets `profile` and refuses an empty name.
-The server knows
-`full` and `core` (case-sensitive) and fails `tools/list` for any other
-name, which leaves the harness with no Kagura tools. It applies a
-`?tools=` allowlist already on the URL instead, so that case gets a
-warning. Both go at the end of the query, `guardrails`
-first, replacing any value already there, as the Python CLI writes them.
-A `setup claude` run that leaves out a `guardrails` or `profile` value
-the entry it replaces had says so in a note. `--name`, `--force` and
+`guardrails`). All of this is as in Python.
+
+**What `tools/list` shows** (the entry's tool view). Since memory-cloud
+0.93.0 a bare MCP URL lists the `core` profile, the memory loop (21 tools
+on 0.141.0), and `?profile=full` every tool (72). `tools/call` is
+unaffected: a profile is a view, not an authorization boundary, so an
+unlisted tool stays callable and every `KaguraClient` method works on any
+URL. `--tool-profile NAME` (every harness; memory-cloud v0.73.0+) sets
+`profile`; the server knows only `core` and `full` (case-sensitive) and
+fails `tools/list` for any other name, which leaves the harness with no
+Kagura tools. Setup leaves that check to the server and refuses only a
+blank name or one starting with `-` (exit 2), as Python does.
+`--add-tools NAME[,NAME…]` (every harness; v0.129.0+; may
+repeat) lists more tools on top of the profile: trimmed, de-duplicated,
+at most 100, unknown names ignored by the server. `recall`'s
+`explore_hints` need `explore` listed (v0.135.0 took it out of `core`),
+so add `--add-tools explore` or use `--tool-profile full`. A `?tools=`
+allowlist already on the URL wins over both, which gets a warning.
+`--context CONTEXT_ID` (`setup claude`; v0.114.0+) names the connection's
+default context: context-scoped tools called without `context_id` run in
+it, an explicit `context_id` wins, and the default is checked like one,
+so it never widens access; unlike `--context-id`, it must be a UUID. On
+codex, hermes and openclaw a `?profile=` or `?add_tools=` already in
+`--mcp-url` is kept when the flag is absent, and Codex's `--guardrails`
+preview repeats the entry's view (`--profile` / `--tools` /
+`--add-tools`), so its truncation note names a tool the entry lists. The
+keys go at the end of the query in Python's order (`guardrails`,
+`profile`, `add_tools`, `context`), replacing any value already there,
+with commas left literal, as the Python CLI writes them. A `setup claude`
+run that leaves out a `guardrails`, `profile`, `add_tools` or `context`
+value the entry it replaces had says so in a note. Servers older than a
+parameter ignore it. `--name`, `--force` and
 `--dry-run` (codex, hermes, openclaw) name the entry, replace an existing
 one, and show the command or block without changing anything. A name is
 1-64 letters, digits, `-` or `_`, starting with a letter or digit, as in
@@ -635,8 +659,7 @@ with the differences in options and output this section lists.
 **Only in this bin.** `secret keygen --reveal`: keygen prints the private
 key (see key custody below) and refuses to print it to a terminal without
 `--reveal`. `-c` is short for `--context-id` on every `setup` subcommand.
-`setup codex` also takes `--tool-profile`, which the Python CLI has only on
-`setup claude`. `auth refresh --no-browser`: a refresh that widens
+`auth refresh --no-browser`: a refresh that widens
 `--scope` re-runs the device flow here too, and this skips opening the
 browser, as on `auth login`; Python's `auth refresh` takes only
 `--profile` and `--scope`. `-h` is short for `--help` everywhere, where
@@ -814,8 +837,10 @@ text (exit 1) rather than printed as complete. `--cap` takes 1-1000.
 `digest` reads the REST digest route with the credential chain (an API
 key or an OAuth profile) and prints the text: the `AGENTS.md` export
 block, or with `--target instructions` the MCP server instructions this
-credential would receive, where `--profile` and `--tools` repeat an MCP
-URL's `?profile=` and `?tools=`. A context with no tool guardrails prints
+credential would receive, where `--profile`, `--tools` and `--add-tools`
+(memory-cloud v0.129.0+; comma-separated, may repeat) repeat an MCP URL's
+`?profile=`, `?tools=` and `?add_tools=`; without them, memory-cloud 0.93.0+
+previews the `core` view a bare URL lists. A context with no tool guardrails prints
 nothing, and says so on stderr. With `--out FILE`, it splices the block
 into FILE between its marker lines: an earlier block is replaced in place,
 an unchanged set rewrites nothing, and an empty set removes an earlier
@@ -898,9 +923,29 @@ remaining difference: a plain-HTTP `.kagura.json` `mcp_url` that the
 credential does not use, because `KAGURA_API_KEY` or an OAuth profile
 brings its own URL, still fails the `mcp` section here (`mcp_url is not
 HTTPS: …`, exit 1), since `setup claude` would refuse that URL; the
-Python CLI's `doctor` never reads the file's `mcp_url`. `--json`
-prints Python's shape, with `details` on every check (`{}` when there are
-none). Any failed check exits 1.
+Python CLI's `doctor` never reads the file's `mcp_url`.
+
+The last section, `tools` (Python 0.43.0's, python-sdk#300), is the
+`tools/list` view of the CLI's MCP URL, asked on the server check's own
+client: `tools/list on the CLI's MCP URL: 21 tools (profile core
+(default))`. The URL's query is read as the server reads it (the first
+value of a key wins): `profile full`, `+ add_tools explore, list_edges`
+for an `?add_tools=`, `tools allowlist recall,remember` for a `?tools=`
+(which beats the other two), and `profile core (default)` without
+`?profile=` on memory-cloud 0.93.0+ (`no ?profile=` on an older server,
+or when the version is unknown, as after the OAuth `info` line). A
+`tools/list` that fails fails the check, never doctor, with the view in
+the message (`tools allowlist (empty)` for a `?tools=` naming no tool, and
+`profile (empty)` for a blank `?profile=`, both of which the server
+refuses), and so does a reply that is no `tools/list` result, with
+`getToolDefinitions`' `KaguraResponseError` message; a 401 for a static key without the `kagura_` prefix carries the
+bearer-routing hint above. It is skipped when the server check fails or
+finds the server below the minimum. A Claude Code entry's own tool view
+(its URL's query) is not this one. `--json` details carry `mcp_url`, the
+view and `tool_count`.
+
+`--json` prints Python's shape, with `details` on every check (`{}` when
+there are none). Any failed check exits 1.
 
 **Sign-in rate limit.** memory-cloud v0.76.0 and later limit device sign-in
 requests per client address. When the server refuses one with HTTP 429,
@@ -1484,8 +1529,9 @@ Since v0.135.0 the server makes them only when the MCP URL lists the
 `tools=` / `add_tools=` list it already has). On any other URL the call
 still succeeds and carries `explore_hints_omitted`, a sentence naming that
 opt-in, in place of `explore_hints`. `explore()` itself is unaffected.
-Writing that URL from `kagura-memory setup` is
-[#83](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/83).
+`kagura-memory setup … --add-tools explore` writes that URL into a
+harness entry, and `kagura-memory-mcp --add-tools explore` sets it on the
+proxy's upstream.
 
 ### Deterministic lanes
 
@@ -1572,7 +1618,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 | `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
-| `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
+| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, and `?tools=a,b` is an allowlist. `tools/call` never reads the view, so every method of this client works on any URL; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 
@@ -1662,7 +1708,7 @@ an API key, an agent-bound key included, with no MCP session:
 
 | Method | What it does |
 |--------|--------------|
-| `getGuardrailDigest` | The rendered tool-triggered set for clients without tool hooks (`GET /api/v1/memory/guardrails/digest`). `target: "export"` (the default) returns the `AGENTS.md` block, between its marker lines, or `""` when the context has none; `"instructions"` returns the exact MCP server instructions this credential would receive, and `profile` / `tools` repeat the MCP URL's `?profile=` / `?tools=`. `tool_triggered_version` is the response header, `null` when absent. The text is returned as is. |
+| `getGuardrailDigest` | The rendered tool-triggered set for clients without tool hooks (`GET /api/v1/memory/guardrails/digest`). `target: "export"` (the default) returns the `AGENTS.md` block, between its marker lines, or `""` when the context has none; `"instructions"` returns the exact MCP server instructions this credential would receive, and `profile` / `tools` / `addTools` repeat the MCP URL's `?profile=` / `?tools=` / `?add_tools=` (`addTools`, memory-cloud v0.129.0+, is validated and joined as the server reads the names, sent only when it names a tool, and refused before any request for more than 100 names or one starting with `-`). `tool_triggered_version` is the response header, `null` when absent. The text is returned as is. |
 | `loadGuardrails` | The REST twin of `KaguraClient.loadGuardrails` (`POST /api/v1/memory/guardrails`): the same two lanes and truncation flags, without the context block (`context_id` and `context_name` are `null`). The set is read as the Python SDK's `GuardrailSet` model reads it, by the same reader `guardrails load` prints with: the model's fields only, in its order, `null` for an optional one left out (so `GuardrailItem`'s optional fields and `ToolTrigger.match` are typed nullable), and a `tool_trigger` that is no trigger `null`. A set missing a required field, a truncation flag included, or holding one of the wrong type (`pinned.0.type: Input should be a valid string`) raises `KaguraResponseError` (`operation` `MemoryClient.load_guardrails`) rather than read as complete. |
 
 Both refuse a `contextId` that is not a UUID before any request, in the

@@ -1,6 +1,7 @@
 /** Shared HTTP utilities for Kagura Memory SDK clients (port of _http.py). */
 
 import {
+  excMessage,
   KaguraAuthError,
   KaguraCapacityLockedError,
   KaguraConnectionError,
@@ -11,7 +12,8 @@ import {
   KaguraServiceUnavailableError,
 } from "./errors.js";
 import type { KaguraCapacityLockedErrorOptions, KaguraQuotaErrorOptions } from "./errors.js";
-import { PY_SPACE_CLASS } from "./pyCompat.js";
+import { normalizeUuid, PY_SPACE_CLASS, pyRepr, pyStrip } from "./pyCompat.js";
+import { pyTypeName } from "./python.js";
 
 export { SDK_VERSION } from "./version.js";
 
@@ -20,8 +22,8 @@ export { SDK_VERSION } from "./version.js";
  *
  * Drops the query and fragment, then strips `/mcp` and everything after it
  * (e.g. `/mcp/w/{workspace}`). The query (`?profile=`, `?tools=`,
- * `?guardrails=`) configures the MCP endpoint alone, so it is dropped even
- * from a URL with no `/mcp` segment to strip.
+ * `?add_tools=`, `?guardrails=`, `?context=`) configures the MCP endpoint
+ * alone, so it is dropped even from a URL with no `/mcp` segment to strip.
  */
 export function baseUrlFromMcp(mcpUrl: string): string {
   // `?` and `#` end the path. Callers strip trailing slashes from the raw
@@ -34,6 +36,355 @@ export function baseUrlFromMcp(mcpUrl: string): string {
   const from = authority ? authority[0].length : 0;
   const m = /\/mcp(?=\/|$)/.exec(path.slice(from));
   return m ? path.slice(0, from + m.index) : path;
+}
+
+// --- The MCP URL's endpoint query ------------------------------------------
+//
+// memory-cloud reads the MCP URL's query with `parse_qsl(keep_blank_values=
+// True)`: `&`-separated, names and values `+`/percent-decoded, a segment
+// without `=` a blank value, and the first value of a repeated name wins
+// (`select_tool_definitions`, `select_default_context`). Every reader and
+// writer of that query below follows it, so the SDK, the bins and the
+// server read one URL alike.
+
+interface SplitUrl {
+  base: string;
+  params: string[];
+  fragment: string;
+}
+
+/**
+ * Split a URL by hand rather than through `URL`: `searchParams` re-encodes
+ * every parameter on the way out (`tools=a,b` becomes `tools=a%2Cb`), and
+ * the other parameters are meant to be kept as written.
+ */
+function splitUrl(url: string): SplitUrl {
+  const hash = url.indexOf("#");
+  const fragment = hash === -1 ? "" : url.slice(hash);
+  const rest = hash === -1 ? url : url.slice(0, hash);
+  const q = rest.indexOf("?");
+  return {
+    base: q === -1 ? rest : rest.slice(0, q),
+    params: q === -1 ? [] : rest.slice(q + 1).split("&").filter((p) => p !== ""),
+    fragment,
+  };
+}
+
+// `ignoreBOM`: a default TextDecoder drops a U+FEFF at the start of each
+// decode, which Python's UTF-8 codec (and so the server) keeps.
+const UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
+
+/**
+ * A name or value as Python's `unquote_plus` reads it: `+` is a space, and
+ * each run of `%XX` escapes is decoded as UTF-8, an invalid sequence as
+ * U+FFFD, a U+FEFF kept; a `%` not followed by two hex digits stays as
+ * written.
+ */
+function unquotePlus(text: string): string {
+  const raw = text.replace(/\+/g, " ");
+  return raw.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) =>
+    UTF8.decode(Uint8Array.from({ length: run.length / 3 }, (_, i) => parseInt(run.slice(i * 3 + 1, i * 3 + 3), 16))),
+  );
+}
+
+/**
+ * A value as Python's `urlencode(…, safe=",")` writes it (`quote_plus`):
+ * `+` for a space, and `!'()*`, which `encodeURIComponent` leaves bare,
+ * escaped; a comma stays literal, which keeps a tool list readable in a
+ * stored entry (the server splits the decoded value either way).
+ */
+function quotePlus(text: string): string {
+  return encodeURIComponent(text)
+    .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/%20/g, "+")
+    .replace(/%2C/g, ",");
+}
+
+/** A parameter's name, decoded: `guard%72ails` is `guardrails`, as the server reads it. */
+function paramName(param: string): string {
+  const eq = param.indexOf("=");
+  return unquotePlus(eq === -1 ? param : param.slice(0, eq));
+}
+
+/** A parameter's value, decoded; `""` for a segment without `=`. */
+function paramValue(param: string): string {
+  const eq = param.indexOf("=");
+  return eq === -1 ? "" : unquotePlus(param.slice(eq + 1));
+}
+
+/**
+ * A split URL put back together with a new query, as Python's
+ * `urlunsplit(urlsplit(url)._replace(query=…))` rebuilds it: the scheme
+ * lower-cased (`HTTP://` is written `http://`), no `?` for an empty query
+ * and no `#` for an empty fragment. The rest stays as written.
+ */
+function joinUrl(base: string, params: string[], fragment: string): string {
+  const scheme = base.replace(/^[A-Za-z][A-Za-z0-9+.-]*:/, (s) => s.toLowerCase());
+  return `${scheme}${params.length > 0 ? `?${params.join("&")}` : ""}${fragment.length > 1 ? fragment : ""}`;
+}
+
+/**
+ * The first value of each parameter in the URL's query, by decoded name —
+ * Python's `mcp_url_query_values`. A blank value is kept: `?profile=` is
+ * present (and refused by the server), not absent.
+ */
+export function mcpUrlQueryValues(url: string): Map<string, string> {
+  const values = new Map<string, string>();
+  for (const param of splitUrl(url).params) {
+    const name = paramName(param);
+    if (!values.has(name)) values.set(name, paramValue(param));
+  }
+  return values;
+}
+
+/**
+ * The decoded value of the first `key` in the URL's query — the one the
+ * server reads — or undefined. Names compare decoded.
+ */
+export function queryParam(url: string, key: string): string | undefined {
+  return mcpUrlQueryValues(url).get(key);
+}
+
+/**
+ * Drop `key` from the URL's query, every occurrence, keeping the other
+ * parameters as written and leaving no bare `?` behind — Python's
+ * `mcp_url_without_query_param`. Names compare decoded; a URL without the
+ * key comes back as written, and one it rewrites is rebuilt as Python's is
+ * ({@link joinUrl}).
+ */
+export function withoutQueryParam(url: string, key: string): string {
+  const { base, params, fragment } = splitUrl(url);
+  const kept = params.filter((param) => paramName(param) !== key);
+  if (kept.length === params.length) return url;
+  return joinUrl(base, kept, fragment);
+}
+
+/** The URL with its query and fragment dropped. */
+export function withoutQuery(url: string): string {
+  return splitUrl(url).base;
+}
+
+/**
+ * The most names memory-cloud reads from one `tools` or `add_tools` value
+ * (its `MAX_TOOL_NAMES`); the rest is ignored.
+ */
+export const MAX_ADD_TOOLS = 100;
+
+/**
+ * The tool names in a comma-separated `value`, by memory-cloud's
+ * `_read_names` rule: each item trimmed, blank names dropped, duplicates
+ * removed in order. With `cap`, only the first `cap` items are read (blank
+ * ones count), as the server reads them; `null` reads every item.
+ */
+function toolNames(value: string, cap: number | null): string[] {
+  const parts = value.split(",");
+  const read = cap === null ? parts : parts.slice(0, cap);
+  return [...new Set(read.map(pyStrip).filter((name) => name !== ""))];
+}
+
+/** Validate a tool name list for `label` (`add_tools`, `tools`) and join it; {@link normalizeAddTools}. */
+function normalizeToolNames(names: readonly string[], label: string): string {
+  if (!Array.isArray(names)) {
+    // Python's words for a str, which it would read a character at a time;
+    // any other non-list is named by its Python type too.
+    throw new TypeError(`${label} must be a list of tool names, not a ${pyTypeName(names)}`);
+  }
+  for (const item of names) {
+    // Python's `type(item).__name__`: `got int`, `got NoneType`.
+    if (typeof item !== "string") throw new TypeError(`${label} items must be str, got ${pyTypeName(item)}`);
+  }
+  // Every name is read, not the first 100: a longer list is refused below.
+  const unique = toolNames(names.join(","), null);
+  const dashed = unique.find((name) => name.startsWith("-"));
+  if (dashed !== undefined) throw new Error(`${label} names cannot start with '-': ${pyRepr(dashed)}`);
+  if (unique.length > MAX_ADD_TOOLS) {
+    throw new Error(`${label} accepts at most ${MAX_ADD_TOOLS} tool names, got ${unique.length}`);
+  }
+  return unique.join(",");
+}
+
+/**
+ * Validate `?add_tools=` tool names and join them as the server reads them
+ * — Python's `normalize_add_tools`.
+ *
+ * memory-cloud (v0.129.0+, memory-cloud#2354) adds the names to the profile
+ * the URL lists: trimmed, case-sensitive, an unknown one ignored, at most
+ * 100 read. An item may itself be comma-separated (`"explore,list_edges"`,
+ * as the CLI flags take them); blank names are dropped and duplicates
+ * removed, keeping the order. A name starting with `-` is refused: no tool
+ * has one, and `kagura-memory-mcp --add-tools -x` in a stored entry would
+ * not start.
+ *
+ * @returns The names joined with `,`; `""` when none is left.
+ * @throws TypeError `names` is not an array (a string would be read one
+ *   character at a time), or an item is not a string.
+ * @throws Error More than 100 names, which the server would cut off, or a
+ *   name starting with `-`, in the Python SDK's words.
+ */
+export function normalizeAddTools(names: readonly string[]): string {
+  return normalizeToolNames(names, "add_tools");
+}
+
+/**
+ * `--add-tools NAME[,NAME...]` values (the flag repeats; each value is
+ * comma-separated) as one list — the check Python's `_add_tools_option`
+ * (`setup *`, `guardrails digest`) and `kagura-mcp`'s `_add_tools_arg`
+ * share, which the CLI and the proxy each wrap in their own usage error.
+ * A value naming no tool is a typo, so it is refused rather than dropped;
+ * so is a name starting with `-`, and more than 100 names in all.
+ *
+ * @returns The names, normalized by {@link normalizeAddTools} (`[]` for no
+ *   values), or the problem in the Python CLI's words.
+ */
+export function readAddToolsFlag(values: readonly string[]): { names: string[] } | { problem: string } {
+  try {
+    if (values.some((item) => !normalizeAddTools([item]))) return { problem: "must name at least one tool" };
+    const joined = normalizeAddTools(values);
+    return { names: joined ? joined.split(",") : [] };
+  } catch (e) {
+    return { problem: excMessage(e) };
+  }
+}
+
+/**
+ * Validate a tool profile name (`?profile=`) — Python's
+ * `normalize_tool_profile`. memory-cloud knows `core` and `full` and fails
+ * `tools/list` for any other name, so that list is left to the server.
+ * Refused here is what breaks an entry before the server sees it: a blank
+ * name, and one starting with `-`, which a stored proxy argv would read as
+ * a flag.
+ *
+ * @returns The name, trimmed.
+ * @throws Error The name is blank or starts with `-`, in the Python SDK's words.
+ */
+export function normalizeToolProfile(value: string): string {
+  const name = pyStrip(value);
+  if (!name) throw new Error("tool_profile must not be empty");
+  if (name.startsWith("-")) throw new Error(`tool_profile cannot start with '-': ${pyRepr(name)}`);
+  return name;
+}
+
+/**
+ * Validate a `?guardrails=` value: `off` in any case, or a context UUID in
+ * any spelling Python's `uuid.UUID` accepts — Python's
+ * `normalize_guardrails`. memory-cloud silently ignores any other value, so
+ * a typo is refused here instead.
+ *
+ * @returns `"off"` or the canonical UUID.
+ * @throws Error `guardrails must be 'off' or a context UUID, got '…'`.
+ */
+export function normalizeGuardrails(value: string): string {
+  const stripped = pyStrip(value);
+  if (stripped.toLowerCase() === "off") return "off";
+  try {
+    return normalizeUuid(stripped, "guardrails");
+  } catch {
+    throw new Error(`guardrails must be 'off' or a context UUID, got ${pyRepr(value)}`);
+  }
+}
+
+/** The endpoint query {@link mcpUrlWithQuery} sets; an undefined key is left as it is. */
+export interface McpUrlQuery {
+  /** `?guardrails=`: `off` or a context UUID, as {@link normalizeGuardrails} returns it (memory-cloud v0.74.0+). */
+  guardrails?: string | undefined;
+  /** `?profile=`: the tool profile `tools/list` serves (`core`, `full`; v0.73.0+), validated by {@link normalizeToolProfile}. */
+  profile?: string | undefined;
+  /** `?tools=`: an allowlist, which the server applies instead of `profile` and `add_tools` (v0.73.0+). A list naming no tool leaves the key alone. */
+  tools?: readonly string[] | undefined;
+  /** `?add_tools=`: names added to the listed profile (v0.129.0+), validated by {@link normalizeAddTools}. A list naming no tool leaves the key alone. */
+  addTools?: readonly string[] | undefined;
+  /** `?context=`: the connection's default context, a context UUID written canonically (v0.114.0+). */
+  context?: string | undefined;
+}
+
+/**
+ * The MCP URL with memory-cloud's endpoint query set — the port of
+ * Python's `mcp_url_with_query`, so the SDK, both bins and the Python CLI
+ * write the same URL for the same flags.
+ *
+ * A key being set loses every earlier value of it (the server reads only
+ * the first it finds) and goes at the end, in the order `guardrails`,
+ * `profile`, `tools`, `add_tools`, `context`. Every other parameter is
+ * kept as written; an unset key is left alone, and with nothing to set the
+ * URL comes back as written. A URL it rewrites is rebuilt as Python's is
+ * ({@link joinUrl}), the values form-encoded with commas kept literal.
+ * Servers older than a key ignore it.
+ *
+ * `shown.guardrailsAsIs` is for display only: the `guardrails` value goes
+ * in as it is, neither validated nor encoded — a dry run's `<UUID of
+ * context VALUE>` placeholder, as the Python CLI shows it. Such a URL is
+ * never written or run.
+ *
+ * @throws Error `guardrails` is neither `off` nor a context UUID
+ *   ({@link normalizeGuardrails}), `profile` is blank or starts with `-`, a
+ *   tool name starts with `-` or a list names more than 100, or `context`
+ *   is not a UUID.
+ * @throws TypeError `tools` / `addTools` is not an array of strings.
+ */
+export function mcpUrlWithQuery(
+  url: string,
+  updates: McpUrlQuery,
+  shown: { guardrailsAsIs?: boolean } = {},
+): string {
+  const set: [string, string][] = [];
+  if (updates.guardrails !== undefined) {
+    const asIs = shown.guardrailsAsIs === true;
+    set.push(["guardrails", asIs ? updates.guardrails : normalizeGuardrails(updates.guardrails)]);
+  }
+  if (updates.profile !== undefined) set.push(["profile", normalizeToolProfile(updates.profile)]);
+  const tools = updates.tools !== undefined ? normalizeToolNames(updates.tools, "tools") : "";
+  if (tools) set.push(["tools", tools]);
+  const added = updates.addTools !== undefined ? normalizeAddTools(updates.addTools) : "";
+  if (added) set.push(["add_tools", added]);
+  if (updates.context !== undefined) set.push(["context", normalizeUuid(updates.context, "context")]);
+  if (set.length === 0) return url;
+  const keys = set.map(([key]) => key);
+  const { base, params, fragment } = splitUrl(url);
+  const kept = params.filter((param) => !keys.includes(paramName(param)));
+  const encode = (key: string, value: string): string =>
+    key === "guardrails" && shown.guardrailsAsIs === true ? value : quotePlus(value);
+  return joinUrl(base, [...kept, ...set.map(([key, value]) => `${key}=${encode(key, value)}`)], fragment);
+}
+
+/** The `tools/list` view an MCP URL's query selects ({@link mcpUrlToolView}). */
+export interface McpToolView {
+  /** The first `profile` value, trimmed; `""` for a blank one, which the server refuses; `null` without one (the server's default, `core` from v0.93.0). */
+  profile: string | null;
+  /** The names in the first `tools` value; `[]` when it names none, which the server refuses; `null` without one. When set, the server ignores `profile` and `add_tools`. */
+  tools: string[] | null;
+  /** The names in the first `add_tools` value; `[]` without one or when it names none (it then adds nothing). */
+  addTools: string[];
+}
+
+/**
+ * The `profile` / `tools` / `add_tools` in the URL's query, as the server
+ * reads them — Python's `mcp_url_tool_view`, the one reader of a URL's
+ * tool view for `setup`, `guardrails digest`, `doctor` and the proxy.
+ *
+ * It follows memory-cloud's `select_tool_definitions`: the first value of
+ * a repeated parameter wins, even a blank one, `profile` is trimmed, and a
+ * name list is read as `_read_names` reads it — its first 100
+ * comma-separated items, trimmed, blank names dropped, duplicates removed
+ * in order. Which parameter wins (`tools` over the other two) is left to
+ * the caller.
+ */
+export function mcpUrlToolView(url: string): McpToolView {
+  return mcpQueryToolView(mcpUrlQueryValues(url));
+}
+
+/**
+ * {@link mcpUrlToolView} of a query {@link mcpUrlQueryValues} already read
+ * — Python's `mcp_query_tool_view`, for a caller that reads other
+ * parameters of the same URL too, so the query is parsed once.
+ */
+export function mcpQueryToolView(query: ReadonlyMap<string, string>): McpToolView {
+  const profile = query.get("profile");
+  const tools = query.get("tools");
+  return {
+    profile: profile === undefined ? null : pyStrip(profile),
+    tools: tools === undefined ? null : toolNames(tools, MAX_ADD_TOOLS),
+    addTools: toolNames(query.get("add_tools") ?? "", MAX_ADD_TOOLS),
+  };
 }
 
 function formatValidationErrors(errors: unknown[]): string {

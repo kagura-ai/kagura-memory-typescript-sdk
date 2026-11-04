@@ -464,6 +464,44 @@ describe("getGuardrailDigest", () => {
     ]);
   });
 
+  it("sends addTools as add_tools, validated and joined as Python's normalize_add_tools joins them (#83)", async () => {
+    const server = new FakeRest();
+    server.body = "base text";
+    await makeClient(server).getGuardrailDigest(CTX, {
+      target: "instructions",
+      profile: "core",
+      addTools: ["explore", " list_edges, explore", ""],
+    });
+    expect(query(server)).toEqual([
+      ["context_id", CTX],
+      ["target", "instructions"],
+      ["profile", "core"],
+      ["add_tools", "explore,list_edges"],
+    ]);
+  });
+
+  it("leaves add_tools out for a list that names no tool, as Python does", async () => {
+    const server = new FakeRest();
+    server.body = "";
+    await makeClient(server).getGuardrailDigest(CTX, { target: "instructions", addTools: [" , "] });
+    expect(query(server)).toEqual([
+      ["context_id", CTX],
+      ["target", "instructions"],
+    ]);
+  });
+
+  it.each([
+    [["-x"], new Error("add_tools names cannot start with '-': '-x'")],
+    [Array.from({ length: 101 }, (_, i) => `t${i}`), new Error("add_tools accepts at most 100 tool names, got 101")],
+    ["explore" as unknown as string[], new TypeError("add_tools must be a list of tool names, not a str")],
+  ])("refuses addTools %j before any request", async (addTools, error) => {
+    const server = new FakeRest();
+    await expect(
+      makeClient(server).getGuardrailDigest(CTX, { target: "instructions", addTools }),
+    ).rejects.toThrow(error);
+    expect(server.requests).toEqual([]);
+  });
+
   it("returns an empty set as empty text, with its version", async () => {
     const server = new FakeRest();
     server.body = "";
