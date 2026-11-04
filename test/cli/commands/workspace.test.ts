@@ -804,7 +804,8 @@ describe("workspace invite list", () => {
       [
         "[",
         "  {",
-        '    "id": 7,',
+        // `id: int | str` keeps the string, as the Python CLI 0.44.0 prints it.
+        '    "id": "7",',
         '    "email": "new@x.com",',
         '    "role": "member",',
         '    "is_accepted": false,',
@@ -949,9 +950,10 @@ describe("auth create-key", () => {
     ]);
   });
 
-  it("reads the response as pydantic's MemberAPIKey does: a string id is an int", async () => {
-    // What Python prints for this body (pydantic 2.13.4); a strict type
-    // check would have refused it as a mis-shaped mint.
+  it("reads the response as pydantic's MemberAPIKey does: a numeric string id is accepted", async () => {
+    // What the Python CLI 0.44.0 prints for this body (pydantic 2.13.4):
+    // `id: int | str` keeps "42" the string; a strict type check would
+    // have refused it as a mis-shaped mint.
     const h = harness();
     reply(h, { id: "42", name: "n", key_prefix: "p", plaintext_key: "kp" }, 201);
     expect(await runCli(["auth", "create-key", "-u", "u", "-n", "n", "--expires-days", "30"], h.deps)).toBe(0);
@@ -1038,10 +1040,13 @@ describe("auth list-keys", () => {
     const h = harness();
     reply(h, { api_keys: ROWS, target_user_role: "member" });
     expect(await runCli(["auth", "list-keys", "--user", "google_2"], h.deps)).toBe(0);
+    // As the Python CLI 0.44.0 prints it (#102): the ID column is 6 wide,
+    // or as wide as the longest id (`_id_column_width`, python-sdk #294),
+    // where 0.41.0 let a long id push its own row right.
     expect(h.out).toEqual([
       [
-        "ID     NAME                     PREFIX             CREATED      EXPIRES      REVOKED",
-        "42     ci-bot                   kagura_abcdef123   2026-07-03   2026-10-01   -",
+        "ID      NAME                     PREFIX             CREATED      EXPIRES      REVOKED",
+        "42      ci-bot                   kagura_abcdef123   2026-07-03   2026-10-01   -",
         "1234567 a-very-long-key-name-exceeding-24-chars kagura_0123456789abcdef -            never        2026-07-05",
       ].join("\n"),
     ]);
