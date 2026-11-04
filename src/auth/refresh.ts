@@ -12,12 +12,12 @@
  */
 
 import { KaguraAuthError } from "../errors.js";
-import type { OAuthCredentials } from "./credentials.js";
+import type { OAuthCredentials, RefreshResult } from "./credentials.js";
 import {
-  KaguraOAuth,
   getSharedState,
-  loadCredentialsFile,
+  loadForUpdate,
   profileNamed,
+  refreshSharedState,
   updateProfile,
 } from "./credentials.js";
 import { authorizeDevice, pollForToken } from "./deviceFlow.js";
@@ -60,37 +60,76 @@ function isScopeRejection(error: unknown): boolean {
 /**
  * Refresh a stored profile's access token and persist the result.
  *
- * @returns the credentials that were written.
+ * The refresh runs under the cross-process lock on the credentials file,
+ * after re-reading it: when another process (a client, `kagura-memory-mcp`,
+ * the Python CLI's own `kagura auth refresh`) already rotated the token
+ * while this one waited, its profile is returned and nothing is sent — a
+ * refresh token works once (memory-cloud v0.79.0+).
+ *
+ * @returns the credentials now in force.
  * @throws Error if the named profile does not exist.
  * @throws KaguraAuthExpiredError the refresh token is no longer valid —
  *   the stored profile is left untouched so it can still be inspected.
- * @throws KaguraAuthError other protocol/response failures.
+ * @throws KaguraAuthError other protocol/response failures; also when the
+ *   credentials file exists but cannot be read or parsed (before any
+ *   request, and the file is left as it is), or when the refreshed profile
+ *   could not be saved (the message names the file and says to log in
+ *   again: the server has rotated the token by then).
  * @throws KaguraConnectionError the server was unreachable.
  */
 export async function refresh(options: RefreshOptions = {}): Promise<OAuthCredentials> {
-  const cf = loadCredentialsFile(options.credentialsPath);
+  return (await refreshProfile(options)).credentials;
+}
+
+/**
+ * What {@link refreshProfile} did: the profile it refreshed, and whether
+ * it was refreshed here or adopted from another process.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export interface ProfileRefreshResult extends RefreshResult {
+  /** The profile name the refresh resolved (`options.profile` or the default). */
+  profile: string;
+}
+
+/**
+ * {@link refresh}, also saying which profile and whether this call
+ * refreshed it — what `kagura-memory auth refresh` prints.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export async function refreshProfile(options: RefreshOptions = {}): Promise<ProfileRefreshResult> {
+  // Strict: a file that exists but cannot be read is refused here, naming
+  // it, rather than read as "no profile".
+  const cf = loadForUpdate(options.credentialsPath);
   const target = options.profile || cf.defaultProfile;
   const stored = profileNamed(cf, target);
   if (stored === undefined) {
-    throw new Error(`No profile named '${target}'. Run a login first.`);
+    throw new Error(`No profile named '${target}'.\n  Run: kagura-memory auth login`);
   }
 
   const httpOptions = options.fetch !== undefined ? { fetch: options.fetch } : {};
 
-  // Delegate to KaguraOAuth rather than driving refreshAccessToken here:
-  // it holds the cross-process file lock across the whole
-  // read-check-refresh-persist sequence, so a peer that rotated while we
-  // waited is adopted instead of racing us into an `invalid_grant` on a
-  // token that is already stale on disk.
+  // The shared state, not a copy: a client of this process holding the
+  // same profile sees the rotated token, and the refresh is serialized with
+  // its own on the in-process mutex.
   const state = getSharedState(options.credentialsPath, target);
   if (state === null) {
-    throw new Error(`No profile named '${target}'. Run a login first.`);
+    throw new Error(`No profile named '${target}'.\n  Run: kagura-memory auth login`);
   }
-  const provider = new KaguraOAuth(state, httpOptions);
 
+  // Forced path, as on a 401: refresh unless the file no longer holds the
+  // token read here (another process rotated it while this one waited).
+  const staleToken = state.credentials.accessToken;
   try {
-    await provider.forceRefresh(options.scope !== undefined ? { scope: options.scope } : {});
-    return state.credentials;
+    const result = await state.mutex.runExclusive(() =>
+      refreshSharedState(state, {
+        expectedStaleToken: staleToken,
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        ...httpOptions,
+      }),
+    );
+    return { ...result, profile: target };
   } catch (e) {
     // A rejection only means "widen" when the caller actually asked for a
     // different scope; otherwise re-consent would be the wrong response
@@ -98,12 +137,15 @@ export async function refresh(options: RefreshOptions = {}): Promise<OAuthCreden
     if (options.scope === undefined || !isScopeRejection(e)) {
       throw e;
     }
-    // Runs outside the lock — forceRefresh released it on the way out, and
-    // updateProfile below re-acquires it, so there is no deadlock.
+    // Runs outside the lock — the refresh released it on the way out, and
+    // updateProfile below re-acquires it, so there is no deadlock. The
+    // device flow waits on the user for minutes: holding the lock that
+    // long would stall every other process's refresh.
     const next = await consentToWiderScope(state.credentials, options.scope, options, httpOptions);
     await updateProfile(target, next, options.credentialsPath);
     state.credentials = next;
-    return next;
+    state.usedRefreshToken = null;
+    return { credentials: next, refreshed: true, profile: target };
   }
 }
 
