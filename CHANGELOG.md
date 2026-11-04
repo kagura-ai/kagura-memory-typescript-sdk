@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude setup validates resolved context IDs before writing and resolves
+  UUID-shaped context names on the first page, following Python 0.44.0.
+  UUID normalization now accepts Unicode decimal digits, including digits
+  outside the BMP, while preserving Python's original length check (#116).
+
 ## [0.15.0] - 2026-11-05
 
 Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud

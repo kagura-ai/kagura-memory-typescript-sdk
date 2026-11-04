@@ -10,7 +10,7 @@
  * @internal Not part of the package's API.
  */
 
-import { pyRepr } from "./python.js";
+import { normalizeDecimalDigits, pyRepr } from "./python.js";
 
 /**
  * The characters Python's `str.strip()` removes (`str.isspace()`).
@@ -39,7 +39,7 @@ export { pyRepr };
  * `int(value, 16)` after `uuid.UUID` has cut the string to 32 characters:
  * surrounding whitespace, a `+` sign, a `0x` prefix and single underscores
  * between digits are all accepted, as Python's `int()` accepts them.
- * (Python also maps non-ASCII decimal digits, which this does not.)
+ * Unicode decimal digits are mapped to ASCII before this grammar is read.
  */
 const PY_HEX_INT_RE = new RegExp(
   `^[${PY_SPACE_CLASS}]*\\+?(?:0[xX]_?)?([0-9a-fA-F](?:_?[0-9a-fA-F])*)[${PY_SPACE_CLASS}]*$`,
@@ -60,7 +60,7 @@ function pythonUuid(value: string): string | null {
   hex = hex.replace(/^[{}]+|[{}]+$/g, "").split("-").join("");
   // Python's len() counts code points, not UTF-16 units.
   if ([...hex].length !== 32) return null;
-  const match = PY_HEX_INT_RE.exec(hex);
+  const match = PY_HEX_INT_RE.exec(normalizeDecimalDigits(hex));
   if (match === null) return null;
   const digits = match[1]!.replace(/_/g, "").toLowerCase().padStart(32, "0");
   return (
@@ -105,8 +105,8 @@ const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
  * the Python SDK's `is_canonical_uuid`. Every such value is one
  * {@link uuidOrNone} reads; its other spellings (dashless, `{braces}`,
  * `urn:uuid:`) are not this form, and neither is a padded one. `setup`
- * takes this form as a context id without looking it up by name, since a
- * dashless 32-hex string can be a context name too.
+ * uses this distinction for dry-run placeholders and to stop name lookup
+ * after the first page; a dashless 32-hex string can be a context name too.
  */
 export function isCanonicalUuid(value: string): boolean {
   return CANONICAL_UUID_RE.test(value);
