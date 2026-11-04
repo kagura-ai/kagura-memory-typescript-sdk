@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import * as fs from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,15 +12,32 @@ import {
   updateProfile,
 } from "../../src/auth/credentials.js";
 
+// The atomic write's rename, failing only on request (#92): a refreshed
+// profile that cannot be saved.
+const failRename = vi.hoisted(() => ({ errors: [] as Error[] }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+      const error = failRename.errors.shift();
+      if (error !== undefined) throw error;
+      actual.renameSync(from, to);
+    },
+  };
+});
+
 let dir: string;
 let credentialsPath: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "kagura-proxy-auth-"));
   credentialsPath = join(dir, "credentials.json");
+  failRename.errors = [];
   resetStateCache();
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  failRename.errors = [];
   resetStateCache();
 });
 
@@ -232,6 +250,93 @@ describe("desktop OAuth", () => {
     });
     await expect(s.auth.getAuthHeader()).rejects.toThrow("server changed");
     expect(s.fetcher).not.toHaveBeenCalled();
+  });
+
+  describe("credentials.json it cannot read or write (#92)", () => {
+    const cannotUpdate = () =>
+      `Cannot update ${credentialsPath}: it is not valid JSON.\n` +
+      "  Fix the file, or move it aside and run: kagura-memory auth login";
+
+    it("refuses an unreadable file at startup, naming it, before any request", () => {
+      writeFileSync(credentialsPath, "not json {{{");
+      let thrown: unknown;
+      try {
+        setup([]);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ProxyError);
+      // An authored message, which carries no token: it reaches MCP/logs.
+      expect(safeError(thrown)).toBe(cannotUpdate());
+      expect(readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
+    });
+
+    it("refuses a file that became unreadable while running, without starting a login", async () => {
+      await stored();
+      const s = setup([Response.json(authorization), Response.json(token)]);
+      expect(await s.auth.getAuthHeader()).toBe("Bearer old-access");
+      writeFileSync(credentialsPath, "not json {{{");
+      // Read as "no profile", it would open the browser for a login whose
+      // result could not be saved.
+      await expect(s.auth.getAuthHeader()).rejects.toThrow(new ProxyError(cannotUpdate()));
+      await expect(s.auth.forceRefresh()).rejects.toThrow(new ProxyError(cannotUpdate()));
+      expect(s.fetcher).not.toHaveBeenCalled();
+      expect(s.open).not.toHaveBeenCalled();
+      expect(readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
+    });
+
+    const notSavedLog = () =>
+      `Refreshed profile 'desktop', but could not save it to ${credentialsPath}: EROFS: read-only file system\n` +
+      "  The refresh used up the refresh token on file, so the profile on file cannot be refreshed again.\n" +
+      "  Fix the cause, then run: kagura-memory auth login";
+    const erofs = () => Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+
+    // The request goes on with the rotated token the shared state keeps;
+    // the save failure is logged once, without a token.
+    it("after a 401, serves the refresh it could not save, logging why once", async () => {
+      await stored();
+      const s = setup([Response.json(token)]);
+      failRename.errors = [erofs()];
+      await s.auth.forceRefresh();
+      expect(s.log.mock.calls).toEqual([[notSavedLog()]]);
+      // The file still holds the revoked pair; the proxy reloads it per
+      // request, and must keep the rotated one it holds instead, without
+      // refreshing again.
+      expect(loadCredentialsFile(credentialsPath).profiles.desktop?.accessToken).toBe("old-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(s.fetcher).toHaveBeenCalledOnce();
+      expect(s.log).toHaveBeenCalledOnce();
+      expect(JSON.stringify(s.log.mock.calls)).not.toContain("private-");
+      expect(s.open).not.toHaveBeenCalled();
+    });
+
+    it("logs a save that keeps failing the same way once", async () => {
+      await stored({ expiresAt: new Date(Date.now() + 10_000) });
+      // Tokens issued inside the skew window, so each request refreshes.
+      const s = setup([
+        Response.json({ ...token, expires_in: 10 }),
+        Response.json({ ...token, access_token: "private-access-2", refresh_token: "private-refresh-2", expires_in: 10 }),
+      ]);
+      failRename.errors = [erofs(), erofs()];
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access-2");
+      expect(s.fetcher).toHaveBeenCalledTimes(2);
+      expect(s.log.mock.calls).toEqual([[notSavedLog()]]);
+    });
+
+    it("near expiry, answers with the refresh it could not save, and does not refresh again", async () => {
+      await stored({ expiresAt: new Date(Date.now() + 10_000) }); // inside the skew window
+      const s = setup([Response.json(token)]);
+      failRename.errors = [erofs()];
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(s.fetcher).toHaveBeenCalledOnce();
+      expect(s.log.mock.calls).toEqual([[notSavedLog()]]);
+      expect(JSON.stringify(s.log.mock.calls)).not.toContain("private-");
+      expect(loadCredentialsFile(credentialsPath).profiles.desktop?.accessToken).toBe("old-access");
+      expect(s.open).not.toHaveBeenCalled();
+    });
   });
 
   it("does not retain a profile removed by CLI logout", async () => {

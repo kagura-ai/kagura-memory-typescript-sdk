@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import * as readline from "node:readline/promises";
 
 import { login } from "./auth/login.js";
-import { refresh } from "./auth/refresh.js";
+import { refreshProfile } from "./auth/refresh.js";
 import { resolveAuth } from "./auth/resolve.js";
 import type { ResolvedAuth } from "./auth/types.js";
 import { execAttached, execFile, which } from "./cli/exec.js";
@@ -87,7 +87,7 @@ const code = await runCli(process.argv.slice(2), {
   execAttached: (file, argv) => execAttached(file, argv),
   stdinIsTty: () => Boolean(process.stdin.isTTY),
   login,
-  refresh,
+  refresh: refreshProfile,
   loadConfig,
   makeClient: (options) => new KaguraClient(options),
   resolveAuth,

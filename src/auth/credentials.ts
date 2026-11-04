@@ -21,7 +21,10 @@
  * `AsyncMutex` coalesces refreshes *within* a process, and the
  * cross-process lock in `filelock.ts` (acquired inside the refresh path)
  * re-reads the on-disk token after locking and skips the `/oauth/token/`
- * round-trip when another process already rotated it.
+ * round-trip when another process already rotated it. That refresh path,
+ * {@link refreshProfileLocked}, is the one `KaguraOAuth` (every client and
+ * `kagura-memory-mcp`), `refresh()` and the CLI's `auth refresh` /
+ * `auth token` all take.
  */
 
 import * as crypto from "node:crypto";
@@ -29,7 +32,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { KaguraAuthExpiredError } from "../errors.js";
+import { KaguraAuthError, KaguraAuthExpiredError, excMessage } from "../errors.js";
+import type { KaguraErrorOptions } from "../errors.js";
 import { parseJsonLossless, valueAt } from "../losslessJson.js";
 import { pyStr, pyTruthy } from "../python.js";
 import { refreshAccessToken } from "./deviceFlow.js";
@@ -278,17 +282,22 @@ export function credentialsFileToDict(cf: CredentialsFile): Record<string, unkno
   };
 }
 
-/** @throws Error when any profile is malformed (caller treats file as empty). */
+/**
+ * @throws Error when `profiles` is present but no object, or any profile is
+ *   malformed (as Python's `from_dict`, which calls `.items()` on it); the
+ *   lenient loader then treats the file as empty, the strict one refuses it.
+ */
 export function credentialsFileFromDict(d: Record<string, unknown>): CredentialsFile {
-  const profilesRaw = d.profiles;
+  const profilesRaw = Object.prototype.hasOwnProperty.call(d, "profiles") ? d.profiles : {};
   const profiles: Record<string, OAuthCredentials> = {};
-  if (typeof profilesRaw === "object" && profilesRaw !== null && !Array.isArray(profilesRaw)) {
-    for (const [name, p] of Object.entries(profilesRaw)) {
-      if (typeof p !== "object" || p === null || Array.isArray(p)) {
-        throw new Error(`credentials profile '${name}' is not an object`);
-      }
-      defineOwn(profiles, name, credentialsFromDict(p as Record<string, unknown>));
+  if (typeof profilesRaw !== "object" || profilesRaw === null || Array.isArray(profilesRaw)) {
+    throw new Error("credentials 'profiles' is not an object");
+  }
+  for (const [name, p] of Object.entries(profilesRaw)) {
+    if (typeof p !== "object" || p === null || Array.isArray(p)) {
+      throw new Error(`credentials profile '${name}' is not an object`);
     }
+    defineOwn(profiles, name, credentialsFromDict(p as Record<string, unknown>));
   }
   return {
     version: typeof d.version === "number" ? d.version : 1,
@@ -388,6 +397,87 @@ function resolvePath(p?: string): string {
   return p ?? defaultCredentialsPath();
 }
 
+function isErrnoException(e: unknown): e is NodeJS.ErrnoException {
+  return e instanceof Error && "code" in e;
+}
+
+// Python reads the file with `read_text(encoding="utf-8")`, which refuses
+// bytes that are not UTF-8 where Node's "utf-8" decoding would replace them
+// with U+FFFD (and a rewrite would then save the replacement). A leading BOM
+// is kept, as `readFileSync(p, "utf-8")` keeps it, so the JSON parse refuses
+// it as `json.loads` does.
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * Whether nothing at all is at `p`: `lstat` says ENOENT. Any other answer
+ * — an entry (a dangling symlink too), or a directory that cannot be
+ * searched (EACCES), a path through a file (ENOTDIR), a symlink loop —
+ * is not "no file". `fs.existsSync` is `false` for all of them.
+ *
+ * @throws Error why `p` cannot be looked at, when it cannot.
+ */
+function isAbsent(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return false;
+  } catch (e) {
+    if (isErrnoException(e) && e.code === "ENOENT") {
+      return true;
+    }
+    throw new Error(`it cannot be read (${excMessage(e)})`);
+  }
+}
+
+/**
+ * Parse the credentials file at `p`; `null` when there is none.
+ *
+ * Coerces the directory and file permissions to 0700/0600 first
+ * (best-effort). Python's `_read_credentials_file`.
+ *
+ * "None" means nothing is at `p` at all. A dangling symlink, or a
+ * directory this process cannot search, is a file that cannot be read:
+ * read as "none", the strict loader would let a save replace it with one
+ * profile.
+ *
+ * @throws Error when the file exists but cannot be read or parsed. The
+ *   message says which (Python's words), never what the file holds.
+ */
+function readCredentialsFile(p: string): CredentialsFile | null {
+  if (isAbsent(p)) {
+    return null;
+  }
+  enforceDirPerms(path.dirname(p));
+  enforceFilePerms(p);
+
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(p);
+  } catch (e) {
+    if (isErrnoException(e) && e.code === "ENOENT" && isAbsent(p)) {
+      return null; // removed since the check above
+    }
+    throw new Error(`it cannot be read (${excMessage(e)})`);
+  }
+  let data: unknown;
+  try {
+    // Read as Python's json.loads reads it (#69): NaN and the infinities
+    // are accepted, and each number literal is kept for the tokens.
+    data = parseJsonLossless(STRICT_UTF8.decode(bytes));
+  } catch {
+    // Not UTF-8, or not JSON: Python's UnicodeDecodeError and
+    // JSONDecodeError are both this ValueError.
+    throw new Error("it is not valid JSON");
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("it is not a JSON object");
+  }
+  try {
+    return credentialsFileFromDict(data as Record<string, unknown>);
+  } catch {
+    throw new Error("it is not a credentials file this SDK can read");
+  }
+}
+
 /**
  * Read and parse the credentials file.
  *
@@ -395,32 +485,52 @@ function resolvePath(p?: string): string {
  * or malformed — the caller can distinguish "no profile" via
  * `getProfile(cf) === null`. On a present file, parent directory and file
  * permissions are coerced to 0700/0600 (best-effort).
+ *
+ * Every read-modify-write of the file reads it with the strict
+ * {@link loadForUpdate} instead, so a file read here as empty is never
+ * saved back over.
  */
 export function loadCredentialsFile(credentialsPath?: string): CredentialsFile {
-  const p = resolvePath(credentialsPath);
-  if (!fs.existsSync(p)) {
-    return emptyCredentialsFile();
-  }
-
-  enforceDirPerms(path.dirname(p));
-  enforceFilePerms(p);
-
-  let data: unknown;
   try {
-    // Read as Python's json.loads reads it (#69): NaN and the infinities
-    // are accepted, and each number literal is kept for the tokens.
-    data = parseJsonLossless(fs.readFileSync(p, "utf-8"));
-  } catch {
-    return emptyCredentialsFile();
-  }
-  if (typeof data !== "object" || data === null || Array.isArray(data)) {
-    return emptyCredentialsFile();
-  }
-  try {
-    return credentialsFileFromDict(data as Record<string, unknown>);
+    return readCredentialsFile(resolvePath(credentialsPath)) ?? emptyCredentialsFile();
   } catch {
     // Corrupt or partial file — treat as empty rather than crashing.
     return emptyCredentialsFile();
+  }
+}
+
+/**
+ * The credentials file exists but cannot be read or parsed, or a refreshed
+ * profile could not be saved to it. The message names the file and the next
+ * step, never what the file holds.
+ *
+ * @internal Not exported from the package entry point: catch
+ *   `KaguraAuthError`.
+ */
+export class CredentialsFileError extends KaguraAuthError {}
+
+/**
+ * Load `credentials.json` for a read-modify-write (Python's
+ * `_load_for_update`); the caller holds the file lock, or is about to take
+ * one to refresh.
+ *
+ * A missing file starts empty. One that exists but cannot be read or parsed
+ * is refused instead of loading as empty: saving an empty file plus the one
+ * profile being written would drop every other profile and the default.
+ *
+ * @throws CredentialsFileError naming the file and why.
+ * @internal Not exported from the package entry point.
+ */
+export function loadForUpdate(credentialsPath?: string): CredentialsFile {
+  const p = resolvePath(credentialsPath);
+  try {
+    return readCredentialsFile(p) ?? emptyCredentialsFile();
+  } catch (e) {
+    throw new CredentialsFileError(
+      `Cannot update ${p}: ${excMessage(e)}.\n` +
+        "  Fix the file, or move it aside and run: kagura-memory auth login",
+      { cause: e },
+    );
   }
 }
 
@@ -437,6 +547,9 @@ export function saveCredentialsFile(cf: CredentialsFile, credentialsPath?: strin
  * an update. The lock is on a sibling `credentials.json.lock`, not the
  * file itself, so it never races the atomic rename in
  * `saveCredentialsFile`.
+ *
+ * @throws KaguraAuthError the file exists but cannot be read or parsed; it
+ *   is left as it is rather than rewritten with this profile alone.
  */
 export async function updateProfile(
   profileName: string,
@@ -445,7 +558,7 @@ export async function updateProfile(
 ): Promise<void> {
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
-    const cf = loadCredentialsFile(p);
+    const cf = loadForUpdate(p);
     setProfile(cf, profileName, creds);
     saveCredentialsFile(cf, p);
   });
@@ -461,6 +574,7 @@ export async function updateProfile(
  * @throws Error if `profileName` is not an existing profile — selecting a
  *   non-existent default would silently break resolution. (Python raises
  *   `KeyError` here; a plain `Error` is the TS equivalent.)
+ * @throws KaguraAuthError the file exists but cannot be read or parsed.
  */
 export async function setDefaultProfile(
   profileName: string,
@@ -468,7 +582,7 @@ export async function setDefaultProfile(
 ): Promise<void> {
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
-    const cf = loadCredentialsFile(p);
+    const cf = loadForUpdate(p);
     if (!hasProfile(cf, profileName)) {
       throw new Error(`profile '${profileName}' not found in credentials file`);
     }
@@ -485,6 +599,8 @@ export async function setDefaultProfile(
  * cannot clobber a freshly written token. The absent-profile early return
  * runs *inside* the lock so the membership check and the save observe one
  * consistent snapshot (no TOCTOU).
+ *
+ * @throws KaguraAuthError the file exists but cannot be read or parsed.
  */
 export async function deleteProfile(
   profileName: string,
@@ -492,7 +608,7 @@ export async function deleteProfile(
 ): Promise<void> {
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
-    const cf = loadCredentialsFile(p);
+    const cf = loadForUpdate(p);
     if (!hasProfile(cf, profileName)) {
       return;
     }
@@ -543,6 +659,36 @@ export interface SharedCredentialsState {
   /** Resolved absolute path of the credentials file. */
   path: string;
   mutex: AsyncMutex;
+  /**
+   * The refresh token the file still holds after a refresh of this process
+   * could not be saved: the server used it up, and `credentials` holds the
+   * one that works. `null` (or absent) once a refresh is saved or adopted,
+   * or the file holds another profile.
+   */
+  usedRefreshToken?: string | null;
+  /**
+   * The access token on file alongside {@link usedRefreshToken}. The file
+   * is behind this process only while it holds both: a server that keeps
+   * the refresh token on a refresh (omits it from the response) leaves it
+   * unchanged across another process's rotation.
+   */
+  usedAccessToken?: string | null;
+}
+
+/**
+ * Whether `onFile` is still the profile a refresh of this process rotated
+ * away and could not save (both tokens; see
+ * {@link SharedCredentialsState.usedAccessToken}).
+ */
+function isBehind(
+  onFile: OAuthCredentials,
+  used: { usedRefreshToken?: string | null; usedAccessToken?: string | null },
+): boolean {
+  return (
+    Boolean(used.usedRefreshToken) &&
+    onFile.refreshToken === used.usedRefreshToken &&
+    onFile.accessToken === used.usedAccessToken
+  );
 }
 
 const stateCache = new Map<string, SharedCredentialsState>();
@@ -574,11 +720,24 @@ export function getSharedState(
   credentialsPath?: string,
   profile?: string | null,
 ): SharedCredentialsState | null {
+  return sharedStateFrom(loadCredentialsFile(credentialsPath), credentialsPath, profile);
+}
+
+/**
+ * {@link getSharedState} from a file the caller already loaded (strictly,
+ * say), so it is not read a second time.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function sharedStateFrom(
+  cf: CredentialsFile,
+  credentialsPath?: string,
+  profile?: string | null,
+): SharedCredentialsState | null {
   // Normalize the path once so the cache key and the persisted state path
   // stay consistent — a relative path could otherwise cause the cache
   // lookup and the refresh-time write to target different files.
   const p = path.resolve(resolvePath(credentialsPath));
-  const cf = loadCredentialsFile(p);
   const creds = getProfile(cf, profile);
   if (creds === null) {
     return null;
@@ -597,10 +756,17 @@ export function getSharedState(
       mutex: getFileMutex(p),
     };
     stateCache.set(key, cached);
-  } else {
+  } else if (!isBehind(creds, cached)) {
     // Refresh in-memory creds from disk so a recent CLI login is visible
-    // to clients already constructed in this process.
+    // to clients already constructed in this process. Not while the file
+    // still holds the profile a refresh of this process rotated away and
+    // could not save: its access token is revoked and its refresh token
+    // used up, and the working pair exists only in memory. Once the file
+    // holds another profile (a login, another process's rotation), it wins
+    // and this process is no longer ahead of it.
     cached.credentials = creds;
+    cached.usedRefreshToken = null;
+    cached.usedAccessToken = null;
   }
   return cached;
 }
@@ -662,7 +828,12 @@ export class KaguraOAuth implements AuthProvider {
       if (!isExpired(this.state.credentials, REFRESH_SKEW_SEC)) {
         return;
       }
-      await this.refreshLocked(null);
+      // Skew path: skip when another process already saved a token outside
+      // the skew window.
+      await refreshSharedState(this.state, {
+        expectedStaleToken: null,
+        ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
+      });
     });
   }
 
@@ -672,8 +843,13 @@ export class KaguraOAuth implements AuthProvider {
    * Used on an upstream 401: the token was rejected server-side (rotated /
    * revoked out-of-band) even though it is not yet within the skew window.
    * The same in-process mutex serializes this with skew-driven refreshes.
-   * Cross-process dedup is handled in `refreshLocked` via the
+   * Cross-process dedup is handled in {@link refreshProfileLocked} via the
    * rejected-token identity check.
+   *
+   * @throws KaguraAuthError also when credentials.json exists but cannot be
+   *   read (before any request), or when the refreshed profile could not be
+   *   saved — the rotated token is then kept in memory, so this process
+   *   stays usable until it expires.
    */
   async forceRefresh(options: { scope?: string } = {}): Promise<void> {
     // Capture the rejected token BEFORE the in-process mutex: if a peer
@@ -682,102 +858,302 @@ export class KaguraOAuth implements AuthProvider {
     // would compare equal to disk and force a redundant refresh.
     const rejectedToken = this.state.credentials.accessToken;
     await this.state.mutex.runExclusive(() =>
-      this.refreshLocked(rejectedToken, options.scope),
+      refreshSharedState(this.state, {
+        expectedStaleToken: rejectedToken,
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
+      }),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-process refresh (shared by KaguraOAuth, refresh() and the CLI)
+// ---------------------------------------------------------------------------
+
+/**
+ * The server rotated the token, but credentials.json could not be written.
+ *
+ * `credentials` is the refreshed profile and its only copy: the rotation
+ * revoked the access token on file and used up its refresh token, which is
+ * `usedRefreshToken` (`null` when the profile was not in the file), with
+ * `usedAccessToken` beside it. Python's `_RefreshNotSavedError`. Also what
+ * `refresh()` throws when the grant a widening `scope` collected through
+ * the device flow could not be saved.
+ *
+ * The token fields are non-enumerable: this error reaches every caller of
+ * a client whose refresh could not be saved, and `console.error(e)`,
+ * `util.inspect` and JSON loggers print an error's own enumerable
+ * properties (and its `cause`'s) — that would write the live access and
+ * refresh token to the log.
+ *
+ * @internal Not exported from the package entry point: catch
+ *   `KaguraAuthError`.
+ */
+export class RefreshNotSavedError extends CredentialsFileError {
+  // `declare`: no class field is emitted (ES2022 would define an
+  // enumerable one); the constructor defines them non-enumerable.
+  declare readonly credentials: OAuthCredentials;
+  declare readonly usedRefreshToken: string | null;
+  declare readonly usedAccessToken: string | null;
+
+  constructor(
+    message: string,
+    credentials: OAuthCredentials,
+    onFile: Pick<OAuthCredentials, "accessToken" | "refreshToken"> | null,
+    options?: KaguraErrorOptions,
+  ) {
+    super(message, options);
+    Object.defineProperties(this, {
+      credentials: { value: credentials, enumerable: false },
+      usedRefreshToken: { value: onFile !== null ? onFile.refreshToken : null, enumerable: false },
+      usedAccessToken: { value: onFile !== null ? onFile.accessToken : null, enumerable: false },
+    });
+  }
+}
+
+/**
+ * Why a save failed, for a "could not save it to <path>: <why>" message:
+ * the reason a {@link CredentialsFileError} gives (not its whole text,
+ * which names the file and a next step of its own), or the system's.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function saveFailureReason(e: unknown): string {
+  return e instanceof CredentialsFileError && e.cause !== undefined ? excMessage(e.cause) : excMessage(e);
+}
+
+/**
+ * Keep the profile a {@link RefreshNotSavedError} carries on `state`, as
+ * its only working copy, and mark the profile the file still holds as one
+ * this process is ahead of: {@link getSharedState} does not reload it, and
+ * the next refresh sends the refresh token held in memory.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export function keepUnsaved(state: SharedCredentialsState, error: RefreshNotSavedError): void {
+  state.credentials = error.credentials;
+  state.usedRefreshToken = error.usedRefreshToken;
+  state.usedAccessToken = error.usedAccessToken;
+}
+
+/**
+ * What {@link refreshProfileLocked} did (Python's `RefreshResult`).
+ *
+ * @internal Not exported from the package entry point.
+ */
+export interface RefreshResult {
+  /** The profile now in force, as saved in the file. */
+  credentials: OAuthCredentials;
+  /**
+   * `true` when this call refreshed it; `false` when another process had
+   * already rotated the token and its profile was adopted without a
+   * network call.
+   */
+  refreshed: boolean;
+}
+
+/** @internal Options of {@link refreshProfileLocked}. */
+export interface RefreshProfileLockedOptions {
+  /**
+   * Governs the "already rotated?" check. `null` (skew path) → skip when
+   * the on-disk token is outside `REFRESH_SKEW_SEC` of expiry. A token
+   * (forced path: an upstream 401, `auth refresh`) → skip only when the
+   * on-disk token differs from it and has not expired; the same token
+   * means nobody has rotated yet (a 401 is independent of `expiresAt`).
+   */
+  expectedStaleToken: string | null;
+  /**
+   * The caller's copy of the profile, refreshed when the profile is no
+   * longer in the file or the file is behind it (`usedRefreshToken`).
+   */
+  fallback: OAuthCredentials;
+  /**
+   * A refresh token the caller knows is used up: an earlier refresh of its
+   * own consumed it but could not be saved ({@link RefreshNotSavedError}),
+   * so `fallback` holds the one that works. While the file still holds it
+   * and {@link usedAccessToken}, `fallback` is refreshed instead; once the
+   * file holds anything else (another process saved since), the file wins
+   * as usual.
+   */
+  usedRefreshToken?: string | null;
+  /** The access token on file beside {@link usedRefreshToken}. */
+  usedAccessToken?: string | null;
+  /**
+   * Scope to request. When set, the refresh always runs: a token another
+   * process rotated carries the grant it had, not this one.
+   */
+  scope?: string;
+  /** Credentials file path (default `~/.kagura/credentials.json`). */
+  credentialsPath?: string;
+  /** Injectable fetch for the token request. */
+  fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * Refresh one profile at most once across processes and save the result
+ * (Python's `refresh_profile_locked`).
+ *
+ * The one refresh path: `KaguraOAuth` (every client and
+ * `kagura-memory-mcp`), `refresh()` and the CLI's `auth refresh` /
+ * `auth token` all come here. Under the cross-process lock it re-reads the
+ * profile and, when another process already rotated the token, returns
+ * that profile without calling `/oauth/token/`. Otherwise it refreshes from
+ * the refresh token on disk and saves the result before releasing the
+ * lock. A refresh token works once (memory-cloud v0.79.0+, #1686), so
+ * refreshing from an older copy of the file would earn `invalid_grant`.
+ *
+ * The lock is held across the network round-trip only: callers must not
+ * run anything that waits on a person (the device flow) inside it.
+ *
+ * @throws KaguraAuthExpiredError the profile holds no refresh token, or the
+ *   server answered `invalid_grant`.
+ * @throws KaguraAuthError any other OAuth refusal; the file exists but
+ *   cannot be read or parsed (checked before any network call, and the file
+ *   is left as it is); or the refreshed profile could not be saved
+ *   ({@link RefreshNotSavedError}: the server has rotated by then, so the
+ *   profile on file can no longer be refreshed and the message says to log
+ *   in again).
+ * @throws KaguraConnectionError the server was unreachable.
+ * @throws FileLockTimeoutError another holder kept the lock past the
+ *   acquire timeout.
+ * @internal Not exported from the package entry point.
+ */
+export async function refreshProfileLocked(
+  profileName: string,
+  options: RefreshProfileLockedOptions,
+): Promise<RefreshResult> {
+  const p = resolvePath(options.credentialsPath);
+  return withFileLock(p, async (): Promise<RefreshResult> => {
+    // Before any request: a file that cannot be read must never be
+    // rewritten with this one profile, and the refresh would use up the
+    // refresh token for a profile that then cannot be saved.
+    const onFile = getProfile(loadForUpdate(p), profileName);
+    // The file behind the caller (its unsaved refresh): refresh from its copy.
+    const disk = onFile !== null && !isBehind(onFile, options) ? onFile : null;
+    if (
+      disk !== null &&
+      options.scope === undefined &&
+      alreadyRotated(disk, options.expectedStaleToken)
+    ) {
+      return { credentials: disk, refreshed: false };
+    }
+    const refreshed = await networkRefresh(disk ?? options.fallback, options.scope, options.fetch);
+    try {
+      // We already hold the cross-process lock; write directly rather than
+      // via updateProfile (which would re-acquire it and deadlock). Loaded
+      // again, unlike Python's single load: a Python process does not see
+      // this lock, so a profile it saved during the round-trip is kept.
+      const cf = readCredentialsFile(p) ?? emptyCredentialsFile();
+      setProfile(cf, profileName, refreshed);
+      saveCredentialsFile(cf, p);
+    } catch (e) {
+      throw new RefreshNotSavedError(
+        `Refreshed profile '${profileName}', but could not save it to ${p}: ${excMessage(e)}\n` +
+          "  The refresh used up the refresh token on file, so the profile on file cannot be " +
+          "refreshed again.\n" +
+          "  Fix the cause, then run: kagura-memory auth login",
+        refreshed,
+        onFile,
+        { cause: e },
+      );
+    }
+    return { credentials: refreshed, refreshed: true };
+  });
+}
+
+/**
+ * Refresh `state`'s profile through {@link refreshProfileLocked} and adopt
+ * the result. Caller holds `state.mutex`.
+ *
+ * When the refresh succeeded but could not be saved, the refreshed profile
+ * is kept on `state` ({@link keepUnsaved}), so this process stays usable
+ * until it expires; the error is rethrown.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export async function refreshSharedState(
+  state: SharedCredentialsState,
+  options: {
+    expectedStaleToken: string | null;
+    scope?: string;
+    fetch?: typeof globalThis.fetch;
+  },
+): Promise<RefreshResult> {
+  try {
+    const result = await refreshProfileLocked(state.profileName, {
+      expectedStaleToken: options.expectedStaleToken,
+      fallback: state.credentials,
+      usedRefreshToken: state.usedRefreshToken ?? null,
+      usedAccessToken: state.usedAccessToken ?? null,
+      credentialsPath: state.path,
+      ...(options.scope !== undefined ? { scope: options.scope } : {}),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+    });
+    state.credentials = result.credentials;
+    state.usedRefreshToken = null;
+    state.usedAccessToken = null;
+    return result;
+  } catch (e) {
+    if (e instanceof RefreshNotSavedError) {
+      keepUnsaved(state, e);
+    }
+    throw e;
+  }
+}
+
+/** Whether `disk` shows another process already produced a usable token. */
+function alreadyRotated(disk: OAuthCredentials, expectedStaleToken: string | null): boolean {
+  if (expectedStaleToken === null) {
+    // Skew path: a token outside the skew window is fresh enough.
+    return !isExpired(disk, REFRESH_SKEW_SEC);
+  }
+  // Forced path: a different token means someone rotated, unless it has
+  // expired too (a file put back from an older copy, a writer whose clock
+  // is behind): there is nothing fresh to adopt, so refresh, from the
+  // refresh token on file. An identical token means the stale token is
+  // still current and we must refresh. (Python's `_already_rotated` adopts
+  // any different token; the gate1 design of #92 requires a live one.)
+  return disk.accessToken !== expectedStaleToken && !isExpired(disk);
+}
+
+/** Hit `/oauth/token/` with `base`'s refresh token. Caller holds the file lock. */
+async function networkRefresh(
+  base: OAuthCredentials,
+  scope: string | undefined,
+  fetchImpl: typeof globalThis.fetch | undefined,
+): Promise<OAuthCredentials> {
+  // A profile stored without a refresh token cannot be refreshed. Going
+  // to the network first only earns an `invalid_grant`, whose message
+  // ("refresh token is no longer valid") describes a token that never
+  // existed — the actual cause is that the grant never carried offline
+  // access. Fail here instead, naming that.
+  if (!base.refreshToken) {
+    throw new KaguraAuthExpiredError(
+      "This profile was stored without a refresh token, so it cannot be " +
+        "refreshed — log in again to get one.\n" +
+        "  Run: kagura auth login (or `npx kagura-memory auth login`)",
+      base.expiresAt,
     );
   }
 
-  /**
-   * Refresh `/oauth/token/` once across all processes. Caller holds the
-   * in-process mutex.
-   *
-   * After acquiring the cross-process file lock, re-read the credentials
-   * from disk and **skip the network call when another process already
-   * rotated the token** — "skip" means "adopt the on-disk result", never
-   * "leave the stale in-memory token in place".
-   *
-   * `expectedStaleToken` governs the "already rotated?" predicate:
-   * `null` (skew path) → skip when the on-disk token is no longer within
-   * the skew window. A token string (401 path) → skip only when the
-   * on-disk token *differs* from the rejected one (a 401 is independent of
-   * `expiresAt`).
-   */
-  private async refreshLocked(
-    expectedStaleToken: string | null,
-    scope?: string,
-  ): Promise<void> {
-    const credPath = this.state.path;
-    const profileName = this.state.profileName;
-    await withFileLock(credPath, async () => {
-      const disk = getProfile(loadCredentialsFile(credPath), profileName);
-      // A scope change must never adopt a peer's rotation: that token was
-      // issued for the *old* scope, so treating it as "already done" would
-      // silently drop the change the caller asked for.
-      if (scope === undefined && disk !== null && this.alreadyRotated(disk, expectedStaleToken)) {
-        this.state.credentials = disk;
-        return;
-      }
-      const base = disk ?? this.state.credentials;
-      await this.networkRefreshAndSave(base, credPath, profileName, scope);
-    });
-  }
-
-  /** Whether `disk` shows another process already produced a usable token. */
-  private alreadyRotated(disk: OAuthCredentials, expectedStaleToken: string | null): boolean {
-    if (expectedStaleToken === null) {
-      // Skew path: a token outside the skew window is fresh enough.
-      return !isExpired(disk, REFRESH_SKEW_SEC);
-    }
-    // 401 path: a different token means someone rotated; an identical token
-    // means the rejected token is still current and we must refresh.
-    return disk.accessToken !== expectedStaleToken;
-  }
-
-  /** Hit `/oauth/token/` from `base` and persist. Caller holds both locks. */
-  private async networkRefreshAndSave(
-    base: OAuthCredentials,
-    credPath: string,
-    profileName: string,
-    scope?: string,
-  ): Promise<void> {
-    // A profile stored without a refresh token cannot be refreshed. Going
-    // to the network first only earns an `invalid_grant`, whose message
-    // ("refresh token is no longer valid") describes a token that never
-    // existed — the actual cause is that the grant never carried offline
-    // access. Fail here instead, naming that.
-    if (!base.refreshToken) {
-      throw new KaguraAuthExpiredError(
-        "This profile was stored without a refresh token, so it cannot be " +
-          "refreshed — log in again to get one.\n" +
-          "  Run: kagura auth login (or `npx kagura-memory auth login`)",
-        base.expiresAt,
-      );
-    }
-
-    const token = await refreshAccessToken(base.server, {
-      clientId: base.clientId,
-      refreshToken: base.refreshToken,
-      ...(scope !== undefined ? { scope } : {}),
-      ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
-    });
-    // Pass `null` when the server omits `refresh_token` so the stored token
-    // is preserved: `TokenResponse.refreshToken` defaults to "" when
-    // absent, and overwriting a valid stored token with an empty one would
-    // break every subsequent refresh.
-    this.state.credentials = withRefreshed(base, {
-      accessToken: token.accessToken,
-      refreshToken: token.refreshToken || null,
-      expiresAt: token.expiresAt,
-      // `||` not `??`: TokenResponse.scope defaults to "" when the server
-      // omits it, and withRefreshed's `?? creds.scope` only catches
-      // null/undefined — so an omitted scope used to blank the stored one.
-      scope: token.scope || null,
-    });
-    // We already hold the cross-process lock; write directly rather than
-    // via updateProfile (which would re-acquire the same lock and
-    // deadlock). Re-load → set → save still preserves every other profile
-    // in the file.
-    const cf = loadCredentialsFile(credPath);
-    setProfile(cf, profileName, this.state.credentials);
-    saveCredentialsFile(cf, credPath);
-  }
+  const token = await refreshAccessToken(base.server, {
+    clientId: base.clientId,
+    refreshToken: base.refreshToken,
+    ...(scope !== undefined ? { scope } : {}),
+    ...(fetchImpl ? { fetch: fetchImpl } : {}),
+  });
+  // Pass `null` when the server omits `refresh_token` so the stored token
+  // is preserved: `TokenResponse.refreshToken` defaults to "" when
+  // absent, and overwriting a valid stored token with an empty one would
+  // break every subsequent refresh.
+  return withRefreshed(base, {
+    accessToken: token.accessToken,
+    refreshToken: token.refreshToken || null,
+    expiresAt: token.expiresAt,
+    // `||` not `??`: TokenResponse.scope defaults to "" when the server
+    // omits it, and withRefreshed's `?? creds.scope` only catches
+    // null/undefined — so an omitted scope used to blank the stored one.
+    scope: token.scope || null,
+  });
 }

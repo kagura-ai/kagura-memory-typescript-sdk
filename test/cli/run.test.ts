@@ -120,9 +120,9 @@ function harness(over: Partial<CliDeps> = {}): Harness {
       loginCalls.push(o);
       return creds();
     },
-    refresh: async (o: unknown) => {
+    refresh: async (o: { profile?: string }) => {
       refreshCalls.push(o);
-      return creds({ accessToken: "at-2" });
+      return { profile: o.profile ?? "default", credentials: creds({ accessToken: "at-2" }), refreshed: true };
     },
     // Only `--invite` sends a request of the CLI's own; this stub keeps the
     // suite off the network. It does not fail a test that forgets to supply
@@ -1205,7 +1205,8 @@ describe("cli: status", () => {
       const token = harness();
       expect(await runCli(["auth", "token", "--profile", name], token.deps)).toBe(1);
       expect(token.out).toEqual([]);
-      expect(token.err).toEqual([`No profile named '${name}'.\n  Run: kagura-memory auth login`]);
+      // Python's ClickException line (#92), "Error: " included.
+      expect(token.err).toEqual([`Error: No profile named '${name}'.\n  Run: kagura-memory auth login`]);
     },
   );
 

@@ -140,13 +140,17 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory measure series <context-id> weight_kg --period week",
     "    kagura-memory measure series <context-id> pnl_usd --agg sum --start 2026-01-01T00:00:00",
   ]],
+  // Recorded from the Python CLI 0.44.0, which put `--verbosity full` on
+  // the fifth and added the last two (python-sdk #298, this bin's #82).
   ["recall", [
     "  Examples:",
     "    kagura-memory recall \"FastAPI dependency injection\"",
     "    kagura-memory recall \"OAuth2 implementation\" -k 10",
     "    kagura-memory recall -c dev \"error handling pattern\"",
     "    kagura-memory recall \"latency-sensitive lookup\" --no-rerank",
-    "    kagura-memory recall \"project context\" --trusted-only",
+    "    kagura-memory recall \"project context\" --trusted-only --verbosity full",
+    "    kagura-memory recall \"deploy runbook\" --full 1 --max-chars 40000",
+    "    kagura-memory recall \"release notes\" --full 0",
   ]],
   ["reference", [
     "  Examples:",

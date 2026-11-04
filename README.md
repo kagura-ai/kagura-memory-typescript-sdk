@@ -87,7 +87,11 @@ Four ways to authenticate, in resolution order:
    (below) or the Python CLI's `kagura auth login`. Profiles
    (`KAGURA_PROFILE` env or `{ profile: "name" }`) and auto-refresh work
    exactly like the Python SDK; the credentials file is shared between both
-   SDKs.
+   SDKs. Every refresh (a client's, `kagura-memory-mcp`'s, `refresh()`'s,
+   `auth refresh`'s and `auth token`'s) takes one lock on the file and
+   re-reads it first, so processes sharing a profile refresh it once, and a
+   `credentials.json` that exists but cannot be read is never rewritten (see
+   [Refreshing](#refreshing)).
 4. **Config file** — `.kagura.json` in the working directory or home:
 
 ```json
@@ -172,6 +176,10 @@ npx kagura-memory --help
 npx kagura-memory auth login --profile work --read-only
 npx kagura-memory recall "OAuth setup" -c dev -k 10
 npx kagura-memory recall "dependency injection" --no-rerank   # skip reranking; no flag follows the context config (v0.69.0+)
+npx kagura-memory recall "project context" --verbosity full   # uncut summaries + tags; compact is the server default (v0.108.0+)
+npx kagura-memory recall "deploy runbook" --full 1 --max-chars 40000   # content on the top hit only (v0.114.0+); reply budget (v0.82.0+)
+# A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
+# retry without the ones it names (every one it sent when it names none), with a note on stderr.
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
 npx kagura-memory measure record <context-id> weight_kg 71.5 --unit kg
 npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
@@ -1142,6 +1150,54 @@ Callers holding their own provider can use `KaguraOAuth` directly — its
 `forceRefresh()` is what `refresh()` builds on, including the
 cross-process lock and the "another process already rotated" dedup.
 
+**One refresh path.** A refresh token works once (memory-cloud v0.79.0+,
+kagura-ai/memory-cloud#1686): of two processes presenting the same one, the
+second gets `invalid_grant`. So every refresh — `KaguraOAuth` in a client or
+in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
+`auth token` — takes the lock on `credentials.json` (a sibling
+`credentials.json.lock`), re-reads the profile, and when another process
+already rotated it to a token that has not expired, uses that profile and
+sends nothing; otherwise it refreshes from the refresh token on file and
+saves the result before it releases the lock. (Python 0.44.0 also adopts a
+different token that has expired; this SDK refreshes it instead.) The
+device flow a widening `--scope` falls back to runs after the lock is
+released, since it waits on the user. The Python SDK
+locks the same `credentials.json.lock` with an OS lock, which Node does not
+have, so the two SDKs' locks do not exclude each other: between them only
+the re-read applies. This is client-side and works against every server. As
+in Python SDK 0.44.0 (kagura-ai/kagura-memory-python-sdk#313):
+
+- `auth refresh` says `✓ Profile 'NAME' was already refreshed by another
+  process.` when it found the profile rotated under the lock, and `✓
+  Refreshed profile 'NAME'.` after a refresh of its own, each followed by
+  the `Scope:` and `Expires:` lines; both exit 0. `auth token` prints the
+  token another process refreshed.
+- A `credentials.json` that exists but cannot be read or parsed is refused
+  before any refresh request or write, and left as it is: `KaguraAuthError`
+  `Cannot update <path>: it is not valid JSON.` (or why else it cannot be
+  read), with `Fix the file, or move it aside and run: kagura-memory auth
+  login`. This holds for a refresh (checked under the lock), the save at
+  the end of `login()`, `updateProfile`, `setDefaultProfile` and
+  `deleteProfile`; `kagura-memory-mcp` refuses it at startup and before any
+  login. "Exists" includes a dangling symlink, and a file in a directory
+  this process cannot search. A missing file is still "no profile".
+  `loadCredentialsFile()`, client construction, `refresh()` and the CLI's
+  `auth refresh` / `auth token` read such a file as holding no profile first,
+  as Python's do (`No profile named 'default'.`); the refusal comes when it
+  became unreadable by the time the lock is held.
+- When the server refreshed but the profile cannot be saved (a full disk, a
+  read-only directory), the refresh throws `KaguraAuthError` `Refreshed
+  profile 'NAME', but could not save it to <path>: <reason>`, saying the
+  refresh used up the refresh token on file and to run `kagura-memory auth
+  login` after fixing the cause. The process that refreshed keeps the
+  rotated token in memory (its next refresh sends the new refresh token,
+  until another process saves the profile), so a client stays usable until
+  it expires; `kagura-memory-mcp` goes on serving the request with it and
+  logs the message once. A widening `--scope` whose device-flow grant
+  cannot be saved gives the same kind of error (`Got consent for scope
+  …`), and the grant is kept the same way. `auth refresh` and `auth token`
+  exit 1, and `auth token` prints no token.
+
 ### Error handling
 
 All errors extend `KaguraError`:
@@ -1340,11 +1396,65 @@ when `undefined`.
 | Method | What it does |
 |--------|--------------|
 | `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. |
-| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". Returns a typed `RecallResponse` (`confidence` first: read `confidence.level` before the hits); see [Recall result shape](#recall-result-shape). |
 | `reference` | Full detail for one memory, under `result.memory`. |
 | `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. `tags` replaces the list, with `remember`'s caps. |
 | `forget` | Soft-delete by `memoryId` or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). A row carries `observed_at` (v0.127.0+), when the fact held, as the text the server stores: a date `YYYY-MM-DD` or a UTC datetime `YYYY-MM-DDTHH:MM:SSZ`, never parsed (a date sorts and filters as the start of its UTC day). |
+
+#### Recall result shape
+
+Since memory-cloud v0.108.0 a `recall` hit is **compact** unless you pass
+`verbosity: "full"`: `memory_id`, a 160-character `summary` head
+(`summary_cut: true` when it was cut), `type`, `importance`, `score`,
+`created_at` and `updated_at`. **`tags`, `context_summary`,
+`scope`, `version` and the uncut `summary` need `verbosity: "full"`**;
+code that reads them from a compact hit gets `undefined`. Both shapes
+carry `observed_at`, `superseded_by`, `contradicts`, `supersede_candidate`
+(with `verified: true` when the server's judge confirmed it, v0.109.0+)
+and `folded` (older versions of the same fact folded under the newest
+row, v0.114.0+) when they apply. A key that does not apply is left out:
+`context_summary` and the annotations since v0.73.0, an empty `tags`
+since v0.93.0. Older servers send `null` / `[]` for them, so test these
+keys for truthiness, not for `undefined`. `updated_at` is `null` on a
+memory never edited.
+
+Since v0.114.0 the top `full` hits also carry `content` (up to 1,500
+characters; `content_truncated` / `content_next_offset` when cut, and
+`reference()` has the rest). The MCP default is 3 (the deployment's
+`MCP_RECALL_DEFAULT_FULL`), on trusted, non-connector rows only; an
+explicit `full` makes every row eligible, and `full: 0` returns summaries
+only. `maxChars` (10,000–100,000, server default 20,000; v0.82.0+) bounds
+the whole reply: content goes first (`full_applied` counts the rows that
+kept it), then `context_summary` (`context_summary_omitted: true`), then
+the lowest-ranked rows (`truncated: true`). A context with the LLM
+selector on adds `selector` and per-row `spans` (v0.115.0+).
+
+```ts
+const detailed = await client.recall({ contextId, query: "OAuth2", verbosity: "full", full: 0 });
+for (const hit of detailed.results) {
+  console.log(hit.summary, hit.tags ?? []); // an empty tag list is omitted, not []
+}
+const top = await client.recall({ contextId, query: "deploy runbook", full: 1, maxChars: 40_000 });
+// top.results[0]?.content; with content_truncated, reference() has the whole memory
+```
+
+`verbosity`, `full` and `maxChars` are sent only when set, and checked
+locally first (`full` 0–100, `maxChars` 10,000–100,000, integers). From
+v0.82.0 a server refuses an argument it does not declare (`KaguraError`,
+code `invalid_argument`), so `verbosity` needs v0.108.0+ and `full`
+v0.114.0+ there; older servers ignore all three. `recall()` never retries
+without them; the `recall` command of the bin does, once.
+
+`includeExploreHints` asks for `explore_hints`, seeds for `explore()`.
+Since v0.135.0 the server makes them only when the MCP URL lists the
+`explore` tool, which the bare URL (the core tool profile) does not: add
+`?add_tools=explore` or `?profile=full` to `mcpUrl` (or `explore` to a
+`tools=` / `add_tools=` list it already has). On any other URL the call
+still succeeds and carries `explore_hints_omitted`, a sentence naming that
+opt-in, in place of `explore_hints`. `explore()` itself is unaffected.
+Writing that URL from `kagura-memory setup` is
+[#83](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/83).
 
 ### Deterministic lanes
 
@@ -1353,10 +1463,10 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | Axis |
 |--------|------|
-| `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. |
-| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`; `context_summary_omitted` (v0.82.0+) says the reply passed its budget and the pinned items lost their `context_summary`. |
+| `loadPinned` | The complete, unranked `deliveryMode: "always"` set. Bounded: check `truncated` / `total_available` rather than assuming you got everything. `maxChars` (10,000–100,000, server default 20,000; v0.82.0+) bounds the reply: `context_summary` goes first (`context_summary_omitted: true`), then items from the end. |
+| `loadGuardrails` | The set a client-side tool hook matches against (server v0.74.0+): the pinned set plus every memory carrying `details.tool_trigger`, in two separately capped lanes — `cap` bounds only the tool-triggered one, so pins never crowd guardrails out. Check `tool_triggered_truncated` / `pinned_truncated`; `context_summary_omitted` (v0.82.0+) says the reply passed its budget and the pinned items lost their `context_summary`. `maxChars` as for `loadPinned` (MCP only; the REST twin takes none). |
 | `recallUpcoming` | WHEN — `type: "time"` memories whose window overlaps `from`/`until`, soonest first. Items carry `trigger`, not `details` (server v0.73.0+); `includeDetails: true` returns the full `details` object instead. |
-| `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. See [the WHERE axis](#the-where-axis--geospatial-memories). |
+| `recallNearby` | WHERE — memories near a point, nearest first with `distance_m`. Items carry `location`, not `details` (server v0.82.0+); `includeDetails: true` returns the full `details` object instead. See [the WHERE axis](#the-where-axis--geospatial-memories). |
 | `recordMeasurement` | HOW-MUCH — append one number to a metric's series (server v0.54.0+). Not a memory: never embedded, recalled or consolidated. Append-only, with no delete. See [the HOW-MUCH axis](#the-how-much-axis--measurement-series). |
 | `recallSeries` | HOW-MUCH — one metric's series, bucketed by `period` (`day`, `week`, `month`) and aggregated by `agg` (`avg`, `min`, `max`, `sum`, `count`, `last`), UTC-aligned, empty buckets omitted. `count` is buckets, not observations. |
 
@@ -1487,7 +1597,10 @@ const bootstrap = await client.getAgentBootstrap({
   agentId: agent.id,          // contextId omitted → default binding
   sessionId: "run-42",        // echoed in the correlation block
   query: "session summary",   // enables the trusted-only recall component
+  maxChars: 40_000,           // whole-envelope budget (server v0.82.0+; default 20,000)
 });
+// Server v0.82.0+ loads 20 pinned memories by default here (pinnedCap raises it);
+// bootstrap.context_summary_omitted / a component's truncated say what the budget took.
 if (bootstrap.degraded) {
   // some component failed fail-soft; inspect bootstrap.components
 }
@@ -1565,6 +1678,12 @@ into `details`, so `"35.68"` is rejected server-side with HTTP 422.
 `recallNearby()` returns a typed `RecallNearbyResponse`
 (`results[].distance_m`); `MemoryLocation` and `NearbyMemory` are exported
 too. Out-of-range coordinates throw locally rather than round-tripping.
+Since server v0.82.0 each item carries `location` (its
+`details.location`) instead of the whole `details`; `includeDetails: true`
+returns `details` again, held to a reply budget of about 20,000
+characters: from the last item backwards, one that does not fit carries
+`details_omitted: true` and `details_total_chars` instead (read it with
+`reference()`). Older servers always send `details`.
 
 `listMemories()` filters by a bounding box instead (server v0.54.0+):
 `latMin`, `latMax`, `lonMin` and `lonMax`, in any combination, keep only
