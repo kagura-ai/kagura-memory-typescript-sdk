@@ -18,24 +18,17 @@ import type { ResolvedAuth } from "../../../src/auth/types.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { restClientFromAuth } from "../../../src/restBase.js";
 import { WorkspaceClient } from "../../../src/workspaceClient.js";
+import {
+  recordedFetch,
+  terminalText,
+  type RecordedCase,
+  type RecordedRoutes,
+  type SentRequest,
+} from "../../pythonDumpHarness.js";
 
-interface Sent {
-  method: string;
-  /** The path and query. */
-  path: string;
-  body: string | null;
-}
-
-interface Case {
-  name: string;
-  argv: string[];
-  /** `METHOD /path` → the status and the exact body sent. */
-  routes: Record<string, { status: number; raw: string }>;
+interface Case extends RecordedCase {
   /** The requests the Python CLI made, in order. */
-  requests: Sent[];
-  code: number;
-  stdout: string;
-  stderr: string;
+  requests: SentRequest[];
 }
 
 const CASES: Case[] = [
@@ -183,22 +176,15 @@ interface Run {
   code: number;
   stdout: string;
   stderr: string;
-  sent: Sent[];
+  sent: SentRequest[];
 }
 
-/** Run `argv` against a fetch answering each `METHOD /path` with its recorded bytes, and 404 otherwise. */
-async function run(argv: string[], routes: Case["routes"]): Promise<Run> {
+/** Run `argv` against the recorded routes ({@link recordedFetch}), collecting every request sent. */
+async function run(argv: string[], routes: RecordedRoutes): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
-  const sent: Sent[] = [];
-  const fetch: typeof globalThis.fetch = async (input, init) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? "GET";
-    sent.push({ method, path: url.pathname + url.search, body: typeof init?.body === "string" ? init.body : null });
-    const route = routes[`${method} ${url.pathname}`];
-    if (route === undefined) return new Response('{"detail":"Not Found"}', { status: 404 });
-    return new Response(route.raw, { status: route.status });
-  };
+  const sent: SentRequest[] = [];
+  const fetch = recordedFetch(routes, sent);
   const deps = {
     write: (line: string) => void out.push(line),
     writeError: (line: string) => void err.push(line),
@@ -214,12 +200,7 @@ async function run(argv: string[], routes: Case["routes"]): Promise<Run> {
     },
   } as unknown as CliDeps;
   const code = await runCli(argv, deps);
-  return {
-    code,
-    stdout: out.map((line) => `${line}\n`).join(""),
-    stderr: err.map((line) => `${line}\n`).join(""),
-    sent,
-  };
+  return { code, stdout: terminalText(out), stderr: terminalText(err), sent };
 }
 
 describe("member key and invitation output with v0.89.0 string ids, byte for byte the Python CLI's (#102)", () => {

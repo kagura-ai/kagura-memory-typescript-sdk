@@ -26,17 +26,11 @@ import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FilesClient } from "../../../src/filesClient.js";
 import { ResourceClient } from "../../../src/resourceClient.js";
 import { restClientFromAuth } from "../../../src/restBase.js";
+import { recordedFetch, terminalText, type RecordedCase } from "../../pythonDumpHarness.js";
 
-interface Case {
-  name: string;
-  argv: string[];
+interface Case extends RecordedCase {
   /** Files the command reads, by the name `argv` gives them. */
   files?: Record<string, string>;
-  /** `METHOD /path` → the status and the exact body sent. */
-  routes: Record<string, { status: number; raw: string }>;
-  code: number;
-  stdout: string;
-  stderr: string;
 }
 
 const CASES: Case[] = [
@@ -636,21 +630,11 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** A fetch answering each `METHOD /path` with its recorded bytes, and 404 otherwise. */
-function rawFetch(routes: Case["routes"]): typeof globalThis.fetch {
-  return async (input, init) => {
-    const url = new URL(String(input));
-    const route = routes[`${init?.method ?? "GET"} ${url.pathname}`];
-    if (route === undefined) return new Response('{"detail":"Not Found"}', { status: 404 });
-    return new Response(route.status === 204 ? null : route.raw, { status: route.status });
-  };
-}
-
 describe("resource and files output, byte for byte the Python CLI's (#66)", () => {
   it.each([...CASES, ...LOSSLESS_CASES, ...NULL_CONTEXT_CASES].map((c) => [c.name, c] as const))("%s", async (_name, c) => {
     const out: string[] = [];
     const err: string[] = [];
-    const fetch = rawFetch(c.routes);
+    const fetch = recordedFetch(c.routes);
     const deps = {
       write: (line: string) => void out.push(line),
       writeError: (line: string) => void err.push(line),
@@ -665,7 +649,7 @@ describe("resource and files output, byte for byte the Python CLI's (#66)", () =
     const argv = c.argv.map((arg) => (c.files?.[arg] !== undefined ? path.join(dir, arg) : arg));
 
     expect(await runCli(argv, deps)).toBe(c.code);
-    expect(out.map((line) => `${line}\n`).join("")).toBe(c.stdout);
-    expect(err.map((line) => `${line}\n`).join("")).toBe(c.stderr);
+    expect(terminalText(out)).toBe(c.stdout);
+    expect(terminalText(err)).toBe(c.stderr);
   });
 });
