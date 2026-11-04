@@ -2515,47 +2515,10 @@ describe("sleep maintenance", () => {
     rollback_sleep_run: ["report_id"],
   };
 
-  /**
-   * A {@link FakeServer} that refuses an undeclared argument as memory-cloud
-   * v0.82.0+ does: the envelope of `find_unknown_arguments`
-   * (`backend/src/mcp_server/tools/_arg_coercion.py`) for one unknown name
-   * with no close declared name, in a result flagged `isError`.
-   */
+  /** A {@link FakeServer} that refuses an undeclared sleep argument as memory-cloud v0.82.0+ does. */
   function strictSleepServer(): FakeServer {
     const server = new FakeServer();
-    const answer = server.fetch;
-    server.fetch = async (input, init) => {
-      const response = await answer(input, init);
-      const body = server.requests[server.requests.length - 1]?.body;
-      if (body?.method !== "tools/call") return response;
-      const { name, arguments: args } = body.params as { name: string; arguments: Record<string, unknown> };
-      const declared = SLEEP_TOOL_ARGUMENTS[name];
-      const unknown = Object.keys(args)
-        .filter((key) => declared !== undefined && !declared.includes(key))
-        .sort();
-      if (declared === undefined || unknown.length === 0) return response;
-      const refusal = {
-        status: "error",
-        error: "invalid_argument",
-        message:
-          `${name} does not accept the argument '${unknown[0]}'. ` +
-          `Arguments its inputSchema declares: ${declared.join(", ")}.`,
-        unknown_arguments: unknown,
-        allowed_arguments: declared,
-        suggestions: {},
-        help:
-          "Remove the unknown arguments or rename them as suggested, then call the " +
-          "tool again. tools/list shows each tool's inputSchema.",
-      };
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          result: { content: [{ type: "text", text: JSON.stringify(refusal) }], isError: true },
-        }),
-        { status: 200 },
-      );
-    };
+    server.declaredArguments = SLEEP_TOOL_ARGUMENTS;
     return server;
   }
 
@@ -2608,6 +2571,17 @@ describe("sleep maintenance", () => {
     expect(server.toolCallArgs()).toEqual({ report_id: "r1" });
     expect(server.toolCallArgs()).not.toHaveProperty("context_id");
     expect(result).toEqual(rolledBack);
+  });
+
+  it("getSleepReport and rollbackSleepRun take no contextId at all", async () => {
+    const server = strictSleepServer();
+    server.toolResults.get_sleep_report = { status: "success", report: { report_id: "r1" }, actions: [] };
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1" };
+    const client = makeClient(server);
+    await client.getSleepReport({ reportId: "r1" });
+    await client.rollbackSleepRun({ reportId: "r1" });
+    expect(server.toolCallArgs(0)).toEqual({ report_id: "r1" });
+    expect(server.toolCallArgs(1)).toEqual({ report_id: "r1" });
   });
 
   it("rollbackSleepRun: a report the caller cannot reach is KaguraNotFoundError (v0.126.0+)", async () => {
@@ -2663,6 +2637,75 @@ describe("sleep maintenance", () => {
       "rollback_sleep_run failed (analysis_report): Report r1 is an analysis report: it records the " +
         "LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.",
     );
+  });
+});
+
+// The shared fake's v0.82.0+ undeclared-argument refusal (memory-cloud#1742).
+// Each expected envelope is what memory-cloud v0.143.0's
+// find_unknown_arguments returned for the same arguments.
+describe("FakeServer.declaredArguments", () => {
+  function strict(): FakeServer {
+    const server = new FakeServer();
+    server.declaredArguments = { rollback_sleep_run: ["report_id"] };
+    return server;
+  }
+
+  it("answers the server's whole envelope, in a result flagged isError", async () => {
+    const response = await strict().fetch("https://x.test/mcp", {
+      method: "POST",
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "rollback_sleep_run", arguments: { context_id: "c", report_id: "r" } },
+      }),
+    });
+    const rpc = (await response.json()) as { result: { isError: boolean; content: Array<{ text: string }> } };
+    expect(rpc.result.isError).toBe(true);
+    expect(JSON.parse(rpc.result.content[0]!.text)).toEqual({
+      status: "error",
+      error: "invalid_argument",
+      message: "rollback_sleep_run does not accept the argument 'context_id'. Arguments its inputSchema declares: report_id.",
+      unknown_arguments: ["context_id"],
+      allowed_arguments: ["report_id"],
+      suggestions: {},
+      help:
+        "Remove the unknown arguments or rename them as suggested, then call the tool again. " +
+        "tools/list shows each tool's inputSchema.",
+    });
+  });
+
+  it("names every unknown argument, sorted, and accepts _meta", async () => {
+    const err = await makeClient(strict())
+      .callRawTool("rollback_sleep_run", { zz: 1, context_id: "c", _meta: {}, report_id: "r" })
+      .catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (invalid_argument): rollback_sleep_run does not accept the arguments " +
+        "'context_id', 'zz'. Arguments its inputSchema declares: report_id.",
+    );
+  });
+
+  it("names ten unknown arguments and counts the rest", async () => {
+    const args = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`a${i + 1}`, i]));
+    const err = await makeClient(strict())
+      .callRawTool("rollback_sleep_run", args)
+      .catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (invalid_argument): rollback_sleep_run does not accept the arguments " +
+        "'a1', 'a10', 'a11', 'a12', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7' and 2 more. " +
+        "Arguments its inputSchema declares: report_id.",
+    );
+  });
+
+  it("lets declared arguments through, and every argument of a tool it does not list", async () => {
+    const server = strict();
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r" };
+    const client = makeClient(server);
+    await expect(client.callRawTool("rollback_sleep_run", { report_id: "r", _meta: {} })).resolves.toEqual({
+      status: "rolled_back",
+      report_id: "r",
+    });
+    await expect(client.callRawTool("recall", { anything: 1 })).resolves.toEqual({ status: "success" });
   });
 });
 
