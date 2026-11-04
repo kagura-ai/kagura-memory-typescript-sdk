@@ -114,11 +114,6 @@ async function loadAge(): Promise<AgeModule> {
   return agePromise;
 }
 
-/** Reset the memoized module handle. Test seam; not part of the public API. */
-export function resetAgeCache(): void {
-  agePromise = null;
-}
-
 /**
  * Generate a fresh X25519 age keypair.
  *
