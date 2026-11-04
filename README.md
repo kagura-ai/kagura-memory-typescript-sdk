@@ -1578,8 +1578,9 @@ code that reads them from a compact hit gets `undefined`. Both shapes
 carry `observed_at`, `superseded_by`, `contradicts`, `supersede_candidate`
 (with `verified: true` when the server's judge confirmed it, v0.109.0+,
 and `acceptance` from v0.142.0 — see
-[Supersede suggestions](#supersede-suggestions)) and `folded` (older versions of the same fact folded under the newest
-row, v0.114.0+) when they apply. A key that does not apply is left out:
+[Supersede suggestions](#supersede-suggestions)) and `folded` (older
+versions of the same fact folded under the newest row, v0.114.0+) when
+they apply. A key that does not apply is left out:
 `context_summary` and the annotations since v0.73.0, an empty `tags`
 since v0.93.0. Older servers send `null` / `[]` for them, so test these
 keys for truthiness, not for `undefined`. `updated_at` is `null` on a
@@ -1760,21 +1761,22 @@ one decimal), `plan` (absent when the server could not resolve it),
 `upgrade` when a higher tier raises that cap, or `admin` on a deployment
 without billing), `help` (what to do and what fails at 100 %) and, on the
 daily dimensions, `resets_at` (the next UTC midnight). Below 80 % the key
-is absent. `bootstrap` carries it on every call, keeping `help` on the
-most severe entry only when the notice would take more than a quarter of
-its `maxChars`; a write shows an entry at most once an hour per
-workspace, dimension and level, so a missing key does not mean the plan
-has room.
+is absent. `bootstrap` carries it on every call (no hourly throttle)
+within a quarter of its `maxChars`: past that, `help` stays on the most
+severe entry only, and past it still that entry alone stays. A write
+shows an entry at most once an hour per workspace, dimension and level,
+so a missing key does not mean the plan has room.
 
 `bootstrap` and `rememberBatch` read it fail-open, as the Python SDK's
 `PlanHeadroom` field does: the notice is advisory, so an entry the model
 cannot read is dropped (the call still succeeds), and a value that is not
-a list, or keeps no entry, is left out. The entries that read come back
-as sent; `dimension`, `level` and the `remedies` are plain strings, so a
-value a newer server adds still reads. `remember` and `updateMemory`
-return it as sent, unchecked like the rest of their reply. The CLI's
-`bootstrap` prints each notice as Python's model dumps it, defaults
-filled.
+a list, or keeps no entry, is left out (where Python's model reads
+`None`). The entries that read come back as sent; `dimension`, `level`
+and the `remedies` are plain strings, so a value a newer server adds
+still reads. `remember` and `updateMemory` return it as sent, unchecked
+like the rest of their reply. The CLI's `bootstrap` prints each notice as
+Python's model dumps it, defaults filled, and `"plan_headroom": null`
+when none reads.
 
 ```ts
 const session = await client.bootstrap({ contextId });

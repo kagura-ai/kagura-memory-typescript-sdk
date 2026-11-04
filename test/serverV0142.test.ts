@@ -110,14 +110,32 @@ const BATCH = {
 
 type Envelope = BootstrapResponse | RememberBatchResult;
 
-/** Call `tool` through its method against a server that answers `reply`. */
+const ITEMS = [{ summary: "s", content: "c", type: "note" }];
+
+/**
+ * The `tools/call` arguments each method sends with only its required
+ * options: the notice is response-only, so nothing new goes on the wire
+ * and a server older than v0.142.0 sees the same call.
+ */
+const WIRE_ARGS = {
+  bootstrap: { context_id: CTX },
+  remember_batch: { context_id: CTX, items: ITEMS },
+} as const;
+
+/**
+ * Call `tool` through its method against a server that answers `reply`,
+ * checking that the call sent {@link WIRE_ARGS} and nothing else.
+ */
 async function call(tool: "bootstrap" | "remember_batch", reply: unknown): Promise<Envelope> {
   const server = new FakeServer();
   server.toolResults[tool] = reply;
   const client = makeClient(server);
-  return tool === "bootstrap"
+  const result = await (tool === "bootstrap"
     ? client.bootstrap({ contextId: CTX })
-    : client.rememberBatch({ contextId: CTX, items: [{ summary: "s", content: "c", type: "note" }] });
+    : client.rememberBatch({ contextId: CTX, items: ITEMS }));
+  const calls = server.requests.filter((r) => r.body?.method === "tools/call").map((r) => r.body?.params);
+  expect(calls).toEqual([{ name: tool, arguments: WIRE_ARGS[tool] }]);
+  return result;
 }
 
 const ENVELOPES = [
@@ -140,11 +158,15 @@ describe("plan_headroom on bootstrap and remember_batch (memory-cloud v0.142.0, 
     expect(notices?.[0]).not.toHaveProperty("help");
     expect(notices?.[2]).not.toHaveProperty("plan");
     expect(notices?.[1]?.resets_at).toBe("2026-11-05T00:00:00Z");
+    // As sent: the reply's keys and each entry's (resets_at before plan) in the server's order.
+    expect(Object.keys(result)).toEqual(Object.keys(reply));
+    expect(notices?.map((n) => Object.keys(n))).toEqual(SENT.map((n) => Object.keys(n)));
   });
 
   it.each(ENVELOPES)("%s without plan_headroom (below 80 %%) has none", async (tool, envelope) => {
     const result = await call(tool, envelope);
     expect(result).toEqual(envelope);
+    expect(Object.keys(result)).toEqual(Object.keys(envelope));
     expect(result).not.toHaveProperty("plan_headroom");
   });
 
@@ -269,6 +291,17 @@ describe("supersede_candidate.acceptance (recall v0.142.0 #2508, reference v0.13
       expect(result.memory.supersede_candidate?.acceptance).toEqual({ allowed: false, reason });
     },
   );
+
+  it("a reason a newer server adds reads as sent", async () => {
+    const server = new FakeServer();
+    const acceptance = { allowed: false, reason: "context_archived", detail: "a newer key" };
+    const reply = { ...RECALL, results: [row(M1, { supersede_candidate: { ...candidate, acceptance } })], count: 1 };
+    server.toolResults.recall = reply;
+    const result = await makeClient(server).recall({ contextId: CTX, query: "deploy target" });
+    expect(result).toEqual(reply);
+    const read: SupersedeAcceptance | undefined = result.results[0]!.supersede_candidate?.acceptance;
+    expect(read?.reason).toBe("context_archived");
+  });
 
   it("reference from a server before v0.137.0 has no acceptance", async () => {
     const server = new FakeServer();

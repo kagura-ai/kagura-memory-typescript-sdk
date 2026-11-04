@@ -2409,10 +2409,11 @@ export type ListOrderBy = "updated_at" | "created_at" | "importance" | "observed
  * cap) or `"admin"` (a deployment without billing). `help` names those
  * remedies and what fails at 100 %, in at most 300 characters with no URL.
  *
- * `plan` is absent when the server could not resolve the plan, and
- * `bootstrap` keeps `help` on its most severe entry only when the notice
- * would take more than a quarter of its `maxChars` budget. The entry comes
- * back as sent, once the Python SDK's `PlanHeadroomNotice` model reads it.
+ * `plan` is absent when the server could not resolve the plan. `bootstrap`
+ * holds the notice to a quarter of its `maxChars` budget: past it, `help`
+ * stays on the most severe entry only (the first `critical`, else the
+ * first), and past it still that entry alone stays. The entry comes back
+ * as sent, once the Python SDK's `PlanHeadroomNotice` model reads it.
  */
 export interface PlanHeadroomNotice {
   dimension: string;
@@ -2581,7 +2582,7 @@ export interface BootstrapResponse extends ContextEcho {
    * the Python SDK's `PlanHeadroom` field reads it: the notice is
    * advisory, so an entry {@link PlanHeadroomNotice} cannot read is
    * dropped, and a value that is not a list, or keeps no entry, is left
-   * out — never a failed call.
+   * out (where Python's model reads `None`) — never a failed call.
    */
   plan_headroom?: PlanHeadroomNotice[];
 }
