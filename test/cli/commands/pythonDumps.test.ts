@@ -9,7 +9,10 @@
  * lone-surrogate cases (#69) were recorded from the Python CLI 0.42.0
  * (click 8.3.3, pydantic 2.13.4) the same way, and the indexer-status
  * cases again from the Python CLI 0.44.0, whose `IndexerStateMetrics` has
- * `failed_events` (memory-cloud v0.135.0+, #85).
+ * `failed_events` (memory-cloud v0.135.0+, #85). The resource token cases
+ * were recorded again from the Python CLI 0.44.0 (#102), whose token `id`
+ * is `int | str` (memory-cloud v0.89.0+ `rtok_…` ids): a wire `"6"` stays
+ * the string.
  */
 
 import * as fs from "node:fs";
@@ -23,27 +26,42 @@ import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FilesClient } from "../../../src/filesClient.js";
 import { ResourceClient } from "../../../src/resourceClient.js";
 import { restClientFromAuth } from "../../../src/restBase.js";
+import { recordedFetch, terminalText, type RecordedCase } from "../../pythonDumpHarness.js";
 
-interface Case {
-  name: string;
-  argv: string[];
+interface Case extends RecordedCase {
   /** Files the command reads, by the name `argv` gives them. */
   files?: Record<string, string>;
-  /** `METHOD /path` → the status and the exact body sent. */
-  routes: Record<string, { status: number; raw: string }>;
-  code: number;
-  stdout: string;
-  stderr: string;
 }
 
 const CASES: Case[] = [
   {
+    // Re-recorded from the Python CLI 0.44.0 (#102): `id: int | str` keeps
+    // the wire's "6" a string, where the 0.41.0 `int` field printed 6.
     name: "tokens list extra keys + missing optionals + lax values",
     argv: ["resource","tokens","list","-r","products","-l","2"],
     routes: {"GET /api/v1/resource-tokens":{"status":200,"raw":"{\"offset\": \"0\", \"tokens\": [{\"status\": \"active\", \"id\": \"6\", \"extra\": [1, 2], \"resource_id\": \"products\", \"quota_events_per_hour\": 1000, \"created_at\": \"2026-06-01T00:00:00Z\", \"is_active\": 1, \"token_hash\": \"zzz\"}], \"total\": 1, \"limit\": 2, \"next\": null}"}},
     code: 0,
-    stdout: "{\n  \"tokens\": [\n    {\n      \"id\": 6,\n      \"resource_id\": \"products\",\n      \"description\": null,\n      \"quota_events_per_hour\": 1000,\n      \"created_by\": null,\n      \"created_at\": \"2026-06-01T00:00:00Z\",\n      \"last_used_at\": null,\n      \"is_active\": true,\n      \"status\": \"active\"\n    }\n  ],\n  \"total\": 1,\n  \"limit\": 2,\n  \"offset\": 0\n}\n",
+    stdout: "{\n  \"tokens\": [\n    {\n      \"id\": \"6\",\n      \"resource_id\": \"products\",\n      \"description\": null,\n      \"quota_events_per_hour\": 1000,\n      \"created_by\": null,\n      \"created_at\": \"2026-06-01T00:00:00Z\",\n      \"last_used_at\": null,\n      \"is_active\": true,\n      \"status\": \"active\"\n    }\n  ],\n  \"total\": 1,\n  \"limit\": 2,\n  \"offset\": 0\n}\n",
     stderr: "",
+  },
+  {
+    // memory-cloud v0.89.0+ (memory-cloud#1008) token ids, recorded from the
+    // Python CLI 0.44.0 (#102): the string id, and a value neither member
+    // of `int | str` takes, refused under each.
+    name: "tokens list, a v0.89.0 rtok_ id",
+    argv: ["resource","tokens","list","-r","products"],
+    routes: {"GET /api/v1/resource-tokens":{"status":200,"raw":"{\"tokens\": [{\"id\": \"rtok_4hT9xQ2mLp8vZr1sKc3dEf\", \"resource_id\": \"products\", \"description\": \"Sync\", \"quota_events_per_hour\": 1000, \"created_by\": \"google_1\", \"created_at\": \"2026-06-01T00:00:00Z\", \"last_used_at\": null, \"is_active\": true, \"status\": \"active\"}], \"total\": 1, \"limit\": 50, \"offset\": 0}"}},
+    code: 0,
+    stdout: "{\n  \"tokens\": [\n    {\n      \"id\": \"rtok_4hT9xQ2mLp8vZr1sKc3dEf\",\n      \"resource_id\": \"products\",\n      \"description\": \"Sync\",\n      \"quota_events_per_hour\": 1000,\n      \"created_by\": \"google_1\",\n      \"created_at\": \"2026-06-01T00:00:00Z\",\n      \"last_used_at\": null,\n      \"is_active\": true,\n      \"status\": \"active\"\n    }\n  ],\n  \"total\": 1,\n  \"limit\": 50,\n  \"offset\": 0\n}\n",
+    stderr: "",
+  },
+  {
+    name: "tokens list, an rtok_ id and an id of 7.5",
+    argv: ["resource","tokens","list","-r","products"],
+    routes: {"GET /api/v1/resource-tokens":{"status":200,"raw":"{\"tokens\": [{\"id\": \"rtok_4hT9xQ2mLp8vZr1sKc3dEf\", \"resource_id\": \"products\", \"quota_events_per_hour\": 1000, \"created_at\": \"2026-06-01T00:00:00Z\", \"is_active\": true, \"status\": \"active\"}, {\"id\": 7.5, \"resource_id\": \"products\", \"quota_events_per_hour\": 1000, \"created_at\": \"2026-06-01T00:00:00Z\", \"is_active\": true, \"status\": \"active\"}], \"total\": 2, \"limit\": 50, \"offset\": 0}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: ResourceClient.list_tokens: unexpected server response for PaginatedResourceTokensResponse (tokens.1.id.int: Input should be a valid integer, got a number with a fractional part; tokens.1.id.str: Input should be a valid string). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
   },
   {
     name: "tokens create",
@@ -612,21 +630,11 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** A fetch answering each `METHOD /path` with its recorded bytes, and 404 otherwise. */
-function rawFetch(routes: Case["routes"]): typeof globalThis.fetch {
-  return async (input, init) => {
-    const url = new URL(String(input));
-    const route = routes[`${init?.method ?? "GET"} ${url.pathname}`];
-    if (route === undefined) return new Response('{"detail":"Not Found"}', { status: 404 });
-    return new Response(route.status === 204 ? null : route.raw, { status: route.status });
-  };
-}
-
 describe("resource and files output, byte for byte the Python CLI's (#66)", () => {
   it.each([...CASES, ...LOSSLESS_CASES, ...NULL_CONTEXT_CASES].map((c) => [c.name, c] as const))("%s", async (_name, c) => {
     const out: string[] = [];
     const err: string[] = [];
-    const fetch = rawFetch(c.routes);
+    const fetch = recordedFetch(c.routes);
     const deps = {
       write: (line: string) => void out.push(line),
       writeError: (line: string) => void err.push(line),
@@ -641,7 +649,7 @@ describe("resource and files output, byte for byte the Python CLI's (#66)", () =
     const argv = c.argv.map((arg) => (c.files?.[arg] !== undefined ? path.join(dir, arg) : arg));
 
     expect(await runCli(argv, deps)).toBe(c.code);
-    expect(out.map((line) => `${line}\n`).join("")).toBe(c.stdout);
-    expect(err.map((line) => `${line}\n`).join("")).toBe(c.stderr);
+    expect(terminalText(out)).toBe(c.stdout);
+    expect(terminalText(err)).toBe(c.stderr);
   });
 });

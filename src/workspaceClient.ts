@@ -23,7 +23,7 @@ import { pyTypeName } from "./python.js";
 import {
   ResponseReader,
   laxBool,
-  laxInt,
+  laxIntOrStr,
   laxStr,
   nullable,
   responseShapeError,
@@ -89,8 +89,10 @@ function passThrough(obj: Record<string, unknown>, key: string): string | null {
 /**
  * Read a key row as the Python SDK's `MemberAPIKey` model reads it: its
  * fields in its order, defaults filled, unknown keys dropped, the scalars
- * coerced as pydantic's lax mode does (`"42"` is id 42, a numeric
- * `plaintext_key` is refused). A row that fails throws
+ * coerced as pydantic's lax mode does (`"false"` is `false`, a numeric
+ * `plaintext_key` is refused). The `id` is its `int | str`: an `akey_…`
+ * id (memory-cloud v0.89.0+) or any other string stays the string, `"42"`
+ * included, and an integer stays an integer. A row that fails throws
  * `KaguraResponseError` in Python's words, naming fields, never values.
  *
  * @internal Shared with the CLI; not part of the package's API.
@@ -101,7 +103,7 @@ export function readMemberKey(raw: unknown, operation: string): MemberAPIKey {
   if (obj === null) r.check();
   const row = obj ?? {};
   const key: MemberAPIKey = {
-    id: r.field(row, "id", laxInt),
+    id: r.field(row, "id", laxIntOrStr),
     name: r.field(row, "name", laxStr),
     key_prefix: r.field(row, "key_prefix", laxStr),
     plaintext_key: r.field(row, "plaintext_key", nullable(laxStr), { default: null }),
@@ -332,8 +334,9 @@ export class WorkspaceClient extends KaguraRestClient {
    *
    * The response is read as the Python SDK's `MemberAPIKey` model reads
    * it, leniently as pydantic does: the key comes back with the model's
-   * fields only, `"42"` read as id 42. A response that model refuses
-   * throws a `KaguraError` carrying the plaintext when there is one.
+   * fields only, its `id` an `akey_…` string from memory-cloud v0.89.0 on
+   * and an integer before. A response that model refuses throws a
+   * `KaguraError` carrying the plaintext when there is one.
    */
   async mintMemberKey(
     workspaceId: string,
@@ -352,8 +355,9 @@ export class WorkspaceClient extends KaguraRestClient {
     const payload = this.json(resp);
     const operation = "WorkspaceClient.mint_member_key";
     try {
-      // As `MemberAPIKey.model_validate` reads it: lax, so `"42"` is id 42,
-      // and whole, so a `plaintext_key` that is no string is refused.
+      // As `MemberAPIKey.model_validate` reads it: lax, so `"false"` is
+      // false and an `akey_…` id stays the string, and whole, so a
+      // `plaintext_key` that is no string is refused.
       return readMemberKey(payload, operation);
     } catch (e) {
       if (!(e instanceof KaguraResponseError)) throw e;

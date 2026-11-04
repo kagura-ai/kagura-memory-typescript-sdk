@@ -5,6 +5,7 @@ import {
   buildDetails,
   flagLabel,
   missingParam,
+  optionalRanged,
   paramLabel,
   parseChoice,
   parseDetails,
@@ -16,6 +17,7 @@ import {
   parseTags,
   quote,
 } from "../../src/cli/parse.js";
+import { parseArgs } from "../../src/cli/parseArgs.js";
 
 const IMPORTANCE = { name: "importance", short: "i", type: "value" } as const;
 const CONTENT = { name: "content", type: "value" } as const;
@@ -189,6 +191,34 @@ describe("parseFloatOption: Python's float() grammar", () => {
     expect(() => parseFloatOption("VALUE", "heavy")).toThrow(
       "Invalid value for 'VALUE': 'heavy' is not a valid float.",
     );
+  });
+});
+
+describe("optionalRanged", () => {
+  const LIMIT = { name: "limit", type: "value" } as const;
+  const WEIGHT = { name: "weight", type: "value" } as const;
+  const parse = (...argv: string[]) => parseArgs(["cmd", ...argv], { flags: [LIMIT, WEIGHT] });
+  const limit = (...argv: string[]) =>
+    optionalRanged(parse(...argv), LIMIT, { min: 1, max: 200, rangeLabel: "1<=x<=200", integer: true });
+
+  it("is undefined when the flag was not given, so the option is not sent", () => {
+    expect(limit()).toBeUndefined();
+    expect(limit("--weight", "0.5")).toBeUndefined();
+  });
+
+  it("returns parseRanged's value when it was given", () => {
+    expect(limit("--limit", "+05")).toBe(5);
+    expect(limit("--limit=200")).toBe(200);
+    expect(optionalRanged(parse("--weight", "1e-1"), WEIGHT, { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" })).toBe(0.1);
+  });
+
+  it.each([
+    ["0", "Invalid value for '--limit': 0 is not in the range 1<=x<=200."],
+    ["x", "Invalid value for '--limit': 'x' is not a valid integer range."],
+    // Given but empty is a value, as in click: refused, not unset.
+    ["", "Invalid value for '--limit': '' is not a valid integer range."],
+  ])("throws parseRanged's usage error for %j", (raw, message) => {
+    expect(() => limit("--limit", raw)).toThrow(new CliUsageError(message));
   });
 });
 

@@ -13,7 +13,7 @@ import { excMessage } from "../errors.js";
 import { normalizeAddTools } from "../http.js";
 import { pyStrip } from "../pyCompat.js";
 import { PY_INT, pyBigInt, pyFloat, pyFloatRepr, pyInt, pyRepr, pyTypeName } from "../python.js";
-import type { FlagSpec } from "./parseArgs.js";
+import type { FlagSpec, ParsedArgs } from "./parseArgs.js";
 
 export { PY_INT, pyFloatRepr, pyRepr };
 
@@ -207,6 +207,20 @@ export function parseRanged(
     );
   }
   return value;
+}
+
+/**
+ * An optional `click.IntRange` / `click.FloatRange` option: `undefined`
+ * when the flag was not given, else {@link parseRanged}'s value (or its
+ * usage error).
+ */
+export function optionalRanged(
+  args: ParsedArgs,
+  flag: FlagSpec,
+  options: { min: number; max: number; rangeLabel: string; integer?: boolean },
+): number | undefined {
+  const raw = args.values[flag.name];
+  return raw === undefined ? undefined : parseRanged(flag, raw, options);
 }
 
 export interface ChoiceOptions {
