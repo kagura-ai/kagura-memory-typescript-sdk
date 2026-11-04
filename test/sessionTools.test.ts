@@ -649,3 +649,111 @@ describe("session_not_found on any tool", () => {
     await expect(client.callRawTool("changes_since", {})).rejects.toBeInstanceOf(KaguraNotFoundError);
   });
 });
+
+/**
+ * The argument names each tool's inputSchema declares
+ * (`backend/src/mcp_server/tools/_definitions.py`): a strict fake refuses
+ * any other, as memory-cloud v0.82.0+ does (`invalid_argument`).
+ */
+const DECLARED_V0_143: Record<string, readonly string[]> = {
+  bootstrap: ["context_id", "format", "include", "max_chars", "since"],
+  changes_since: ["by_me", "context_id", "cursor", "kinds", "limit", "max_chars", "session_id", "since", "until"],
+  list: ["context_id", "cursor", "direction", "filters", "include_details", "limit", "max_chars", "order_by"],
+  remember_batch: ["atomic", "context_id", "dedupe", "items", "tags_normalize", "verbose"],
+  forget: ["context_id", "k", "memory_id", "memory_ids", "query"],
+  describe_tools: ["names", "query"],
+  guide: ["topics"],
+  list_revisions: ["context_id", "cursor", "limit", "max_chars", "memory_id"],
+  rollback_session: ["context_id", "dry_run", "session_id", "since", "until"],
+};
+
+/** v0.93.0, where the session tools start: no `format`, no `session_id` / `by_me`, no `memory_ids`. */
+const DECLARED_V0_93: Record<string, readonly string[]> = {
+  ...DECLARED_V0_143,
+  bootstrap: ["context_id", "include", "max_chars", "since"],
+  changes_since: ["context_id", "cursor", "kinds", "limit", "max_chars", "since", "until"],
+  forget: ["context_id", "k", "memory_id", "query"],
+};
+
+function strict(declared: Record<string, readonly string[]>): { server: FakeServer; client: KaguraClient } {
+  const server = new FakeServer();
+  server.declaredArguments = declared;
+  Object.assign(server.toolResults, {
+    bootstrap: BOOTSTRAP_OK,
+    changes_since: CHANGES_OK,
+    list: LIST_OK,
+    remember_batch: BATCH_OK,
+    forget: FORGET_OK,
+    describe_tools: { status: "success" },
+    guide: { status: "success", topics: [] },
+    list_revisions: REVISIONS_OK,
+    rollback_session: ROLLBACK_PLAN,
+  });
+  return { server, client: makeClient(server) };
+}
+
+describe("a strict server: no undeclared argument is sent", () => {
+  it("v0.143.0 accepts every method with every option set", async () => {
+    const { server, client } = strict(DECLARED_V0_143);
+    await client.bootstrap({ contextId: CTX, since: "7d", include: ["pinned"], maxChars: 5000, format: "index" });
+    await client.changesSince({
+      contextId: CTX,
+      since: "2026-11-01",
+      until: "2026-11-02",
+      kinds: ["created"],
+      cursor: "c",
+      limit: 5,
+      sessionId: "s",
+      byMe: true,
+      maxChars: 10000,
+    });
+    await client.listMatching({
+      contextId: CTX,
+      filters: { type: "task" },
+      orderBy: "created_at",
+      direction: "asc",
+      cursor: "50",
+      limit: 5,
+      includeDetails: true,
+      maxChars: 10000,
+    });
+    await client.rememberBatch({ contextId: CTX, items: [ITEM], atomic: true, dedupe: "off", tagsNormalize: true, verbose: true });
+    await client.forget({ contextId: CTX, memoryIds: [M1, M2] });
+    await client.describeTools({ query: "graph", names: ["explore"] });
+    await client.guide(["recall"]);
+    await client.listRevisions({ contextId: CTX, memoryId: M1, limit: 5, cursor: "c", maxChars: 10000 });
+    await client.rollbackSession({ contextId: CTX, since: "2026-11-01", until: "2026-11-02", dryRun: false });
+    await client.rollbackSession({ contextId: CTX, sessionId: "s" });
+    expect(toolCalls(server).map((c) => c.name)).toEqual([
+      "bootstrap",
+      "changes_since",
+      "list",
+      "remember_batch",
+      "forget",
+      "describe_tools",
+      "guide",
+      "list_revisions",
+      "rollback_session",
+      "rollback_session",
+    ]);
+  });
+
+  it("v0.93.0 accepts every call that leaves the newer options unset", async () => {
+    const { client } = strict(DECLARED_V0_93);
+    await client.bootstrap({ contextId: CTX, since: "7d", include: ["changes"], maxChars: 10000 });
+    await client.changesSince({ contextId: CTX, since: "2026-11-01", kinds: ["created"], limit: 5 });
+    await client.forget({ contextId: CTX, query: "old", k: 3 });
+  });
+
+  it.each([
+    ["bootstrap format", (c: KaguraClient) => c.bootstrap({ contextId: CTX, format: "index" }), "'format'"],
+    ["changesSince byMe", (c: KaguraClient) => c.changesSince({ contextId: CTX, since: "2026-11-01", byMe: true }), "'by_me'"],
+    ["forget memoryIds", (c: KaguraClient) => c.forget({ contextId: CTX, memoryIds: [M1] }), "'memory_ids'"],
+  ])("v0.93.0 refuses %s as invalid_argument, a KaguraError with the code", async (_name, call, argument) => {
+    const { client } = strict(DECLARED_V0_93);
+    const err = await call(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraError);
+    expect((err as KaguraError).code).toBe("invalid_argument");
+    expect((err as Error).message).toContain(argument);
+  });
+});
