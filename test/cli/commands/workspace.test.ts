@@ -1005,7 +1005,7 @@ describe("auth create-key", () => {
   });
 
   it("is no bare `kagura-memory create-key`", async () => {
-    // Only the seven v0.7.0 subcommands keep a bare alias.
+    // Only the v0.7.0 subcommands, `list` aside (#86), keep a bare alias.
     for (const name of ["create-key", "list-keys", "revoke-key"]) {
       const h = harness();
       expect(await runCli([name, "--help"], h.deps)).toBe(2);

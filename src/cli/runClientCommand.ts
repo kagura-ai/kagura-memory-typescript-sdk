@@ -175,6 +175,12 @@ export interface RunClientCommandOptions {
    * helper's `needs_context` keyword.
    */
   needsContext?: boolean;
+  /**
+   * How the result is printed; default {@link formatJson}. A command whose
+   * Python counterpart prints a model's `model_dump(mode="json")` passes
+   * `formatDumpsJson` of the model's read (`cli/modelDump.ts`).
+   */
+  format?: (result: unknown) => string;
 }
 
 /**
@@ -202,7 +208,7 @@ export async function runClientCommand(
   const client = ctx.makeClient(mcpOptions(config));
   try {
     const result = await operation(client, resolvedContext);
-    ctx.write(formatJson(result));
+    ctx.write((options.format ?? formatJson)(result));
     return 0;
   } catch (e) {
     throw e instanceof CliError || e instanceof CliUsageError ? e : new CliError(cliErrorMessage(e));

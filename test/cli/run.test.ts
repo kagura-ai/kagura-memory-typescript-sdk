@@ -1011,8 +1011,11 @@ describe("cli: login --invite (#44)", () => {
     ]);
   });
 
-  /** The subcommands v0.7.0 shipped, the only ones with a bare alias. */
-  const LEGACY = new Set(["refresh", "status", "use", "logout", "list", "token"]);
+  /**
+   * The subcommands v0.7.0 shipped, the only ones with a bare alias — but
+   * `list`, the Python CLI's own `list` command since 0.15.0 (#86).
+   */
+  const LEGACY = new Set(["refresh", "status", "use", "logout", "token"]);
 
   it.each(others.flatMap((name): [string[]][] => [
     [["auth", name, "--invite", INVITE]],

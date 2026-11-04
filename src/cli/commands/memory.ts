@@ -30,6 +30,7 @@ import {
 } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
+import { runForgetByIds } from "./session.js";
 
 const CONTEXT_ID: FlagSpec = {
   name: "context-id",
@@ -426,21 +427,50 @@ const reference: Command = {
   },
 };
 
-const FORGET_K = kFlag("Max memories to delete in query mode", "10");
+/**
+ * `-k`, short-only, with no default of its own since the Python CLI 0.44.0:
+ * `--ids` refuses it, so "not given" must stay apart from 10.
+ */
+const FORGET_K: FlagSpec = {
+  name: "k",
+  short: "k",
+  shortOnly: true,
+  type: "value",
+  metavar: "INTEGER",
+  help: "Max memories to delete in query mode (default 10)",
+};
+
+const FORGET_IDS: FlagSpec = {
+  name: "ids",
+  type: "value",
+  help:
+    "Comma-separated memory IDs to delete in one call, 1-50 (server v0.117.0+); " +
+    "prints one result row per id",
+};
 
 const forget: Command = {
-  summary: "Delete memories (soft delete; kept until the server's retention window passes, default 30 days).",
-  description: examples(
-    'forget -m "abc-123-def"',
-    'forget -q "outdated test data" -k 5',
-    'forget -c dev -m "memory-uuid"',
-  ),
+  summary: "Delete memories (soft delete).",
+  description:
+    "  Deleted memories stay recoverable until the deployment's cleanup window\n" +
+    "  passes (CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, 30 days by default).\n\n" +
+    "  Use --memory-id for specific deletion, --ids for several specific memories\n" +
+    "  in one call, or --query for bulk deletion. The server refuses --query while\n" +
+    "  recall is degraded (keyword-only). --ids reports each id as deleted, skipped\n" +
+    "  (not found or not yours) or error; resend the ids whose error is\n" +
+    "  not_attempted.\n\n" +
+    examples(
+      'forget -m "abc-123-def"',
+      'forget --ids "abc-123-def,fed-321-cba"',
+      'forget -q "outdated test data" -k 5',
+      'forget -c dev -m "memory-uuid"',
+    ),
   spec: {
     flags: [
       CONTEXT_ID,
       { ...MEMORY_ID, help: "Memory ID to delete (specific deletion)" },
       { name: "query", short: "q", type: "value", help: "Query to find memories to delete (bulk deletion)" },
       FORGET_K,
+      FORGET_IDS,
     ],
   },
   run: async (deps, args) => {
@@ -449,17 +479,27 @@ const forget: Command = {
     const query = args.values.query;
     // Converted first, as click does `type=int`: a bad -k exits 2 even
     // when neither --memory-id nor --query was given.
-    const k = intOr(args, FORGET_K, 10);
+    const rawK = args.values.k;
+    const k = rawK === undefined ? undefined : parseIntOption(FORGET_K, rawK);
+    const rawIds = args.values.ids;
+    if (rawIds !== undefined) {
+      // Each a ClickException in Python: exit 1, before any request.
+      const ids = parseTags(rawIds);
+      if (ids === undefined) throw new CliError("--ids needs at least one memory ID");
+      if (memoryId || query) throw new CliError("Use only one of --memory-id, --ids or --query");
+      if (k !== undefined) throw new CliError("-k applies to --query only, not to --ids");
+      return runForgetByIds(deps, args.values["context-id"], ids);
+    }
     if (!memoryId && !query) {
       // ClickException, not UsageError: exit 1, matching Python.
-      throw new CliError("Either --memory-id or --query is required");
+      throw new CliError("Either --memory-id or --query is required (or --ids)");
     }
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
       client.forget({
         contextId,
         ...(memoryId !== undefined ? { memoryId } : {}),
         ...(query !== undefined ? { query } : {}),
-        k,
+        k: k ?? 10,
       }),
     );
   },

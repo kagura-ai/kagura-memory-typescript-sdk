@@ -64,6 +64,7 @@ import { MEASURE_GROUP } from "./commands/measure.js";
 import { MEMORY_COMMANDS } from "./commands/memory.js";
 import { RESOURCE_GROUP } from "./commands/resource.js";
 import { SECRET_GROUP } from "./commands/secret.js";
+import { SESSION_COMMANDS } from "./commands/session.js";
 import { SETUP_GROUP, classifyMcpEntry, findClaudeEntries } from "./commands/setup.js";
 import { AUTH_KEY_COMMANDS, WORKSPACE_GROUP } from "./commands/workspace.js";
 import { getCloseMatches } from "./closeMatches.js";
@@ -949,6 +950,7 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
   sleep: SLEEP_GROUP,
   workspace: WORKSPACE_GROUP,
   ...MEMORY_COMMANDS,
+  ...SESSION_COMMANDS,
 };
 
 /**
@@ -956,9 +958,12 @@ export const ROOT_COMMANDS: Record<string, Command | CommandGroup> = {
  * only `auth`, and both spellings worked. Not listed in the root help;
  * `auth login` is canonical and matches the Python CLI.
  *
- * The seven subcommands v0.7.0 had, named rather than read from
+ * Six of the seven subcommands v0.7.0 had, named rather than read from
  * `AUTH_GROUP`: a compatibility shim must not grow, and `auth create-key`
- * and its siblings have no bare spelling, in Python or here.
+ * and its siblings have no bare spelling, in Python or here. The seventh,
+ * `list`, is the Python CLI's own `list` command since 0.15.0 (#86):
+ * `kagura-memory list` lists a context's memories, `auth list` the
+ * profiles.
  */
 const BARE_AUTH_ALIASES: ReadonlySet<string> = new Set([
   "login",
@@ -966,7 +971,6 @@ const BARE_AUTH_ALIASES: ReadonlySet<string> = new Set([
   "status",
   "use",
   "logout",
-  "list",
   "token",
 ]);
 

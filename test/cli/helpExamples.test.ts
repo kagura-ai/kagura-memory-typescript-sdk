@@ -3,6 +3,8 @@
  * CLI's `\b` blocks do from 0.41.1 (python-sdk #285). The blocks are
  * recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
  * `kagura <command> --help`, with `kagura ` written `kagura-memory `.
+ * `bootstrap`, `changes`, `list` and `forget` (its `--ids` line) are the
+ * Python CLI 0.44.0's (#86).
  *
  * Not here: `ingest`, which this bin does not have.
  */
@@ -40,6 +42,18 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["auth revoke-key", [
     "  Example:",
     "    kagura-memory auth revoke-key 42 --user google_1234 --yes",
+  ]],
+  ["bootstrap", [
+    "  Examples:",
+    "    kagura-memory bootstrap",
+    "    kagura-memory bootstrap --since 7d --format index --max-chars 5000",
+    "    kagura-memory bootstrap -c dev --include pinned,changes --since 2026-11-01",
+  ]],
+  ["changes", [
+    "  Examples:",
+    "    kagura-memory changes 2026-11-01T00:00:00Z",
+    "    kagura-memory changes 2026-11-01 --kinds created,forgotten --limit 20",
+    "    kagura-memory changes 2026-11-04T09:00:00Z --by-me",
   ]],
   ["context create", [
     "  Examples:",
@@ -114,6 +128,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["forget", [
     "  Examples:",
     "    kagura-memory forget -m \"abc-123-def\"",
+    "    kagura-memory forget --ids \"abc-123-def,fed-321-cba\"",
     "    kagura-memory forget -q \"outdated test data\" -k 5",
     "    kagura-memory forget -c dev -m \"memory-uuid\"",
   ]],
@@ -127,6 +142,12 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "  Examples:",
     "    kagura-memory guardrails load",
     "    kagura-memory guardrails load CTX_UUID --cap 200",
+  ]],
+  ["list", [
+    "  Examples:",
+    "    kagura-memory list --filters '{\"type\": [\"tech-debt\"], \"tags\": [\"status:open\"]}'",
+    "    kagura-memory list --filters '{\"details.status\": \"open\"}' --order-by created_at",
+    "    kagura-memory list --order-by observed_at --direction asc --details",
   ]],
   ["measure record", [
     "  Examples:",
