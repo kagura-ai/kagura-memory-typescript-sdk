@@ -2505,6 +2505,138 @@ describe("sleep maintenance", () => {
       client.getSleepReport({ contextId: "c1", reportId: "nope" }),
     ).rejects.toBeInstanceOf(KaguraNotFoundError);
   });
+
+  // The inputSchema properties of memory-cloud v0.143.0 (unchanged since
+  // the v0.141.0 probe python-sdk#296 recorded). From v0.82.0
+  // (memory-cloud#1742) every tool refuses an argument its schema does not
+  // declare with invalid_argument, and none ever declared context_id (#79).
+  const SLEEP_TOOL_ARGUMENTS: Record<string, string[]> = {
+    get_sleep_report: ["actions_cursor", "actions_limit", "max_chars", "report_id"],
+    rollback_sleep_run: ["report_id"],
+  };
+
+  /** A {@link FakeServer} that refuses an undeclared argument as memory-cloud v0.82.0+ does. */
+  function strictSleepServer(): FakeServer {
+    const server = new FakeServer();
+    const answer = server.fetch;
+    server.fetch = async (input, init) => {
+      const response = await answer(input, init);
+      const body = server.requests[server.requests.length - 1]?.body;
+      if (body?.method !== "tools/call") return response;
+      const { name, arguments: args } = body.params as { name: string; arguments: Record<string, unknown> };
+      const declared = SLEEP_TOOL_ARGUMENTS[name];
+      const unknown = Object.keys(args)
+        .filter((key) => declared !== undefined && !declared.includes(key))
+        .sort();
+      if (declared === undefined || unknown.length === 0) return response;
+      const refusal = {
+        status: "error",
+        error: "invalid_argument",
+        message:
+          `${name} does not accept the argument '${unknown[0]}'. ` +
+          `Arguments its inputSchema declares: ${declared.join(", ")}.`,
+      };
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(refusal) }] } }),
+        { status: 200 },
+      );
+    };
+    return server;
+  }
+
+  it("the strict fake refuses the context_id SDKs up to 0.14.1 sent", async () => {
+    const server = strictSleepServer();
+    await expect(
+      makeClient(server).callRawTool("get_sleep_report", { context_id: "c1", report_id: "r1" }),
+    ).rejects.toThrow(
+      "get_sleep_report failed (invalid_argument): get_sleep_report does not accept the argument " +
+        "'context_id'. Arguments its inputSchema declares: actions_cursor, actions_limit, max_chars, report_id.",
+    );
+  });
+
+  it("getSleepReport sends report_id only and ignores contextId (#79)", async () => {
+    const server = strictSleepServer();
+    server.toolResults.get_sleep_report = {
+      status: "success",
+      report: { report_id: "r1", context_id: "c-of-the-report", status: "completed" },
+      actions: [],
+      action_count: 0,
+    };
+    const detail = await makeClient(server).getSleepReport({ contextId: "c1", reportId: "r1" });
+    expect(server.toolCallArgs()).toEqual({ report_id: "r1" });
+    expect(server.toolCallArgs()).not.toHaveProperty("context_id");
+    expect(detail.report_id).toBe("r1");
+    expect(detail.context_id).toBe("c-of-the-report");
+  });
+
+  it("rollbackSleepRun sends report_id only and ignores contextId (#79)", async () => {
+    const server = strictSleepServer();
+    const rolledBack = {
+      status: "rolled_back",
+      report_id: "r1",
+      rollback_summary: { edges_deleted: 1, errors: [] },
+    };
+    server.toolResults.rollback_sleep_run = rolledBack;
+    const result = await makeClient(server).rollbackSleepRun({ contextId: "c1", reportId: "r1" });
+    expect(server.toolCallArgs()).toEqual({ report_id: "r1" });
+    expect(server.toolCallArgs()).not.toHaveProperty("context_id");
+    expect(result).toEqual(rolledBack);
+  });
+
+  it("rollbackSleepRun: a report the caller cannot reach is KaguraNotFoundError (v0.126.0+)", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "report_not_found",
+      message: "Sleep report r1 not found or not owned by you.",
+    };
+    const err = await makeClient(server)
+      .rollbackSleepRun({ contextId: "c1", reportId: "r1" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraNotFoundError);
+    expect((err as Error).message).toBe("rollback_sleep_run: Sleep report r1 not found or not owned by you.");
+  });
+
+  it("rollbackSleepRun: a reader who cannot edit the report's context is KaguraPermissionError (v0.126.0+)", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "permission_denied",
+      message: "Cannot roll back sleep runs: you need the editor or owner role on this context.",
+      your_role: "viewer",
+      required_role: "editor",
+      help: "Ask a context owner for the editor role.",
+    };
+    const err = await makeClient(server)
+      .rollbackSleepRun({ contextId: "c1", reportId: "r1" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraPermissionError).requiredRole).toBe("editor");
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (permission_denied): " +
+        "Cannot roll back sleep runs: you need the editor or owner role on this context.",
+    );
+  });
+
+  it("rollbackSleepRun: an analysis report is a plain KaguraError (v0.140.0+, memory-cloud#2547)", async () => {
+    const server = new FakeServer();
+    server.toolResults.rollback_sleep_run = {
+      status: "error",
+      error: "analysis_report",
+      message:
+        "Report r1 is an analysis report: it records the LLM spend of a Memory Analysis run " +
+        "and has no Sleep actions, so there is nothing to roll back.",
+      help: "get_sleep_history lists the context's Sleep runs (source 'sleep', its default); roll back one of those.",
+    };
+    const err = await makeClient(server)
+      .rollbackSleepRun({ contextId: "c1", reportId: "r1" })
+      .catch((e: unknown) => e);
+    expect((err as object).constructor).toBe(KaguraError);
+    expect((err as Error).message).toBe(
+      "rollback_sleep_run failed (analysis_report): Report r1 is an analysis report: it records the " +
+        "LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.",
+    );
+  });
 });
 
 describe("tool definitions", () => {
