@@ -841,8 +841,13 @@ memory-cloud v0.82.0+ that revokes the access token issued with it too
 while an older server revokes only the token sent. Up to 0.14.1 it
 revoked only the access token, which left the refresh token valid. The
 revoke is best effort: the profile is deleted even when it fails, with
-Python's warning (with `--all`, silently, as in Python). It notes when `KAGURA_API_KEY` is still
-set. Unlike the Python CLI, it asks before removing anything unless
+Python's warning (with `--all`, silently, as in Python). It notes when
+`KAGURA_API_KEY` is still set. Its lines read `Profile 'NAME' removed.`
+and `All profiles removed.`, where Python prints `✓ Profile 'NAME'
+removed.` and `✓ All profiles removed; ~/.kagura/credentials.json
+deleted.`, and that note says `kagura-memory commands` where Python's
+says `kagura commands`. Unlike the Python CLI, it asks before removing
+anything unless
 `--yes` (`-y`) is given, rather than refusing `--all` without it; a
 logout that names no profile succeeds when nothing is stored, so
 `logout --yes` stays idempotent in setup scripts; and `--all` with
