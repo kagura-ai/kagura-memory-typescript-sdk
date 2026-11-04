@@ -1,0 +1,333 @@
+/**
+ * The session-tool readers (#86) read a reply as the Python SDK 0.44.0's
+ * models read it: each case is a reply shaped as memory-cloud v0.142.0
+ * sends it (index and full bootstrap, a degraded lane and a lane a newer
+ * server adds, an event of a forgotten memory without `summary`, a batch
+ * with candidate / skipped / failed rows and `committed_after_timeout`,
+ * forget rows with `not_attempted`, a revisions page, a dry-run plan and a
+ * finished rollback), or one the models refuse, and what the Python models
+ * made of it — `json.dumps(model.model_dump(mode="json", by_alias=True),
+ * indent=2, ensure_ascii=False)`, or the `KaguraResponseError` text —
+ * recorded with pydantic 2.13.4. The partial session rollback cases are
+ * what Python's `_partial_session_rollback_error` keeps of the envelope.
+ *
+ * `plan_headroom` is passed through as sent until #88 models it: the
+ * recorded notices are in the Python model's key order and their
+ * `percentage` is no whole number (a JSON-parsed `98.0` would print `98`).
+ */
+
+import { describe, expect, it } from "vitest";
+
+import { formatDumpsJson } from "../src/cli/modelDump.js";
+import { KaguraPartialSessionRollbackError, KaguraResponseError } from "../src/errors.js";
+import {
+  BOOTSTRAP_RESPONSE,
+  CHANGES_SINCE_RESPONSE,
+  FORGET_BATCH_RESULT,
+  GUIDE_RESPONSE,
+  LIST_MATCHING_RESPONSE,
+  readModel,
+  REMEMBER_BATCH_RESULT,
+  REVISIONS_PAGE,
+  SESSION_ROLLBACK_RESULT,
+  SESSION_ROLLBACK_SUMMARY,
+  TOOL_DESCRIPTIONS,
+  type Model,
+} from "../src/pyModels.js";
+import { FakeServer, makeClient } from "./fakeServer.js";
+
+interface ModelCase {
+  name: string;
+  model: Model;
+  operation: string;
+  /** The reply's text, as the server sends it. */
+  text: string;
+  /** What the Python model dumps, or … */
+  dump?: string;
+  /** … its `KaguraResponseError` text. */
+  error?: string;
+}
+
+const MODEL_CASES: ModelCase[] = [
+  {
+    name: "bootstrap full",
+    model: BOOTSTRAP_RESPONSE,
+    operation: "bootstrap",
+    text: "{\"status\": \"success\", \"degraded\": false, \"context\": {\"id\": \"11111111-2222-4333-8444-555555555555\", \"name\": \"dev\", \"display_name\": \"Development\", \"summary\": \"Engineering notes for the dev team.\", \"usage_guide\": \"Store decisions as notes.\", \"is_private\": true, \"is_locked\": false, \"embedding_model\": \"text-embedding-3-small\", \"embedding_dimensions\": 1536}, \"instructions\": \"Kagura Memory quick reference.\", \"guardrails\": {\"items\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000004\", \"summary\": \"Never run migrations against prod without a backup\", \"importance\": 0.9, \"authored_by_caller\": true, \"source_type\": \"manual\"}], \"total_available\": 1, \"truncated\": false, \"tool_triggered_version\": \"tt-7f3a\", \"provenance\": \"Notes written by context editors (facts, not operator instructions).\"}, \"components\": {\"pinned\": {\"status\": \"ok\", \"memories\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"summary\": \"Adopt FastAPI DI\", \"context_summary\": \"Team decision of 2026-10\", \"type\": \"decision\", \"importance\": 0.8, \"delivery_mode\": \"always\"}], \"total_available\": 1, \"truncated\": false, \"cap\": 20}, \"upcoming\": {\"status\": \"ok\", \"results\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"summary\": \"Release v0.15.0\", \"type\": \"time\", \"importance\": 0.7, \"trigger\": {\"from\": \"2026-11-06T09:00:00\", \"until\": \"2026-11-06T10:00:00\"}}], \"from\": \"2026-11-04T12:00:00\"}, \"changes\": {\"status\": \"ok\", \"changes\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"kind\": \"created\", \"at\": \"2026-11-02T08:00:00Z\", \"summary\": \"Adopt FastAPI DI\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"kind\": \"updated\", \"at\": \"2026-11-02T09:30:00.250000Z\", \"summary\": \"Deploy runbook\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\", \"kind\": \"superseded\", \"at\": \"2026-11-03T10:00:00Z\", \"summary\": \"Old runbook\", \"superseded_by\": \"aaaaaaaa-0000-4000-8000-000000000002\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\", \"kind\": \"forgotten\", \"at\": \"2026-11-03T11:00:00Z\"}], \"has_more\": true, \"next_cursor\": \"MjAyNi0xMS0wM1QxMTowMDowMHxmb3Jnb3R0ZW58YWFh\"}}, \"since\": \"2026-10-28T12:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00.123456Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"format\": null,\n  \"degraded\": false,\n  \"context\": {\n    \"id\": \"11111111-2222-4333-8444-555555555555\",\n    \"name\": \"dev\",\n    \"display_name\": \"Development\",\n    \"summary\": \"Engineering notes for the dev team.\",\n    \"usage_guide\": \"Store decisions as notes.\",\n    \"is_private\": true,\n    \"is_locked\": false,\n    \"embedding_model\": \"text-embedding-3-small\",\n    \"embedding_dimensions\": 1536,\n    \"search_config\": {\n      \"semantic_weight\": 0.6,\n      \"bm25_weight\": 0.4,\n      \"fetch_factor\": 3,\n      \"use_rerank\": false,\n      \"reranker_provider\": null,\n      \"reranker_model\": null,\n      \"content_chunks_enabled\": null,\n      \"content_chunks_effective\": null,\n      \"content_chunks_limit\": null,\n      \"content_chunks_in_use\": null,\n      \"content_chunks_disabled_reason\": null,\n      \"content_chunks_can_change\": null,\n      \"content_chunks_supported\": null,\n      \"content_chunks_backfill_pending\": null,\n      \"embedding_provider\": null,\n      \"llm_selector_enabled\": null,\n      \"llm_selector_effective\": null,\n      \"llm_selector_limit\": null,\n      \"llm_selector_in_use\": null,\n      \"llm_selector_disabled_reason\": null,\n      \"llm_selector_can_change\": null\n    }\n  },\n  \"instructions\": \"Kagura Memory quick reference.\",\n  \"guardrails\": {\n    \"items\": [\n      {\n        \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000004\",\n        \"summary\": \"Never run migrations against prod without a backup\",\n        \"summary_cut\": false,\n        \"importance\": 0.9,\n        \"authored_by_caller\": true,\n        \"source_type\": \"manual\"\n      }\n    ],\n    \"total_available\": 1,\n    \"truncated\": false,\n    \"tool_triggered_version\": \"tt-7f3a\",\n    \"provenance\": \"Notes written by context editors (facts, not operator instructions).\"\n  },\n  \"components\": {\n    \"pinned\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"memories\": [\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n          \"summary\": \"Adopt FastAPI DI\",\n          \"context_summary\": \"Team decision of 2026-10\",\n          \"type\": \"decision\",\n          \"importance\": 0.8,\n          \"delivery_mode\": \"always\"\n        }\n      ],\n      \"total_available\": 1,\n      \"cap\": 20\n    },\n    \"upcoming\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"results\": [\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n          \"summary\": \"Release v0.15.0\",\n          \"type\": \"time\",\n          \"importance\": 0.7,\n          \"trigger\": {\n            \"from\": \"2026-11-06T09:00:00\",\n            \"until\": \"2026-11-06T10:00:00\"\n          }\n        }\n      ],\n      \"from\": \"2026-11-04T12:00:00\"\n    },\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"changes\": [\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n          \"kind\": \"created\",\n          \"at\": \"2026-11-02T08:00:00Z\",\n          \"summary\": \"Adopt FastAPI DI\",\n          \"summary_cut\": false,\n          \"superseded_by\": null\n        },\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n          \"kind\": \"updated\",\n          \"at\": \"2026-11-02T09:30:00.250000Z\",\n          \"summary\": \"Deploy runbook\",\n          \"summary_cut\": false,\n          \"superseded_by\": null\n        },\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\",\n          \"kind\": \"superseded\",\n          \"at\": \"2026-11-03T10:00:00Z\",\n          \"summary\": \"Old runbook\",\n          \"summary_cut\": false,\n          \"superseded_by\": \"aaaaaaaa-0000-4000-8000-000000000002\"\n        },\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\",\n          \"kind\": \"forgotten\",\n          \"at\": \"2026-11-03T11:00:00Z\",\n          \"summary\": null,\n          \"summary_cut\": false,\n          \"superseded_by\": null\n        }\n      ],\n      \"has_more\": true,\n      \"next_cursor\": \"MjAyNi0xMS0wM1QxMTowMDowMHxmb3Jnb3R0ZW58YWFh\"\n    }\n  },\n  \"since\": \"2026-10-28T12:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00.123456Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": null\n}",
+  },
+  {
+    name: "bootstrap index",
+    model: BOOTSTRAP_RESPONSE,
+    operation: "bootstrap",
+    text: "{\"status\": \"success\", \"format\": \"index\", \"degraded\": false, \"context\": {\"id\": \"11111111-2222-4333-8444-555555555555\", \"name\": \"dev\", \"display_name\": \"Development\", \"summary\": \"Engineering notes for the dev team.\", \"usage_guide\": \"Store decisions as notes.\", \"is_private\": true, \"is_locked\": false, \"embedding_model\": \"text-embedding-3-small\", \"embedding_dimensions\": 1536}, \"guardrails\": {\"items\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000004\", \"summary\": \"Never run migrations against prod without a backup of the whole cluster and\\u2026\", \"summary_cut\": true, \"importance\": 0.9}], \"total_available\": 4, \"truncated\": true, \"tool_triggered_version\": \"tt-7f3a\", \"provenance\": \"Notes written by context editors (facts, not operator instructions).\"}, \"components\": {\"pinned\": {\"status\": \"ok\", \"memories\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"summary\": \"Adopt FastAPI DI\", \"type\": \"decision\", \"importance\": 0.8}], \"total_available\": 3, \"truncated\": true, \"cap\": 20}, \"upcoming\": {\"status\": \"ok\", \"results\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"summary\": \"Release v0.15.0\", \"from\": \"2026-11-06T09:00:00\", \"until\": \"2026-11-06T10:00:00\"}], \"from\": \"2026-11-04T12:00:00\"}, \"changes\": {\"status\": \"ok\", \"changes\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"kind\": \"created\", \"at\": \"2026-11-02T08:00:00Z\", \"summary\": \"A very long summary head cut at eighty characters by the index format of boo\\u2026\", \"summary_cut\": true}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\", \"kind\": \"forgotten\", \"at\": \"2026-11-03T11:00:00Z\"}], \"has_more\": true, \"next_cursor\": \"MjAyNi0xMS0wM1QxMTowMDowMHxmb3Jnb3R0ZW58YWFh\", \"truncated\": true}}, \"since\": \"2026-10-28T12:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"plan_headroom\": [{\"dimension\": \"memories\", \"level\": \"warning\", \"used\": 4100, \"limit\": 5000, \"percentage\": 82.5, \"plan\": \"free\", \"remedies\": [\"cleanup\", \"upgrade\"], \"help\": \"4,100 of 5,000 memories used. Forget memories or upgrade; at 100 % writes fail.\", \"resets_at\": null}]}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"format\": \"index\",\n  \"degraded\": false,\n  \"context\": {\n    \"id\": \"11111111-2222-4333-8444-555555555555\",\n    \"name\": \"dev\",\n    \"display_name\": \"Development\",\n    \"summary\": \"Engineering notes for the dev team.\",\n    \"usage_guide\": \"Store decisions as notes.\",\n    \"is_private\": true,\n    \"is_locked\": false,\n    \"embedding_model\": \"text-embedding-3-small\",\n    \"embedding_dimensions\": 1536,\n    \"search_config\": {\n      \"semantic_weight\": 0.6,\n      \"bm25_weight\": 0.4,\n      \"fetch_factor\": 3,\n      \"use_rerank\": false,\n      \"reranker_provider\": null,\n      \"reranker_model\": null,\n      \"content_chunks_enabled\": null,\n      \"content_chunks_effective\": null,\n      \"content_chunks_limit\": null,\n      \"content_chunks_in_use\": null,\n      \"content_chunks_disabled_reason\": null,\n      \"content_chunks_can_change\": null,\n      \"content_chunks_supported\": null,\n      \"content_chunks_backfill_pending\": null,\n      \"embedding_provider\": null,\n      \"llm_selector_enabled\": null,\n      \"llm_selector_effective\": null,\n      \"llm_selector_limit\": null,\n      \"llm_selector_in_use\": null,\n      \"llm_selector_disabled_reason\": null,\n      \"llm_selector_can_change\": null\n    }\n  },\n  \"instructions\": null,\n  \"guardrails\": {\n    \"items\": [\n      {\n        \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000004\",\n        \"summary\": \"Never run migrations against prod without a backup of the whole cluster and…\",\n        \"summary_cut\": true,\n        \"importance\": 0.9,\n        \"authored_by_caller\": null,\n        \"source_type\": null\n      }\n    ],\n    \"total_available\": 4,\n    \"truncated\": true,\n    \"tool_triggered_version\": \"tt-7f3a\",\n    \"provenance\": \"Notes written by context editors (facts, not operator instructions).\"\n  },\n  \"components\": {\n    \"pinned\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": true,\n      \"memories\": [\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n          \"summary\": \"Adopt FastAPI DI\",\n          \"type\": \"decision\",\n          \"importance\": 0.8\n        }\n      ],\n      \"total_available\": 3,\n      \"cap\": 20\n    },\n    \"upcoming\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"results\": [\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n          \"summary\": \"Release v0.15.0\",\n          \"from\": \"2026-11-06T09:00:00\",\n          \"until\": \"2026-11-06T10:00:00\"\n        }\n      ],\n      \"from\": \"2026-11-04T12:00:00\"\n    },\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": true,\n      \"changes\": [\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n          \"kind\": \"created\",\n          \"at\": \"2026-11-02T08:00:00Z\",\n          \"summary\": \"A very long summary head cut at eighty characters by the index format of boo…\",\n          \"summary_cut\": true,\n          \"superseded_by\": null\n        },\n        {\n          \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\",\n          \"kind\": \"forgotten\",\n          \"at\": \"2026-11-03T11:00:00Z\",\n          \"summary\": null,\n          \"summary_cut\": false,\n          \"superseded_by\": null\n        }\n      ],\n      \"has_more\": true,\n      \"next_cursor\": \"MjAyNi0xMS0wM1QxMTowMDowMHxmb3Jnb3R0ZW58YWFh\"\n    }\n  },\n  \"since\": \"2026-10-28T12:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories\",\n      \"level\": \"warning\",\n      \"used\": 4100,\n      \"limit\": 5000,\n      \"percentage\": 82.5,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"cleanup\",\n        \"upgrade\"\n      ],\n      \"help\": \"4,100 of 5,000 memories used. Forget memories or upgrade; at 100 % writes fail.\",\n      \"resets_at\": null\n    }\n  ]\n}",
+  },
+  {
+    name: "bootstrap degraded",
+    model: BOOTSTRAP_RESPONSE,
+    operation: "bootstrap",
+    text: "{\"status\": \"success\", \"degraded\": true, \"context\": {\"id\": \"11111111-2222-4333-8444-555555555555\", \"name\": \"dev\"}, \"instructions\": \"Kagura Memory quick reference.\", \"guardrails\": null, \"components\": {\"pinned\": {\"status\": \"error\", \"error\": \"component_failed\"}, \"changes\": {\"status\": \"ok\", \"changes\": [], \"has_more\": false, \"next_cursor\": null}, \"state\": {\"status\": \"ok\", \"keys\": [\"a\"]}}, \"since\": \"2026-11-04T00:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"format\": null,\n  \"degraded\": true,\n  \"context\": {\n    \"id\": \"11111111-2222-4333-8444-555555555555\",\n    \"name\": \"dev\",\n    \"display_name\": null,\n    \"summary\": null,\n    \"usage_guide\": null,\n    \"is_private\": true,\n    \"is_locked\": false,\n    \"embedding_model\": null,\n    \"embedding_dimensions\": null,\n    \"search_config\": {\n      \"semantic_weight\": 0.6,\n      \"bm25_weight\": 0.4,\n      \"fetch_factor\": 3,\n      \"use_rerank\": false,\n      \"reranker_provider\": null,\n      \"reranker_model\": null,\n      \"content_chunks_enabled\": null,\n      \"content_chunks_effective\": null,\n      \"content_chunks_limit\": null,\n      \"content_chunks_in_use\": null,\n      \"content_chunks_disabled_reason\": null,\n      \"content_chunks_can_change\": null,\n      \"content_chunks_supported\": null,\n      \"content_chunks_backfill_pending\": null,\n      \"embedding_provider\": null,\n      \"llm_selector_enabled\": null,\n      \"llm_selector_effective\": null,\n      \"llm_selector_limit\": null,\n      \"llm_selector_in_use\": null,\n      \"llm_selector_disabled_reason\": null,\n      \"llm_selector_can_change\": null\n    }\n  },\n  \"instructions\": \"Kagura Memory quick reference.\",\n  \"guardrails\": null,\n  \"components\": {\n    \"pinned\": {\n      \"status\": \"error\",\n      \"error\": \"component_failed\",\n      \"truncated\": false,\n      \"memories\": [],\n      \"total_available\": null,\n      \"cap\": null\n    },\n    \"upcoming\": null,\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"changes\": [],\n      \"has_more\": false,\n      \"next_cursor\": null\n    },\n    \"state\": {\n      \"status\": \"ok\",\n      \"keys\": [\n        \"a\"\n      ]\n    }\n  },\n  \"since\": \"2026-11-04T00:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": null\n}",
+  },
+  {
+    name: "bootstrap unreadable guardrails",
+    model: BOOTSTRAP_RESPONSE,
+    operation: "bootstrap",
+    text: "{\"status\": \"success\", \"degraded\": false, \"context\": {\"id\": \"11111111-2222-4333-8444-555555555555\", \"name\": \"dev\", \"display_name\": \"Development\", \"summary\": \"Engineering notes for the dev team.\", \"usage_guide\": \"Store decisions as notes.\", \"is_private\": true, \"is_locked\": false, \"embedding_model\": \"text-embedding-3-small\", \"embedding_dimensions\": 1536}, \"guardrails\": {\"items\": \"x\", \"total_available\": 1}, \"components\": {\"changes\": {\"status\": \"ok\", \"changes\": [], \"has_more\": false}}, \"since\": \"2026-11-04T00:00:00Z\", \"generated_at\": \"2026-11-04T12:00:00Z\"}",
+    dump: "{\n  \"context_id\": null,\n  \"context_name\": null,\n  \"context_display_name\": null,\n  \"context_is_private\": null,\n  \"context_is_locked\": null,\n  \"status\": \"success\",\n  \"format\": null,\n  \"degraded\": false,\n  \"context\": {\n    \"id\": \"11111111-2222-4333-8444-555555555555\",\n    \"name\": \"dev\",\n    \"display_name\": \"Development\",\n    \"summary\": \"Engineering notes for the dev team.\",\n    \"usage_guide\": \"Store decisions as notes.\",\n    \"is_private\": true,\n    \"is_locked\": false,\n    \"embedding_model\": \"text-embedding-3-small\",\n    \"embedding_dimensions\": 1536,\n    \"search_config\": {\n      \"semantic_weight\": 0.6,\n      \"bm25_weight\": 0.4,\n      \"fetch_factor\": 3,\n      \"use_rerank\": false,\n      \"reranker_provider\": null,\n      \"reranker_model\": null,\n      \"content_chunks_enabled\": null,\n      \"content_chunks_effective\": null,\n      \"content_chunks_limit\": null,\n      \"content_chunks_in_use\": null,\n      \"content_chunks_disabled_reason\": null,\n      \"content_chunks_can_change\": null,\n      \"content_chunks_supported\": null,\n      \"content_chunks_backfill_pending\": null,\n      \"embedding_provider\": null,\n      \"llm_selector_enabled\": null,\n      \"llm_selector_effective\": null,\n      \"llm_selector_limit\": null,\n      \"llm_selector_in_use\": null,\n      \"llm_selector_disabled_reason\": null,\n      \"llm_selector_can_change\": null\n    }\n  },\n  \"instructions\": null,\n  \"guardrails\": null,\n  \"components\": {\n    \"pinned\": null,\n    \"upcoming\": null,\n    \"changes\": {\n      \"status\": \"ok\",\n      \"error\": null,\n      \"truncated\": false,\n      \"changes\": [],\n      \"has_more\": false,\n      \"next_cursor\": null\n    }\n  },\n  \"since\": \"2026-11-04T00:00:00Z\",\n  \"generated_at\": \"2026-11-04T12:00:00Z\",\n  \"context_summary_omitted\": false,\n  \"plan_headroom\": null\n}",
+  },
+  {
+    name: "bootstrap no components",
+    model: BOOTSTRAP_RESPONSE,
+    operation: "bootstrap",
+    text: "{\"status\": \"success\", \"degraded\": false, \"context\": {\"id\": \"11111111-2222-4333-8444-555555555555\", \"name\": \"dev\", \"display_name\": \"Development\", \"summary\": \"Engineering notes for the dev team.\", \"usage_guide\": \"Store decisions as notes.\", \"is_private\": true, \"is_locked\": false, \"embedding_model\": \"text-embedding-3-small\", \"embedding_dimensions\": 1536}}",
+    error: "bootstrap: unexpected server response for BootstrapResponse (components: Field required). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "bootstrap bad lane",
+    model: BOOTSTRAP_RESPONSE,
+    operation: "bootstrap",
+    text: "{\"components\": {\"pinned\": {\"memories\": []}, \"changes\": {\"status\": \"ok\", \"changes\": [{\"kind\": \"created\"}]}}}",
+    error: "bootstrap: unexpected server response for BootstrapResponse (components.pinned.status: Field required; components.changes.changes.0.memory_id: Field required; components.changes.changes.0.at: Field required). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "changes page",
+    model: CHANGES_SINCE_RESPONSE,
+    operation: "changes_since",
+    text: "{\"status\": \"success\", \"changes\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"kind\": \"created\", \"at\": \"2026-11-02T08:00:00Z\", \"summary\": \"Adopt FastAPI DI\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"kind\": \"updated\", \"at\": \"2026-11-02T09:30:00.250000Z\", \"summary\": \"Deploy runbook\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\", \"kind\": \"superseded\", \"at\": \"2026-11-03T10:00:00Z\", \"summary\": \"Old runbook\", \"superseded_by\": \"aaaaaaaa-0000-4000-8000-000000000002\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\", \"kind\": \"forgotten\", \"at\": \"2026-11-03T11:00:00Z\"}], \"count\": 4, \"has_more\": true, \"next_cursor\": \"MjAyNi0xMS0wM1QxMTowMDowMHxmb3Jnb3R0ZW58YWFh\", \"since\": \"2026-11-01T00:00:00Z\", \"until\": \"2026-11-04T12:00:00Z\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"changes\": [\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"kind\": \"created\",\n      \"at\": \"2026-11-02T08:00:00Z\",\n      \"summary\": \"Adopt FastAPI DI\",\n      \"summary_cut\": false,\n      \"superseded_by\": null\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n      \"kind\": \"updated\",\n      \"at\": \"2026-11-02T09:30:00.250000Z\",\n      \"summary\": \"Deploy runbook\",\n      \"summary_cut\": false,\n      \"superseded_by\": null\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\",\n      \"kind\": \"superseded\",\n      \"at\": \"2026-11-03T10:00:00Z\",\n      \"summary\": \"Old runbook\",\n      \"summary_cut\": false,\n      \"superseded_by\": \"aaaaaaaa-0000-4000-8000-000000000002\"\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\",\n      \"kind\": \"forgotten\",\n      \"at\": \"2026-11-03T11:00:00Z\",\n      \"summary\": null,\n      \"summary_cut\": false,\n      \"superseded_by\": null\n    }\n  ],\n  \"count\": 4,\n  \"has_more\": true,\n  \"next_cursor\": \"MjAyNi0xMS0wM1QxMTowMDowMHxmb3Jnb3R0ZW58YWFh\",\n  \"since\": \"2026-11-01T00:00:00Z\",\n  \"until\": \"2026-11-04T12:00:00Z\",\n  \"session_id\": null,\n  \"by_me\": false,\n  \"truncated\": false\n}",
+  },
+  {
+    name: "changes session",
+    model: CHANGES_SINCE_RESPONSE,
+    operation: "changes_since",
+    text: "{\"status\": \"success\", \"changes\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"kind\": \"created\", \"at\": \"2026-11-04T09:01:00Z\", \"summary\": \"Adopt FastAPI DI\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\", \"kind\": \"restored\", \"at\": \"2026-11-04T09:05:00Z\"}], \"count\": 2, \"has_more\": false, \"next_cursor\": null, \"since\": \"2026-11-04T09:00:00Z\", \"until\": \"2026-11-04T10:00:00Z\", \"session_id\": \"sess_3f2a9c\", \"by_me\": true, \"truncated\": true, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"changes\": [\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"kind\": \"created\",\n      \"at\": \"2026-11-04T09:01:00Z\",\n      \"summary\": \"Adopt FastAPI DI\",\n      \"summary_cut\": false,\n      \"superseded_by\": null\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000005\",\n      \"kind\": \"restored\",\n      \"at\": \"2026-11-04T09:05:00Z\",\n      \"summary\": null,\n      \"summary_cut\": false,\n      \"superseded_by\": null\n    }\n  ],\n  \"count\": 2,\n  \"has_more\": false,\n  \"next_cursor\": null,\n  \"since\": \"2026-11-04T09:00:00Z\",\n  \"until\": \"2026-11-04T10:00:00Z\",\n  \"session_id\": \"sess_3f2a9c\",\n  \"by_me\": true,\n  \"truncated\": true\n}",
+  },
+  {
+    name: "changes no has_more",
+    model: CHANGES_SINCE_RESPONSE,
+    operation: "changes_since",
+    text: "{\"status\": \"success\", \"changes\": []}",
+    error: "changes_since: unexpected server response for ChangesSinceResponse (has_more: Field required). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "list page",
+    model: LIST_MATCHING_RESPONSE,
+    operation: "list",
+    text: "{\"status\": \"success\", \"memories\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"summary\": \"Fix flaky upload test\", \"type\": \"task\", \"importance\": 0.6, \"scope\": \"persistent\", \"tags\": [\"status:open\"], \"delivery_mode\": \"on_recall\", \"source_type\": null, \"created_at\": \"2026-11-01T08:00:00Z\", \"updated_at\": \"2026-11-02T08:00:00Z\", \"version\": 3, \"observed_at\": \"2026-10-31\", \"details\": {\"status\": \"open\", \"estimate\": 2}}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"summary\": \"Rotate staging keys\", \"type\": \"task\", \"importance\": 0.4, \"scope\": \"persistent\", \"tags\": [], \"delivery_mode\": \"on_recall\", \"source_type\": \"manual\", \"created_at\": \"2026-11-01T09:00:00Z\", \"updated_at\": null, \"version\": 1, \"details\": {\"status\": \"open\"}}], \"count\": 2, \"total\": 12, \"has_more\": true, \"next_cursor\": \"60\", \"order_by\": \"observed_at\", \"direction\": \"asc\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"memories\": [\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"summary\": \"Fix flaky upload test\",\n      \"type\": \"task\",\n      \"importance\": 0.6,\n      \"scope\": \"persistent\",\n      \"tags\": [\n        \"status:open\"\n      ],\n      \"delivery_mode\": \"on_recall\",\n      \"source_type\": null,\n      \"created_at\": \"2026-11-01T08:00:00Z\",\n      \"updated_at\": \"2026-11-02T08:00:00Z\",\n      \"version\": 3,\n      \"observed_at\": \"2026-10-31\",\n      \"details\": {\n        \"status\": \"open\",\n        \"estimate\": 2\n      }\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n      \"summary\": \"Rotate staging keys\",\n      \"type\": \"task\",\n      \"importance\": 0.4,\n      \"scope\": \"persistent\",\n      \"tags\": [],\n      \"delivery_mode\": \"on_recall\",\n      \"source_type\": \"manual\",\n      \"created_at\": \"2026-11-01T09:00:00Z\",\n      \"updated_at\": null,\n      \"version\": 1,\n      \"details\": {\n        \"status\": \"open\"\n      }\n    }\n  ],\n  \"count\": 2,\n  \"total\": 12,\n  \"has_more\": true,\n  \"next_cursor\": \"60\",\n  \"order_by\": \"observed_at\",\n  \"direction\": \"asc\",\n  \"truncated\": false,\n  \"details_omitted\": false\n}",
+  },
+  {
+    name: "list cut",
+    model: LIST_MATCHING_RESPONSE,
+    operation: "list",
+    text: "{\"status\": \"success\", \"memories\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"summary\": \"Fix flaky upload test\", \"type\": \"task\", \"importance\": 0.6, \"scope\": \"persistent\", \"tags\": [\"status:open\"], \"delivery_mode\": \"on_recall\", \"source_type\": null, \"created_at\": \"2026-11-01T08:00:00Z\", \"updated_at\": \"2026-11-02T08:00:00Z\", \"version\": 3}], \"count\": 1, \"total\": 12, \"has_more\": true, \"next_cursor\": \"1\", \"order_by\": \"updated_at\", \"direction\": \"desc\", \"truncated\": true, \"details_omitted\": true, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"memories\": [\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"summary\": \"Fix flaky upload test\",\n      \"type\": \"task\",\n      \"importance\": 0.6,\n      \"scope\": \"persistent\",\n      \"tags\": [\n        \"status:open\"\n      ],\n      \"delivery_mode\": \"on_recall\",\n      \"source_type\": null,\n      \"created_at\": \"2026-11-01T08:00:00Z\",\n      \"updated_at\": \"2026-11-02T08:00:00Z\",\n      \"version\": 3\n    }\n  ],\n  \"count\": 1,\n  \"total\": 12,\n  \"has_more\": true,\n  \"next_cursor\": \"1\",\n  \"order_by\": \"updated_at\",\n  \"direction\": \"desc\",\n  \"truncated\": true,\n  \"details_omitted\": true\n}",
+  },
+  {
+    name: "list no total",
+    model: LIST_MATCHING_RESPONSE,
+    operation: "list",
+    text: "{\"status\": \"success\", \"memories\": [], \"has_more\": false}",
+    error: "list: unexpected server response for ListMatchingResponse (total: Field required). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "batch partial",
+    model: REMEMBER_BATCH_RESULT,
+    operation: "remember_batch",
+    text: "{\"status\": \"partial\", \"results\": [{\"index\": 0, \"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"scope\": \"persistent\", \"persistence\": {\"stored\": true}, \"lint\": [{\"code\": \"tag_case\", \"tag\": \"Dev\"}]}, {\"index\": 1, \"status\": \"duplicate_candidate\", \"candidate\": {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"summary\": \"Deploy runbook\", \"similarity\": 0.97}}, {\"index\": 2, \"status\": \"error\", \"error\": \"payload_too_large\", \"message\": \"content is over 1 MB\", \"limit\": 1048576, \"actual\": 2000000, \"help\": \"Split the content.\"}, {\"index\": 3, \"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\", \"scope\": \"persistent\", \"summary_truncated\": true, \"summary_original_length\": 812}], \"count\": 4, \"succeeded\": 2, \"candidates\": 1, \"failed\": 1, \"skipped\": 0, \"session_id\": \"sess_3f2a9c\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"plan_headroom\": [{\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"used\": 980, \"limit\": 1000, \"percentage\": 98.5, \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"980 of 1,000 memories today.\", \"resets_at\": \"2026-11-05T00:00:00Z\"}]}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"partial\",\n  \"results\": [\n    {\n      \"index\": 0,\n      \"status\": \"success\",\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"scope\": \"persistent\",\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": null,\n      \"persistence\": {\n        \"stored\": true\n      },\n      \"lint\": [\n        {\n          \"code\": \"tag_case\",\n          \"tag\": \"Dev\"\n        }\n      ],\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    },\n    {\n      \"index\": 1,\n      \"status\": \"duplicate_candidate\",\n      \"memory_id\": null,\n      \"scope\": null,\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": {\n        \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n        \"summary\": \"Deploy runbook\",\n        \"similarity\": 0.97\n      },\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    },\n    {\n      \"index\": 2,\n      \"status\": \"error\",\n      \"memory_id\": null,\n      \"scope\": null,\n      \"error\": \"payload_too_large\",\n      \"message\": \"content is over 1 MB\",\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null,\n      \"limit\": 1048576,\n      \"actual\": 2000000,\n      \"help\": \"Split the content.\"\n    },\n    {\n      \"index\": 3,\n      \"status\": \"success\",\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\",\n      \"scope\": \"persistent\",\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": true,\n      \"summary_original_length\": 812\n    }\n  ],\n  \"count\": 4,\n  \"succeeded\": 2,\n  \"candidates\": 1,\n  \"failed\": 1,\n  \"skipped\": 0,\n  \"committed_after_timeout\": false,\n  \"message\": null,\n  \"session_id\": \"sess_3f2a9c\",\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"used\": 980,\n      \"limit\": 1000,\n      \"percentage\": 98.5,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"980 of 1,000 memories today.\",\n      \"resets_at\": \"2026-11-05T00:00:00Z\"\n    }\n  ]\n}",
+  },
+  {
+    name: "batch atomic rolled back",
+    model: REMEMBER_BATCH_RESULT,
+    operation: "remember_batch",
+    text: "{\"status\": \"partial\", \"results\": [{\"index\": 0, \"status\": \"duplicate_candidate\", \"candidate\": {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"summary\": \"Deploy runbook\"}}, {\"index\": 1, \"status\": \"skipped\", \"message\": \"batch rolled back: item 0 failed\"}], \"count\": 2, \"succeeded\": 0, \"candidates\": 1, \"failed\": 0, \"skipped\": 1, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"partial\",\n  \"results\": [\n    {\n      \"index\": 0,\n      \"status\": \"duplicate_candidate\",\n      \"memory_id\": null,\n      \"scope\": null,\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": {\n        \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n        \"summary\": \"Deploy runbook\"\n      },\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    },\n    {\n      \"index\": 1,\n      \"status\": \"skipped\",\n      \"memory_id\": null,\n      \"scope\": null,\n      \"error\": null,\n      \"message\": \"batch rolled back: item 0 failed\",\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    }\n  ],\n  \"count\": 2,\n  \"succeeded\": 0,\n  \"candidates\": 1,\n  \"failed\": 0,\n  \"skipped\": 1,\n  \"committed_after_timeout\": false,\n  \"message\": null,\n  \"session_id\": null,\n  \"plan_headroom\": null\n}",
+  },
+  {
+    name: "batch committed after timeout",
+    model: REMEMBER_BATCH_RESULT,
+    operation: "remember_batch",
+    text: "{\"status\": \"success\", \"results\": [{\"index\": 0, \"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"scope\": \"persistent\"}, {\"index\": 1, \"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"scope\": \"persistent\"}], \"count\": 2, \"succeeded\": 2, \"candidates\": 0, \"failed\": 0, \"skipped\": 0, \"session_id\": \"sess_3f2a9c\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"committed_after_timeout\": true, \"message\": \"The call passed its time limit after the batch was committed: every item is stored (memory_id per item). Do NOT send the batch again.\"}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"results\": [\n    {\n      \"index\": 0,\n      \"status\": \"success\",\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"scope\": \"persistent\",\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    },\n    {\n      \"index\": 1,\n      \"status\": \"success\",\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n      \"scope\": \"persistent\",\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    }\n  ],\n  \"count\": 2,\n  \"succeeded\": 2,\n  \"candidates\": 0,\n  \"failed\": 0,\n  \"skipped\": 0,\n  \"committed_after_timeout\": true,\n  \"message\": \"The call passed its time limit after the batch was committed: every item is stored (memory_id per item). Do NOT send the batch again.\",\n  \"session_id\": \"sess_3f2a9c\",\n  \"plan_headroom\": null\n}",
+  },
+  {
+    name: "batch old server",
+    model: REMEMBER_BATCH_RESULT,
+    operation: "remember_batch",
+    text: "{\"status\": \"partial\", \"results\": [{\"index\": 0, \"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"scope\": \"persistent\"}, {\"index\": 1, \"status\": \"error\", \"error\": \"missing_fields\", \"message\": \"Missing required field: content\"}], \"count\": 2, \"succeeded\": 1, \"failed\": 1}",
+    dump: "{\n  \"context_id\": null,\n  \"context_name\": null,\n  \"context_display_name\": null,\n  \"context_is_private\": null,\n  \"context_is_locked\": null,\n  \"status\": \"partial\",\n  \"results\": [\n    {\n      \"index\": 0,\n      \"status\": \"success\",\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"scope\": \"persistent\",\n      \"error\": null,\n      \"message\": null,\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    },\n    {\n      \"index\": 1,\n      \"status\": \"error\",\n      \"memory_id\": null,\n      \"scope\": null,\n      \"error\": \"missing_fields\",\n      \"message\": \"Missing required field: content\",\n      \"candidate\": null,\n      \"persistence\": null,\n      \"lint\": null,\n      \"summary_truncated\": false,\n      \"summary_original_length\": null\n    }\n  ],\n  \"count\": 2,\n  \"succeeded\": 1,\n  \"candidates\": 0,\n  \"failed\": 1,\n  \"skipped\": 0,\n  \"committed_after_timeout\": false,\n  \"message\": null,\n  \"session_id\": null,\n  \"plan_headroom\": null\n}",
+  },
+  {
+    name: "batch refused shape",
+    model: REMEMBER_BATCH_RESULT,
+    operation: "remember_batch",
+    text: "{\"status\": \"success\", \"results\": [{\"status\": \"success\"}], \"succeeded\": \"x\"}",
+    error: "remember_batch: unexpected server response for RememberBatchResult (results.0.index: Field required; count: Field required; succeeded: Input should be a valid integer, unable to parse string as an integer (+1 more)). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "forget partial",
+    model: FORGET_BATCH_RESULT,
+    operation: "forget",
+    text: "{\"status\": \"partial\", \"deleted_count\": 1, \"memory_ids\": [\"aaaaaaaa-0000-4000-8000-000000000001\"], \"results\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"status\": \"deleted\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"status\": \"skipped\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\", \"status\": \"error\", \"error\": \"not_attempted\", \"message\": \"The call's time budget ran out before this id; send it again.\"}], \"count\": 3, \"succeeded\": 1, \"skipped\": 1, \"failed\": 1, \"session_id\": \"sess_3f2a9c\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\"}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": null,\n  \"context_is_locked\": null,\n  \"status\": \"partial\",\n  \"deleted_count\": 1,\n  \"memory_ids\": [\n    \"aaaaaaaa-0000-4000-8000-000000000001\"\n  ],\n  \"results\": [\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"status\": \"deleted\",\n      \"error\": null,\n      \"message\": null,\n      \"correlation_id\": null\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n      \"status\": \"skipped\",\n      \"error\": null,\n      \"message\": null,\n      \"correlation_id\": null\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\",\n      \"status\": \"error\",\n      \"error\": \"not_attempted\",\n      \"message\": \"The call's time budget ran out before this id; send it again.\",\n      \"correlation_id\": null\n    }\n  ],\n  \"count\": 3,\n  \"succeeded\": 1,\n  \"skipped\": 1,\n  \"failed\": 1,\n  \"session_id\": \"sess_3f2a9c\"\n}",
+  },
+  {
+    name: "forget refused shape",
+    model: FORGET_BATCH_RESULT,
+    operation: "forget",
+    text: "{\"status\": \"success\", \"results\": [{\"status\": \"deleted\"}]}",
+    error: "forget: unexpected server response for ForgetBatchResult (deleted_count: Field required; results.0.memory_id: Field required; count: Field required (+3 more)). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "describe list",
+    model: TOOL_DESCRIPTIONS,
+    operation: "describe_tools",
+    text: "{\"status\": \"success\", \"tools\": [{\"name\": \"explore\", \"title\": \"Explore\", \"summary\": \"Walk the memory graph.\"}], \"count\": 1, \"listed\": [\"recall\", \"remember\", \"bootstrap\"], \"url\": {\"profile_full\": \"?profile=full\", \"add_tools\": \"?add_tools=explore\"}, \"hint\": \"Call describe_tools(names=[...]) for a definition.\", \"profile\": \"core\"}",
+    dump: "{\n  \"status\": \"success\",\n  \"tools\": [\n    {\n      \"name\": \"explore\",\n      \"title\": \"Explore\",\n      \"summary\": \"Walk the memory graph.\"\n    }\n  ],\n  \"count\": 1,\n  \"listed\": [\n    \"recall\",\n    \"remember\",\n    \"bootstrap\"\n  ],\n  \"definitions\": [],\n  \"unknown\": [],\n  \"url\": {\n    \"profile_full\": \"?profile=full\",\n    \"add_tools\": \"?add_tools=explore\"\n  },\n  \"url_error\": null,\n  \"hint\": \"Call describe_tools(names=[...]) for a definition.\",\n  \"profile\": \"core\"\n}",
+  },
+  {
+    name: "describe names",
+    model: TOOL_DESCRIPTIONS,
+    operation: "describe_tools",
+    text: "{\"status\": \"success\", \"definitions\": [{\"name\": \"explore\", \"inputSchema\": {\"type\": \"object\", \"properties\": {}}, \"annotations\": {\"readOnlyHint\": true}}], \"unknown\": [\"nope\"], \"url\": {}, \"url_error\": null}",
+    dump: "{\n  \"status\": \"success\",\n  \"tools\": [],\n  \"count\": null,\n  \"listed\": [],\n  \"definitions\": [\n    {\n      \"name\": \"explore\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"properties\": {}\n      },\n      \"annotations\": {\n        \"readOnlyHint\": true\n      }\n    }\n  ],\n  \"unknown\": [\n    \"nope\"\n  ],\n  \"url\": {},\n  \"url_error\": null,\n  \"hint\": null\n}",
+  },
+  {
+    name: "describe refused",
+    model: TOOL_DESCRIPTIONS,
+    operation: "describe_tools",
+    text: "{\"tools\": \"x\", \"url\": []}",
+    error: "describe_tools: unexpected server response for ToolDescriptions (tools: Input should be a valid list; url: Input should be a valid dictionary). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "guide",
+    model: GUIDE_RESPONSE,
+    operation: "guide",
+    text: "{\"status\": \"success\", \"topics\": [{\"topic\": \"recall.usage\", \"text\": \"How to read a recall reply.\"}, {\"topic\": \"recall.filters\", \"text\": \"Exact filters.\"}], \"unknown\": [\"nope\"], \"hint\": \"guide([\\\"index\\\"]) lists every topic.\"}",
+    dump: "{\n  \"status\": \"success\",\n  \"topics\": [\n    {\n      \"topic\": \"recall.usage\",\n      \"text\": \"How to read a recall reply.\"\n    },\n    {\n      \"topic\": \"recall.filters\",\n      \"text\": \"Exact filters.\"\n    }\n  ],\n  \"unknown\": [\n    \"nope\"\n  ],\n  \"hint\": \"guide([\\\"index\\\"]) lists every topic.\"\n}",
+  },
+  {
+    name: "guide refused",
+    model: GUIDE_RESPONSE,
+    operation: "guide",
+    text: "{\"topics\": [{\"topic\": \"x\"}]}",
+    error: "guide: unexpected server response for GuideResponse (topics.0.text: Field required). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "revisions",
+    model: REVISIONS_PAGE,
+    operation: "list_revisions",
+    text: "{\"status\": \"success\", \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"current_version\": 3, \"revisions\": [{\"version\": 3, \"kind\": \"updated\", \"at\": \"2026-11-04T09:00:00Z\", \"changed_fields\": [\"summary\", \"tags\"], \"writer\": \"api\", \"by_you\": true, \"agent_id\": null, \"session_id\": \"sess_3f2a9c\"}, {\"version\": 2, \"kind\": \"restored\", \"at\": \"2026-11-03T09:00:00.5Z\", \"writer\": \"rollback\", \"by_you\": false}, {\"version\": 1, \"kind\": \"created\", \"at\": \"2026-11-01T09:00:00Z\", \"changed_fields\": [], \"writer\": \"erasure\", \"by_you\": true}], \"count\": 3, \"has_more\": false, \"next_cursor\": null, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"success\",\n  \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n  \"current_version\": 3,\n  \"revisions\": [\n    {\n      \"version\": 3,\n      \"kind\": \"updated\",\n      \"at\": \"2026-11-04T09:00:00Z\",\n      \"changed_fields\": [\n        \"summary\",\n        \"tags\"\n      ],\n      \"writer\": \"api\",\n      \"by_you\": true,\n      \"agent_id\": null,\n      \"session_id\": \"sess_3f2a9c\"\n    },\n    {\n      \"version\": 2,\n      \"kind\": \"restored\",\n      \"at\": \"2026-11-03T09:00:00.500000Z\",\n      \"changed_fields\": [],\n      \"writer\": \"rollback\",\n      \"by_you\": false,\n      \"agent_id\": null,\n      \"session_id\": null\n    },\n    {\n      \"version\": 1,\n      \"kind\": \"created\",\n      \"at\": \"2026-11-01T09:00:00Z\",\n      \"changed_fields\": [],\n      \"writer\": \"erasure\",\n      \"by_you\": true,\n      \"agent_id\": null,\n      \"session_id\": null\n    }\n  ],\n  \"count\": 3,\n  \"has_more\": false,\n  \"next_cursor\": null,\n  \"truncated\": false\n}",
+  },
+  {
+    name: "revisions refused",
+    model: REVISIONS_PAGE,
+    operation: "list_revisions",
+    text: "{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"revisions\": [{\"version\": \"v3\", \"kind\": \"updated\", \"at\": \"yesterday\"}], \"has_more\": false}",
+    error: "list_revisions: unexpected server response for RevisionsPage (current_version: Field required; revisions.0.version: Input should be a valid integer, unable to parse string as an integer; revisions.0.at: Input should be a valid datetime or date, input is too short (+2 more)). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+  {
+    name: "rollback dry run",
+    model: SESSION_ROLLBACK_RESULT,
+    operation: "rollback_session",
+    text: "{\"status\": \"dry_run\", \"dry_run\": true, \"plan\": {\"forget\": 1, \"restore\": 1, \"unforget\": 0, \"skip\": 2}, \"items\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\", \"kind\": \"created\", \"action\": \"forget\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\", \"kind\": \"updated\", \"action\": \"restore\", \"fields\": [\"summary\", \"content\"]}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\", \"kind\": \"updated\", \"action\": \"skip\", \"cause\": \"modified_since\"}, {\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000004\", \"kind\": \"created\", \"action\": \"skip\", \"cause\": \"not_permitted\", \"detail\": \"agent-bound key\"}], \"since\": \"2026-11-04T09:00:00Z\", \"until\": \"2026-11-04T10:00:00Z\", \"until_from\": \"unfinished_rollback\", \"events\": 4, \"remaining\": 0, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false, \"help\": \"Call again with dry_run=false to roll these back.\"}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"dry_run\",\n  \"dry_run\": true,\n  \"session_id\": null,\n  \"since\": \"2026-11-04T09:00:00Z\",\n  \"until\": \"2026-11-04T10:00:00Z\",\n  \"until_from\": \"unfinished_rollback\",\n  \"events\": 4,\n  \"remaining\": 0,\n  \"rollback_id\": null,\n  \"plan\": {\n    \"forget\": 1,\n    \"restore\": 1,\n    \"unforget\": 0,\n    \"skip\": 2\n  },\n  \"items\": [\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000001\",\n      \"kind\": \"created\",\n      \"action\": \"forget\",\n      \"cause\": null,\n      \"fields\": [],\n      \"unforget\": false\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000002\",\n      \"kind\": \"updated\",\n      \"action\": \"restore\",\n      \"cause\": null,\n      \"fields\": [\n        \"summary\",\n        \"content\"\n      ],\n      \"unforget\": false\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\",\n      \"kind\": \"updated\",\n      \"action\": \"skip\",\n      \"cause\": \"modified_since\",\n      \"fields\": [],\n      \"unforget\": false\n    },\n    {\n      \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000004\",\n      \"kind\": \"created\",\n      \"action\": \"skip\",\n      \"cause\": \"not_permitted\",\n      \"fields\": [],\n      \"unforget\": false,\n      \"detail\": \"agent-bound key\"\n    }\n  ],\n  \"items_truncated\": false,\n  \"rollback_status\": null,\n  \"summary\": null,\n  \"totals\": null,\n  \"help\": \"Call again with dry_run=false to roll these back.\"\n}",
+  },
+  {
+    name: "rollback done",
+    model: SESSION_ROLLBACK_RESULT,
+    operation: "rollback_session",
+    text: "{\"status\": \"in_progress\", \"dry_run\": false, \"rollback_status\": \"in_progress\", \"summary\": {\"forgotten\": 1, \"restored\": 1, \"updated_restored\": 0, \"skipped\": 1, \"failed\": 0, \"chunks_requeued\": 2, \"points_requeued\": 2, \"skipped_items\": [{\"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\", \"kind\": \"updated\", \"cause\": \"modified_since\"}], \"errors\": [], \"erased\": 0}, \"totals\": {\"forgotten\": 1, \"restored\": 1, \"calls\": 1}, \"session_id\": \"sess_3f2a9c\", \"events\": 600, \"remaining\": 100, \"rollback_id\": 42, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    dump: "{\n  \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": \"Development\",\n  \"context_is_private\": true,\n  \"context_is_locked\": false,\n  \"status\": \"in_progress\",\n  \"dry_run\": false,\n  \"session_id\": \"sess_3f2a9c\",\n  \"since\": null,\n  \"until\": null,\n  \"until_from\": null,\n  \"events\": 600,\n  \"remaining\": 100,\n  \"rollback_id\": 42,\n  \"plan\": null,\n  \"items\": [],\n  \"items_truncated\": false,\n  \"rollback_status\": \"in_progress\",\n  \"summary\": {\n    \"forgotten\": 1,\n    \"restored\": 1,\n    \"updated_restored\": 0,\n    \"skipped\": 1,\n    \"failed\": 0,\n    \"chunks_requeued\": 2,\n    \"points_requeued\": 2,\n    \"skipped_items\": [\n      {\n        \"memory_id\": \"aaaaaaaa-0000-4000-8000-000000000003\",\n        \"kind\": \"updated\",\n        \"cause\": \"modified_since\"\n      }\n    ],\n    \"errors\": [],\n    \"erased\": 0\n  },\n  \"totals\": {\n    \"forgotten\": 1,\n    \"restored\": 1,\n    \"calls\": 1\n  },\n  \"help\": null\n}",
+  },
+  {
+    name: "rollback refused",
+    model: SESSION_ROLLBACK_RESULT,
+    operation: "rollback_session",
+    text: "{\"status\": \"dry_run\", \"plan\": {\"forget\": \"x\"}, \"summary\": {\"errors\": \"e\"}}",
+    error: "rollback_session: unexpected server response for SessionRollbackResult (dry_run: Field required; plan.forget: Input should be a valid integer, unable to parse string as an integer; summary.errors: Input should be a valid list). The server may be newer than this SDK; upgrading kagura-memory may help.",
+  },
+];
+
+interface PartialCase {
+  name: string;
+  text: string;
+  message: string;
+  code: string;
+  details: Record<string, unknown>;
+  /** Python's `session_summary` dumped, or `null` when it read none. */
+  sessionSummary: string | null;
+  totals: Record<string, unknown> | null;
+  rollbackId: number | null;
+  remaining: number | null;
+}
+
+const PARTIAL_CASES: PartialCase[] = [
+  {
+    name: "partial",
+    text: "{\"status\": \"error\", \"error\": \"partial_rollback\", \"message\": \"Rollback finished this call with 1 failed item(s); summary shows what was reversed.\", \"help\": \"Call again with the same arguments to retry the failed items. 1 event(s) remain.\", \"retryable\": true, \"rollback_status\": \"in_progress\", \"summary\": {\"forgotten\": 1, \"restored\": 0, \"failed\": 1, \"errors\": [\"aaaaaaaa-0000-4000-8000-000000000002: restore failed (correlation_id=c0ffee)\"]}, \"totals\": {\"forgotten\": 1, \"failed\": 1, \"calls\": 2}, \"correlation_id\": \"c0ffee\", \"session_id\": \"sess_3f2a9c\", \"events\": 2, \"remaining\": 1, \"rollback_id\": 42, \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"dev\", \"context_display_name\": \"Development\", \"context_is_private\": true, \"context_is_locked\": false}",
+    message: "rollback_session failed (partial_rollback): Rollback finished this call with 1 failed item(s); summary shows what was reversed.",
+    code: "partial_rollback",
+    details: {"help": "Call again with the same arguments to retry the failed items. 1 event(s) remain.", "retryable": true, "rollback_status": "in_progress", "summary": {"forgotten": 1, "restored": 0, "failed": 1, "errors": ["aaaaaaaa-0000-4000-8000-000000000002: restore failed (correlation_id=c0ffee)"]}, "totals": {"forgotten": 1, "failed": 1, "calls": 2}, "correlation_id": "c0ffee", "session_id": "sess_3f2a9c", "events": 2, "remaining": 1, "rollback_id": 42, "context_id": "11111111-2222-4333-8444-555555555555", "context_name": "dev", "context_display_name": "Development", "context_is_private": true, "context_is_locked": false},
+    sessionSummary: "{\n  \"forgotten\": 1,\n  \"restored\": 0,\n  \"updated_restored\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"chunks_requeued\": 0,\n  \"points_requeued\": 0,\n  \"skipped_items\": [],\n  \"errors\": [\n    \"aaaaaaaa-0000-4000-8000-000000000002: restore failed (correlation_id=c0ffee)\"\n  ]\n}",
+    totals: {"forgotten": 1, "failed": 1, "calls": 2},
+    rollbackId: 42,
+    remaining: 1,
+  },
+  {
+    name: "partial unreadable",
+    text: "{\"status\": \"error\", \"error\": \"partial_rollback\", \"message\": \"Rollback finished this call with 1 failed item(s); summary shows what was reversed.\", \"summary\": {\"forgotten\": \"many\"}, \"totals\": [\"x\"], \"rollback_id\": true}",
+    message: "rollback_session failed (partial_rollback): Rollback finished this call with 1 failed item(s); summary shows what was reversed.",
+    code: "partial_rollback",
+    details: {"summary": {"forgotten": "many"}, "totals": ["x"], "rollback_id": true},
+    sessionSummary: null,
+    totals: null,
+    rollbackId: null,
+    remaining: null,
+  },
+];
+
+describe("session-tool models, read as the Python SDK 0.44.0 reads them (#86)", () => {
+  it.each(MODEL_CASES.map((c) => [c.name, c] as const))("%s", (_name, c) => {
+    const read = () => readModel(JSON.parse(c.text), c.model, c.operation);
+    if (c.error !== undefined) {
+      expect(read).toThrow(KaguraResponseError);
+      expect(read).toThrow(c.error);
+      return;
+    }
+    expect(formatDumpsJson(read())).toBe(c.dump);
+  });
+});
+
+describe("rollbackSession's partial_rollback, kept as Python keeps it (#86)", () => {
+  it.each(PARTIAL_CASES.map((c) => [c.name, c] as const))("%s", async (_name, c) => {
+    const server = new FakeServer();
+    server.toolTexts.rollback_session = c.text;
+    const client = makeClient(server);
+    const err = await client
+      .rollbackSession({ contextId: "ctx", sessionId: "sess_3f2a9c", dryRun: false })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraPartialSessionRollbackError);
+    const partial = err as KaguraPartialSessionRollbackError;
+    expect(partial.message).toBe(c.message);
+    expect(partial.code).toBe(c.code);
+    expect(partial.details).toEqual(c.details);
+    expect(partial.totals).toEqual(c.totals);
+    expect(partial.rollbackId).toBe(c.rollbackId);
+    expect(partial.remaining).toBe(c.remaining);
+    if (c.sessionSummary === null) {
+      expect(partial.sessionSummary).toBeNull();
+    } else {
+      // As sent; the Python model's read of it fills the defaults.
+      expect(partial.sessionSummary).toEqual(JSON.parse(c.text).summary);
+      expect(formatDumpsJson(readModel(partial.sessionSummary, SESSION_ROLLBACK_SUMMARY, "rollback_session"))).toBe(
+        c.sessionSummary,
+      );
+    }
+  });
+});

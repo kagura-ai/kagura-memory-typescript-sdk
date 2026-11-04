@@ -27,7 +27,7 @@
  * (`cli/modelDump.ts`), not exported from the package entry point.
  */
 
-import { jsonValue, orderedEntries, valueAt } from "./losslessJson.js";
+import { JsonNumber, jsonValue, orderedEntries, valueAt } from "./losslessJson.js";
 import { pydanticDatetime } from "./pydanticDatetime.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import {
@@ -79,13 +79,25 @@ export type Kind =
   | "datetime"
   /** `dict[str, Any]`: an object, its contents untouched. */
   | "dict"
+  /**
+   * `Any`: whatever the body holds, untouched and never refused — a field
+   * the Python model reads fail-open (`plan_headroom`) and this one does
+   * not read yet.
+   */
+  | "any"
   /** `dict[str, T]`: an object whose every value is read as `T`. */
   | { dictOf: Kind }
   | { literal: readonly string[] }
   | { list: Kind }
   | { model: Model }
   /** `T | None`. */
-  | { nullable: Kind };
+  | { nullable: Kind }
+  /**
+   * `Model | None` read fail-open, as the Python SDK's `_validate_or_none`
+   * reads it: a value the model refuses is `None` (`null`), never a
+   * problem of the enclosing reply.
+   */
+  | { orNone: Model };
 
 export interface Field {
   key: string;
@@ -98,6 +110,12 @@ export interface Model {
   /** The Python model's name, for its `KaguraResponseError`. */
   name: string;
   fields: readonly Field[];
+  /**
+   * `"allow"` for a model with `extra="allow"`: a key it does not declare
+   * is kept after its fields, in the body's order and as sent, where pydantic
+   * keeps it (`model_extra`) and dumps it. Unknown keys are dropped otherwise.
+   */
+  extra?: "allow";
 }
 
 const required = (key: string, kind: Kind): Field => ({ key, kind });
@@ -163,8 +181,22 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
       }
       r.issue(at, "Input should be a valid dictionary");
       return undefined;
+    case "any":
+      return untyped(raw);
   }
   if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, raw, at);
+  if ("orNone" in kind) {
+    if (value === null) return null;
+    // Read on a reader of its own, so what the model refuses stays out of `r`.
+    const own = new ResponseReader(r.operation, kind.orNone.name);
+    const read = readFields(own, kind.orNone, value, []);
+    try {
+      own.check();
+    } catch {
+      return null;
+    }
+    return read;
+  }
   if ("dictOf" in kind) {
     if (!isObject(value)) {
       r.issue(at, "Input should be a valid dictionary");
@@ -197,6 +229,13 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
   return readFields(r, kind.model, value, at);
 }
 
+/** A value pydantic keeps as it is (`Any`, an extra key): untouched, a container marked {@link UNTYPED}. */
+function untyped(raw: unknown): unknown {
+  // A JsonNumber stays one, so the dump prints the literal the body wrote.
+  if ((isObject(raw) && !(raw instanceof JsonNumber)) || Array.isArray(raw)) UNTYPED.add(raw);
+  return raw;
+}
+
 function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Record<string, unknown> | undefined {
   const obj = r.object(raw, at, model.name);
   if (obj === null) return undefined;
@@ -212,6 +251,12 @@ function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Rec
       continue;
     }
     out[field.key] = readValue(r, field.kind, value, [...at, field.key]);
+  }
+  if (model.extra === "allow") {
+    const declared = new Set(model.fields.map((field) => field.key));
+    for (const [key] of orderedEntries(obj)) {
+      if (!declared.has(key)) out[key] = untyped(valueAt(obj, key));
+    }
   }
   return out;
 }
@@ -641,5 +686,390 @@ export const SLEEP_REPORT_DETAIL: Model = {
     optional("actions_has_more", "bool", false),
     optional("actions_next_cursor", nullable("str")),
     optional("note", nullable("str")),
+  ],
+};
+
+// Session tools (memory-cloud v0.93.0+, #86): the Python SDK 0.44.0's
+// models for bootstrap, changes_since, list, remember_batch, forget by ids,
+// describe_tools, guide, list_revisions and rollback_session.
+
+/** A model's defaults as one object: what a `default_factory=Model` field holds. */
+function defaultsOf(model: Model): Record<string, unknown> {
+  return Object.fromEntries(model.fields.map((field) => [field.key, field.default!()]));
+}
+
+const SEARCH_CONFIG: Model = {
+  name: "SearchConfig",
+  fields: [
+    optional("semantic_weight", "float", 0.6),
+    optional("bm25_weight", "float", 0.4),
+    optional("fetch_factor", "int", 3),
+    optional("use_rerank", "bool", false),
+    optional("reranker_provider", nullable("str")),
+    optional("reranker_model", nullable("str")),
+    optional("content_chunks_enabled", nullable("bool")),
+    optional("content_chunks_effective", nullable("bool")),
+    optional("content_chunks_limit", nullable("int")),
+    optional("content_chunks_in_use", nullable("int")),
+    optional("content_chunks_disabled_reason", nullable("str")),
+    optional("content_chunks_can_change", nullable("bool")),
+    optional("content_chunks_supported", nullable("bool")),
+    optional("content_chunks_backfill_pending", nullable("int")),
+    optional("embedding_provider", nullable("str")),
+    optional("llm_selector_enabled", nullable("bool")),
+    optional("llm_selector_effective", nullable("bool")),
+    optional("llm_selector_limit", nullable("int")),
+    optional("llm_selector_in_use", nullable("int")),
+    optional("llm_selector_disabled_reason", nullable("str")),
+    optional("llm_selector_can_change", nullable("bool")),
+  ],
+};
+
+const CONTEXT_DETAIL: Model = {
+  name: "ContextDetail",
+  fields: [
+    required("id", "str"),
+    required("name", "str"),
+    optional("display_name", nullable("str")),
+    optional("summary", nullable("str")),
+    optional("usage_guide", nullable("str")),
+    optional("is_private", "bool", true),
+    optional("is_locked", "bool", false),
+    optional("embedding_model", nullable("str")),
+    optional("embedding_dimensions", nullable("int")),
+    // `Field(default_factory=SearchConfig)`: absent is the defaults, not `{}`.
+    { key: "search_config", kind: { model: SEARCH_CONFIG }, default: () => defaultsOf(SEARCH_CONFIG) },
+  ],
+};
+
+const CONTEXT_GUARDRAIL_ITEM: Model = {
+  name: "ContextGuardrailItem",
+  fields: [
+    required("memory_id", "str"),
+    required("summary", "str"),
+    optional("summary_cut", "bool", false),
+    optional("importance", nullable("float")),
+    optional("authored_by_caller", nullable("bool")),
+    optional("source_type", nullable("str")),
+  ],
+};
+
+const CONTEXT_GUARDRAILS: Model = {
+  name: "ContextGuardrails",
+  fields: [
+    required("items", listOf({ model: CONTEXT_GUARDRAIL_ITEM })),
+    required("total_available", "int"),
+    required("truncated", "bool"),
+    optional("tool_triggered_version", nullable("str")),
+    optional("provenance", nullable("str")),
+  ],
+};
+
+/** `_ContextEcho`'s fields, which come first in every model that extends it. */
+const CONTEXT_ECHO_FIELDS: readonly Field[] = [
+  optional("context_id", nullable("str")),
+  optional("context_name", nullable("str")),
+  optional("context_display_name", nullable("str")),
+  optional("context_is_private", nullable("bool")),
+  optional("context_is_locked", nullable("bool")),
+];
+
+/**
+ * `plan_headroom` (memory-cloud v0.142.0+, #2615), passed through as sent:
+ * the Python SDK reads it fail-open as `PlanHeadroomNotice` rows, which
+ * this reader does not model yet.
+ */
+const PLAN_HEADROOM: Field = optional("plan_headroom", "any");
+
+const CHANGE_EVENT: Model = {
+  name: "ChangeEvent",
+  fields: [
+    required("memory_id", "str"),
+    required("kind", "str"),
+    required("at", "datetime"),
+    optional("summary", nullable("str")),
+    optional("summary_cut", "bool", false),
+    optional("superseded_by", nullable("str")),
+  ],
+};
+
+const BOOTSTRAP_LANE_FIELDS: readonly Field[] = [
+  required("status", "str"),
+  optional("error", nullable("str")),
+  optional("truncated", "bool", false),
+];
+
+const BOOTSTRAP_PINNED_LANE: Model = {
+  name: "BootstrapPinnedLane",
+  extra: "allow",
+  fields: [
+    ...BOOTSTRAP_LANE_FIELDS,
+    optional("memories", listOf("dict"), []),
+    optional("total_available", nullable("int")),
+    optional("cap", nullable("int")),
+  ],
+};
+
+const BOOTSTRAP_UPCOMING_LANE: Model = {
+  name: "BootstrapUpcomingLane",
+  extra: "allow",
+  // `from` is the wire key; the Python model's `from_` dumps by alias.
+  fields: [...BOOTSTRAP_LANE_FIELDS, optional("results", listOf("dict"), []), optional("from", nullable("str"))],
+};
+
+const BOOTSTRAP_CHANGES_LANE: Model = {
+  name: "BootstrapChangesLane",
+  extra: "allow",
+  fields: [
+    ...BOOTSTRAP_LANE_FIELDS,
+    optional("changes", listOf({ model: CHANGE_EVENT }), []),
+    optional("has_more", "bool", false),
+    optional("next_cursor", nullable("str")),
+  ],
+};
+
+const BOOTSTRAP_COMPONENTS: Model = {
+  name: "BootstrapComponents",
+  extra: "allow",
+  fields: [
+    optional("pinned", nullable({ model: BOOTSTRAP_PINNED_LANE })),
+    optional("upcoming", nullable({ model: BOOTSTRAP_UPCOMING_LANE })),
+    optional("changes", nullable({ model: BOOTSTRAP_CHANGES_LANE })),
+  ],
+};
+
+/** A `bootstrap` reply, as Python's `BootstrapResponse` reads it (dumped by alias). */
+export const BOOTSTRAP_RESPONSE: Model = {
+  name: "BootstrapResponse",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    optional("status", "str", "success"),
+    optional("format", nullable("str")),
+    optional("degraded", "bool", false),
+    optional("context", nullable({ model: CONTEXT_DETAIL })),
+    optional("instructions", nullable("str")),
+    // Fail-open, as the server serves the block: unreadable is `null`.
+    optional("guardrails", { orNone: CONTEXT_GUARDRAILS }),
+    required("components", { model: BOOTSTRAP_COMPONENTS }),
+    optional("since", nullable("datetime")),
+    optional("generated_at", nullable("datetime")),
+    optional("context_summary_omitted", "bool", false),
+    PLAN_HEADROOM,
+  ],
+};
+
+/** A `changes_since` reply, as Python's `ChangesSinceResponse` reads it. */
+export const CHANGES_SINCE_RESPONSE: Model = {
+  name: "ChangesSinceResponse",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    optional("status", "str", "success"),
+    required("changes", listOf({ model: CHANGE_EVENT })),
+    optional("count", nullable("int")),
+    required("has_more", "bool"),
+    optional("next_cursor", nullable("str")),
+    optional("since", nullable("datetime")),
+    optional("until", nullable("datetime")),
+    optional("session_id", nullable("str")),
+    optional("by_me", "bool", false),
+    optional("truncated", "bool", false),
+  ],
+};
+
+/** A `list` reply, as Python's `ListMatchingResponse` reads it. */
+export const LIST_MATCHING_RESPONSE: Model = {
+  name: "ListMatchingResponse",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    optional("status", "str", "success"),
+    required("memories", listOf("dict")),
+    optional("count", nullable("int")),
+    required("total", "int"),
+    required("has_more", "bool"),
+    optional("next_cursor", nullable("str")),
+    optional("order_by", nullable("str")),
+    optional("direction", nullable("str")),
+    optional("truncated", "bool", false),
+    optional("details_omitted", "bool", false),
+  ],
+};
+
+const REMEMBER_BATCH_ITEM_RESULT: Model = {
+  name: "RememberBatchItemResult",
+  extra: "allow",
+  fields: [
+    required("index", "int"),
+    required("status", "str"),
+    optional("memory_id", nullable("str")),
+    optional("scope", nullable("str")),
+    optional("error", nullable("str")),
+    optional("message", nullable("str")),
+    optional("candidate", nullable("dict")),
+    optional("persistence", nullable("dict")),
+    optional("lint", nullable(listOf("dict"))),
+    optional("summary_truncated", "bool", false),
+    optional("summary_original_length", nullable("int")),
+  ],
+};
+
+/** A `remember_batch` reply, as Python's `RememberBatchResult` reads it. */
+export const REMEMBER_BATCH_RESULT: Model = {
+  name: "RememberBatchResult",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    optional("status", "str", "success"),
+    required("results", listOf({ model: REMEMBER_BATCH_ITEM_RESULT })),
+    required("count", "int"),
+    required("succeeded", "int"),
+    optional("candidates", "int", 0),
+    required("failed", "int"),
+    optional("skipped", "int", 0),
+    optional("committed_after_timeout", "bool", false),
+    optional("message", nullable("str")),
+    optional("session_id", nullable("str")),
+    PLAN_HEADROOM,
+  ],
+};
+
+const FORGET_ID_RESULT: Model = {
+  name: "ForgetIdResult",
+  extra: "allow",
+  fields: [
+    required("memory_id", "str"),
+    required("status", "str"),
+    optional("error", nullable("str")),
+    optional("message", nullable("str")),
+    optional("correlation_id", nullable("str")),
+  ],
+};
+
+/** A `forget({ memoryIds })` reply, as Python's `ForgetBatchResult` reads it. */
+export const FORGET_BATCH_RESULT: Model = {
+  name: "ForgetBatchResult",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    optional("status", "str", "success"),
+    required("deleted_count", "int"),
+    optional("memory_ids", listOf("str"), []),
+    required("results", listOf({ model: FORGET_ID_RESULT })),
+    required("count", "int"),
+    required("succeeded", "int"),
+    required("skipped", "int"),
+    required("failed", "int"),
+    optional("session_id", nullable("str")),
+  ],
+};
+
+/** A `describe_tools` reply, as Python's `ToolDescriptions` reads it. */
+export const TOOL_DESCRIPTIONS: Model = {
+  name: "ToolDescriptions",
+  extra: "allow",
+  fields: [
+    optional("status", "str", "success"),
+    optional("tools", listOf("dict"), []),
+    optional("count", nullable("int")),
+    optional("listed", listOf("str"), []),
+    optional("definitions", listOf("dict"), []),
+    optional("unknown", listOf("str"), []),
+    optional("url", "dict", {}),
+    optional("url_error", nullable("str")),
+    optional("hint", nullable("str")),
+  ],
+};
+
+const GUIDE_TOPIC: Model = { name: "GuideTopic", fields: [required("topic", "str"), required("text", "str")] };
+
+/** A `guide` reply, as Python's `GuideResponse` reads it. */
+export const GUIDE_RESPONSE: Model = {
+  name: "GuideResponse",
+  fields: [
+    optional("status", "str", "success"),
+    required("topics", listOf({ model: GUIDE_TOPIC })),
+    optional("unknown", listOf("str"), []),
+    optional("hint", nullable("str")),
+  ],
+};
+
+const MEMORY_REVISION: Model = {
+  name: "MemoryRevision",
+  fields: [
+    required("version", "int"),
+    required("kind", "str"),
+    required("at", "datetime"),
+    optional("changed_fields", listOf("str"), []),
+    required("writer", "str"),
+    required("by_you", "bool"),
+    optional("agent_id", nullable("str")),
+    optional("session_id", nullable("str")),
+  ],
+};
+
+/** A `list_revisions` reply, as Python's `RevisionsPage` reads it. */
+export const REVISIONS_PAGE: Model = {
+  name: "RevisionsPage",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    optional("status", "str", "success"),
+    required("memory_id", "str"),
+    required("current_version", "int"),
+    required("revisions", listOf({ model: MEMORY_REVISION })),
+    optional("count", nullable("int")),
+    required("has_more", "bool"),
+    optional("next_cursor", nullable("str")),
+    optional("truncated", "bool", false),
+  ],
+};
+
+const SESSION_ROLLBACK_ITEM: Model = {
+  name: "SessionRollbackItem",
+  extra: "allow",
+  fields: [
+    required("memory_id", "str"),
+    required("kind", "str"),
+    required("action", "str"),
+    optional("cause", nullable("str")),
+    optional("fields", listOf("str"), []),
+    optional("unforget", "bool", false),
+  ],
+};
+
+/** A `rollback_session` call's `summary`, as Python's `SessionRollbackSummary` reads it. */
+export const SESSION_ROLLBACK_SUMMARY: Model = {
+  name: "SessionRollbackSummary",
+  extra: "allow",
+  fields: [
+    optional("forgotten", "int", 0),
+    optional("restored", "int", 0),
+    optional("updated_restored", "int", 0),
+    optional("skipped", "int", 0),
+    optional("failed", "int", 0),
+    optional("chunks_requeued", "int", 0),
+    optional("points_requeued", "int", 0),
+    optional("skipped_items", listOf("dict"), []),
+    optional("errors", listOf("str"), []),
+  ],
+};
+
+/** A `rollback_session` reply, as Python's `SessionRollbackResult` reads it. */
+export const SESSION_ROLLBACK_RESULT: Model = {
+  name: "SessionRollbackResult",
+  fields: [
+    ...CONTEXT_ECHO_FIELDS,
+    required("status", "str"),
+    required("dry_run", "bool"),
+    optional("session_id", nullable("str")),
+    optional("since", nullable("datetime")),
+    optional("until", nullable("datetime")),
+    optional("until_from", nullable("str")),
+    optional("events", "int", 0),
+    optional("remaining", "int", 0),
+    optional("rollback_id", nullable("int")),
+    optional("plan", nullable({ dictOf: "int" })),
+    optional("items", listOf({ model: SESSION_ROLLBACK_ITEM }), []),
+    optional("items_truncated", "bool", false),
+    optional("rollback_status", nullable("str")),
+    optional("summary", nullable({ model: SESSION_ROLLBACK_SUMMARY })),
+    optional("totals", nullable("dict")),
+    optional("help", nullable("str")),
   ],
 };

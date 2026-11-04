@@ -2155,3 +2155,541 @@ export interface GuardrailDigest {
   tool_triggered_version: string | null;
   content_type: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Session tools (memory-cloud v0.93.0+, SDK issue #86)
+// ---------------------------------------------------------------------------
+
+/** Valid `bootstrap` `include` values (request side only; the server's `COMPONENTS`). */
+export type BootstrapComponentName = "pinned" | "upcoming" | "changes";
+
+/** Valid `bootstrap` `format` values (memory-cloud v0.115.0+, #2126; request side only). */
+export type BootstrapFormat = "full" | "index";
+
+/**
+ * Valid `listMatching` `orderBy` values (request side only). `observed_at`
+ * needs memory-cloud v0.127.0+ (#2330) and puts memories without one last.
+ */
+export type ListOrderBy = "updated_at" | "created_at" | "importance" | "observed_at";
+
+/**
+ * The `context_*` fields a context-scoped MCP reply echoes: the context the
+ * call ran in, useful when it came from the MCP URL's `?context=` default.
+ * Absent when the server did not send them.
+ */
+export interface ContextEcho {
+  context_id?: string | null;
+  context_name?: string | null;
+  context_display_name?: string | null;
+  context_is_private?: boolean | null;
+  context_is_locked?: boolean | null;
+}
+
+/**
+ * One row of the change log — `changesSince` and `bootstrap`'s `changes`
+ * lane.
+ *
+ * `kind` is `created`, `updated`, `superseded` or `forgotten` (`restored`
+ * too in the revision lane: `changesSince({ sessionId })` or
+ * `byMe: true`), typed `string` so a newer kind passes. `summary` is
+ * absent on every event of a memory that is forgotten now (memory-cloud
+ * v0.96.0+, #1876). `superseded_by` is the newer memory, on `superseded`
+ * events only. In a `bootstrap({ format: "index" })` reply `summary` is
+ * cut to 80 characters and `summary_cut` says text was dropped.
+ */
+export interface ChangeEvent {
+  memory_id: string;
+  kind: string;
+  /** ISO 8601, UTC. */
+  at: string;
+  summary?: string | null;
+  /** @default false */
+  summary_cut?: boolean;
+  superseded_by?: string | null;
+}
+
+/**
+ * What every `bootstrap` lane carries: fail-soft `status` and `truncated`.
+ *
+ * `status` is `"ok"`, or `"error"` when the lane failed (`error` is then
+ * `"component_failed"`, its rows are absent, and the reply's `degraded` is
+ * `true`). `truncated` is `true` when the reply's `maxChars` budget cut the
+ * lane's rows (never a silent cut). Keys a newer server adds pass through.
+ */
+export interface BootstrapLane {
+  status: string;
+  error?: string | null;
+  /** @default false */
+  truncated?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * `components.pinned`: the trusted pinned set (`loadPinned`, cap 20).
+ *
+ * The full format's rows have `memory_id`, `summary`, `context_summary`,
+ * `type`, `importance` and `delivery_mode`; the index format keeps the full
+ * `summary` and drops `context_summary` / `delivery_mode`. `truncated` is
+ * also `true` when the set held more than `cap`.
+ */
+export interface BootstrapPinnedLane extends BootstrapLane {
+  /** @default [] */
+  memories?: Record<string, unknown>[];
+  total_available?: number | null;
+  cap?: number | null;
+}
+
+/**
+ * `components.upcoming`: trusted Time Memories whose window is ahead (k =
+ * 20). Rows are `recallUpcoming`'s (`trigger` in place of `details`); an
+ * index-format row is `{memory_id, summary, summary_cut?, from?, until?}`,
+ * the trigger's window. `from` is the lower bound the server used, a naive
+ * UTC ISO string (the Python SDK's `from_`).
+ */
+export interface BootstrapUpcomingLane extends BootstrapLane {
+  /** @default [] */
+  results?: Record<string, unknown>[];
+  from?: string | null;
+}
+
+/**
+ * `components.changes`: the change log since `since` (trusted, at most
+ * 50). Page on with `KaguraClient.changesSince` and `next_cursor`
+ * while `has_more`; a budget-cut lane points `next_cursor` at the last
+ * change it kept, so paging on skips nothing.
+ */
+export interface BootstrapChangesLane extends BootstrapLane {
+  /** @default [] */
+  changes?: ChangeEvent[];
+  /** @default false */
+  has_more?: boolean;
+  next_cursor?: string | null;
+}
+
+/** `bootstrap`'s lanes; one left out of `include` is absent. A lane a newer server adds passes through. */
+export interface BootstrapComponents {
+  pinned?: BootstrapPinnedLane | null;
+  upcoming?: BootstrapUpcomingLane | null;
+  changes?: BootstrapChangesLane | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Reply of the `bootstrap` MCP tool (memory-cloud v0.93.0+, #1851), from
+ * `KaguraClient.bootstrap`.
+ *
+ * An interactive session's start on one context in one deterministic call
+ * (no recall): the `context` block, `guardrails`, and the `pinned` /
+ * `upcoming` / `changes` lanes under `components`. Lanes are fail-soft: a
+ * failed one is `status: "error"` while the rest return, and `degraded` is
+ * `true`. Not `KaguraClient.getAgentBootstrap`, which rehydrates a
+ * registered agent.
+ *
+ * `format` is `"index"` for pointer rows (memory-cloud v0.115.0+, #2126:
+ * pinned keeps its text; guardrail, upcoming and change rows carry an
+ * 80-character `summary` head with `summary_cut`; no `instructions`), and
+ * absent for the full shape (the server sends the key in index mode only).
+ *
+ * `guardrails` has three states, as on {@link ContextInfo}: absent when
+ * the MCP URL carries `?guardrails=off`, `null` when the server's read
+ * failed or the block is one this SDK cannot read (the Python SDK reads
+ * that as `None` too), else a {@link ContextGuardrails}. In index mode a
+ * budget cut can empty its `items` (`truncated`).
+ *
+ * `context_summary_omitted` is `true` when a full-format reply passed its
+ * `maxChars` budget and the server left `context_summary` out of the
+ * pinned rows first. `components` is required, so a reply without it
+ * throws `KaguraResponseError` instead of reading as a session with
+ * nothing in it.
+ */
+export interface BootstrapResponse extends ContextEcho {
+  /** @default "success" */
+  status?: string;
+  format?: string | null;
+  /** @default false */
+  degraded?: boolean;
+  context?: ContextDetail | null;
+  instructions?: string | null;
+  guardrails?: ContextGuardrails | null;
+  components: BootstrapComponents;
+  /** Start of the `changes` window the server used, ISO 8601. */
+  since?: string | null;
+  generated_at?: string | null;
+  /** @default false */
+  context_summary_omitted?: boolean;
+  /**
+   * Every plan dimension at 80 % or more of its limit (memory-cloud
+   * v0.142.0+, #2615), as the server sent it; absent otherwise.
+   */
+  plan_headroom?: unknown[];
+}
+
+/**
+ * Reply of the `changes_since` MCP tool (memory-cloud v0.93.0+, #1852),
+ * from `KaguraClient.changesSince`.
+ *
+ * A context's memory change log in `[since, until)`, oldest first, keyset
+ * paged: call again with `cursor: next_cursor` while `has_more`. `changes`
+ * and `has_more` are required, so a reply without them throws instead of
+ * reading as a complete log. `session_id` / `by_me` echo the revision-lane
+ * filters; `truncated` is `true` when the `maxChars` budget cut the page
+ * (`next_cursor` then continues from the last change kept).
+ */
+export interface ChangesSinceResponse extends ContextEcho {
+  /** @default "success" */
+  status?: string;
+  changes: ChangeEvent[];
+  count?: number | null;
+  has_more: boolean;
+  next_cursor?: string | null;
+  since?: string | null;
+  until?: string | null;
+  session_id?: string | null;
+  /** @default false */
+  by_me?: boolean;
+  /** @default false */
+  truncated?: boolean;
+}
+
+/**
+ * One row of {@link ListMatchingResponse}: `memory_id`, `summary`, `type`,
+ * `importance`, `scope`, `tags`, `delivery_mode`, `source_type`,
+ * `created_at`, `updated_at`, `version` (v0.113.0+), `observed_at` when set
+ * (v0.127.0+) and `details` with `includeDetails`. Not checked beyond
+ * being an object, as the Python SDK keeps these rows as dicts.
+ */
+export interface ListedMemory {
+  memory_id: string;
+  summary?: string;
+  type?: string;
+  importance?: number;
+  scope?: string;
+  tags?: string[];
+  delivery_mode?: string;
+  source_type?: string | null;
+  created_at?: string;
+  updated_at?: string | null;
+  version?: number;
+  observed_at?: string;
+  details?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Reply of the `list` MCP tool (memory-cloud v0.93.0+, #1852), from
+ * `KaguraClient.listMatching`.
+ *
+ * Every live memory of the context that matches the exact filters, in a
+ * stable order, offset-paged (`next_cursor`). `total` counts every match
+ * across pages. `truncated` / `details_omitted` report a `maxChars` cut
+ * (`details` goes first).
+ */
+export interface ListMatchingResponse extends ContextEcho {
+  /** @default "success" */
+  status?: string;
+  memories: ListedMemory[];
+  count?: number | null;
+  total: number;
+  has_more: boolean;
+  next_cursor?: string | null;
+  order_by?: string | null;
+  direction?: string | null;
+  /** @default false */
+  truncated?: boolean;
+  /** @default false */
+  details_omitted?: boolean;
+}
+
+/**
+ * One `remember_batch` result row, in item order (`index`).
+ *
+ * `status` is `success` (`memory_id`, `scope`, `persistence?`, `lint?`,
+ * `summary_truncated?`), `duplicate_candidate` (nothing written;
+ * `candidate` is the near-duplicate — a `dedupe: "check"` refusal),
+ * `skipped` (the rest of a rolled-back atomic batch) or `error` (`error` /
+ * `message`: e.g. `invalid_argument`, `missing_fields`, `validation_error`,
+ * `quota_exceeded`, `payload_too_large` with `limit` / `actual`,
+ * `forbidden`, `dedupe_unavailable`). All plain `string`; keys a newer
+ * server adds pass through.
+ */
+export interface RememberBatchItemResult {
+  index: number;
+  status: string;
+  memory_id?: string | null;
+  scope?: string | null;
+  error?: string | null;
+  message?: string | null;
+  candidate?: Record<string, unknown> | null;
+  persistence?: Record<string, unknown> | null;
+  lint?: Record<string, unknown>[] | null;
+  /** @default false */
+  summary_truncated?: boolean;
+  summary_original_length?: number | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Reply of the `remember_batch` MCP tool (memory-cloud v0.93.0+, #1853),
+ * from `KaguraClient.rememberBatch`.
+ *
+ * `status` is `success` (every item written), `partial` (some written) or
+ * `duplicate_candidate` (nothing written and every refusal a candidate).
+ * `failed` excludes `skipped` and `candidates` (v0.96.0+, #1873; an older
+ * server counts the rolled-back rest as failed and sends no `skipped`).
+ * `committed_after_timeout` is `true` when an atomic batch passed its time
+ * limit *after* the commit: every item is stored (each row has its
+ * `memory_id`) — do not send it again; `message` says the declared links of
+ * some items may be missing. `session_id` is the session the writes are
+ * recorded under (v0.113.0+, for `KaguraClient.changesSince` /
+ * `KaguraClient.rollbackSession`).
+ */
+export interface RememberBatchResult extends ContextEcho {
+  /** @default "success" */
+  status?: string;
+  results: RememberBatchItemResult[];
+  count: number;
+  succeeded: number;
+  /** @default 0 */
+  candidates?: number;
+  failed: number;
+  /** @default 0 */
+  skipped?: number;
+  /** @default false */
+  committed_after_timeout?: boolean;
+  message?: string | null;
+  session_id?: string | null;
+  /**
+   * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
+   * #2615), once per call, throttled hourly per workspace and dimension; as
+   * the server sent it.
+   */
+  plan_headroom?: unknown[];
+}
+
+/**
+ * One `forget({ memoryIds })` row, in request order.
+ *
+ * `status` is `deleted`, `skipped` (not found, not the caller's to delete,
+ * or already gone — one word on purpose, so the row is no existence
+ * oracle) or `error` with `error` / `message`; an id the call's time budget
+ * did not reach is `error` with `error: "not_attempted"` (memory-cloud
+ * v0.118.0+, #2191): resend it. `correlation_id` comes with a server
+ * failure.
+ */
+export interface ForgetIdResult {
+  memory_id: string;
+  status: string;
+  error?: string | null;
+  message?: string | null;
+  correlation_id?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Reply of `forget({ memoryIds })` (memory-cloud v0.117.0+, #2127).
+ *
+ * Each id is forgotten exactly as `forget({ memoryId })` would forget it,
+ * committed on its own. `status` is `success` or `partial` (an id failed);
+ * `memory_ids` lists the deleted ids and `deleted_count` / `succeeded`
+ * count them, `failed` counts the `error` rows. Of the context echo,
+ * `forget` sends `context_id` and `context_name` only.
+ */
+export interface ForgetBatchResult extends ContextEcho {
+  /** @default "success" */
+  status?: string;
+  deleted_count: number;
+  /** @default [] */
+  memory_ids?: string[];
+  results: ForgetIdResult[];
+  count: number;
+  succeeded: number;
+  skipped: number;
+  failed: number;
+  session_id?: string | null;
+}
+
+/**
+ * Reply of the `describe_tools` MCP tool (memory-cloud v0.93.0+, #1849),
+ * from `KaguraClient.describeTools`.
+ *
+ * Without `names`: `tools` lists the tools this MCP URL's `tools/list` left
+ * out, one `{name, title, summary}` object each, and `listed` the names it
+ * shows. With `names`: `definitions` holds those tools' complete
+ * definitions (`inputSchema`, annotations) and `unknown` the names the
+ * server does not know. `url` says which URL query lists more
+ * (`?profile=full`, `?add_tools=a,b`, `?tools=a,b`); `url_error` is the
+ * message `tools/list` fails with when the URL's selection is broken. Keys
+ * a newer server adds pass through.
+ */
+export interface ToolDescriptions {
+  /** @default "success" */
+  status?: string;
+  /** @default [] */
+  tools?: Record<string, unknown>[];
+  count?: number | null;
+  /** @default [] */
+  listed?: string[];
+  /** @default [] */
+  definitions?: Record<string, unknown>[];
+  /** @default [] */
+  unknown?: string[];
+  /** @default {} */
+  url?: Record<string, unknown>;
+  url_error?: string | null;
+  hint?: string | null;
+  [key: string]: unknown;
+}
+
+/** One manual section from `guide`: its `topic` key and static `text`. */
+export interface GuideTopic {
+  topic: string;
+  text: string;
+}
+
+/**
+ * Reply of the `guide` MCP tool (memory-cloud v0.93.0+, #1850), from
+ * `KaguraClient.guide`.
+ *
+ * `topics` holds the sections asked for, in request order (a tool name
+ * expands to all of its sections); names the server does not know are in
+ * `unknown`, not thrown.
+ */
+export interface GuideResponse {
+  /** @default "success" */
+  status?: string;
+  topics: GuideTopic[];
+  /** @default [] */
+  unknown?: string[];
+  hint?: string | null;
+}
+
+/**
+ * One event of a memory's revision log (memory-cloud v0.113.0+, #2043).
+ *
+ * `kind` is `created`, `updated`, `forgotten` or `restored`; `version` is
+ * the version after the event. `changed_fields` lists what an `updated`
+ * event changed (empty otherwise, and when the caller may not read the
+ * versions around it). `writer` is `api`, `rollback` or `erasure`
+ * (v0.123.0+, #2244). `by_you` says the caller or a linked account wrote
+ * it; `agent_id` / `session_id` show on the caller's own events only. The
+ * value sets are plain `string`.
+ */
+export interface MemoryRevision {
+  version: number;
+  kind: string;
+  at: string;
+  /** @default [] */
+  changed_fields?: string[];
+  writer: string;
+  by_you: boolean;
+  agent_id?: string | null;
+  session_id?: string | null;
+}
+
+/**
+ * Reply of the `list_revisions` MCP tool (memory-cloud v0.113.0+, #2043),
+ * from `KaguraClient.listRevisions`.
+ *
+ * One page of a memory's revision log, newest first; page on with
+ * `cursor: next_cursor` while `has_more`. `truncated` reports a `maxChars`
+ * cut. Sleep maintenance and connector re-indexes write no events.
+ */
+export interface RevisionsPage extends ContextEcho {
+  /** @default "success" */
+  status?: string;
+  memory_id: string;
+  current_version: number;
+  revisions: MemoryRevision[];
+  count?: number | null;
+  has_more: boolean;
+  next_cursor?: string | null;
+  /** @default false */
+  truncated?: boolean;
+}
+
+/**
+ * One planned memory of `rollback_session`.
+ *
+ * `kind` is what the session did (`created` / `updated` / `forgotten`);
+ * `action` is `forget`, `restore`, `unforget` or `skip` with a `cause`
+ * (`modified_since`, `merged_by_sleep`, `deleted_by_other`,
+ * `resource_row`, `not_permitted` (v0.134.0+, #2432), `prior_erased`,
+ * `already_forgotten`, …). `fields` are the fields a `restore` puts back.
+ * Plain `string` throughout; keys a newer server adds pass through.
+ */
+export interface SessionRollbackItem {
+  memory_id: string;
+  kind: string;
+  action: string;
+  cause?: string | null;
+  /** @default [] */
+  fields?: string[];
+  /** @default false */
+  unforget?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * What one `rollback_session` call reversed, skipped and failed.
+ *
+ * `skipped_items` are `{memory_id, kind, cause}` objects and `errors` one
+ * line per failed item (with its correlation id). Counters a newer server
+ * adds pass through.
+ */
+export interface SessionRollbackSummary {
+  /** @default 0 */
+  forgotten?: number;
+  /** @default 0 */
+  restored?: number;
+  /** @default 0 */
+  updated_restored?: number;
+  /** @default 0 */
+  skipped?: number;
+  /** @default 0 */
+  failed?: number;
+  /** @default 0 */
+  chunks_requeued?: number;
+  /** @default 0 */
+  points_requeued?: number;
+  /** @default [] */
+  skipped_items?: Record<string, unknown>[];
+  /** @default [] */
+  errors?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * Reply of the `rollback_session` MCP tool (memory-cloud v0.113.0+,
+ * #2044), from `KaguraClient.rollbackSession`.
+ *
+ * `status` is `dry_run` (`plan` counts per action and `items` lists up to
+ * 100 planned memories, `items_truncated` past that), or after a real run
+ * `rolled_back` / `in_progress` (`remaining` events left: call again with
+ * the same arguments), with `summary` for this call and `totals` for every
+ * call of the rollback so far. The mode echo is `session_id`, or the
+ * effective `since` / `until` of a window (v0.114.0+, #2121); `until_from:
+ * "unfinished_rollback"` says the `until` is an earlier call's. Plain
+ * `string` statuses.
+ */
+export interface SessionRollbackResult extends ContextEcho {
+  status: string;
+  dry_run: boolean;
+  session_id?: string | null;
+  since?: string | null;
+  until?: string | null;
+  until_from?: string | null;
+  /** @default 0 */
+  events?: number;
+  /** @default 0 */
+  remaining?: number;
+  rollback_id?: number | null;
+  plan?: Record<string, number> | null;
+  /** @default [] */
+  items?: SessionRollbackItem[];
+  /** @default false */
+  items_truncated?: boolean;
+  rollback_status?: string | null;
+  summary?: SessionRollbackSummary | null;
+  totals?: Record<string, unknown> | null;
+  help?: string | null;
+}
