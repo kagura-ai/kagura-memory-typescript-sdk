@@ -90,13 +90,22 @@ export type Coerced<T> = { ok: true; value: T } | CoerceFailure;
  * Why a value could not be coerced: pydantic's message, at the field's
  * location. A union every member refused carries `members` instead,
  * each member's name and message, which pydantic lists under the field's
- * location plus the name (`id.int: …; id.str: …`); `msg` is then the
- * first member's. {@link ResponseReader.refuse} records either.
+ * location plus the name (`id.int: …; id.str: …`); build one with
+ * {@link unionFailure}, the one place that sets `msg` to the first
+ * member's. {@link ResponseReader.refuse} records either.
  */
 export interface CoerceFailure {
   ok: false;
   msg: string;
-  members?: readonly (readonly [member: string, msg: string])[];
+  members?: readonly UnionMemberFailure[];
+}
+
+/** One union member's refusal: the member's name (`int`) and its message. */
+type UnionMemberFailure = readonly [member: string, msg: string];
+
+/** A union every member refused, its members in the union's order. */
+function unionFailure(first: UnionMemberFailure, ...rest: UnionMemberFailure[]): CoerceFailure {
+  return { ok: false, msg: first[1], members: [first, ...rest] };
 }
 
 /** One field type's lax-mode conversion. */
@@ -289,14 +298,7 @@ export function intOrStr<I>(int: Coercer<I>): Coercer<I | string> {
     if (typeof value === "string") return laxStr(value);
     const asInt = int(value);
     if (asInt.ok) return asInt;
-    return {
-      ok: false,
-      msg: asInt.msg,
-      members: [
-        ["int", asInt.msg],
-        ["str", "Input should be a valid string"],
-      ],
-    };
+    return unionFailure(["int", asInt.msg], ["str", "Input should be a valid string"]);
   };
 }
 
