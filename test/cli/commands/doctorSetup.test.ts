@@ -1380,7 +1380,7 @@ describe("doctor's tools check (#83)", () => {
   });
 
   // Recorded from Python 0.44.0's _check_tool_listing on a client whose
-  // tools/list returns the same result (python-sdk#319's ToolListResponse).
+  // tools/list returns the same result (python-sdk#311's ToolListResponse).
   it.each<[string, Record<string, unknown>, string]>([
     ["tools a string", { tools: "oops" }, "tools: Input should be a valid list"],
     ["an item not an object", { tools: [1] }, "tools.0: Input should be a valid dictionary"],
