@@ -32,16 +32,21 @@ import {
   KaguraQuotaError,
 } from "./errors.js";
 import {
+  annotateServerError,
   baseUrlFromMcp,
   extractDetail,
   gateError,
+  insufficientScopeFrom,
   parseErrorEnvelope,
   responseRetryAfter,
   REST_GATE_CODES,
   sanitizeServerDetail,
   SDK_VERSION,
+  serverErrorFields,
+  serviceUnavailableFrom,
   validateHttpsUrl,
 } from "./http.js";
+import type { ServerErrorFields } from "./http.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
 
@@ -271,15 +276,27 @@ function jsonTypeName(value: unknown): string {
  * default hooks implement the majority behavior:
  *
  * - 401 → {@link KaguraAuthError} with an OAuth-aware recovery hint
- * - 403 → {@link KaguraFeatureNotAvailableError} / {@link KaguraQuotaError} for a plan
- *   or quota refusal (see {@link gateRefusal}), else the generic
+ * - 403 `insufficient_scope` (an OAuth token without the scope the method
+ *   needs, memory-cloud v0.79.0+) → {@link KaguraAuthError} naming the
+ *   scope, before any client's 403 hook
+ * - 403 → {@link KaguraCapacityLockedError} for the Free capacity lock
+ *   (`CAPACITY-001`, `details.gate === "capacity"`, v0.99.0+),
+ *   {@link KaguraFeatureNotAvailableError} / {@link KaguraQuotaError} for a
+ *   plan or quota refusal (see {@link gateRefusal}), else the generic
  *   `HTTP 403: <detail>` mapping
  * - 404 → {@link KaguraNotFoundError} (server detail or "Not found")
  * - 429 → {@link KaguraQuotaError} with a tolerant `Retry-After` (else the
  *   body's `details.retry_after`), carrying the refusal's gate payload
  *   when the body has one
+ * - 503 (`DB-002`, the database unavailable) →
+ *   {@link KaguraServiceUnavailableError} with `retryAfter` from
+ *   `Retry-After` and `reason` from `details.reason`
  * - other statuses → {@link KaguraConnectionError}
  * - transport errors → {@link KaguraConnectionError}
+ * - whatever the class, an error built from a response keeps the body's
+ *   error code as `code` and its `details` (the REST envelope's `details`,
+ *   or an OAuth-style body's fields) as `details` — set by {@link request},
+ *   so every hook's error gets them too
  */
 export class KaguraRestClient {
   readonly baseUrl: string;
@@ -487,10 +504,20 @@ export class KaguraRestClient {
       path: requestPath(url, path),
     };
     if (response.status < 200 || response.status >= 300) {
-      throw this.mapStatusError(envelope, {
-        requestJson: opts.json,
-        requestParams: opts.params,
-      });
+      // The body's code and fields, read once for the scope and 503 errors
+      // and for the annotation below (the per-status hooks read the body
+      // themselves).
+      const fields = serverErrorFields(envelope.text);
+      const err = this.mapStatusError(
+        envelope,
+        {
+          requestJson: opts.json,
+          requestParams: opts.params,
+        },
+        fields,
+      );
+      // One place for every hook: a typed error keeps what it already set.
+      throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
     }
     return envelope;
   }
@@ -510,19 +537,27 @@ export class KaguraRestClient {
    * owns the single throw site — one uniform chain and a compiler-checked
    * `KaguraError` contract on every hook.
    */
-  protected mapStatusError(response: RestResponse, context: RequestContext): KaguraError {
+  protected mapStatusError(
+    response: RestResponse,
+    context: RequestContext,
+    fields: ServerErrorFields | null = serverErrorFields(response.text),
+  ): KaguraError {
     const status = response.status;
     if (status === 401) {
       return this.error401(response);
     }
     if (status === 403) {
-      return this.error403(response, context);
+      return insufficientScopeFrom(response.headers, fields) ?? this.error403(response, context);
     }
     if (status === 404) {
       return new KaguraNotFoundError(extractDetail(response.text) || "Not found");
     }
     if (status === 429) {
       return this.error429(response);
+    }
+    if (status === 503) {
+      const detail = extractDetail(response.text);
+      return serviceUnavailableFrom(response.headers, detail ? `HTTP 503: ${detail}` : "HTTP 503", fields);
     }
     return this.genericError(response);
   }
@@ -573,11 +608,14 @@ export class KaguraRestClient {
   }
 
   /**
-   * A plan or quota refusal → its typed error; `null` for any other body.
+   * A plan, quota or capacity refusal → its typed error; `null` for any
+   * other body.
    *
    * memory-cloud v0.75.0 annotates every such refusal with `details.gate`,
    * and the class follows the gate rather than the status: the
-   * resource-token cap is a quota that answers 403. An older server sends
+   * resource-token cap is a quota that answers 403, and the Free capacity
+   * lock (`403 CAPACITY-001`, `gate: "capacity"`, v0.99.0+) is
+   * {@link KaguraCapacityLockedError}. An older server sends
    * no gate, so the `FEAT-001` / `QUOTA-001` / `QUOTA-002` /
    * `CONNECTOR-001` code decides. A body that is neither (a role denial, a
    * pre-v0.75 `HTTP-403` plan message) gets `null`, and the hook maps it

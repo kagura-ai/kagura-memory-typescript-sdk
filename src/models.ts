@@ -128,6 +128,45 @@ export interface UsageQuotaLimitOnly {
   limit: number;
 }
 
+/**
+ * How far a Free workspace is over its capacity (memory-cloud v0.99.0+,
+ * #1941) — the Python SDK's `CapacityLock`.
+ *
+ * While the workspace is locked, search and saving throw
+ * `KaguraCapacityLockedError`; listing, deleting, export and usage keep
+ * working. `over_*` is 0 on an axis that is within its limit. Every field
+ * is optional so a reply that leaves one out still reads.
+ */
+export interface CapacityLock {
+  /** Live memories in the workspace. */
+  memory_count?: number | null;
+  /** The effective memory limit. */
+  memory_limit?: number | null;
+  /** Memories to remove to unlock. */
+  over_memories?: number | null;
+  /** File bytes the owner can still delete. */
+  used_bytes?: number | null;
+  /** The effective storage limit in bytes. */
+  storage_limit_bytes?: number | null;
+  /** File bytes to remove to unlock. */
+  over_bytes?: number | null;
+  /** The web page to clean up or re-subscribe. */
+  cleanup_url?: string | null;
+  /**
+   * The server's next step: how much to remove and what still works (MCP
+   * `get_usage`).
+   */
+  help?: string | null;
+  /**
+   * When the workspace's data is deleted if it is still over capacity, an
+   * ISO-8601 UTC timestamp (REST `GET /api/v1/workspace/usage/current`
+   * only, memory-cloud v0.102.0+). `null` until the daily sweep has seen
+   * it and while the deployment cannot purge; it may move later (v0.126.0,
+   * #1971).
+   */
+  purge_at?: string | null;
+}
+
 /** Workspace usage and quota information. */
 export interface UsageInfo {
   plan: string;
@@ -136,6 +175,11 @@ export interface UsageInfo {
   members: UsageQuota;
   /** `used` counts today's MCP calls. */
   mcp_calls_per_day: UsageQuota;
+  /**
+   * `null` unless the workspace is over its Free capacity (memory-cloud
+   * v0.99.0+); absent on older servers.
+   */
+  capacity_lock?: CapacityLock | null;
 }
 
 /**

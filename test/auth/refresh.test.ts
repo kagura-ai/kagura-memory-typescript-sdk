@@ -178,6 +178,44 @@ describe("refresh (#16)", () => {
     },
   );
 
+  it("falls back to the device flow when another code's description names the scope refusal (#84)", async () => {
+    // The refresh error now keeps `invalid_request` as its code; the scope
+    // problem is only in error_description, which the message carries.
+    await seedProfile();
+
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [
+      { status: 400, body: { error: "invalid_request", error_description: "insufficient_scope: memory:write" } },
+      { status: 200, body: tokenBody({ access_token: "at-wide", refresh_token: "rt-wide" }) },
+    ];
+
+    const creds = await refresh({
+      credentialsPath,
+      scope: "memory:read memory:write profile:read",
+      fetch: server.fetch,
+      onUserCode: () => {},
+    });
+
+    expect(server.urls[1]).toBe("https://x.test/api/v1/oauth/device/authorize");
+    expect(creds.accessToken).toBe("at-wide");
+  });
+
+  it("does not fall back to the device flow for a coded refusal that names no scope", async () => {
+    await seedProfile();
+
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [{ status: 400, body: { error: "invalid_request", error_description: "bad body" } }];
+
+    const err = await refresh({
+      credentialsPath,
+      scope: "memory:read memory:write profile:read",
+      fetch: server.fetch,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraAuthError);
+    expect((err as KaguraAuthError).code).toBe("invalid_request");
+    expect(server.urls.some((u) => u.includes("/device/authorize"))).toBe(false);
+  });
+
   it("does not fall back to the device flow when no scope was requested", async () => {
     await seedProfile();
 

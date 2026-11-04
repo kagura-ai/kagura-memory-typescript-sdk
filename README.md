@@ -846,7 +846,15 @@ resolves it, as in Python: `KAGURA_API_KEY`, then the OAuth profile
 is the default), then `.kagura.json`. A selected profile that does not
 exist fails the auth section once, with the resolution's message, and
 with `KAGURA_API_KEY` set an expired or missing profile is no failure, as
-in Python, whose warning is that the key shadows the profile. A resolved
+in Python, whose warning is that the key shadows the profile. A static
+key that does not start with `kagura_` gets Python's auth warning
+(`Unusual API key shape: <first 8>...<last 4>. This value does not look
+like a Kagura API key (kagura_…); the server routes bearer tokens by
+shape, so an OAuth token passed as an API key is a 401.`): from
+memory-cloud v0.119.0 the server looks a `kagura_` bearer up only among
+API keys and any other one only among OAuth tokens, so an OAuth token
+configured as the API key is refused. It is a warning, so the exit code is
+unchanged, and only the redacted preview is printed. A resolved
 MCP URL that is not HTTPS is a warning and the server is not contacted
 (`Server connectivity check skipped because the MCP URL is insecure`),
 whichever source it came from:
@@ -1152,6 +1160,59 @@ try {
 }
 ```
 
+Every error the server reported keeps what it sent. `code` is its error
+code: the MCP envelope's `error` (`payload_too_large`, `capacity_locked`
+…), the REST body's `error` (`FEAT-001`, `CAPACITY-001`, `DB-002` …), the
+OAuth `error` (`invalid_client`, `insufficient_scope` …) or a JSON-RPC
+error's `data.error`; it is `undefined` when the SDK raised the error
+itself or the server named no code (an MCP envelope without `error`,
+whose message still reads `failed (unknown)`). `details` holds the other
+fields as sent (the MCP envelope without `status` / `error` / `message`,
+the REST `details` whole, the JSON-RPC `data` without its `error`, an
+OAuth body without its `error`), `{}` when there are none. A JSON-RPC
+error that `/mcp` answers with HTTP 200 (a `tools/call` whose plumbing
+failed) stays a `KaguraConnectionError` (`MCP error: …`), as in Python,
+and keeps its `data` the same way. **Branch on `code` and the class,
+never on the message**: memory-cloud words its messages for people and
+changes them.
+
+Since memory-cloud v0.78.0 an MCP tool refusal carries `help`, the next
+step, and a tool's server failure `help`, `cause`, `correlation_id`,
+`retryable` and, for a write, `outcome: "unknown"`; since v0.82.0 the
+`/mcp` transport's own JSON-RPC errors (a 503, a failed session) carry
+them too. `KaguraError` reads
+them from `details` as getters, `null` when absent:
+
+| Getter | Envelope field | Meaning |
+|--------|----------------|---------|
+| `help` | `help` | what to do next |
+| `serverCause` | `cause` | why a server failure happened: `timeout`, `service_unavailable` or `internal_error`; `null` on a refusal, which is the caller's to fix |
+| `correlationId` | `correlation_id` | the id the server logged the failure under — quote it in a report |
+| `retryable` | `retryable` | whether repeating the call is safe; `false` for a write whose outcome is unknown |
+| `outcome` | `outcome` | `"unknown"` when a failed write may or may not have been applied: check with the read `help` names before calling it again |
+
+`serverCause` is the Python SDK's `cause` property, renamed because
+JavaScript's `Error.cause` already holds the chained error (the `fetch`
+failure, a parse error); `details.cause` holds the server's value too.
+
+```ts
+import { KaguraCapacityLockedError, KaguraError, KaguraServiceUnavailableError } from "kagura-memory";
+
+try {
+  await client.remember({ contextId, summary: "s", content: "..." });
+} catch (e) {
+  if (e instanceof KaguraCapacityLockedError) {
+    console.log(`over by ${e.overMemories} memories; clean up at ${e.cleanupUrl}`);
+  } else if (e instanceof KaguraServiceUnavailableError) {
+    console.log(`retry in ${e.retryAfter ?? "a few"} s (${e.reason})`);
+  } else if (e instanceof KaguraError && e.code === "payload_too_large") {
+    console.log(`split it: ${e.details.actual} > ${e.details.limit}`);
+  } else if (e instanceof KaguraError && e.outcome === "unknown") {
+    console.log(`may have been saved; ${e.help} (correlation id ${e.correlationId})`);
+  }
+}
+```
+
 Server-side domain errors (`{"status": "error", ...}`) are translated into
 exceptions, so you never need to inspect `result.status`. The class is
 keyed on the error code and the envelope's fields, never on the message:
@@ -1159,12 +1220,51 @@ keyed on the error code and the envelope's fields, never on the message:
 | Class | Raised for | Carries |
 |-------|------------|---------|
 | `KaguraNotFoundError` | missing contexts/memories/reports/agents/bindings (on `updateSearchConfig`, a missing context is a `KaguraPermissionError` instead) | — |
-| `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
+| `KaguraFeatureNotAvailableError` | MCP `plan_required` / `feature_not_available`; REST 403 `FEAT-001` — the plan lacks a feature, or it is switched off. From memory-cloud v0.100.0 also a plan that dropped below what the workspace holds: `feature` `"members"` on every workspace route for a member without a seat, `"contexts"` on a content write into a context without a writable slot (`limit` / `current` in `details`) | `feature`, `requiredPlan`, `requiredPlanDisplay`, `currentPlan`, `gate` |
 | `KaguraQuotaError` | MCP `quota_exceeded` / `CONNECTOR-001`, and `rate_limit_exceeded`, the daily MCP call cap every non-read-only tool checks (`quotaType` `api_mcp_daily`, `resetsAt` the next UTC midnight); REST `QUOTA-001`, `QUOTA-002` and `CONNECTOR-001` (the resource-token and connector seat caps answer **403**); any other 429 from a REST client but `SecretClient` | `quotaType`, `current`, `limit`, `usedToday`, `resetsAt`, `retryAfter`, and the plan fields above |
+| `KaguraCapacityLockedError` | memory-cloud v0.99.0+: a Free workspace over its capacity — MCP `capacity_locked`, REST 403 `CAPACITY-001` (`details.gate` `"capacity"`). Search and saving are refused until it is cleaned up or re-subscribed; listing, deleting, export and `getUsage` keep working. Neither a quota nor a plan gate, so it extends neither class. A caller outside the locked workspace (a public context) gets every figure `null` | `cleanupUrl`, `memoryCount`, `memoryLimit`, `overMemories`, `usedBytes`, `storageLimitBytes`, `overBytes`, `gate` (`"capacity"`) |
+| `KaguraAuthError` | HTTP 401; and from memory-cloud v0.79.0 an OAuth token that lacks the scope a call needs (HTTP 403 `insufficient_scope`): `memory:read` for the read-only tools, `recall` and `getAgentBootstrap`, `memory:write` for every other tool, so a `kagura-memory auth login --read-only` profile gets it on every write. The message names the scope and the re-login | `code` `"insufficient_scope"`, `details.required_scope` |
+| `KaguraServiceUnavailableError` | any HTTP 503 from `/mcp` or a REST route (the OAuth endpoints keep their own errors): `/mcp`'s `temporarily_unavailable` (the credential could not be verified, v0.82.0+) and its JSON-RPC transport failures (a dependency down or timed out), REST `DB-002` (the database unavailable). A `KaguraConnectionError`, so existing handlers keep catching it | `retryAfter` (the `Retry-After` header, else `data.retry_after_seconds`; `null` on a write whose outcome is unknown), `reason` (REST `details.reason`, else the MCP `cause`, else the code) |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. That includes `getServerInfo`, `checkServerVersion` (as `KaguraClient.get_server_info`), `getEmbeddingStatus`, `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`, which check the body against the Python model and return it as sent. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
-| `KaguraError` | any other code | — |
+| `KaguraError` | any other code — `payload_too_large` among them, a memory over 1 MB on MCP (memory-cloud v0.108.0+; it replaced `quota_exceeded` there, and REST keeps `429 QUOTA-001`): no plan lifts it, so it is no quota | `code`, `details` (`limit` / `actual` for `payload_too_large`) |
+
+The codes the SDK types, by surface:
+
+| Code | Surface | Class | Server |
+|------|---------|-------|--------|
+| `capacity_locked` | MCP | `KaguraCapacityLockedError` | v0.99.0+ |
+| `CAPACITY-001` (`details.gate` `"capacity"`) | REST 403 | `KaguraCapacityLockedError` | v0.99.0+ |
+| `plan_required`, `feature_not_available` | MCP | `KaguraFeatureNotAvailableError` | |
+| `FEAT-001` (`details.feature`; `members` / `contexts` from v0.100.0) | REST 403 | `KaguraFeatureNotAvailableError` | |
+| `quota_exceeded`, `CONNECTOR-001`, `rate_limit_exceeded` | MCP | `KaguraQuotaError` | |
+| `QUOTA-001`, `QUOTA-002`, `CONNECTOR-001` | REST | `KaguraQuotaError` | |
+| `insufficient_scope` | MCP / REST 403 | `KaguraAuthError` | v0.79.0+ |
+| `temporarily_unavailable` | MCP 503 | `KaguraServiceUnavailableError` | v0.82.0+ |
+| `timeout`, `service_unavailable` (JSON-RPC `data.error`) | MCP 503 | `KaguraServiceUnavailableError` | v0.82.0+ |
+| `DB-002` (`details.reason`: `pool_exhausted`, `connection_refused`, `database_error`, `deadlock`) | REST 503 | `KaguraServiceUnavailableError` | v0.104.0+ (`deadlock` v0.105.0) |
+| `payload_too_large` (`limit`, `actual`) | MCP | `KaguraError` | v0.108.0+ |
+| `invalid_request`, `invalid_client`, `invalid_scope` (`device/authorize`) | OAuth | `KaguraAuthError`, `error_description` in the message and `details` | v0.78.0+ |
+
+A gate is read before the code, so a v0.75.0+ server's `gate` decides the
+class whatever the code. `kagura-memory` commands print, under the error
+message, the reset time, the required plan, the capacity lock's cleanup
+page (unless `help` already names it), a 503's retry window and the
+server's `help` and correlation id, as the Python CLI does.
+
+`authorizeDevice` turns an RFC 6749 refusal from `device/authorize`
+(memory-cloud v0.78.0+) into a `KaguraAuthError` whose `code` is the OAuth
+`error` and whose message carries the `error_description`. Only an RFC
+6749 code or a body with an `error_description` reads so: any other error
+body — memory-cloud's REST `HTTP-404` from a server URL with the wrong
+path — keeps the generic `Device authorization failed (HTTP 404): …`
+message and its "Verify the server URL" hint, with the body's code as
+`code` (Python 0.44.0 drops that hint). `pollForToken` keeps the OAuth
+`error` of a refusal it does not know as `code` too. `pollForToken` treats `temporarily_unavailable` (v0.84.0+) as transient:
+it keeps polling until the device code expires, after the `Retry-After`
+wait when the server sent one (never less than the interval, never past
+the expiry), else the interval.
 
 `ResourceClient`'s readers check each 2xx body against the Python SDK's
 model, as Python's `_parse` does, and throw `KaguraResponseError` for one
@@ -1328,7 +1428,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 |--------|--------------|
 | `getServerInfo` | Version, deployment feature flags, and (v0.69.0+) the reranker defaults new contexts start with, under `search_defaults` (from v0.112.0 also `content_chunks_enabled`, a new context's chunk setting). `content_chunks_require_plan` (v0.113.0+) and `llm_selector_require_plan` (v0.115.0+) say the deployment gates those features by plan. |
 | `checkServerVersion` | Compare against `MIN_SERVER_VERSION` (0.75.0). Advisory: logs, and never throws on an old version; a body that is not a `ServerInfo` throws `KaguraResponseError`, as in `getServerInfo`. Reads the version as the Python SDK does: `v0.75.0`, `0.75.0+build` and `0.75.0.post1` meet it, a pre-release of it (`0.75.0-rc1`, `0.75.0rc1`, `0.75.0.dev1`) does not, and a version it cannot read (`0.75`, `main-abc123`) is not compared. |
-| `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. |
+| `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
 | `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
