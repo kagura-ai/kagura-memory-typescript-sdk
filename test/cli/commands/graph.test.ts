@@ -173,12 +173,16 @@ describe("kagura-memory sleep", () => {
   });
 
   it("says in --help that CONTEXT_ID is not sent", async () => {
+    // `kagura sleep report --help` of the Python CLI 0.44.0 in a terminal
+    // (click wraps at 78 columns); its paragraph goes on with a sentence
+    // about --actions-cursor, which comes with that flag (#85).
     const h = harness();
     expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
     expect(h.out.join("\n")).toContain(
-      "  CONTEXT_ID is kept for backwards compatibility and not sent: the server finds\n" +
-        "  the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the run's\n" +
-        "  own context).",
+      "\n\n" +
+        "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+        "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
+        "  run's own context).\n\n",
     );
   });
 });
@@ -214,11 +218,14 @@ describe("kagura-memory sleep rollback", () => {
 
   it("says in --help that CONTEXT_ID is not sent", async () => {
     const h = harness();
+    // Byte for byte the paragraph of the Python CLI 0.44.0's
+    // `kagura sleep rollback --help` in a terminal (click wraps at 78 columns).
     expect(await runCli(["sleep", "rollback", "--help"], h.deps)).toBe(0);
     expect(h.out.join("\n")).toContain(
-      "  CONTEXT_ID is kept for backwards compatibility and not sent: the server finds\n" +
-        "  the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner role on\n" +
-        "  the run's own context).",
+      "\n\n" +
+        "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+        "  finds the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner\n" +
+        "  role on the run's own context).\n\n",
     );
   });
 
@@ -242,6 +249,14 @@ describe("kagura-memory sleep rollback", () => {
  * model's keys in its order: this bin prints the reply as the server sent
  * it, where Python prints the model (`model_dump`), so only such a reply
  * prints the same in both.
+ *
+ * The Python CLI 0.44.0, given the same replies, prints the two
+ * `report_not_found` cases identically and the others differently, for
+ * gaps this fix leaves alone: its dumps add the model fields of 0.43.0
+ * (`source`, `details_omitted`, `details_total_chars`, `actions_has_more`,
+ * `actions_next_cursor`, `note`; `chunks_requeued`, `points_requeued`;
+ * #85), and its stderr adds a `  Help: <help>` line for an envelope that
+ * carries `help` (python-sdk#299).
  */
 interface SleepCase {
   name: string;
