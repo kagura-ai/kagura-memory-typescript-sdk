@@ -1226,13 +1226,15 @@ function isObservedAtText(text: string): boolean {
   // refuses 24:00:00), no leap second, an offset under 24 hours.
   if (!isCalendarDay(year, month, day) || hour > 23 || minute > 59 || second > 59) return false;
   if (at[8] === undefined) return true;
-  const offsetHours = Number(at[9]);
-  const offsetMinutes = Number(at[10]);
-  if (offsetHours > 23 || offsetMinutes > 59) return false;
+  // fromisoformat does not range-check the offset's minutes: `+00:60` is
+  // one hour and `+05:99` 6:39 (CPython 3.11, the server's, and 3.14).
+  // Only the whole offset must stay under 24 hours.
+  const offset = Number(at[9]) * 60 + Number(at[10]);
+  if (offset >= 24 * 60) return false;
   // The conversion to UTC must stay inside years 1-9999 (an OverflowError
   // on the server).
   const sign = at[8] === "-" ? -1 : 1;
-  const utc = dayNumber(year, month, day) * 1440 + hour * 60 + minute - sign * (offsetHours * 60 + offsetMinutes);
+  const utc = dayNumber(year, month, day) * 1440 + hour * 60 + minute - sign * offset;
   return utc >= FIRST_MINUTE && utc <= LAST_MINUTE;
 }
 
@@ -1396,8 +1398,8 @@ export function checkUpdateMemoryOptions(
     if (options.dismissSupersedeCandidate || options.acceptSupersedeCandidate) {
       const flag = options.dismissSupersedeCandidate ? "dismissSupersedeCandidate" : "acceptSupersedeCandidate";
       throw new Error(
-        `${n(flag)} requires ${n("memoryId")}; an ${n("externalId")} upsert ` +
-          "replaces the memory and its suggestion",
+        `${n(flag)} requires ${n("memoryId")} (in-place mode); an ${n("externalId")} upsert ` +
+          "replaces the memory and its suggestion.",
       );
     }
     if (isSet(options.expectedVersion)) {

@@ -72,6 +72,12 @@ describe("observedAt is checked as memory-cloud v0.127.0 checks it", () => {
     "2024-03-07T10:00:00.123+01:00",
     "0001-01-01T00:00:00-01:00",
     "9999-12-31T23:00:00+01:00",
+    // fromisoformat does not range-check an offset's minutes, only the
+    // whole offset (under 24 hours): the server's CPython 3.11 reads these.
+    "2024-03-07T10:00:00+00:60",
+    "2024-03-07T10:00:00+05:99",
+    "2024-03-07T10:00:00-00:99",
+    "0001-01-01T01:00:00+00:60",
     " 2024-03-07 ",
     "2024-03-07\n",
     "　2024-03-07",
@@ -96,6 +102,9 @@ describe("observedAt is checked as memory-cloud v0.127.0 checks it", () => {
     "2024-03-07T10:00:00+0100",
     "0001-01-01T00:00:00+01:00",
     "9999-12-31T23:00:00-01:00",
+    "0001-01-01T00:30:00+00:31",
+    "9999-12-31T23:59:59-00:01",
+    "2024-03-07T10:00:00+22:120",
     "2024-03-07T10:00",
     "20240307",
     "2024-03-07 10:00:00",
@@ -337,7 +346,7 @@ describe("updateMemory refuses before any request what the server would refuse",
   const UPSERT = { externalId: "ext-1", summary: "A summary of ten", content: "c", type: "note" };
 
   it.each([
-    [{ ...UPSERT, acceptSupersedeCandidate: true }, "acceptSupersedeCandidate requires memoryId; an externalId upsert replaces the memory and its suggestion"],
+    [{ ...UPSERT, acceptSupersedeCandidate: true }, "acceptSupersedeCandidate requires memoryId (in-place mode); an externalId upsert replaces the memory and its suggestion."],
     [{ ...UPSERT, dismissSupersedeCandidate: true, acceptSupersedeCandidate: true }, "dismissSupersedeCandidate requires memoryId"],
     [{ ...UPSERT, expectedVersion: 2 }, "expectedVersion requires memoryId (in-place mode); an externalId upsert replaces the memory under a new id."],
     [{ ...UPSERT, addTags: ["a"] }, "addTags require memoryId (in-place mode); use tags / details with externalId."],
@@ -404,6 +413,12 @@ describe("updateMemory refuses before any request what the server would refuse",
     );
     expect(() => checkUpdateMemoryOptions({ contextId: CTX, memoryId: MEM, addTags: Array(51).fill("t") }, "wire")).toThrow(
       "add_tags accepts at most 50 tags, got 51",
+    );
+    // The Python SDK 0.44.0's words, whole.
+    expect(() =>
+      checkUpdateMemoryOptions({ contextId: CTX, externalId: "ext-1", acceptSupersedeCandidate: true }, "wire"),
+    ).toThrow(
+      /^accept_supersede_candidate requires memory_id \(in-place mode\); an external_id upsert replaces the memory and its suggestion\.$/,
     );
   });
 });
@@ -625,6 +640,114 @@ describe("recall: observedAfter and observedBefore", () => {
     await expectLocalRefusal(
       (c) => c.recall({ contextId: CTX, query: "q", filters: { observed_before: null }, observedBefore: "2024-01-01" }),
       "observedBefore and filters.observed_before are the same filter",
+    );
+  });
+});
+
+// ============================================================================
+// Against a strict server: every name declared, nothing new sent unset
+// ============================================================================
+
+/**
+ * The inputSchema properties memory-cloud v0.143.0 declares for these tools
+ * (`backend/src/mcp_server/tools/_definitions.py`). A strict fake refuses
+ * anything else with `invalid_argument`, as v0.82.0+ servers do.
+ */
+const DECLARED_V0143: Record<string, readonly string[]> = {
+  remember: [
+    "content", "context", "context_id", "context_summary", "dedupe", "delivery_mode", "details", "importance",
+    "linked_memory_ids", "linked_source_uris", "observed_at", "source_type", "source_uri", "summary", "supersedes",
+    "tags", "tags_normalize", "type", "verbose",
+  ],
+  update_memory: [
+    "accept_supersede_candidate", "add_tags", "content", "context", "context_id", "context_summary", "delivery_mode",
+    "details", "details_patch", "dismiss_supersede_candidate", "expected_version", "external_id", "importance",
+    "memory_id", "observed_at", "remove_tags", "summary", "tags", "type", "verbose",
+  ],
+  reference: ["content_offset", "context_id", "context_offset", "details_offset", "fields", "max_chars", "memory_id", "version"],
+  update_search_config: [
+    "bm25_weight", "content_chunks_enabled", "context_id", "fetch_factor", "llm_selector_enabled", "reinforce_enabled",
+    "reinforce_max_boost", "reinforce_require_host_arbitration", "reranker_model", "reranker_provider", "routing_mode",
+    "semantic_weight", "use_rerank",
+  ],
+  recall: [
+    "context_id", "context_ids", "filters", "full", "include_explore_hints", "include_superseded", "k", "max_chars",
+    "query", "search_mode", "use_rerank", "verbosity",
+  ],
+};
+
+/** The arguments #87 adds, per tool: what a server before their release does not declare. */
+const ADDED_BY_87: Record<string, readonly string[]> = {
+  remember: ["observed_at", "dedupe", "tags_normalize", "verbose"],
+  update_memory: [
+    "observed_at", "add_tags", "remove_tags", "details_patch", "expected_version", "accept_supersede_candidate", "verbose",
+  ],
+  reference: ["version", "content_offset", "details_offset", "context_offset", "fields", "max_chars"],
+  update_search_config: ["content_chunks_enabled", "llm_selector_enabled"],
+  recall: [],
+};
+
+function strictServer(declared: Record<string, readonly string[]>): FakeServer {
+  const server = new FakeServer();
+  server.declaredArguments = declared;
+  server.toolResults.reference = { status: "success", memory: { memory_id: MEM } };
+  server.toolResults.update_search_config = { status: "success", config: {} };
+  server.toolResults.recall = { status: "success", results: [], count: 0 };
+  return server;
+}
+
+describe("against a strict server", () => {
+  it("a v0.143.0 fake accepts every new argument, so each wire name is one it declares", async () => {
+    const server = strictServer(DECLARED_V0143);
+    const client = makeClient(server);
+    await client.remember({
+      ...BASE,
+      observedAt: "2026-11-01",
+      dedupe: "check",
+      tagsNormalize: true,
+      verbose: true,
+      toolTrigger: { tool: "Bash" },
+    });
+    await client.updateMemory({
+      contextId: CTX,
+      memoryId: MEM,
+      observedAt: new Date(Date.UTC(2026, 10, 1)),
+      addTags: ["a"],
+      removeTags: ["b"],
+      detailsPatch: { status: "done" },
+      expectedVersion: 2,
+      verbose: true,
+      toolTrigger: { tool: "Bash" },
+    });
+    await client.updateMemory({ contextId: CTX, memoryId: MEM, acceptSupersedeCandidate: true, expectedVersion: 3 });
+    await client.reference({ contextId: CTX, memoryId: MEM, version: 1 });
+    await client.reference({ contextId: CTX, memoryId: MEM, detailsOffset: 0, fields: ["details"], maxChars: 40_000 });
+    await client.reference({ contextId: CTX, memoryId: MEM, contentOffset: 5 });
+    await client.reference({ contextId: CTX, memoryId: MEM, contextOffset: 0 });
+    await client.updateSearchConfig({ contextId: CTX, contentChunksEnabled: false, llmSelectorEnabled: true });
+    await client.recall({ contextId: CTX, query: "q", observedAfter: "2024-01-01", observedBefore: "2025-01-01" });
+    const sent = server.requests
+      .filter((r) => r.body?.method === "tools/call")
+      .flatMap((r) => Object.keys((r.body!.params as { arguments: Record<string, unknown> }).arguments));
+    // Every argument #87 adds went out at least once, and was accepted.
+    for (const name of Object.values(ADDED_BY_87).flat()) expect(sent).toContain(name);
+  });
+
+  it("a server that predates every #87 argument still takes each call that sets none of them", async () => {
+    const older = Object.fromEntries(
+      Object.entries(DECLARED_V0143).map(([tool, names]) => [tool, names.filter((n) => !ADDED_BY_87[tool]!.includes(n))]),
+    );
+    const server = strictServer(older);
+    const client = makeClient(server);
+    await client.remember({ ...BASE, tags: ["a"], details: { a: 1 } });
+    await client.updateMemory({ contextId: CTX, memoryId: MEM, summary: "A summary of ten", details: { a: 1 } });
+    await client.updateMemory({ contextId: CTX, memoryId: MEM, dismissSupersedeCandidate: true });
+    await client.reference({ contextId: CTX, memoryId: MEM });
+    await client.updateSearchConfig({ contextId: CTX, useRerank: true });
+    await client.recall({ contextId: CTX, query: "q", filters: { type: "note" } });
+    // And one that sets a new argument is refused there, naming it.
+    await expect(client.updateMemory({ contextId: CTX, memoryId: MEM, detailsPatch: { a: 1 } })).rejects.toThrow(
+      "update_memory does not accept the argument 'details_patch'",
     );
   });
 });
