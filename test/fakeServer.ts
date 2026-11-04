@@ -21,6 +21,50 @@ export const SESSION_EXPIRED_BODY = {
   id: null,
 };
 
+/** Arguments memory-cloud accepts on every tool without declaring them. */
+const ALWAYS_ACCEPTED = new Set(["_meta"]);
+/** How many unknown names the refusal echoes back. */
+const MAX_UNKNOWN_SHOWN = 10;
+
+/**
+ * The `invalid_argument` envelope memory-cloud v0.82.0+ answers when a
+ * `tools/call` carries arguments the tool's inputSchema does not declare
+ * (memory-cloud#1742; `find_unknown_arguments` in
+ * `backend/src/mcp_server/tools/_arg_coercion.py`), or `null` when every
+ * argument is declared. The server also suggests the closest declared name
+ * for a misspelled one (difflib) and cuts a name past 64 characters; this
+ * fake does neither, so `suggestions` is always empty and the names in the
+ * message carry no "(did you mean …?)".
+ */
+export function undeclaredArgumentRefusal(
+  tool: string,
+  args: Record<string, unknown>,
+  declared: readonly string[],
+): Record<string, unknown> | null {
+  const accepted = new Set(declared);
+  const unknown = Object.keys(args)
+    .filter((name) => !accepted.has(name) && !ALWAYS_ACCEPTED.has(name))
+    .sort();
+  if (unknown.length === 0) return null;
+  const shown = unknown.slice(0, MAX_UNKNOWN_SHOWN);
+  const more = unknown.length - shown.length;
+  const listed = shown.map((name) => `'${name}'`).join(", ") + (more > 0 ? ` and ${more} more` : "");
+  const allowed = [...declared].sort();
+  return {
+    status: "error",
+    error: "invalid_argument",
+    message:
+      `${tool} does not accept the ${unknown.length === 1 ? "argument" : "arguments"} ${listed}. ` +
+      `Arguments its inputSchema declares: ${allowed.join(", ")}.`,
+    unknown_arguments: shown,
+    allowed_arguments: allowed,
+    suggestions: {},
+    help:
+      "Remove the unknown arguments or rename them as suggested, then call the " +
+      "tool again. tools/list shows each tool's inputSchema.",
+  };
+}
+
 /**
  * Minimal fake MCP + REST server behind a fetch stub — the TS analogue of
  * the httpx MockTransport used by the Python test suite.
@@ -29,6 +73,14 @@ export class FakeServer {
   requests: Recorded[] = [];
   /** Tool name → payload object serialized into content[0].text. */
   toolResults: Record<string, unknown> = {};
+  /**
+   * Tool name → the argument names its inputSchema declares. A call to a
+   * tool listed here that sends any other argument is refused as
+   * memory-cloud v0.82.0+ refuses it ({@link undeclaredArgumentRefusal}, in
+   * a result flagged `isError`), whatever {@link toolResults} holds; a tool
+   * not listed accepts anything, as servers before v0.82.0 did.
+   */
+  declaredArguments: Record<string, readonly string[]> = {};
   /** Tool name → content[0].text as sent, beating {@link toolResults}. */
   toolTexts: Record<string, string> = {};
   /** URL path → REST GET JSON response. */
@@ -67,7 +119,20 @@ export class FakeServer {
       return new Response("{}", { status: 200, headers: responseHeaders });
     }
     if (rpcMethod === "tools/call") {
-      const params = body?.params as { name: string };
+      const params = body?.params as { name: string; arguments?: Record<string, unknown> };
+      const declared = this.declaredArguments[params.name];
+      const refusal =
+        declared === undefined ? null : undeclaredArgumentRefusal(params.name, params.arguments ?? {}, declared);
+      if (refusal !== null) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { content: [{ type: "text", text: JSON.stringify(refusal) }], isError: true },
+          }),
+          { status: 200 },
+        );
+      }
       const payload = this.toolResults[params.name] ?? { status: "success" };
       const text = this.toolTexts[params.name] ?? JSON.stringify(payload);
       return new Response(

@@ -3022,13 +3022,29 @@ export class KaguraClient {
   /**
    * Get a detailed Sleep Maintenance report including the per-action
    * audit log.
+   *
+   * Only `report_id` is sent. No memory-cloud release declares or reads a
+   * `context_id` on `get_sleep_report`, and from v0.82.0
+   * (memory-cloud#1742) the server refuses an argument a tool's schema
+   * does not declare, so SDKs up to 0.14.1, which sent one, failed every
+   * call there with `invalid_argument` (#79). The server finds the run by
+   * `report_id` and, from v0.126.0 (memory-cloud#2315), authorizes the
+   * call against the report's own context: read access there is enough.
+   *
+   * @throws KaguraNotFoundError when the report does not exist, is not the
+   *   caller's, or (memory-cloud v0.126.0+) belongs to a context the caller
+   *   cannot read: the server answers `report_not_found` for each.
    */
   async getSleepReport(options: {
-    contextId: string;
+    /**
+     * Ignored, and optional: the server finds the run by `reportId`. It
+     * was required up to 0.14.1, so calls that pass it still compile.
+     */
+    contextId?: string;
+    /** Sleep report UUID, from {@link getSleepHistory}. */
     reportId: string;
   }): Promise<SleepReportDetail> {
     const result = await this.callToolChecked("get_sleep_report", {
-      context_id: options.contextId,
       report_id: options.reportId,
     });
     // The MCP tool wraps the report fields under a "report" key; flatten
@@ -3059,16 +3075,33 @@ export class KaguraClient {
    * with a plain {@link KaguraError} (`invalid_status`). The actions in
    * `err.summary.errors` stay unreversed and need handling some other way.
    *
+   * Only `report_id` is sent, as for {@link getSleepReport} (#79). The
+   * server finds the run by `report_id` and, from memory-cloud v0.126.0
+   * (memory-cloud#2315), authorizes the rollback against the report's own
+   * context: it needs the editor or owner role there, and a workspace
+   * viewer cannot roll back.
+   *
    * @throws KaguraPartialRollbackError when some actions could not be
    *   reversed.
-   * @throws KaguraNotFoundError when the report or context does not exist.
+   * @throws KaguraNotFoundError when the report does not exist, is not the
+   *   caller's, or (memory-cloud v0.126.0+) belongs to a context the caller
+   *   cannot read: the server answers `report_not_found` for each.
+   * @throws KaguraPermissionError (`permission_denied`, v0.126.0+) when the
+   *   caller can read the report's context but not edit it.
+   * @throws KaguraError (`analysis_report`, v0.140.0+, memory-cloud#2547)
+   *   for a Memory Analysis report (`source: "analysis"`): it records the
+   *   LLM spend of an analysis run and has no Sleep actions to reverse.
    */
   async rollbackSleepRun(options: {
-    contextId: string;
+    /**
+     * Ignored, and optional: the server finds the run by `reportId`. It
+     * was required up to 0.14.1, so calls that pass it still compile.
+     */
+    contextId?: string;
+    /** Sleep report UUID to roll back, from {@link getSleepHistory}. */
     reportId: string;
   }): Promise<RollbackResult> {
     const result = await this.callToolChecked("rollback_sleep_run", {
-      context_id: options.contextId,
       report_id: options.reportId,
     });
     return result as unknown as RollbackResult;
