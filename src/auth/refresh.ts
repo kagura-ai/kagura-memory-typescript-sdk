@@ -62,9 +62,8 @@ function isScopeRejection(error: unknown): boolean {
  *
  * The refresh runs under the cross-process lock on the credentials file,
  * after re-reading it: when another process (a client, `kagura-memory-mcp`,
- * the Python CLI's own `kagura auth refresh`) already rotated the token
- * while this one waited, its profile is returned and nothing is sent — a
- * refresh token works once (memory-cloud v0.79.0+).
+ * another CLI) already rotated the token, its profile is returned and
+ * nothing is sent — a refresh token works once (memory-cloud v0.79.0+).
  *
  * @returns the credentials now in force.
  * @throws Error if the named profile does not exist.

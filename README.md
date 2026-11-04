@@ -1087,9 +1087,11 @@ in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
 already rotated it, uses that profile and sends nothing; otherwise it
 refreshes from the refresh token on file and saves the result before it
 releases the lock. The device flow a widening `--scope` falls back to runs
-after the lock is released, since it waits on the user. This is client-side
-and works against every server. As in Python SDK 0.44.0
-(kagura-ai/kagura-memory-python-sdk#313):
+after the lock is released, since it waits on the user. The Python SDK
+locks the same `credentials.json.lock` with an OS lock, which Node does not
+have, so the two SDKs' locks do not exclude each other: between them only
+the re-read applies. This is client-side and works against every server. As
+in Python SDK 0.44.0 (kagura-ai/kagura-memory-python-sdk#313):
 
 - `auth refresh` says `✓ Profile 'NAME' was already refreshed by another
   process.` when it found the profile rotated under the lock, and `✓
