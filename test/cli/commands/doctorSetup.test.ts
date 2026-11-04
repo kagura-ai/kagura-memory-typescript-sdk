@@ -2124,6 +2124,8 @@ describe("setup claude --add-tools and --context (#83)", () => {
       "Error: Invalid value for '--add-tools': add_tools accepts at most 100 tool names, got 101",
     ],
     [["--tool-profile=-x"], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
+    // Trimmed, then checked, as Python 0.44.0's `setup claude --tool-profile=' -x '` (exit 2).
+    [["--tool-profile= -x "], "Error: Invalid value for '--tool-profile': tool_profile cannot start with '-': '-x'"],
   ])("refuses %j with exit 2, writing nothing", async (extra, message) => {
     const h = harness({});
     expect(await runCli(claude(...extra), h.deps)).toBe(2);
