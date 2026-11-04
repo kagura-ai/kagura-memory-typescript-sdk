@@ -313,13 +313,27 @@ describe("upstream URL query and session id flags (#83)", () => {
     expect(blank.requests.every((r) => !("Kagura-Session-Id" in r.headers))).toBe(true);
   });
 
-  it(`ignores an invalid $${SESSION_ENV} with a warning rather than stopping the proxy`, async () => {
-    const { requests, errors } = await proxied([], { [SESSION_ENV]: "has space" });
-    expect(requests.every((r) => !("Kagura-Session-Id" in r.headers))).toBe(true);
-    expect(errors).toEqual([
-      `kagura-memory-mcp: warning: ignoring ${SESSION_ENV}: use 1-128 letters, digits, '.', '_' or '-' ` +
-        "(memory-cloud drops any other value)\n",
-    ]);
+  it.each(["has space", "run\r\nX-Injected: 1", "run\nX-Injected: 1", "x".repeat(129), "café"])(
+    `ignores an invalid $${SESSION_ENV} %j with a warning that never shows it, sending no header`,
+    async (value) => {
+      const { requests, errors } = await proxied([], { [SESSION_ENV]: value });
+      expect(requests).toHaveLength(2);
+      for (const r of requests) {
+        expect(Object.keys(r.headers).filter((k) => /session-id|injected/i.test(k))).toEqual(
+          r.headers["Mcp-Session-Id"] !== undefined ? ["Mcp-Session-Id"] : [],
+        );
+      }
+      expect(errors).toEqual([
+        `kagura-memory-mcp: warning: ignoring ${SESSION_ENV}: use 1-128 letters, digits, '.', '_' or '-' ` +
+          "(memory-cloud drops any other value)\n",
+      ]);
+    },
+  );
+
+  it("takes a session id of exactly 128 characters, trimmed as Python trims it", async () => {
+    const id = "a".repeat(128);
+    const { requests } = await proxied([], { [SESSION_ENV]: `\t${id}\n` });
+    expect(requests.map((r) => r.headers["Kagura-Session-Id"])).toEqual([id, id]);
   });
 
   it.each([
@@ -338,6 +352,8 @@ describe("upstream URL query and session id flags (#83)", () => {
     [["--session-id", "a b"], "Invalid value for --session-id: use 1-128 letters, digits, '.', '_' or '-' (memory-cloud drops any other value)"],
     [["--session-id", "x".repeat(129)], "Invalid value for --session-id: use 1-128 letters, digits, '.', '_' or '-' (memory-cloud drops any other value)"],
     [["--session-id="], "Invalid value for --session-id: use 1-128 letters, digits, '.', '_' or '-' (memory-cloud drops any other value)"],
+    // A CR/LF would split the header: refused, and not echoed back.
+    [["--session-id", "a\r\nX-Injected: 1"], "Invalid value for --session-id: use 1-128 letters, digits, '.', '_' or '-' (memory-cloud drops any other value)"],
   ])("refuses %j with exit 2 before starting", async (args, message) => {
     const s = io();
     const fetcher = vi.fn() as unknown as typeof fetch;

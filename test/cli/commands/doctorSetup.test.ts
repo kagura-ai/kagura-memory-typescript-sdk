@@ -2023,15 +2023,27 @@ describe("setup claude --add-tools and --context (#83)", () => {
     const h = harness({});
     const argv = claude("--mcp-url", "https://x.test/mcp", "--add-tools", "explore", "--context", `{${CONTEXT.toUpperCase()}}`);
     expect(await runCli(argv, h.deps)).toBe(0);
-    expect(entry()).toEqual({
-      type: "http",
-      url: `https://x.test/mcp?add_tools=explore&context=${CONTEXT}`,
-      headers: { Authorization: `Bearer ${KEY}` },
-    });
+    // The bytes of the .mcp.json the Python CLI 0.44.0 writes for
+    // `setup claude --api-key KEY --mcp-url https://x.test/mcp --add-tools explore --context {UUID} -y`.
+    expect(fs.readFileSync(mcpJson(), "utf-8")).toBe(
+      '{\n  "mcpServers": {\n    "kagura-memory": {\n      "type": "http",\n' +
+        `      "url": "https://x.test/mcp?add_tools=explore&context=${CONTEXT}",\n` +
+        `      "headers": {\n        "Authorization": "Bearer ${KEY}"\n      }\n    }\n  }\n}\n`,
+    );
     expect(JSON.parse(h.out.join("\n")).mcp_url).toBe(`https://x.test/mcp?add_tools=explore&context=${CONTEXT}`);
     // .kagura.json keeps the URL as given: the query is the entry's.
     expect(readJson(path.join(sandbox, ".kagura.json")).mcp_url).toBe("https://x.test/mcp");
   });
+
+  // Recorded from the Python CLI 0.44.0: each spelling writes `?context=` + the dashed lower-case UUID.
+  it.each([`urn:uuid:${CONTEXT.toUpperCase()}`, ` ${CONTEXT.replace(/-/g, "")} `, `{${CONTEXT}}`])(
+    "writes --context %j in the canonical form, as Python's normalize_uuid does",
+    async (spelling) => {
+      const h = harness({});
+      expect(await runCli(claude("--mcp-url", "https://x.test/mcp", "--context", spelling), h.deps)).toBe(0);
+      expect(entry().url).toBe(`https://x.test/mcp?context=${CONTEXT}`);
+    },
+  );
 
   it("orders the four keys as Python does, and sends them in the user-scope entry too", async () => {
     const h = harness({}, { onPath: { claude: "/usr/bin/claude" } });
@@ -2045,6 +2057,7 @@ describe("setup claude --add-tools and --context (#83)", () => {
       "--context", CONTEXT,
     );
     expect(await runCli(argv, h.deps)).toBe(0);
+    // Python 0.44.0 writes this URL for the same flags at project scope.
     const url = `https://x.test/mcp?keep=1&guardrails=off&profile=core&add_tools=explore,list_edges&context=${CONTEXT}`;
     const added = h.runs.find((r) => r[2] === "add-json")!;
     expect(JSON.parse(added.at(-1)!)).toEqual({
