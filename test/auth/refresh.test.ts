@@ -178,6 +178,34 @@ describe("refresh (#16)", () => {
     },
   );
 
+  it("runs the widening device flow with the credentials lock released (#92)", async () => {
+    await seedProfile();
+
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [
+      { status: 400, body: { error: "insufficient_scope" } },
+      { status: 200, body: tokenBody({ access_token: "at-wide", refresh_token: "rt-wide" }) },
+    ];
+    const lockHeldWhileWaitingOnUser: boolean[] = [];
+
+    await refresh({
+      credentialsPath,
+      scope: "memory:read memory:write profile:read",
+      fetch: server.fetch,
+      sleep: async () => {},
+      onUserCode: () => {
+        // The device flow waits on a person for minutes; holding the lock
+        // that long would stall every other process's refresh (Python
+        // 0.44.0 runs it outside the lock too).
+        lockHeldWhileWaitingOnUser.push(fs.existsSync(`${credentialsPath}.lock`));
+      },
+    });
+
+    expect(lockHeldWhileWaitingOnUser).toEqual([false]);
+    expect(fs.existsSync(`${credentialsPath}.lock`)).toBe(false);
+    expect(loadCredentialsFile(credentialsPath).profiles.default!.accessToken).toBe("at-wide");
+  });
+
   it("falls back to the device flow when another code's description names the scope refusal (#84)", async () => {
     // The refresh error now keeps `invalid_request` as its code; the scope
     // problem is only in error_description, which the message carries.

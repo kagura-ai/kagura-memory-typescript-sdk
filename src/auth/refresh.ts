@@ -12,12 +12,15 @@
  */
 
 import { KaguraAuthError } from "../errors.js";
-import type { OAuthCredentials } from "./credentials.js";
+import type { OAuthCredentials, RefreshResult } from "./credentials.js";
 import {
-  KaguraOAuth,
-  getSharedState,
+  CredentialsFileError,
+  RefreshNotSavedError,
+  keepUnsaved,
   loadCredentialsFile,
-  profileNamed,
+  refreshSharedState,
+  saveFailureReason,
+  sharedStateFrom,
   updateProfile,
 } from "./credentials.js";
 import { authorizeDevice, pollForToken } from "./deviceFlow.js";
@@ -61,9 +64,15 @@ const SCOPE_REFUSALS: readonly string[] = ["insufficient_scope", "invalid_scope"
  * another code (`invalid_request` …) still asks for consent, as before
  * the code was kept. Python's `_refused_scope` reads the message only for
  * an error without a code; this keeps the wider check this SDK had.
+ *
+ * A credentials-file error (a file that cannot be read, a refresh or grant
+ * that could not be saved) is never a refusal: it carries no OAuth code,
+ * and its message holds a path and a profile name, which the fallback
+ * would read — a profile named `insufficient_scope` would start a device
+ * flow after a refresh that worked.
  */
 function isScopeRejection(error: unknown): boolean {
-  if (!(error instanceof KaguraAuthError)) {
+  if (!(error instanceof KaguraAuthError) || error instanceof CredentialsFileError) {
     return false;
   }
   if (error.code !== undefined && SCOPE_REFUSALS.includes(error.code)) {
@@ -76,37 +85,76 @@ function isScopeRejection(error: unknown): boolean {
 /**
  * Refresh a stored profile's access token and persist the result.
  *
- * @returns the credentials that were written.
- * @throws Error if the named profile does not exist.
+ * The refresh runs under the cross-process lock on the credentials file,
+ * after re-reading it: when another process (a client, `kagura-memory-mcp`,
+ * another CLI) already rotated the token, its profile is returned and
+ * nothing is sent — a refresh token works once (memory-cloud v0.79.0+).
+ *
+ * @returns the credentials now in force.
+ * @throws Error if the named profile does not exist — also when the
+ *   credentials file cannot be read or parsed, which reads as holding no
+ *   profile, as Python's `kagura auth refresh` reads it; nothing is sent
+ *   and the file is left as it is.
  * @throws KaguraAuthExpiredError the refresh token is no longer valid —
  *   the stored profile is left untouched so it can still be inspected.
- * @throws KaguraAuthError other protocol/response failures.
+ * @throws KaguraAuthError other protocol/response failures; also when the
+ *   credentials file became unreadable by the time the lock is held
+ *   (before any request, and the file is left as it is), or when the
+ *   refreshed profile — or the grant a widening `scope` collected — could
+ *   not be saved (the message names the file; this process keeps the new
+ *   token in memory).
  * @throws KaguraConnectionError the server was unreachable.
  */
 export async function refresh(options: RefreshOptions = {}): Promise<OAuthCredentials> {
+  return (await refreshProfile(options)).credentials;
+}
+
+/**
+ * What {@link refreshProfile} did: the profile it refreshed, and whether
+ * it was refreshed here or adopted from another process.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export interface ProfileRefreshResult extends RefreshResult {
+  /** The profile name the refresh resolved (`options.profile` or the default). */
+  profile: string;
+}
+
+/**
+ * {@link refresh}, also saying which profile and whether this call
+ * refreshed it — what `kagura-memory auth refresh` prints.
+ *
+ * @internal Not exported from the package entry point.
+ */
+export async function refreshProfile(options: RefreshOptions = {}): Promise<ProfileRefreshResult> {
+  // Lenient, as Python's CLI reads it first: a file that cannot be read
+  // holds no profile here. The refresh path refuses it under the lock,
+  // before any request, if it became unreadable after this read.
   const cf = loadCredentialsFile(options.credentialsPath);
   const target = options.profile || cf.defaultProfile;
-  const stored = profileNamed(cf, target);
-  if (stored === undefined) {
-    throw new Error(`No profile named '${target}'. Run a login first.`);
+
+  // The shared state, not a copy: a client of this process holding the
+  // same profile sees the rotated token, and the refresh is serialized with
+  // its own on the in-process mutex.
+  const state = sharedStateFrom(cf, options.credentialsPath, target);
+  if (state === null) {
+    throw new Error(`No profile named '${target}'.\n  Run: kagura-memory auth login`);
   }
 
   const httpOptions = options.fetch !== undefined ? { fetch: options.fetch } : {};
 
-  // Delegate to KaguraOAuth rather than driving refreshAccessToken here:
-  // it holds the cross-process file lock across the whole
-  // read-check-refresh-persist sequence, so a peer that rotated while we
-  // waited is adopted instead of racing us into an `invalid_grant` on a
-  // token that is already stale on disk.
-  const state = getSharedState(options.credentialsPath, target);
-  if (state === null) {
-    throw new Error(`No profile named '${target}'. Run a login first.`);
-  }
-  const provider = new KaguraOAuth(state, httpOptions);
-
+  // Forced path, as on a 401: refresh unless the file no longer holds the
+  // token read here (another process rotated it while this one waited).
+  const staleToken = state.credentials.accessToken;
   try {
-    await provider.forceRefresh(options.scope !== undefined ? { scope: options.scope } : {});
-    return state.credentials;
+    const result = await state.mutex.runExclusive(() =>
+      refreshSharedState(state, {
+        expectedStaleToken: staleToken,
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        ...httpOptions,
+      }),
+    );
+    return { ...result, profile: target };
   } catch (e) {
     // A rejection only means "widen" when the caller actually asked for a
     // different scope; otherwise re-consent would be the wrong response
@@ -114,12 +162,37 @@ export async function refresh(options: RefreshOptions = {}): Promise<OAuthCreden
     if (options.scope === undefined || !isScopeRejection(e)) {
       throw e;
     }
-    // Runs outside the lock — forceRefresh released it on the way out, and
-    // updateProfile below re-acquires it, so there is no deadlock.
-    const next = await consentToWiderScope(state.credentials, options.scope, options, httpOptions);
-    await updateProfile(target, next, options.credentialsPath);
+    // Runs outside the lock — the refresh released it on the way out, and
+    // updateProfile below re-acquires it, so there is no deadlock. The
+    // device flow waits on the user for minutes: holding the lock that
+    // long would stall every other process's refresh.
+    const before = state.credentials;
+    const next = await consentToWiderScope(before, options.scope, options, httpOptions);
+    try {
+      await updateProfile(target, next, options.credentialsPath);
+    } catch (saveError) {
+      // As a refresh that could not be saved: the consented grant exists
+      // only here, so this process keeps it, and the profile on file (the
+      // one this process already marked, or the one it held) stays behind.
+      const onFile = state.usedRefreshToken
+        ? { accessToken: state.usedAccessToken ?? "", refreshToken: state.usedRefreshToken }
+        : before;
+      const error = new RefreshNotSavedError(
+        `Got consent for scope '${options.scope}' on profile '${target}', but could not save it to ` +
+          `${state.path}: ${saveFailureReason(saveError)}\n` +
+          "  The profile on file keeps its previous grant.\n" +
+          `  Fix the cause, then run: kagura-memory auth refresh --scope "${options.scope}"`,
+        next,
+        onFile,
+        { cause: saveError },
+      );
+      keepUnsaved(state, error);
+      throw error;
+    }
     state.credentials = next;
-    return next;
+    state.usedRefreshToken = null;
+    state.usedAccessToken = null;
+    return { credentials: next, refreshed: true, profile: target };
   }
 }
 
