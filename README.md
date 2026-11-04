@@ -87,7 +87,11 @@ Four ways to authenticate, in resolution order:
    (below) or the Python CLI's `kagura auth login`. Profiles
    (`KAGURA_PROFILE` env or `{ profile: "name" }`) and auto-refresh work
    exactly like the Python SDK; the credentials file is shared between both
-   SDKs.
+   SDKs. Every refresh (a client's, `kagura-memory-mcp`'s, `refresh()`'s,
+   `auth refresh`'s and `auth token`'s) takes one lock on the file and
+   re-reads it first, so processes sharing a profile refresh it once, and a
+   `credentials.json` that exists but cannot be read is never rewritten (see
+   [Refreshing](#refreshing)).
 4. **Config file** — `.kagura.json` in the working directory or home:
 
 ```json
@@ -1118,6 +1122,54 @@ the server omits them. An expired refresh token throws
 Callers holding their own provider can use `KaguraOAuth` directly — its
 `forceRefresh()` is what `refresh()` builds on, including the
 cross-process lock and the "another process already rotated" dedup.
+
+**One refresh path.** A refresh token works once (memory-cloud v0.79.0+,
+kagura-ai/memory-cloud#1686): of two processes presenting the same one, the
+second gets `invalid_grant`. So every refresh — `KaguraOAuth` in a client or
+in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
+`auth token` — takes the lock on `credentials.json` (a sibling
+`credentials.json.lock`), re-reads the profile, and when another process
+already rotated it to a token that has not expired, uses that profile and
+sends nothing; otherwise it refreshes from the refresh token on file and
+saves the result before it releases the lock. (Python 0.44.0 also adopts a
+different token that has expired; this SDK refreshes it instead.) The
+device flow a widening `--scope` falls back to runs after the lock is
+released, since it waits on the user. The Python SDK
+locks the same `credentials.json.lock` with an OS lock, which Node does not
+have, so the two SDKs' locks do not exclude each other: between them only
+the re-read applies. This is client-side and works against every server. As
+in Python SDK 0.44.0 (kagura-ai/kagura-memory-python-sdk#313):
+
+- `auth refresh` says `✓ Profile 'NAME' was already refreshed by another
+  process.` when it found the profile rotated under the lock, and `✓
+  Refreshed profile 'NAME'.` after a refresh of its own, each followed by
+  the `Scope:` and `Expires:` lines; both exit 0. `auth token` prints the
+  token another process refreshed.
+- A `credentials.json` that exists but cannot be read or parsed is refused
+  before any refresh request or write, and left as it is: `KaguraAuthError`
+  `Cannot update <path>: it is not valid JSON.` (or why else it cannot be
+  read), with `Fix the file, or move it aside and run: kagura-memory auth
+  login`. This holds for a refresh (checked under the lock), the save at
+  the end of `login()`, `updateProfile`, `setDefaultProfile` and
+  `deleteProfile`; `kagura-memory-mcp` refuses it at startup and before any
+  login. "Exists" includes a dangling symlink, and a file in a directory
+  this process cannot search. A missing file is still "no profile".
+  `loadCredentialsFile()`, client construction, `refresh()` and the CLI's
+  `auth refresh` / `auth token` read such a file as holding no profile first,
+  as Python's do (`No profile named 'default'.`); the refusal comes when it
+  became unreadable by the time the lock is held.
+- When the server refreshed but the profile cannot be saved (a full disk, a
+  read-only directory), the refresh throws `KaguraAuthError` `Refreshed
+  profile 'NAME', but could not save it to <path>: <reason>`, saying the
+  refresh used up the refresh token on file and to run `kagura-memory auth
+  login` after fixing the cause. The process that refreshed keeps the
+  rotated token in memory (its next refresh sends the new refresh token,
+  until another process saves the profile), so a client stays usable until
+  it expires; `kagura-memory-mcp` goes on serving the request with it and
+  logs the message once. A widening `--scope` whose device-flow grant
+  cannot be saved gives the same kind of error (`Got consent for scope
+  …`), and the grant is kept the same way. `auth refresh` and `auth token`
+  exit 1, and `auth token` prints no token.
 
 ### Error handling
 
