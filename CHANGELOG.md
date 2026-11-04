@@ -6,6 +6,705 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud
+up to v0.143.0. `MIN_SERVER_VERSION` stays 0.75.0; each surface below names
+the server version it needs, and
+[`docs/compatibility.md`](docs/compatibility.md) lists them per release.
+Every new option and flag is sent only when set: a server before v0.82.0
+ignores one it predates, and a server from v0.82.0 that predates one refuses
+it with `invalid_argument`.
+
+### Added
+
+- **The server's error envelope on every error**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.78.0+ / v0.82.0+, memory-cloud#1684, #1742;
+  python-sdk#299): `KaguraError` has `code` (the MCP envelope's `error`,
+  the REST `error`, the OAuth `error` or a JSON-RPC `data.error`;
+  `undefined` when the SDK raised the error itself or the server named no
+  code) and `details` (the other fields the server sent, as sent, `{}`
+  when none), set on every error built from a server body on both
+  transports and in the device flow. Getters `help`, `serverCause`,
+  `correlationId`, `retryable` and `outcome` read the envelope;
+  `serverCause` is Python's `cause`, renamed because `Error.cause` holds
+  the chained error. Branch on `code`, never on the message.
+  `payload_too_large` (a memory over 1 MB on MCP, v0.108.0+,
+  memory-cloud#2003) is a plain `KaguraError` with `limit` / `actual` in
+  `details`.
+- **`KaguraCapacityLockedError`**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.99.0+, memory-cloud#1941; python-sdk#299): a Free
+  workspace over its capacity — MCP `capacity_locked`, REST 403
+  `CAPACITY-001` with `details.gate: "capacity"`. Carries `cleanupUrl`,
+  `memoryCount`, `memoryLimit`, `overMemories`, `usedBytes`,
+  `storageLimitBytes`, `overBytes` (`null` when not sent, e.g. for a
+  caller outside the locked workspace). It extends `KaguraError`, neither
+  a quota nor a plan gate. `getUsage()` returns `capacity_lock`
+  (`CapacityLock`, with `help` and, from the REST route, `purge_at`,
+  v0.102.0+) and checks it as Python's model does.
+- **`KaguraServiceUnavailableError`**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.82.0+, memory-cloud#1742; `DB-002` reasons v0.104.0+,
+  memory-cloud#1980; python-sdk#299): every HTTP 503 — `/mcp`'s
+  `temporarily_unavailable`, its JSON-RPC transport failures, REST
+  `DB-002`. `retryAfter` from `Retry-After` (else
+  `data.retry_after_seconds`; `null` for a write whose outcome is
+  unknown), `reason` from `details.reason` (`pool_exhausted`,
+  `connection_refused`, `database_error`, `deadlock`), else the MCP
+  `cause`, else the code.
+- **`KaguraPartialSessionRollbackError`**
+  ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
+  memory-cloud v0.113.0+, memory-cloud#2044; python-sdk#301): a real
+  `rollbackSession` run in which some items failed (`partial_rollback`),
+  with `sessionSummary`, `totals`, `rollbackId` and `remaining`; call
+  again with the same arguments to retry them. `session_not_found` is a
+  `KaguraNotFoundError` on every tool.
+- **Device flow**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.78.0+, memory-cloud#1671, and v0.84.0+,
+  memory-cloud#1770; python-sdk#299): an RFC 6749 refusal from
+  `device/authorize` (`invalid_request`, `invalid_client`,
+  `invalid_scope`) is a `KaguraAuthError` whose `code` is the OAuth
+  `error` and whose message and `details` carry the `error_description`
+  (any other error body keeps the generic message and its "Verify the
+  server URL" hint, with the body's code); `pollForToken` keeps an unknown
+  OAuth error as `code`, and keeps polling on `temporarily_unavailable`
+  until the device code expires, after `Retry-After` (never shorter than
+  the interval) or the interval.
+- **`recall` verbosity, full and maxChars**
+  ([#82](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/82);
+  memory-cloud v0.108.0 / v0.114.0 / v0.82.0, memory-cloud#2002, #2124,
+  #1743; python-sdk#298):
+  - `recall({ verbosity: "compact" | "full", full, maxChars })`.
+    `verbosity: "full"` brings back `tags`, `context_summary`, `scope`,
+    `version` and the uncut `summary`. `full` sets how many of the top
+    hits carry `content` (0–100; `0` means summaries only). `maxChars` is
+    the reply budget (10,000–100,000).
+  - Each is sent only when set and checked locally before any request. A
+    server from v0.82.0 that predates one refuses it (`invalid_argument`).
+  - New types: `RecallVerbosity`, `RecallResponse`, `RecallResult`,
+    `RecallConfidence`, `RecallSelector` and `SupersedeCandidate`. They
+    cover `summary_cut`, `content` / `content_truncated` /
+    `content_next_offset`, `spans`, `folded`, `observed_at`, `selector`,
+    `full_applied`, `context_summary_omitted`, `truncated`,
+    `explore_hints_omitted` and `supersede_candidate.verified`.
+- **`maxChars` on `loadPinned`, `loadGuardrails`, `getAgentBootstrap` and
+  `AgentsClient.bootstrap`**
+  ([#82](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/82);
+  memory-cloud v0.82.0, memory-cloud#1743; python-sdk#298): the reply
+  budget, sent only when set. `AgentBootstrapResponse.context_summary_omitted`
+  is typed.
+- **`recallNearby({ includeDetails })`**
+  ([#82](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/82);
+  memory-cloud v0.82.0, memory-cloud#1743; python-sdk#298): since v0.82.0
+  items carry `location` (typed on `NearbyMemory`) instead of `details`.
+  `includeDetails: true` returns `details`, and items past the budget
+  carry `details_omitted` / `details_total_chars`.
+- **Session tools: `bootstrap`, `changesSince`, `listMatching`,
+  `rememberBatch`, `forget({ memoryIds })`, `describeTools`, `guide`,
+  `listRevisions` and `rollbackSession`**
+  ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
+  memory-cloud v0.93.0+, memory-cloud#1849–#1853; python-sdk#301).
+  `bootstrap()` opens a session on one context in one deterministic call
+  — context block, guardrails, pinned / upcoming / changes lanes, each
+  fail-soft — with `format: "index" | "full"` and `maxChars` down to 2,000
+  from v0.115.0 (memory-cloud#2126). `changesSince()` pages a context's
+  change log (`sessionId` v0.113.0, `byMe` v0.114.0; a forgotten memory's
+  events carry no `summary` from v0.96.0). `listMatching()` is the MCP
+  `list` tool: exact filters (`details.<key>` JSON-type strict), a stable
+  order (`observed_at` v0.127.0) and a `total`. `rememberBatch()` stores
+  1-50 memories, optionally atomic (`dedupe` takes `DedupeMode`); a batch
+  that wrote nothing throws `KaguraError` `batch_failed` /
+  `batch_refused` (rows in `details.results`) or `timeout`, an atomic
+  batch over the daily quota `KaguraQuotaError`.
+  `forget({ contextId, memoryIds })` (v0.117.0, memory-cloud#2127)
+  returns a `ForgetBatchResult` with one `deleted` / `skipped` / `error`
+  row per id (`not_attempted` from v0.118.0); it refuses `memoryId` /
+  `query` / `k` beside it before any request. `describeTools()` /
+  `guide()` read what the MCP URL's tool list leaves out and the server's
+  manual. `listRevisions()` (v0.113.0, memory-cloud#2043) reads a
+  memory's revision log; `rollbackSession()` (v0.113.0 / v0.114.0,
+  memory-cloud#2044) plans or undoes what a session — or the caller in a
+  window — wrote, `dry_run` always sent and `true` by default. Each reply
+  is checked against the Python SDK's model and typed
+  (`BootstrapResponse`, `ChangesSinceResponse`, `ListMatchingResponse`,
+  `RememberBatchResult`, `ForgetBatchResult`, `ToolDescriptions`,
+  `GuideResponse`, `RevisionsPage`, `SessionRollbackResult`).
+- **`observedAt` on `remember` / `updateMemory`, and recall's
+  `observedAfter` / `observedBefore`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.127.0, memory-cloud#2330; python-sdk#302): when a fact
+  held, a `YYYY-MM-DD` date or an extended ISO 8601 datetime (or a
+  `Date`, sent as its UTC instant), stored as `details.observed_at`.
+  Checked locally as the server checks it — a basic form, a time without
+  seconds, an impossible day or a disagreeing `details.observed_at`
+  throws before any request. `kagura-memory remember|update-memory
+  --observed-at`.
+- **Partial memory edits**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.140.0, memory-cloud#2585; python-sdk#302):
+  `updateMemory({ addTags, removeTags, detailsPatch })` edit the stored
+  tags and shallow-merge into the stored details (`null` deletes a key)
+  instead of replacing them; never with `tags` / `details` /
+  `externalId`, and `addTags` keeps the 50 × 100 caps. `kagura-memory
+  update-memory --add-tag --remove-tag --details-patch`.
+- **`expectedVersion` and `KaguraVersionConflictError`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.113.0, memory-cloud#2043; python-sdk#302): an edit
+  applies only while the memory is at that version, else nothing is
+  written and `KaguraVersionConflictError` (`currentVersion`,
+  `expectedVersion`, `memoryId`) is thrown — MCP `version_conflict`, REST
+  409 `RES-002` with `details.reason === "version_conflict"`.
+  `reference({ version })` reads an earlier version. `kagura-memory
+  update-memory --expected-version` prints the current version when
+  refused.
+- **`acceptSupersedeCandidate`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.126.0, memory-cloud#2308; python-sdk#302):
+  `updateMemory({ memoryId, acceptSupersedeCandidate: true })` shadows the
+  suggested older memory (`superseded_memory_id` in the reply); a graph
+  action that takes no field edit. An accept that meets another declared
+  edge throws `KaguraError` with `code` `"edge_exists"` and
+  `details.existing_edge`. `kagura-memory update-memory
+  --accept-supersede-candidate`.
+- **`remember({ dedupe, tagsNormalize, verbose })`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.93.0, memory-cloud#1853, #1851; python-sdk#302):
+  `dedupe: "check"` returns `{ status: "duplicate_candidate", candidate }`
+  and writes nothing; `"off"` opts out of supersede suggestions for good.
+  `kagura-memory remember --dedupe --tags-normalize` (`--dedupe check`
+  exits 0 on a duplicate). `toolTrigger` on both write methods merges
+  into `details` (or `detailsPatch`).
+- **Bounded, paged `reference`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.78.0, memory-cloud#1685; python-sdk#302):
+  `reference({ contentOffset, detailsOffset, contextOffset, fields,
+  maxChars })` and a typed `ReferenceResponse` carrying the bounded-reply
+  keys (`content_truncated`, `content_next_offset`, `details_omitted`,
+  `details_json`, …); a reply whose `status` is not a string or whose
+  `memory` is not an object throws `KaguraResponseError`. Of these, the
+  Python SDK 0.44.0 wraps `content_offset` only.
+- **`updateSearchConfig({ contentChunksEnabled, llmSelectorEnabled })`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.110.0 / v0.115.0, memory-cloud#2015, #2144;
+  python-sdk#302): context owner or workspace owner/admin. `kagura-memory
+  context search-config --[no-]content-chunks --[no-]llm-selector`.
+- **Typed write replies `RememberResult` / `UpdateMemoryResult`**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.108.0 / v0.113.0, memory-cloud#2003, #2043;
+  python-sdk#302), returned as sent, every key optional, with `version`,
+  `session_id` (v0.113.0) and `summary_truncated` /
+  `summary_original_length` (v0.108.0).
+- **`plan_headroom` notices**
+  ([#88](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/88);
+  memory-cloud v0.142.0+, memory-cloud#2615; python-sdk#314): the success
+  reply of `bootstrap`, `rememberBatch`, `remember` and `updateMemory`
+  carries `plan_headroom` when a plan dimension (`memories`,
+  `memories_per_day`, `mcp_calls_per_day`) is at 80 % (`warning`) or 95 %
+  (`critical`) of its effective limit. It holds one `PlanHeadroomNotice`
+  per dimension, with `used`, `limit`, `percentage`, `plan`, `remedies`,
+  `help` and, on the daily caps, `resets_at`.
+  `BootstrapResponse.plan_headroom` and `RememberBatchResult.plan_headroom`
+  are typed `PlanHeadroomNotice[]` and read fail-open, like the Python
+  SDK's `PlanHeadroom` field: an entry the model cannot read is dropped
+  and the call still succeeds, and a value that is not a list, or has no
+  readable entry, is left out. `remember` / `updateMemory` return it as
+  sent, unchecked. `kagura-memory bootstrap` prints each notice as the
+  Python CLI does (defaults filled, unreadable entries dropped). Older
+  servers do not send it.
+- **`supersede_candidate.acceptance` on recall rows**
+  ([#88](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/88);
+  memory-cloud v0.142.0+, memory-cloud#2508; on `reference` since
+  v0.137.0, memory-cloud#2427; python-sdk#314):
+  `SupersedeCandidate.acceptance?: SupersedeAcceptance` (`{ allowed,
+  reason? }`) says whether `updateMemory({ acceptSupersedeCandidate: true
+  })` would go through. `reason` is set only on a refusal: `not_writable`
+  (from v0.142.0 also the guardrail gate on a `details.tool_trigger`
+  memory, memory-cloud#2614), `not_owner`, `newer_candidate` or
+  `edge_exists`. It is absent on a share-key read and where the server
+  could not evaluate it. The README documents the direction asymmetry:
+  the accept refuses a candidate newer than its carrier, while
+  `createEdge` / `updateEdge` apply no direction check.
+- **Paging cursors**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud v0.82.0+, memory-cloud#1743; python-sdk#299):
+  `listContexts({ cursor })` and `getState({ cursor })` (list mode; a
+  `cursor` with a `key` throws before any request) pass a page's
+  `next_cursor` back, and `ListContextsResponse` types `has_more` /
+  `next_cursor`. `listAgents` follows `next_cursor` to the end — at most
+  50 pages, each agent `id` once — and throws `KaguraResponseError` on a
+  page that says `has_more` without a cursor or repeats one.
+  `getSleepReport({ actionsCursor, actionsLimit, maxChars })` pages the
+  audit log: the detail carries `actions_has_more` /
+  `actions_next_cursor`, and an action too large for its page
+  `details_omitted` / `details_total_chars` instead of `details`. Each
+  argument is sent only when set. CLI: `sleep report --actions-cursor C
+  --actions-limit N` (1–200).
+- **Page sizes for `listContexts` and `getState`, and `context list
+  --limit/--cursor`**
+  ([#89](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/89);
+  memory-cloud v0.82.0+, memory-cloud#1743; python-sdk#315):
+  - `listContexts({ limit })` takes 1-200 contexts a page. More than 20
+    with `includeDetails` and no non-blank `nameContains` throws before
+    any request, as the server would refuse it.
+  - `nameContains` is now sent trimmed, and not at all when blank.
+  - `getState({ limit, maxChars })` sizes a list-mode page (1-200
+    entries, 10,000-100,000 characters), checked before any request. With
+    `key`, any of `cursor` / `limit` / `maxChars` throws.
+  - `createContext`'s quota pre-check reads a one-row page.
+  - CLI `context list --limit N --cursor TOKEN` prints the page as JSON on
+    stdout. When the page was cut, stderr adds `has_more` /
+    `next_cursor` and the command for the next page; the cursor appears
+    there only when it is ASCII digits. A blank `--cursor` is unset, and
+    `--details --limit 21` without `--name-contains` exits 2.
+  - `kagura-memory contexts` names the `context list --cursor` call on
+    stderr when more contexts follow.
+  - Servers before v0.82.0 ignore `limit`, `maxChars` and `--limit` /
+    `--cursor` and return every context or entry.
+- **`getSleepHistory({ source: "sleep" | "analysis" | "all" })`** and CLI
+  `sleep history --source`
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud v0.138.0+, memory-cloud#2219; python-sdk#299).
+- **`listEdges` warns about a cut direction**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud v0.82.0+, memory-cloud#1743; python-sdk#299): when the
+  server's default limit (50) or its 200 clamp cut a direction
+  (`outgoing_has_more` / `incoming_has_more`), the client logs the Python
+  SDK's warning through its `warn` option (default `console.warn`).
+  `minWeight` is still always sent, `0.0` unless set, so every edge comes
+  back although the server's own default is 0.05 since v0.117.0
+  (memory-cloud#2127).
+- **`KaguraClientOptions.warn`**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  client-side, every server; python-sdk#299): where the client's advisory
+  warnings go — `listEdges`' cut-direction warning and
+  `checkServerVersion`'s below-minimum warning, the ones the Python SDK
+  logs on its `kagura_memory` logger. Default `console.warn`;
+  `warn: () => {}` silences them, `warn: (m) => logger.warn(m)` routes
+  them.
+- **Local write caps**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud v0.82.0's bounds, checked on every server; python-sdk#299):
+  `remember` / `updateMemory` throw before any request for more than 50
+  tags or a tag longer than 100 characters, and `setState` for a value
+  longer than 16,384 characters of compact JSON as the server measures
+  it, in the Python SDK's words.
+- **CLI `kagura-memory bootstrap`, `changes SINCE`, `list` and `forget
+  --ids`**
+  ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
+  memory-cloud v0.93.0+, `forget --ids` v0.117.0+; python-sdk#301), the
+  Python CLI 0.44.0's, printing the Python model's dump of the reply.
+  `forget --ids ID,ID` refuses `-k` and, when every id failed, prints one
+  `<id> <status> [<error>]` row per id on stderr before the error.
+- **`kagura-memory recall --verbosity {compact,full} --full N --max-chars
+  N`**
+  ([#82](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/82);
+  memory-cloud v0.108.0 / v0.114.0 / v0.82.0; python-sdk#298): when a
+  server refuses one of them with `invalid_argument`, the command retries
+  once without the ones the refusal names and says so on stderr. Output,
+  notes and exit codes match the Python CLI 0.43.0+.
+- **CLI error lines**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.78.0+, memory-cloud#1684; python-sdk#299): a failed
+  command prints, under its `Error: …` line on stderr, `  Help: <help>`
+  whenever the error carries the server's `help` and
+  `  Correlation ID: <id>` whenever it carries a `correlation_id`, plus
+  the capacity lock's `  Clean up or re-subscribe: <url>` (unless `help`
+  already names it) and a 503's `  Retry after: N s`, in the Python CLI
+  0.43.0+'s format and order; an error without them prints as before.
+  Exit codes are unchanged.
+- **`doctor` warns about a non-`kagura_` key**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.119.0+, memory-cloud#1994; python-sdk#299): in the auth
+  section and Python's words, about a static key that does not start with
+  `kagura_`: memory-cloud v0.119.0+ routes such a bearer as an OAuth
+  token, so it is a 401. A client-side check, shown on every server. Exit
+  codes are unchanged.
+- **`?add_tools=` and `?context=` on the MCP URL; `kagura-memory-mcp`
+  query and session flags**
+  ([#83](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/83);
+  memory-cloud v0.93.0 / v0.114.0 / v0.129.0, memory-cloud#1849, #2122,
+  #2125, #2354; python-sdk#300).
+  - Since memory-cloud 0.93.0 a bare MCP URL lists the `core` tool
+    profile (21 tools; `?profile=full` lists 72). `tools/call` is
+    unaffected.
+  - `setup claude --add-tools NAME[,NAME…] --context CONTEXT_ID` writes
+    `?add_tools=` / `?context=` into the entry. `setup
+    codex|hermes|openclaw` take `--add-tools` and `--tool-profile`.
+  - `kagura-memory-mcp` takes `--guardrails`, `--tool-profile`,
+    `--add-tools`, `--context` and `--session-id`. `--session-id` defaults
+    to `$KAGURA_MCP_SESSION_ID` and is sent as `Kagura-Session-Id` on
+    every upstream request.
+  - `MemoryClient.getGuardrailDigest({ addTools })` and `guardrails digest
+    --add-tools` send the digest route's `add_tools`.
+  - `doctor` ends with a `tools` check: the `tools/list` count and the
+    profile / `add_tools` / allowlist that the CLI's MCP URL selects.
+  - `recall`'s `explore_hints` need `explore` listed on memory-cloud
+    0.135.0+ (memory-cloud#2470): `--add-tools explore` writes that URL.
+  - `--tool-profile` now refuses a name starting with `-`, and its errors
+    use Python 0.44.0's words.
+- **memory-cloud v0.141.0 response fields**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud v0.79.0–v0.141.0; python-sdk#299), each optional with the
+  Python model's default: `ServerFeatures.content_chunks_require_plan` /
+  `llm_selector_require_plan`; `SearchConfig`'s `content_chunks_*`,
+  `llm_selector_*` and `embedding_provider`;
+  `MemberAPIKey.default_context_id` / `default_context_name` / `agent_id`
+  / `connector_id`; `WorkspaceMember.seat_paused`;
+  `IndexerStateMetrics.failed_events` and the `plan_suspended` /
+  `memory_limit_exceeded` skip reasons;
+  `FailedMemoryInfo.embedding_attempted_at`; `Agent.description_truncated`;
+  `GuardrailSet.context_summary_omitted`; `ContextGuardrails.provenance`
+  and a `ContextGuardrailItem` type with `summary_cut`;
+  `MemoryListItem.observed_at` (the stored date or datetime text, not
+  parsed); `ListTagsResponse.has_more`; `SleepReport.source` and the
+  `SleepReportSource` type; `SleepReportDetail.note`;
+  `RollbackSummary.chunks_requeued` / `points_requeued`. The
+  pydantic-parity readers fill them in, so `workspace member list
+  --json`, `auth list-keys --json`, `auth create-key`, `resource
+  indexer-status` and `guardrails load` print the new keys as the Python
+  CLI 0.44.0 does.
+- **README: "Permission model (memory-cloud v0.126.0+)"**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud v0.126.0; python-sdk#299): owner/admin reach every shared
+  context, a member or viewer its `allowed_context_ids` (none set: a
+  viewer every shared context, a member none), a context outside the list
+  is `KaguraNotFoundError`, a workspace viewer is read-only; resource
+  tokens are workspace-scoped (v0.94.0) and another workspace's token is
+  404 (v0.97.0); `deleteContext` soft-deletes the context's files and
+  `mergeContexts({ deleteSource: true })` moves them (v0.101.0); a
+  `supersedes` edge needs both memories to be the caller's (v0.132.0).
+- **`docs/compatibility.md`**
+  ([#93](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/93);
+  python-sdk#323): which memory-cloud release each SDK release needs and
+  was checked against, one section per release from 0.15.0 back to 0.1.0,
+  with the floor of every method, option and flag newer than
+  `MIN_SERVER_VERSION`, in the shape of the Python SDK's file.
+
+### Changed
+
+- **403 `insufficient_scope` is a `KaguraAuthError`**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.79.0+, memory-cloud#1686; python-sdk#299): an OAuth
+  token without the scope a call needs (`memory:read` for the read-only
+  tools, `memory:write` for the rest — every write from a `--read-only`
+  login) raised `KaguraConnectionError` (`HTTP 403: …`); it now raises
+  `KaguraAuthError` naming the scope and the re-login (`kagura-memory auth
+  login`), with `code` `"insufficient_scope"` and
+  `details.required_scope`, on `KaguraClient` and every REST client
+  (before a client's own 403 hint).
+- **HTTP 503 is a `KaguraServiceUnavailableError`**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.82.0+, memory-cloud#1742; python-sdk#299): a
+  `KaguraConnectionError` subclass, so handlers catching
+  `KaguraConnectionError` keep catching it; the message is unchanged.
+- **The capacity lock is a `KaguraCapacityLockedError`**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.99.0+, memory-cloud#1941; python-sdk#299): it was a
+  plain `KaguraError` (MCP) or `KaguraConnectionError` (REST 403).
+- **`authorizeDevice` refusal messages**
+  ([#84](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/84);
+  memory-cloud v0.78.0+, memory-cloud#1671; python-sdk#299) read `Device
+  authorization failed (HTTP 400 invalid_client): …` (the OAuth `error`
+  after the status) for an RFC 6749 refusal, as the Python SDK's since
+  0.43.0; any other error body keeps the previous message and hint.
+- **`recall` hits are compact by default on memory-cloud v0.108.0+**
+  ([#82](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/82);
+  memory-cloud#2002, #2124, #2470; python-sdk#298): a 160-character
+  summary head, with no `tags`, `context_summary` or `scope`. Code that
+  reads those from a hit must pass `verbosity: "full"`. Since v0.114.0 the
+  top 3 hits on MCP also carry `content`; pass `full: 0` for summaries
+  only. Since v0.135.0 `includeExploreHints` gets hints only on an MCP URL
+  with `?add_tools=explore` or `?profile=full`; `explore()` is
+  unaffected.
+- **`recall()` returns `RecallResponse` instead of `ToolResult`**
+  ([#82](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/82);
+  client-side; the Python SDK 0.43.0+ keeps a `dict`, python-sdk#298):
+  the same value, now typed. It is still assignable to `ToolResult`. A
+  cast of `results` to your own row type that names a key `RecallResult`
+  does not declare now needs `as unknown as`.
+- **`get_sleep_history` lists Sleep runs only by default on memory-cloud
+  v0.138.0+**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud#2219; python-sdk#299): the server leaves out the rows
+  Memory Analysis writes for its LLM spend unless `source` asks for them
+  (`"analysis"`, `"all"`); older servers list both and send no `source`.
+  `getSleepHistory` sends `source` only when set, and v0.82.0–v0.137.x
+  refuse it (`invalid_argument`).
+- **`KaguraClient.getToolDefinitions()` refuses a malformed `tools/list`
+  result**
+  ([#83](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/83);
+  client-side, every server; python-sdk#311). A result that is not an
+  object, or whose `tools` is not a list of objects, throws
+  `KaguraResponseError` (`operation`
+  `KaguraClient.get_tool_definitions`), as the Python SDK 0.44.0 does,
+  instead of returning `[]`. A result without `tools` still lists none.
+  `doctor`'s `tools` check fails with that message.
+- **`kagura-memory list` is the Python CLI's `list` command**
+  ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
+  memory-cloud v0.93.0+; python-sdk#301): it lists a context's memories by
+  exact filters. It was a hidden v0.7.0 spelling of `auth list`, which is
+  unchanged; the other bare `auth` aliases stay.
+- **`forget`'s `-k` has no default of its own**
+  ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
+  python-sdk#301) in `--help`, and a call without a target says `Either
+  --memory-id or --query is required (or --ids)`, as the Python CLI 0.44.0
+  (query mode still sends `k: 10`, on every server).
+- **`remember` / `update-memory --details` read JSON as the Python CLI
+  does**
+  ([#86](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/86);
+  client-side; python-sdk#301): text that is not JSON is refused in
+  Python's `json` words (`Invalid JSON for --details: Expecting value:
+  line 1 column 7 (char 6)`), and a `NaN` or infinity in the object, which
+  JavaScript's parser refused as invalid JSON (exit 2), is now `Out of
+  range float values are not JSON compliant: nan` (exit 1), Python's line,
+  rather than ever being sent as `null`.
+- **`update-memory --merge-details` is one call**
+  ([#87](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/87);
+  memory-cloud v0.140.0+, memory-cloud#2585; python-sdk#302, continuing
+  python-sdk#247 /
+  [#70](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/70)):
+  `--details` / `--location` go out as one `details_patch`, so unmentioned
+  keys are kept without a read and a `null` value now deletes a key. The
+  `reference()` read-then-write round-trip is kept only for a server that
+  refuses the patch (0.82.0–0.139.x: nothing is written, then the merged
+  object is sent) or ignores it (before 0.82.0: confirmed with `GET
+  /api/v1/system/info` before the second write; exit 1 naming each of
+  `--add-tag` / `--remove-tag` / `--expected-version` / `--observed-at`
+  that server ignored). A reply without `version` from 0.82.0+, or a probe
+  that fails, writes nothing more and exits 1.
+- **`sleep history` and `sleep report` print the Python CLI's dump**
+  ([#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  client-side, every server; python-sdk#299): `history` prints
+  `{"reports": […]}` rather than the bare list, and both read each report
+  through the Python SDK's model — its keys in its order, its defaults
+  filled, unknown keys dropped, timestamps in pydantic's form, with the
+  known float-literal difference of the MCP text path (`1.0` in a
+  `details` / `*_result` object prints `1`) — so a report the model
+  refuses exits 1 with the `KaguraResponseError` text. `getSleepHistory` /
+  `getSleepReport` still return the body as the server sent it.
+- **The MCP URL's query is read once, and as the server reads it**
+  ([#91](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/91);
+  `?profile=` / `?tools=` memory-cloud v0.73.0+, memory-cloud#1601,
+  `?guardrails=` v0.74.0+, memory-cloud#1621, `?add_tools=` v0.129.0+,
+  memory-cloud#2354; python-sdk#311).
+  - `setup *`, `kagura-memory-mcp` and the Claude plugin's `server_url`
+    share one reader. `guardrails=off` is the first value, trimmed as
+    Python and memory-cloud trim it.
+  - Each command splits its URL once, for its warnings and the URL it
+    writes.
+  - A REST error response's body is decoded once, however many of the
+    client's error hooks read it (Python's `ErrorBody`). Errors are
+    unchanged.
+- **`ResourceListItem.context_id` / `context_name` may be `null`**
+  ([#80](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/80);
+  memory-cloud v0.94.0+, memory-cloud#1863; python-sdk#297, fixed there in
+  0.42.2): both fields are now typed `?: string | null` instead of
+  `string` (optional, as Python's `str | None = None`), so TypeScript
+  callers that read them need a null check. This lets
+  `ResourceClient.listResources()` read the row memory-cloud v0.94.0+
+  sends for a resource whose contexts were all deleted while it still
+  holds active tokens: both fields `null`, so those tokens stay reachable,
+  and revoking the last token removes the row. Before, one such row made
+  `listResources()` throw `KaguraResponseError` and `kagura-memory
+  resource list` exit 1; now the row is returned and printed as the Python
+  CLI prints it. For such a resource `getResourceImpact` and
+  `getIndexerStatus` throw `KaguraNotFoundError` and `getResourceSchema`
+  returns `null` (the server's 404); `listResourceEvents` still returns
+  its events. Older servers never send the row.
+- **A numeric-string id now stays a string**
+  ([#102](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/102);
+  memory-cloud v0.89.0+, memory-cloud#1008; the Python SDK 0.42.1+'s
+  `int | str`, python-sdk#294; behaviour change from 0.14.1): 0.14.1 read
+  a wire `"7"` in an `int | str` id as the integer `7` (its note said
+  `"7"` still reads `7`); it is now the string `"7"`, as pydantic's
+  smart-mode union keeps it. This reaches `WorkspaceClient.mintMemberKey`'s
+  `id` and the CLI's `--json` / model dumps: `resource tokens
+  list|create|update` (`id`), `resource setup` (`token_id`), `auth
+  list-keys --json` and `workspace invite list --json` (`id`). Only a
+  reply that sends an id as a numeric string changes: an integer still
+  reads as the integer, and `ResourceClient`'s methods return the body as
+  it arrived, as before.
+- **`SleepReport.llm_call_failures` is typed `number | null`**
+  (`@default null`;
+  [#85](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/85);
+  memory-cloud before v0.43.0; python-sdk#299): servers older than v0.43.0
+  send `null` or nothing, and the Python model is `int | None = None`; it
+  was typed `number` with `@default 0`.
+- **README parity target**
+  ([#93](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/93)):
+  the Python SDK and CLI 0.44.0, checked against memory-cloud up to
+  v0.143.0, where it was 0.42.0 and v0.77.0; `MIN_SERVER_VERSION` stays
+  0.75.0 (the decision and the reasons are in `docs/compatibility.md`).
+- **Node.js 18 is no longer supported; the floor is 20.19.0**
+  ([#76](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/76);
+  breaking; no server or python-sdk counterpart). `engines.node` and the
+  Claude Desktop bundle's `compatibility.runtimes.node` are `>=20.19.0`,
+  the floor `age-encryption`'s `@noble/*` dependencies already declare,
+  so installing the optional crypto peer no longer warns `EBADENGINE`.
+  Node 18 reached end of life on 2025-04-30; stay on 0.14.x if you cannot
+  leave it. The Node 18 WebCrypto shim goes with it: `encrypt`,
+  `generateKeypair` and everything built on them no longer install
+  `node:crypto`'s `webcrypto` as `globalThis.crypto` when the global is
+  missing, since every supported Node provides it, and `npm run
+  test:no-webcrypto` (the suite with the global deleted) is removed. On a
+  runtime without the global (Node 18 with the engines warning ignored),
+  `encrypt`, `decrypt`, `generateKeypair` and `recipientFromIdentity` now
+  throw a `KaguraCryptoError` that names the running Node and the 20.19.0
+  floor. They no longer fail inside `@noble` with
+  `crypto.getRandomValues must be defined`. CI tests Node 20, 22 and 24,
+  and runs the bundle's smoke test on exactly 20.19.0. The test toolchain
+  moves to vitest 4.1 (vite 8), replacing vitest 3.2 and the vite 6 pin,
+  which fixes GHSA-82fw-gwwq-j7x9 (Dependabot alerts 11 and 12, dismissed
+  until now) and GHSA-qxg6-89mg-rqv8; the open vite, tinypool,
+  source-map-js and node-forge (now 1.4.3, via `@anthropic-ai/mcpb`)
+  advisories clear with it. tsup now targets `node20`, which emits the
+  same bytes as `node18` did. Apart from the shim and the new runtime
+  check, the published code is unchanged. Upgrading: Node.js >= 20.19.0
+  is required; on Node 18, stay on `kagura-memory@0.14`.
+
+### Fixed
+
+- **Sleep report and rollback work again on memory-cloud v0.82.0+**
+  ([#79](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/79);
+  memory-cloud#1742; python-sdk#296, fixed in the Python SDK 0.42.2): from
+  v0.82.0 every MCP tool refuses an argument its schema does not declare,
+  and no memory-cloud release declares `context_id` on `get_sleep_report`
+  or `rollback_sleep_run`. `KaguraClient.getSleepReport()`,
+  `rollbackSleepRun()` and `kagura-memory sleep report|rollback` therefore
+  failed every call there with `invalid_argument`. They now send
+  `report_id` only, which works on every server. `contextId` is ignored
+  and now optional, so calls that pass it still compile. The CLI's
+  `CONTEXT_ID` stays a required positional and is ignored too: the server
+  finds the run by `report_id`. From v0.126.0 (memory-cloud#2315) the
+  server authorizes against the report's own context: read access for a
+  report, and the editor or owner role for a rollback
+  (`KaguraPermissionError` without it; a workspace viewer cannot roll
+  back). A report in a context the caller cannot read throws
+  `KaguraNotFoundError`, like a missing one. From v0.140.0
+  (memory-cloud#2547) a Memory Analysis report (`source: "analysis"`) is
+  refused by `rollbackSleepRun` with `analysis_report`, a plain
+  `KaguraError`.
+- **One locked refresh path; an unreadable credentials file is never
+  rewritten; a failed save is typed**
+  ([#92](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/92);
+  client-side, every server; memory-cloud v0.79.0 single-use refresh
+  tokens, memory-cloud#1686; python-sdk#313): `KaguraOAuth` (every client
+  and `kagura-memory-mcp`), `refresh()` and `kagura-memory auth refresh` /
+  `auth token` refresh through one path that re-reads `credentials.json`
+  under the cross-process lock and uses a profile another process already
+  rotated (to a token that has not expired) without sending anything;
+  `auth refresh` then prints `✓ Profile 'NAME' was already refreshed by
+  another process.` (exit 0), and after a refresh of its own Python's
+  `✓ Refreshed profile 'NAME'.` with `Scope:` and `Expires:` lines
+  (replacing `Refreshed. Expires … Scope: …`). A `credentials.json` that
+  exists but cannot be read or parsed — a dangling symlink and an
+  unsearchable directory included — is refused with `KaguraAuthError`
+  `Cannot update <path>: <reason>.` before any refresh request or write —
+  by a refresh (under the lock), `updateProfile` (so `login()`'s save),
+  `setDefaultProfile`, `deleteProfile` and `kagura-memory-mcp` (at
+  startup, before any browser login) — instead of being rewritten with
+  one profile; a missing file is still "no profile", and
+  `loadCredentialsFile()`, `refresh()`, `auth refresh` and `auth token`
+  still read an unreadable file as holding no profile first, as Python's
+  do (now also a non-UTF-8 one). When the server rotated but the profile
+  cannot be saved, the refresh throws `KaguraAuthError` `Refreshed profile
+  'NAME', but could not save it to <path>: …` saying the refresh token on
+  file is used up and to run `kagura-memory auth login`; the process keeps
+  the rotated token in memory and uses it for its next refresh,
+  `kagura-memory-mcp` serves the request with it and logs the message
+  once, `auth refresh` / `auth token` exit 1 and `auth token` prints no
+  token. A widening `--scope` whose device-flow grant cannot be saved
+  throws the same kind of error (`Got consent for scope 'S' on profile
+  'NAME', but could not save it to <path>: …`) and keeps the grant in
+  memory. `refresh()`'s missing-profile error now reads `No profile named
+  'NAME'.\n  Run: kagura-memory auth login`, and `auth token`'s
+  missing-profile line starts with `Error: `, as Python's does.
+- **`auth logout` revokes the refresh token**
+  ([#81](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/81);
+  memory-cloud v0.82.0+, memory-cloud#1741; python-sdk#312, the Python CLI
+  0.43.0's `_revocable_token`): `kagura-memory auth logout` (one profile
+  or `--all`) now revokes each profile's refresh token and, when the
+  profile has both, the access token too, so servers before 0.82.0 also
+  lose the access token at logout. Up to 0.14.1 logout revoked only the
+  access token, which left the refresh token valid on the server, so a
+  logged-out profile could still be refreshed. Each request to
+  `/api/v1/oauth/revoke` carries the profile's `client_id`. One 30 s
+  bound covers a profile's requests, and the revoke stays best effort. On
+  memory-cloud 0.82.0+ revoking the refresh token revokes its access
+  token too, and the second request changes nothing. The Python CLI sends
+  only the refresh token. A profile with no token sends nothing. The
+  warning printed when a revoke fails now has Python 0.43.0's wording:
+  `Its tokens may stay valid on the server until they expire.`
+- **`setup claude --context-id NAME`**
+  ([#90](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/90);
+  memory-cloud v0.73.0 `name_contains` / v0.82.0 cursor paging,
+  memory-cloud#1743; python-sdk#309): a context name from `-c`,
+  `.kagura.json`'s `context_id` or `KAGURA_CONTEXT_ID` is now resolved to
+  its id through `list_contexts` on the setup key and URL, by exact name
+  on every page (`name_contains` and the cursor when the first page says
+  `has_more`, at most 50 pages), and the id is written. Before, setup made
+  no connection and wrote the name into `.kagura.json`, which every later
+  command refused, since the server takes only a UUID. Any value but a
+  dashed UUID, up to 100 characters, is looked up, a dashless 32-hex name
+  included, and the value is trimmed; it is matched by id or exact name
+  on the first page, then by exact name on every page. A context that is
+  only whitespace stops setup with Python's `Invalid context_id: '' —
+  must be alphanumeric, hyphens, or underscores only` (exit 1), before
+  any request or write; an empty `--context-id` counts as none. A value
+  no page matches, or a longer one, is still written as given, after
+  Python's stderr warning `Warning: no context named 'NAME' is visible to
+  this credential; using it as a raw context id.` when it is not a UUID.
+  Paging that does not add up (`Setup failed: …`) and a failed request
+  (`Authentication failed: …` / `Cannot connect to …` with Python's
+  hints, else `Connection failed: …` on the first page) stop setup (exit
+  1) before anything is written or run, as does a blank key: the lookup
+  never authenticates with any credential but the setup key. A dashed
+  UUID or no context still sends no request.
+- **`setup codex|hermes|openclaw --dry-run`**
+  ([#90](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/90);
+  client-side, no request; python-sdk#309): a `--context-id` UUID not in
+  the dashed form (dashless, `{braced}`, `urn:uuid:`) shows as `<UUID of
+  context VALUE>`, as the Python CLI 0.44.0 shows it, in the AGENTS.md
+  line and in the Codex entry's `?guardrails=` URL. A real run still
+  writes the canonical UUID, and these setups still take only a UUID
+  (`-c` NAME is exit 2).
+- **`setup claude` names a dropped `?tools=` allowlist**
+  ([#91](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/91);
+  `?tools=` memory-cloud v0.73.0+, memory-cloud#1601; python-sdk#311). A
+  re-run whose `--mcp-url` leaves out the replaced entry's `?tools=`
+  allowlist now says so, as the Python CLI 0.44.0 does: `Note: the
+  previous project-scope entry also had ?tools=recall,remember, which
+  this run left out; re-run with it (?tools= on the MCP URL) to keep it.`
+- **A padded `?guardrails=off` reads as the server reads it**
+  ([#91](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/91);
+  `?guardrails=` memory-cloud v0.74.0+, memory-cloud#1621;
+  python-sdk#311). `setup claude` decides the plugin's `server_url`
+  (`…?guardrails=off`) and whether to print the "re-run with
+  `--guardrails off`" note. It now reads `?guardrails=%1Foff` (a control
+  character, which Python's `str.strip` removes) as `off`, and
+  `?guardrails=%EF%BB%BFoff` (a U+FEFF, which it keeps) as not `off`, as
+  memory-cloud does.
+- **The Claude plugin's `server_url` lower-cases the scheme**
+  ([#91](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/91);
+  client-side; python-sdk#311). For an `--mcp-url` of
+  `HTTPS://X.test/mcp…`, `setup claude`'s plugin note now names
+  `https://X.test/mcp`, as the Python CLI 0.44.0 (`urlunsplit`) and the
+  written entry do.
+- **Member API key and invitation ids are read as `int | str`**
+  ([#102](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/102);
+  memory-cloud v0.89.0+, memory-cloud#1008; python-sdk#294): this corrects
+  the 0.14.1 note, which said the readers accept either. Two of them still
+  read `id` as an integer, so `WorkspaceClient.mintMemberKey` threw its
+  salvage error and `auth create-key`, `auth list-keys`, `workspace invite
+  create` and `workspace invite list` exited 1 on every v0.89.0+ reply
+  (`id: Input should be a valid integer, unable to parse string as an
+  integer`). They now read an `akey_…` / `winv_…` id as the string and an
+  older server's integer as the integer; a value neither an int nor a
+  string is refused under `id.int` and `id.str`, as pydantic names them.
+  `auth list-keys` and `workspace invite list` widen the ID column to the
+  longest id (6 at least), as the Python CLI does.
+
 ## [0.14.1] - 2026-10-02
 
 ### Changed
@@ -26,6 +725,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accept the string id as typed, and their messages print the id without
   the `#` (`Revoked key akey_… of USER`). Upgrade before the server moves
   to v0.89.0.
+
+> **Correction (0.15.0,
+> [#102](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/102)).**
+> The readers did not all accept either id. The member API key reader
+> (`WorkspaceClient.mintMemberKey`, `auth create-key`, `auth list-keys`)
+> and the CLI's invitation reader (`workspace invite create`, `workspace
+> invite list`) still read `id` as an integer, so they refused every
+> `akey_…` / `winv_…` id a v0.89.0+ server sends; 0.15.0 fixes them. And a
+> numeric-string id such as `"7"` no longer reads `7`: from 0.15.0 it stays
+> the string `"7"`, as the Python SDK's `int | str` keeps it. See 0.15.0's
+> Fixed and Changed entries.
 
 ## [0.14.0] - 2026-09-28
 
