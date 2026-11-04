@@ -89,9 +89,24 @@ let agePromise: Promise<AgeModule> | null = null;
 /**
  * Load `age-encryption` on first use.
  *
- * @throws KaguraCryptoError if the optional peer dependency is not installed.
+ * @throws KaguraCryptoError if the runtime has no WebCrypto global, or if
+ *   the optional peer dependency is not installed.
  */
 async function loadAge(): Promise<AgeModule> {
+  // `engines.node` is advisory: npm only warns (EBADENGINE), so Node 18 can
+  // still load this SDK. WebCrypto became a global in Node 19, and without
+  // it `@noble/*` fails every encrypt and keygen with a bare "crypto.
+  // getRandomValues must be defined". 0.14.x installed `node:crypto`'s
+  // `webcrypto` here; since #76 such a runtime is refused by name instead.
+  // Checked before the import, so it is never reported as "not installed".
+  if (globalThis.crypto === undefined) {
+    throw new KaguraCryptoError(
+      "The secret store needs the WebCrypto global (globalThis.crypto), which " +
+        `this runtime (Node.js ${process.version}) does not provide. ` +
+        "kagura-memory requires Node.js >= 20.19.0.\n" +
+        "  Upgrade Node.js, or stay on kagura-memory 0.14.x on Node 18.",
+    );
+  }
   agePromise ??= (async () => {
     try {
       return (await import("age-encryption")) as AgeModule;

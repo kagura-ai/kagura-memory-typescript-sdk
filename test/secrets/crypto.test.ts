@@ -8,7 +8,7 @@
 
 import { inspect } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KaguraCryptoError } from "../../src/errors.js";
 import {
@@ -308,5 +308,78 @@ describe("fingerprint", () => {
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
     expect(fingerprint(TEST_RECIPIENT)).toHaveLength(64);
+  });
+});
+
+describe("a runtime without the WebCrypto global", () => {
+  // engines.node only warns, so Node 18 can still load the SDK. There, with
+  // no globalThis.crypto, @noble failed every encrypt and keygen with a bare
+  // "crypto.getRandomValues must be defined". The SDK no longer installs
+  // the global (#76), so it names the unsupported runtime instead.
+  it("refuses every age call with a KaguraCryptoError naming the Node floor", async () => {
+    const { recipient } = await generateKeypair();
+    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    delete (globalThis as { crypto?: unknown }).crypto;
+    try {
+      expect(globalThis.crypto).toBeUndefined();
+      const calls: Array<[string, () => Promise<unknown>]> = [
+        ["generateKeypair", () => generateKeypair()],
+        ["encrypt", () => encrypt(new TextEncoder().encode("x"), [recipient])],
+        ["decrypt", () => decrypt(PYRAGE_ARMORED, TEST_IDENTITY)],
+        ["recipientFromIdentity", () => recipientFromIdentity(TEST_IDENTITY)],
+      ];
+      for (const [name, call] of calls) {
+        const err = await call().then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(err, name).toBeInstanceOf(KaguraCryptoError);
+        const message = (err as Error).message;
+        expect(message, name).toContain("needs the WebCrypto global (globalThis.crypto)");
+        expect(message, name).toContain(`(Node.js ${process.version})`);
+        expect(message, name).toContain("requires Node.js >= 20.19.0");
+        // A runtime problem, not the missing-package one: different fixes.
+        expect(message, name).not.toContain("npm install age-encryption");
+      }
+    } finally {
+      if (original !== undefined) Object.defineProperty(globalThis, "crypto", original);
+    }
+    expect(typeof globalThis.crypto.getRandomValues).toBe("function");
+  });
+});
+
+describe("loading age-encryption", () => {
+  afterEach(() => {
+    vi.doUnmock("age-encryption");
+    vi.resetModules();
+  });
+
+  it("retries after a failed import instead of caching the rejection", async () => {
+    // A fresh module instance, so no earlier test has memoized the package.
+    vi.resetModules();
+    vi.doMock("age-encryption", () => {
+      throw new Error("simulated: Cannot find package 'age-encryption'");
+    });
+    const fresh = await import("../../src/secrets/crypto.js");
+    // The errors module `fresh` loaded, for an instanceof that can hold.
+    const errors = await import("../../src/errors.js");
+
+    const first = await fresh.generateKeypair().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(first).toBeInstanceOf(errors.KaguraCryptoError);
+    expect((first as Error).message).toContain("npm install age-encryption");
+    // The simulated failure is in the cause chain (vitest wraps a factory's
+    // throw in an error of its own, so not necessarily the direct cause).
+    const causes: string[] = [];
+    for (let e: unknown = first; e instanceof Error; e = e.cause) causes.push(e.message);
+    expect(causes).toContain("simulated: Cannot find package 'age-encryption'");
+
+    // Installed mid-process: the same module instance must load it now.
+    vi.doUnmock("age-encryption");
+    const { identity, recipient } = await fresh.generateKeypair();
+    expect(recipient).toMatch(RECIPIENT_RE);
+    expect(await fresh.recipientFromIdentity(identity)).toBe(recipient);
   });
 });
