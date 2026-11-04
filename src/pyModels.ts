@@ -363,8 +363,9 @@ const RESOURCE_LIST_ITEM: Model = {
   name: "ResourceListItem",
   fields: [
     required("resource_id", "str"),
-    required("context_id", "str"),
-    required("context_name", "str"),
+    // `str | None = None` (Python SDK 0.42.2): null on a context-less row, see ResourceListItem.
+    optional("context_id", nullable("str")),
+    optional("context_name", nullable("str")),
     optional("context_display_name", nullable("str")),
     required("token_count", "int"),
     required("memory_count", "int"),

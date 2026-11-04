@@ -157,9 +157,10 @@ describe("kagura-memory sleep", () => {
     expect(h.err.join("\n")).toContain("'abc' is not a valid integer range.");
   });
 
-  it("sends the report id only: the server declares no context_id on get_sleep_report", async () => {
-    // Until #85 (and #79) this sent `context_id` too, which memory-cloud
-    // v0.82.0+ refuses with invalid_argument; the positional stays.
+  it("sends REPORT_ID only; CONTEXT_ID is required and not sent (#79)", async () => {
+    // memory-cloud v0.82.0+ refuses the context_id 0.14.1 sent here. The
+    // reply is a whole report: since #85 `sleep report` reads it through
+    // the Python SDK's SleepReportDetail model, as the Python CLI does.
     const h = harness();
     h.server.toolResults.get_sleep_report = {
       status: "success",
@@ -180,6 +181,29 @@ describe("kagura-memory sleep", () => {
     };
     expect(await runCli(["sleep", "report", "ctx-1", "r-1"], h.deps)).toBe(0);
     expect(h.server.toolCallArgs(0)).toEqual({ report_id: "r-1" });
+  });
+
+  it("still requires CONTEXT_ID, as the Python CLI 0.42.2 does", async () => {
+    const { code, h } = await wire(["sleep", "report", "r-1"]);
+    expect(code).toBe(2);
+    expect(h.err.join("\n")).toContain("Missing argument 'REPORT_ID'.");
+    expect(h.server.requests).toEqual([]);
+  });
+
+  it("says in --help that CONTEXT_ID is not sent", async () => {
+    // `kagura sleep report --help` of the Python CLI 0.44.0 in a terminal
+    // (click wraps at 78 columns); its paragraph goes on, on the same line,
+    // with the sentence about --actions-cursor (#85).
+    const h = harness();
+    expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toContain(
+      "\n\n" +
+        "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+        "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
+        "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
+        "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
+        "  cursor.\n\n",
+    );
   });
 });
 
@@ -251,6 +275,14 @@ describe("kagura-memory sleep rollback", () => {
     };
     expect(await runCli(["sleep", "rollback", "ctx-1", "r-1"], h.deps)).toBe(0);
     expect(h.prompts).toEqual(["Roll back sleep run r-1 (7 actions)?"]);
+    // Neither call sends CONTEXT_ID: memory-cloud v0.82.0+ refuses it (#79).
+    const toolCalls = h.server.requests
+      .filter((r) => r.body?.method === "tools/call")
+      .map((r) => r.body?.params);
+    expect(toolCalls).toEqual([
+      { name: "get_sleep_report", arguments: { report_id: "r-1" } },
+      { name: "rollback_sleep_run", arguments: { report_id: "r-1" } },
+    ]);
   });
 
   it("makes exactly one round trip with --yes", async () => {
@@ -259,7 +291,20 @@ describe("kagura-memory sleep rollback", () => {
     expect(await runCli(["sleep", "rollback", "ctx-1", "r-1", "--yes"], h.deps)).toBe(0);
     const toolCalls = h.server.requests.filter((r) => r.body?.method === "tools/call");
     expect(toolCalls).toHaveLength(1);
-    expect(h.server.toolCallArgs(0)).toMatchObject({ context_id: "ctx-1", report_id: "r-1" });
+    expect(h.server.toolCallArgs(0)).toEqual({ report_id: "r-1" });
+  });
+
+  it("says in --help that CONTEXT_ID is not sent", async () => {
+    const h = harness();
+    // Byte for byte the paragraph of the Python CLI 0.44.0's
+    // `kagura sleep rollback --help` in a terminal (click wraps at 78 columns).
+    expect(await runCli(["sleep", "rollback", "--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toContain(
+      "\n\n" +
+        "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+        "  finds the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner\n" +
+        "  role on the run's own context).\n\n",
+    );
   });
 
   it("does not roll back when the prompt is declined", async () => {
@@ -270,5 +315,114 @@ describe("kagura-memory sleep rollback", () => {
       .filter((r) => r.body?.method === "tools/call")
       .map((r) => (r.body?.params as { name: string }).name);
     expect(toolNames).toEqual(["get_sleep_report"]);
+  });
+});
+
+/**
+ * `sleep report` / `sleep rollback` print what the Python CLI 0.42.2 prints
+ * for the same tool reply (#79): each case is the reply, the arguments the
+ * Python CLI sent, and its stdout, stderr and exit code, recorded from the
+ * Python CLI 0.42.2 (click 8.3.3, pydantic 2.13.4) with `KaguraClient._call_tool`
+ * answering these exact objects. The success replies carry the Python
+ * model's keys in its order: this bin prints the reply as the server sent
+ * it, where Python prints the model (`model_dump`), so only such a reply
+ * prints the same in both.
+ *
+ * The Python CLI 0.44.0, given the same replies, prints the two
+ * `report_not_found` cases identically and the others differently, for
+ * gaps this fix leaves alone: its dumps add the model fields of 0.43.0
+ * (`source`, `details_omitted`, `details_total_chars`, `actions_has_more`,
+ * `actions_next_cursor`, `note`; `chunks_requeued`, `points_requeued`;
+ * #85), and its stderr adds a `  Help: <help>` line for an envelope that
+ * carries `help` (python-sdk#299). #85 closed the `sleep report` part:
+ * the first case's stdout is the Python CLI 0.44.0's dump.
+ */
+interface SleepCase {
+  name: string;
+  argv: string[];
+  /** Tool name → the reply object. */
+  results: Record<string, unknown>;
+  /** `[tool, arguments]` of every tool call the Python CLI made. */
+  calls: Array<[string, Record<string, unknown>]>;
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+const PYTHON_SLEEP_CASES: SleepCase[] = [
+  {
+    name: "report: a reply with the model's keys in its order",
+    argv: ["sleep","report","ctx-1","11111111-2222-4333-8444-555555555555"],
+    results: {"get_sleep_report":{"status":"success","report":{"report_id":"11111111-2222-4333-8444-555555555555","context_id":"c0ffee00-0000-4000-8000-000000000001","status":"completed","started_at":"2026-06-01T00:00:00Z","completed_at":"2026-06-01T00:05:00Z","memories_processed":12,"edges_created":3,"memories_merged":1,"memories_promoted":0,"llm_calls_made":4,"llm_tokens_used":900,"llm_call_failures":null,"memories_flagged":0,"embedding_calls_made":2,"error_message":null,"edge_discovery_result":{"edges":3},"dedup_result":null,"merge_retention_result":null,"importance_result":null,"consolidation_result":null,"reindex_result":null},"actions":[{"id":"a1","phase":"edge_discovery","action_type":"create_edge","memory_id":"m1","target_id":"m2","details":{"similarity":0.91},"created_at":"2026-06-01T00:01:00Z"}],"action_count":1}},
+    calls: [["get_sleep_report",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
+    code: 0,
+    // Since #85 `sleep report` prints the Python SDK's SleepReportDetail
+    // dump, so this is the Python CLI 0.44.0's stdout for the reply (0.42.2
+    // printed it without the 0.43.0 model fields); recorded in
+    // sleepDumps.test.ts ("report: #79 reply, the 0.43.0 model fields filled").
+    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_id\": \"c0ffee00-0000-4000-8000-000000000001\",\n  \"status\": \"completed\",\n  \"started_at\": \"2026-06-01T00:00:00Z\",\n  \"completed_at\": \"2026-06-01T00:05:00Z\",\n  \"memories_processed\": 12,\n  \"edges_created\": 3,\n  \"memories_merged\": 1,\n  \"memories_promoted\": 0,\n  \"llm_calls_made\": 4,\n  \"llm_tokens_used\": 900,\n  \"llm_call_failures\": null,\n  \"source\": null,\n  \"memories_flagged\": 0,\n  \"embedding_calls_made\": 2,\n  \"error_message\": null,\n  \"edge_discovery_result\": {\n    \"edges\": 3\n  },\n  \"dedup_result\": null,\n  \"merge_retention_result\": null,\n  \"importance_result\": null,\n  \"consolidation_result\": null,\n  \"reindex_result\": null,\n  \"actions\": [\n    {\n      \"id\": \"a1\",\n      \"phase\": \"edge_discovery\",\n      \"action_type\": \"create_edge\",\n      \"memory_id\": \"m1\",\n      \"target_id\": \"m2\",\n      \"details\": {\n        \"similarity\": 0.91\n      },\n      \"created_at\": \"2026-06-01T00:01:00Z\",\n      \"details_omitted\": false,\n      \"details_total_chars\": null\n    }\n  ],\n  \"action_count\": 1,\n  \"actions_has_more\": false,\n  \"actions_next_cursor\": null,\n  \"note\": null\n}\n",
+    stderr: "",
+  },
+  {
+    name: "report: report_not_found",
+    argv: ["sleep","report","ctx-1","11111111-2222-4333-8444-555555555555"],
+    results: {"get_sleep_report":{"status":"error","error":"report_not_found","message":"Sleep report 11111111-2222-4333-8444-555555555555 not found or not owned by you."}},
+    calls: [["get_sleep_report",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
+    code: 1,
+    stdout: "",
+    stderr: "Error: get_sleep_report: Sleep report 11111111-2222-4333-8444-555555555555 not found or not owned by you.\n",
+  },
+  {
+    name: "rollback --yes: a reply with the model's keys in its order",
+    argv: ["sleep","rollback","ctx-1","11111111-2222-4333-8444-555555555555","--yes"],
+    results: {"rollback_sleep_run":{"report_id":"11111111-2222-4333-8444-555555555555","status":"rolled_back","rollback_summary":{"edges_deleted":3,"merges_reversed":1,"merges_unreversible":0,"importance_restored":0,"promotions_reversed":0,"importance_kept":0,"promotions_kept":0,"archives_restored":0,"errors":[]}}},
+    calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
+    code: 0,
+    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 1,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"errors\": []\n  }\n}\n",
+    stderr: "",
+  },
+  {
+    name: "rollback --yes: report_not_found",
+    argv: ["sleep","rollback","ctx-1","11111111-2222-4333-8444-555555555555","-y"],
+    results: {"rollback_sleep_run":{"status":"error","error":"report_not_found","message":"Sleep report 11111111-2222-4333-8444-555555555555 not found or not owned by you."}},
+    calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
+    code: 1,
+    stdout: "",
+    stderr: "Error: rollback_sleep_run: Sleep report 11111111-2222-4333-8444-555555555555 not found or not owned by you.\n",
+  },
+  {
+    name: "rollback --yes: analysis_report",
+    argv: ["sleep","rollback","ctx-1","11111111-2222-4333-8444-555555555555","--yes"],
+    results: {"rollback_sleep_run":{"status":"error","error":"analysis_report","message":"Report 11111111-2222-4333-8444-555555555555 is an analysis report: it records the LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.","help":"get_sleep_history lists the context's Sleep runs (source 'sleep', its default); roll back one of those."}},
+    calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
+    code: 1,
+    stdout: "",
+    stderr: "Error: rollback_sleep_run failed (analysis_report): Report 11111111-2222-4333-8444-555555555555 is an analysis report: it records the LLM spend of a Memory Analysis run and has no Sleep actions, so there is nothing to roll back.\n",
+  },
+  {
+    name: "rollback --yes: permission_denied",
+    argv: ["sleep","rollback","ctx-1","11111111-2222-4333-8444-555555555555","--yes"],
+    results: {"rollback_sleep_run":{"status":"error","error":"permission_denied","message":"Cannot roll back sleep runs: you need the editor or owner role on this context.","your_role":"viewer","required_role":"editor","help":"Ask a context owner for the editor role."}},
+    calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
+    code: 1,
+    stdout: "",
+    stderr: "Error: rollback_sleep_run failed (permission_denied): Cannot roll back sleep runs: you need the editor or owner role on this context.\n",
+  },
+];
+
+describe("kagura-memory sleep report|rollback, byte for byte the Python CLI 0.42.2's (#79)", () => {
+  it.each(PYTHON_SLEEP_CASES.map((c) => [c.name, c] as const))("%s", async (_name, c) => {
+    const h = harness();
+    h.server.toolResults = { ...c.results };
+    expect(await runCli(c.argv, h.deps)).toBe(c.code);
+    expect(h.out.map((line) => `${line}\n`).join("")).toBe(c.stdout);
+    expect(h.err.map((line) => `${line}\n`).join("")).toBe(c.stderr);
+    const calls = h.server.requests
+      .filter((r) => r.body?.method === "tools/call")
+      .map((r) => {
+        const params = r.body?.params as { name: string; arguments: Record<string, unknown> };
+        return [params.name, params.arguments];
+      });
+    expect(calls).toEqual(c.calls);
   });
 });

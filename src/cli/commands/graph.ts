@@ -252,17 +252,33 @@ const ACTIONS_LIMIT: FlagSpec = {
 };
 
 // CONTEXT_ID stays a required positional, as in the Python CLI 0.42.2+, so
-// existing scripts keep working; getSleepReport ignores it, since
-// memory-cloud v0.82.0+ refuses a context_id on this tool (#79). The
-// paragraph is the Python CLI 0.44.0's, wrapped at 78 columns as click
+// existing scripts keep working; getSleepReport / rollbackSleepRun ignore
+// it, since memory-cloud v0.82.0+ refuses a context_id on these tools (#79).
+
+/**
+ * The `--help` paragraph `sleep report` and `sleep rollback` share with the
+ * Python CLI 0.42.2+: CONTEXT_ID is not sent. `access` ends the sentence
+ * with what the server checks on the run's context. It comes already
+ * wrapped the way click wraps the whole paragraph in a terminal (78
+ * columns), since its words decide where the second line breaks. For
+ * `sleep report` the Python CLI 0.43.0+ goes on with a sentence about
+ * --actions-cursor on the same line (#85).
+ */
+function contextIdNotSent(access: string): string {
+  return (
+    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+    `  finds the run by REPORT_ID (memory-cloud 0.126.0+ ${access}`
+  );
+}
+
+// The paragraph is the Python CLI 0.44.0's, wrapped at 78 columns as click
 // wraps it in a terminal (`--actions-` / `cursor.` split included).
 const sleepReport: Command = {
   summary: "Get a detailed Sleep Maintenance report including audit log.",
   args: "CONTEXT_ID REPORT_ID",
   description:
-    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
-    "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
-    "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
+    contextIdNotSent("checks read access on the\n  run's own context).") +
+    " From memory-cloud 0.82.0 the audit log comes a page at a\n" +
     "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
     "  cursor.",
   spec: { flags: [ACTIONS_CURSOR, ACTIONS_LIMIT] },
@@ -301,7 +317,8 @@ const sleepRollback: Command = {
   description:
     "  Reverses edge creation, memory merges and importance updates made by\n" +
     "  the run. Without --yes the report is fetched first so the prompt can\n" +
-    "  say what is about to be undone.",
+    "  say what is about to be undone.\n\n" +
+    contextIdNotSent("needs the editor or owner\n  role on the run's own context)."),
   spec: { flags: [{ ...YES, help: "Skip confirmation prompt." }] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");

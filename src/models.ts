@@ -751,11 +751,25 @@ export interface ResourceSchemaResponse {
 // Resource list (workspace-scoped, server v0.14+)
 // ============================================================================
 
-/** Single resource entry in the workspace resource list. */
+/**
+ * Single resource entry in the workspace resource list.
+ *
+ * `context_id` and `context_name` are `null` for a resource whose contexts
+ * have all been deleted while it still holds active tokens (server
+ * v0.94.0+, kagura-ai/memory-cloud#1863): the server lists such a row only
+ * so those tokens stay reachable (`ResourceClient.listTokens`), and
+ * revoking the resource's last token (`ResourceClient.revokeToken`)
+ * removes the row. `context_display_name` is `null` then too, and whenever
+ * the context has no display name. The server resolves such a resource's
+ * impact, schema and indexer-status reads through a live context, so they
+ * answer 404: `getResourceImpact` and `getIndexerStatus` throw
+ * `KaguraNotFoundError` and `getResourceSchema` returns `null`.
+ * `listResourceEvents` still returns its events.
+ */
 export interface ResourceListItem {
   resource_id: string;
-  context_id: string;
-  context_name: string;
+  context_id?: string | null;
+  context_name?: string | null;
   context_display_name?: string | null;
   token_count: number;
   memory_count: number;
