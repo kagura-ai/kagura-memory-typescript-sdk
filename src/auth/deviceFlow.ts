@@ -24,7 +24,18 @@ import {
   KaguraConnectionError,
   excMessage,
 } from "../errors.js";
-import { extractDetail, retryAfterSeconds, validateHttpsUrl } from "../http.js";
+import {
+  annotateServerError,
+  detailOf,
+  extractDetail,
+  oauthBodyFields,
+  parseJsonBody,
+  retryAfterSeconds,
+  serverErrorFields,
+  serverErrorFieldsOf,
+  validateHttpsUrl,
+} from "../http.js";
+import type { ServerErrorFields } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 
 // OAuth2 endpoint paths under {server}.
@@ -171,6 +182,78 @@ function deviceRateLimitedMessage(headers: Headers, bodyText: string): string {
 }
 
 /**
+ * RFC 6749 §5.2 refusals of `device/authorize` (memory-cloud v0.78.0+,
+ * #1671) and the hint each one gets — the Python CLI's wording.
+ */
+const DEVICE_AUTHORIZE_HINTS = new Map<string, (clientId: string) => string>([
+  ["invalid_client", (clientId) => `Verify the server URL and that '${clientId}' is registered.`],
+  ["invalid_scope", () => "The client is registered without a memory scope; ask the server operator."],
+]);
+
+/** The error codes of RFC 6749 §5.2, which `device/authorize` refuses with (RFC 8628 §3.2). */
+const RFC6749_ERRORS: readonly string[] = [
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+];
+
+/**
+ * The `KaguraAuthError` for an RFC 6749 §5.2 `device/authorize` refusal,
+ * else `null` (Python's `_oauth_refusal`, narrowed).
+ *
+ * memory-cloud v0.78.0+ (#1671) answers `{"error": …,
+ * "error_description": …}`: `invalid_request` (a missing or malformed body
+ * or Content-Type), `invalid_client` (an unknown `client_id`) or
+ * `invalid_scope`. The OAuth `error` becomes the error's `code`; the
+ * description, which RFC 6749 makes optional, goes into its message and
+ * `details`.
+ *
+ * Only an RFC 6749 code, or a body that carries an `error_description`,
+ * is such a refusal. Any other coded body — memory-cloud's REST envelope
+ * `{"error": "HTTP-404", …}` from a server URL with the wrong path, say — is
+ * `null`, so the caller keeps its generic message and its "Verify the
+ * server URL" hint. (Python 0.44.0 reads every coded body as a refusal and
+ * drops that hint for it.)
+ */
+function oauthRefusal(
+  status: number,
+  body: unknown,
+  fields: ServerErrorFields | null,
+  clientId: string,
+): KaguraAuthError | null {
+  if (fields === null) {
+    return null;
+  }
+  const [error, details] = fields;
+  if (!RFC6749_ERRORS.includes(error) && typeof details.error_description !== "string") {
+    return null;
+  }
+  let message = `Device authorization failed (HTTP ${status} ${error})`;
+  const description = detailOf(body);
+  if (description) {
+    message += `: ${description}`;
+  }
+  const hint = DEVICE_AUTHORIZE_HINTS.get(error);
+  if (hint !== undefined) {
+    message += `\n  ${hint(clientId)}`;
+  }
+  return annotateServerError(new KaguraAuthError(message), error, details);
+}
+
+/**
+ * `err` with the code and fields of `bodyText` when it names an error code
+ * (a JSON-RPC `data.error`, a REST envelope), else as it is: an OAuth
+ * endpoint's answer with no OAuth `error` field.
+ */
+function withBodyFields<E extends KaguraAuthError>(err: E, bodyText: string): E {
+  const fields = serverErrorFields(bodyText);
+  return fields === null ? err : annotateServerError(err, fields[0], fields[1]);
+}
+
+/**
  * Build a `TokenResponse` from a 200 `/oauth/token/` body.
  *
  * `expiresAt` is computed from `expires_in` at receipt time so laptop sleep
@@ -207,7 +290,11 @@ function tokenResponseFromBody(bodyText: string, status: number): TokenResponse 
  *
  * @throws KaguraAuthError the server refused the request. A 429
  *   (memory-cloud v0.76.0+ limits this endpoint per client address) says
- *   how long to wait, from `Retry-After`.
+ *   how long to wait, from `Retry-After`. An RFC 6749 refusal
+ *   (memory-cloud v0.78.0+, #1671: `invalid_request`, `invalid_client`,
+ *   `invalid_scope`) has the OAuth `error` as `code` and its
+ *   `error_description`, when sent, in the message and in
+ *   `details.error_description`.
  * @throws KaguraConnectionError network failure.
  */
 export async function authorizeDevice(
@@ -239,11 +326,19 @@ export async function authorizeDevice(
     throw new KaguraAuthError(deviceRateLimitedMessage(response.headers, text));
   }
   if (!response.ok) {
-    const detail = extractDetail(text) || text;
-    throw new KaguraAuthError(
+    const refused = parseJsonBody(text);
+    const fields = serverErrorFieldsOf(refused);
+    const refusal = oauthRefusal(response.status, refused, fields, clientId);
+    if (refusal !== null) {
+      throw refusal;
+    }
+    const detail = detailOf(refused) || text;
+    const err = new KaguraAuthError(
       `Device authorization failed (HTTP ${response.status}): ${detail}\n` +
         `  Verify the server URL and that '${clientId}' is registered.`,
     );
+    // The body's code (`HTTP-404` …) is kept, as on every server error.
+    throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
   }
 
   const body = safeJsonObject(text, response.status, "Device authorization");
@@ -291,7 +386,13 @@ export interface PollForTokenOptions extends OAuthHttpOptions {
  *
  * The first poll fires immediately (no initial sleep) so a fast approval
  * never waits a whole interval; sleeps only happen between retries after
- * `authorization_pending` / `slow_down`.
+ * `authorization_pending` / `slow_down` / `temporarily_unavailable`.
+ *
+ * `temporarily_unavailable` (RFC 6749 §4.1.2.1; memory-cloud v0.84.0+,
+ * #1770, uses it for a grant that waited too long on a locked account)
+ * is transient: polling goes on until `expiresAt`, after the `Retry-After`
+ * wait when the server sent one (never less than the poll interval, never
+ * past `expiresAt`), else the interval.
  *
  * @throws KaguraAuthDeniedError user clicked "Deny" at the consent screen
  *   (server returns `access_denied`).
@@ -309,7 +410,10 @@ export async function pollForToken(
   const url = tokenUrl(server);
 
   let currentInterval = options.interval;
-  let firstPoll = true;
+  // Seconds to sleep before the next poll; null skips the sleep, so an
+  // immediate approval (or a fast server-side error) does not wait one
+  // whole interval. Set by every answer that means "poll again".
+  let wait: number | null = null;
 
   for (;;) {
     if (Date.now() >= options.expiresAt.getTime()) {
@@ -319,12 +423,8 @@ export async function pollForToken(
       );
     }
 
-    // Skip the initial sleep so an immediate approval (or a fast
-    // server-side error) doesn't wait one whole interval.
-    if (firstPoll) {
-      firstPoll = false;
-    } else {
-      await sleep(currentInterval * 1000);
+    if (wait !== null) {
+      await sleep(wait * 1000);
     }
 
     let response: Response;
@@ -357,10 +457,21 @@ export async function pollForToken(
     const error = stringOr(body.error, "");
 
     if (error === "authorization_pending") {
+      wait = currentInterval;
       continue;
     }
     if (error === "slow_down") {
       currentInterval += SLOW_DOWN_INCREMENT_SEC;
+      wait = currentInterval;
+      continue;
+    }
+    if (error === "temporarily_unavailable") {
+      const retryAfter = retryAfterSeconds(response.headers);
+      const next = retryAfter === null ? currentInterval : Math.max(retryAfter, currentInterval);
+      // Never sleep past the device code's lifetime: the next round then
+      // polls once more, or throws the expiry.
+      const left = Math.ceil((options.expiresAt.getTime() - Date.now()) / 1000);
+      wait = Math.max(0, Math.min(next, left));
       continue;
     }
     if (error === "access_denied") {
@@ -383,14 +494,21 @@ export async function pollForToken(
     // non-JSON bodies that make `error` come back empty).
     const description = stringOr(body.error_description, "");
     if (error || description) {
-      throw new KaguraAuthError(
-        `Token endpoint returned unexpected error '${error}': ${description}`,
+      // The OAuth `error` (when there is one) as `code`, the rest in
+      // `details`, as authorizeDevice and refreshAccessToken keep them.
+      throw annotateServerError(
+        new KaguraAuthError(`Token endpoint returned unexpected error '${error}': ${description}`),
+        error || undefined,
+        oauthBodyFields(body),
       );
     }
     const detail = extractDetail(text) || text.slice(0, 200);
-    throw new KaguraAuthError(
-      `Token endpoint returned HTTP ${response.status} with no OAuth error code. ` +
-        `Body: ${detail}`,
+    throw withBodyFields(
+      new KaguraAuthError(
+        `Token endpoint returned HTTP ${response.status} with no OAuth error code. ` +
+          `Body: ${detail}`,
+      ),
+      text,
     );
   }
 }
@@ -446,25 +564,35 @@ export async function refreshAccessToken(
 
   const body = safeJson(text);
   const error = stringOr(body.error, "");
+  // The OAuth `error` becomes the error's `code` (`refresh` branches on
+  // `invalid_scope`); `error_description` and the rest go to `details`.
+  const fields = oauthBodyFields(body);
 
   if (error === "invalid_grant") {
-    throw new KaguraAuthExpiredError(
-      "Your login expired (refresh token is no longer valid).\n" +
-        "  Run: kagura auth login\n" +
-        "  Your server and workspace selection are preserved.",
+    throw annotateServerError(
+      new KaguraAuthExpiredError(
+        "Your login expired (refresh token is no longer valid).\n" +
+          "  Run: kagura auth login\n" +
+          "  Your server and workspace selection are preserved.",
+      ),
+      error,
+      fields,
     );
   }
 
   const description = stringOr(body.error_description, "");
   if (error) {
-    throw new KaguraAuthError(
-      `Refresh failed: ${error}${description ? ` — ${description}` : ""}`,
+    throw annotateServerError(
+      new KaguraAuthError(`Refresh failed: ${error}${description ? ` — ${description}` : ""}`),
+      error,
+      fields,
     );
   }
   // Non-OAuth failure (HTML 5xx, network proxy returning text/plain, etc.).
   const detail = extractDetail(text) || text.slice(0, 200);
-  throw new KaguraAuthError(
-    `Refresh failed: HTTP ${response.status} with no OAuth error code. Body: ${detail}`,
+  throw withBodyFields(
+    new KaguraAuthError(`Refresh failed: HTTP ${response.status} with no OAuth error code. Body: ${detail}`),
+    text,
   );
 }
 

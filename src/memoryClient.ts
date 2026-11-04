@@ -109,9 +109,9 @@ function readItem(r: ResponseReader, value: unknown, at: Loc): GuardrailItem | n
  * it — `parse_response(GuardrailSet, …)` — so a set missing a truncation
  * flag fails instead of reading as complete ("never a silent truncation").
  *
- * The set is the model's: its fifteen fields in its order, `status`
- * `"success"` and the context block `null` when absent, and each item's
- * eleven. Every field is checked in that order and read in pydantic's lax
+ * The set is the model's: its sixteen fields in its order, `status`
+ * `"success"`, the context block `null` and `context_summary_omitted`
+ * `false` when absent, and each item's eleven. Every field is checked in that order and read in pydantic's lax
  * mode (`"50"` is an int, `"yes"` a bool), a bad optional field included
  * (`pinned.0.type: Input should be a valid string`); fields the model
  * does not name are dropped (the MCP tool's `context_display_name`,
@@ -147,6 +147,8 @@ export function parseGuardrailSet(data: unknown, operation: string): GuardrailSe
       tool_triggered_truncated: r.field(obj, "tool_triggered_truncated", laxBool),
       context_id: r.field(obj, "context_id", nullable(laxStr), { default: null }),
       context_name: r.field(obj, "context_name", nullable(laxStr), { default: null }),
+      // memory-cloud v0.82.0+ (#1743).
+      context_summary_omitted: r.field(obj, "context_summary_omitted", laxBool, { default: false }),
     };
   }
   r.check();

@@ -36,7 +36,8 @@ export interface EmbeddingModelsResponse {
  * Deployment feature flags reported by the server.
  *
  * Each says whether the deployment offers a feature at all, not whether the
- * caller's plan includes it. A v0.75.0 server sends all ten named here; the
+ * caller's plan includes it. A v0.141.0 server sends all twelve named here;
+ * an older one omits the flags it predates, which then read as `false`. The
  * index signature keeps a flag a later server adds type-checking.
  */
 export interface ServerFeatures {
@@ -66,6 +67,18 @@ export interface ServerFeatures {
    * v0.69.0+). A plan can still exclude it.
    */
   reranking?: boolean;
+  /**
+   * Content chunk vectors are a plan feature with a per-plan context cap
+   * (`CONTENT_CHUNKS_REQUIRE_PLAN`; memory-cloud v0.113.0+, #2103; off by
+   * default). @default false
+   */
+  content_chunks_require_plan?: boolean;
+  /**
+   * The recall LLM selector is a plan feature with a per-plan context cap
+   * (`LLM_SELECTOR_REQUIRE_PLAN`; memory-cloud v0.115.0+, #2144; off by
+   * default). @default false
+   */
+  llm_selector_require_plan?: boolean;
   [key: string]: boolean | undefined;
 }
 
@@ -115,6 +128,45 @@ export interface UsageQuotaLimitOnly {
   limit: number;
 }
 
+/**
+ * How far a Free workspace is over its capacity (memory-cloud v0.99.0+,
+ * #1941) — the Python SDK's `CapacityLock`.
+ *
+ * While the workspace is locked, search and saving throw
+ * `KaguraCapacityLockedError`; listing, deleting, export and usage keep
+ * working. `over_*` is 0 on an axis that is within its limit. Every field
+ * is optional so a reply that leaves one out still reads.
+ */
+export interface CapacityLock {
+  /** Live memories in the workspace. */
+  memory_count?: number | null;
+  /** The effective memory limit. */
+  memory_limit?: number | null;
+  /** Memories to remove to unlock. */
+  over_memories?: number | null;
+  /** File bytes the owner can still delete. */
+  used_bytes?: number | null;
+  /** The effective storage limit in bytes. */
+  storage_limit_bytes?: number | null;
+  /** File bytes to remove to unlock. */
+  over_bytes?: number | null;
+  /** The web page to clean up or re-subscribe. */
+  cleanup_url?: string | null;
+  /**
+   * The server's next step: how much to remove and what still works (MCP
+   * `get_usage`).
+   */
+  help?: string | null;
+  /**
+   * When the workspace's data is deleted if it is still over capacity, an
+   * ISO-8601 UTC timestamp (REST `GET /api/v1/workspace/usage/current`
+   * only, memory-cloud v0.102.0+). `null` until the daily sweep has seen
+   * it and while the deployment cannot purge; it may move later (v0.126.0,
+   * #1971).
+   */
+  purge_at?: string | null;
+}
+
 /** Workspace usage and quota information. */
 export interface UsageInfo {
   plan: string;
@@ -123,6 +175,11 @@ export interface UsageInfo {
   members: UsageQuota;
   /** `used` counts today's MCP calls. */
   mcp_calls_per_day: UsageQuota;
+  /**
+   * `null` unless the workspace is over its Free capacity (memory-cloud
+   * v0.99.0+); absent on older servers.
+   */
+  capacity_lock?: CapacityLock | null;
 }
 
 /**
@@ -133,6 +190,13 @@ export interface UsageInfo {
  * return the reinforce and routing fields (as of server v0.75.0), so they
  * are always absent from `ContextDetail.search_config`; read them from
  * that echo instead.
+ *
+ * The content-chunk and LLM-selector fields are absent (`null` in the
+ * Python SDK's model) when the reply did not carry them: a server older
+ * than the field, or a surface that does not send it. At memory-cloud
+ * v0.142.0 `getContextInfo` sends `llm_selector_enabled` /
+ * `llm_selector_effective` only; `updateSearchConfig` returns both
+ * `*_enabled` / `*_effective` pairs in its `config`.
  */
 export interface SearchConfig {
   /** @default 0.6 */
@@ -158,6 +222,53 @@ export interface SearchConfig {
    * option uses the closed enum. @default "off"
    */
   routing_mode?: string;
+  /**
+   * The stored content-chunk opt-in (memory-cloud v0.110.0+, #2015): long
+   * `content` (1,500+ characters) is embedded as chunk vectors, so memory
+   * content — not only summaries — goes to the embedding and rerank
+   * providers.
+   */
+  content_chunks_enabled?: boolean | null;
+  /**
+   * Whether the stored flag is acted on: a vector store that keeps chunks
+   * (not LanceDB) and, where the deployment gates chunks by plan, a plan
+   * slot (v0.113.0+, #2103).
+   */
+  content_chunks_effective?: boolean | null;
+  /** The plan's `max_content_chunk_contexts`; `null` when not gated by plan (v0.113.0+). */
+  content_chunks_limit?: number | null;
+  /** Contexts of the workspace with the flag on (v0.113.0+). */
+  content_chunks_in_use?: number | null;
+  /**
+   * Why the toggle cannot be turned on, or the chunks are inactive:
+   * `unsupported`, `plan`, `cap` or `permission` (v0.113.0+). Typed
+   * `string`, so a newer reason passes.
+   */
+  content_chunks_disabled_reason?: string | null;
+  /** Whether the caller may change the flag (v0.112.0+). */
+  content_chunks_can_change?: boolean | null;
+  /** Whether the vector store keeps chunk vectors — `false` on LanceDB (v0.112.0+). */
+  content_chunks_supported?: boolean | null;
+  /** Long memories still waiting for their chunks; 0 while the flag is off (v0.112.0+). */
+  content_chunks_backfill_pending?: number | null;
+  /** Where content goes with chunks on: `openai` or `self_hosted` (v0.112.0+). */
+  embedding_provider?: string | null;
+  /**
+   * The stored recall LLM-selector opt-in (v0.115.0+, #2144): an MCP
+   * `recall` may send the context's summaries and attached content to the
+   * deployment's judge model.
+   */
+  llm_selector_enabled?: boolean | null;
+  /** Whether recall acts on it — the plan, where the deployment gates it (v0.115.0+). */
+  llm_selector_effective?: boolean | null;
+  /** The plan's `max_llm_selector_contexts`; `null` when not gated by plan. */
+  llm_selector_limit?: number | null;
+  /** Contexts of the workspace with the selector on. */
+  llm_selector_in_use?: number | null;
+  /** `plan`, `cap` or `permission`. */
+  llm_selector_disabled_reason?: string | null;
+  /** Whether the caller may change it. */
+  llm_selector_can_change?: boolean | null;
 }
 
 /** Context metadata returned by `get_context_info`. */
@@ -250,6 +361,13 @@ export interface ContextListItem {
  * `can_create` are absent when the caller has no current workspace.
  * `hint` (server v0.75.0+) appears only when the caller can see no context
  * at all, and says how to create one or get access.
+ *
+ * Since server v0.82.0 (memory-cloud#1743) the directory is paged: 100
+ * contexts a page (20 with `include_details` and no `name_contains`), and
+ * a page also stops at the server's 20,000-character budget. `has_more`
+ * says more contexts follow; pass `next_cursor` back as
+ * `listContexts({ cursor })` for the next page. Both are absent before
+ * v0.82.0.
  */
 export interface ListContextsResponse {
   /** @default "success" */
@@ -259,6 +377,10 @@ export interface ListContextsResponse {
   total?: number;
   limit?: number;
   can_create?: boolean;
+  /** More contexts follow this page (server v0.82.0+). */
+  has_more?: boolean;
+  /** The `cursor` that returns the next page; `null` on the last one (server v0.82.0+). */
+  next_cursor?: string | null;
   hint?: string;
 }
 
@@ -266,7 +388,14 @@ export interface ListContextsResponse {
 // Embedding status models (v0.6.1)
 // ---------------------------------------------------------------------------
 
-/** Info about a memory with failed embedding. */
+/**
+ * Info about a memory with failed embedding.
+ *
+ * `updated_at` is the memory's last edit (`null` when it was never
+ * edited), not the failure time. Since memory-cloud v0.120.0 (#2095) a run
+ * whose claim expired on every retry ends `failed` with `embedding_error`
+ * starting `claim_expired:`; an admin retry resets it.
+ */
 export interface FailedMemoryInfo {
   id: string;
   summary: string;
@@ -275,6 +404,13 @@ export interface FailedMemoryInfo {
   created_at: string;
   /** ISO 8601 datetime string. */
   updated_at?: string | null;
+  /**
+   * When the embedding last failed (memory-cloud v0.95.0+, #1868); the
+   * server lists the failures latest first by it. `null` on older servers
+   * and for a row that failed before the server kept that clock. ISO 8601
+   * datetime string.
+   */
+  embedding_attempted_at?: string | null;
 }
 
 /** Embedding queue status for the workspace. */
@@ -345,6 +481,18 @@ export interface MemoryListItem {
    * `text` (server v0.54.0+); `null` when it has none.
    */
   location?: MemoryListItemLocation | null;
+  /**
+   * When the fact held — the memory's `details.observed_at` (memory-cloud
+   * v0.127.0+, #2330) — as the text the server stores, at the precision
+   * its writer gave: a date `YYYY-MM-DD` or a UTC datetime
+   * `YYYY-MM-DDTHH:MM:SSZ`. It is not parsed into a `Date`, because the
+   * two forms are not the same value: the server sorts and filters a date
+   * as the start of that UTC day (`2024-03-07` as `2024-03-07T00:00:00Z`),
+   * while an exact match on `2024-03-07` finds the date form only. Pad a
+   * date with `T00:00:00Z` before comparing it with a datetime. `null`
+   * when the memory has none; absent on older servers.
+   */
+  observed_at?: string | null;
 }
 
 /**
@@ -698,6 +846,9 @@ export type IndexerJobStatus = "idle" | "queued" | "running" | "failed";
  *
  * `memories_per_day_exceeded` (server v0.68.0+) means the workspace's daily
  * memory quota ran out; the batch waits for the UTC reset.
+ * `plan_suspended` (the plan no longer carries this ingest) and
+ * `memory_limit_exceeded` (the workspace memory limit is reached) arrived
+ * in server v0.99.0 (memory-cloud #1939).
  */
 export type IndexerSkippedReason =
   | "no_pending_events"
@@ -705,7 +856,9 @@ export type IndexerSkippedReason =
   | "context_not_found"
   | "empty_valid_points"
   | "resource_entity_missing"
-  | "memories_per_day_exceeded";
+  | "memories_per_day_exceeded"
+  | "plan_suspended"
+  | "memory_limit_exceeded";
 
 /** Per-run indexer metrics, flattened from the server JSONB column. */
 export interface IndexerStateMetrics {
@@ -715,6 +868,17 @@ export interface IndexerStateMetrics {
   applied_deletes?: number;
   /** @default 0 */
   errors?: number;
+  /**
+   * Events that failed and were neither run again nor cleared by an
+   * operator, capped at 20 (memory-cloud v0.135.0+, #2254). An event below
+   * `last_offset` is not retried: an operator rewinds the indexer to
+   * replay it. Since v0.139.0 (#2477) the count stays until an operator
+   * clears or rewinds it (v0.135.0-v0.138.x emptied it on the next clean
+   * batch). `0` on older servers.
+   *
+   * @default 0
+   */
+  failed_events?: number;
   skipped_reason?: IndexerSkippedReason | null;
 }
 
@@ -775,7 +939,25 @@ export type SleepRunStatus =
   | "cancelled"
   | "rolled_back";
 
-/** Summary of a Sleep Maintenance run, returned by `get_sleep_history`. */
+/**
+ * Known values of {@link SleepReport.source} (memory-cloud v0.138.0+,
+ * #2219).
+ *
+ * `sleep` is a Sleep Maintenance run; `analysis` is the row a Memory
+ * Analysis run writes to record its LLM spend: no Sleep phase ran under
+ * it, it has no Sleep actions and `rollback_sleep_run` refuses it with
+ * `analysis_report` (v0.140.0+, #2547). Documents the known values only:
+ * the field is typed `string`.
+ */
+export type SleepReportSource = "sleep" | "analysis";
+
+/**
+ * Summary of a Sleep Maintenance run, returned by `get_sleep_history`.
+ *
+ * `llm_calls_made` counts successful calls only since memory-cloud
+ * v0.112.0 (#2060), so it reads lower than an older server's count for
+ * the same traffic.
+ */
 export interface SleepReport {
   report_id: string;
   context_id?: string | null;
@@ -793,10 +975,18 @@ export interface SleepReport {
   /**
    * Judge-LLM calls that raised, across all phases (server v0.43.0+). It
    * can be 0 on a `degraded` run whose grade came from a failed phase.
+   * `null` (or absent) from servers older than v0.43.0, as the Python
+   * SDK's `int | None` reads it, and in replies that carry `null`.
    *
-   * @default 0
+   * @default null
    */
-  llm_call_failures?: number;
+  llm_call_failures?: number | null;
+  /**
+   * `"sleep"` or `"analysis"` (memory-cloud v0.138.0+, #2219; see
+   * {@link SleepReportSource}); absent on older servers. Typed `string`
+   * for forward compatibility.
+   */
+  source?: string | null;
 }
 
 /**
@@ -806,6 +996,10 @@ export interface SleepReport {
  * types over time. Known `action_type` values include `create_edge`,
  * `merge`, `update_importance`, `promote`, `archive`, and `flag`.
  * `details` is a generic object whose shape depends on `action_type`.
+ *
+ * An action too large for its page (memory-cloud v0.82.0+, #1743) comes
+ * without `details`: `details_omitted` is `true` and `details_total_chars`
+ * gives the size it would have had.
  */
 export interface SleepAction {
   id: string;
@@ -816,6 +1010,10 @@ export interface SleepAction {
   details?: Record<string, unknown> | null;
   /** ISO 8601 datetime string. */
   created_at?: string | null;
+  /** `details` was left out of this page (server v0.82.0+). @default false */
+  details_omitted?: boolean;
+  /** The size `details` would have had, set with `details_omitted` (server v0.82.0+). */
+  details_total_chars?: number | null;
 }
 
 /**
@@ -824,6 +1022,15 @@ export interface SleepAction {
  * Extends `SleepReport` with per-phase result blobs and the per-action
  * audit log. Fields ending in `_result` are server-side phase outputs kept
  * as raw objects because their shape evolves with the maintenance pipeline.
+ *
+ * Since memory-cloud v0.82.0 (#1743) `actions` is one page of the run's
+ * actions in id order: `action_count` is the run's total,
+ * `actions_has_more` says more actions follow, and `actions_next_cursor`
+ * is the `actionsCursor` for the next page (`null` on the last page).
+ * Older servers send every action and neither paging field. `note`
+ * (v0.140.0+, #2547) is set on an analysis report (`source: "analysis"`):
+ * Memory Analysis spend with no Sleep actions, so there is nothing to roll
+ * back.
  */
 export interface SleepReportDetail extends SleepReport {
   memories_flagged: number;
@@ -838,6 +1045,12 @@ export interface SleepReportDetail extends SleepReport {
   merge_retention_result?: Record<string, unknown> | null;
   actions?: SleepAction[];
   action_count: number;
+  /** More actions follow this page (server v0.82.0+). @default false */
+  actions_has_more?: boolean;
+  /** The `actionsCursor` for the next page; `null` on the last one (server v0.82.0+). */
+  actions_next_cursor?: string | null;
+  /** Set on an analysis report (server v0.140.0+). */
+  note?: string | null;
 }
 
 /**
@@ -874,6 +1087,22 @@ export interface RollbackSummary {
   promotions_kept?: number;
   /** @default 0 */
   archives_restored?: number;
+  /**
+   * Restored memories whose content chunks could not be written during
+   * the rollback and were queued for the embedding sweep to rebuild
+   * (server v0.112.0+, #2061). The restore itself went through, so these
+   * are not errors.
+   *
+   * @default 0
+   */
+  chunks_requeued?: number;
+  /**
+   * Restored memories whose vector was queued for a rebuild (server
+   * v0.112.0+, #2065). Not errors either.
+   *
+   * @default 0
+   */
+  points_requeued?: number;
   /** One entry per action that could not be reversed. */
   errors?: string[];
 }
@@ -1204,12 +1433,23 @@ export interface TagInfo {
   last_used_at?: string | null;
 }
 
-/** Response from `list_tags`: tag vocabulary for a context. */
+/**
+ * Response from `list_tags`: tag vocabulary for a context.
+ *
+ * `has_more` (memory-cloud v0.82.0+, #1743) is `true` when more tags
+ * matched than this reply holds: the MCP tool returns at most 200 tags
+ * whatever the `limit`. There is no cursor — narrow with `prefix` or
+ * `minCount`. Absent (read it as `false`) on a `withTags` drill-down,
+ * whose REST route returns up to `limit` tags and reports nothing, and on
+ * older servers.
+ */
 export interface ListTagsResponse {
   context_id: string;
   context_name: string;
   tags?: TagInfo[];
   total: number;
+  /** @default false */
+  has_more?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,6 +1602,12 @@ export interface IngestResult {
  * `credentials_status` stays an untyped mapping — its inner shape is
  * server-owned display metadata (key counts / visibility booleans) that
  * the SDK forwards without interpreting.
+ *
+ * `allowed_context_ids` is the member's context access list. Since
+ * memory-cloud v0.126.0 it applies on every context path: an owner or
+ * admin reaches every shared context, a member or viewer exactly what the
+ * list names, and with no list (`null`) a viewer reaches every shared
+ * context and a member none.
  */
 export interface WorkspaceMember {
   user_id: string;
@@ -1374,6 +1620,16 @@ export interface WorkspaceMember {
   last_login_at?: string | null;
   allowed_context_ids?: string[] | null;
   credentials_status?: Record<string, unknown> | null;
+  /**
+   * `true` for a member past the seats the workspace's plan carries
+   * (memory-cloud v0.100.0+, #1943): every workspace route refuses them
+   * (`403 FEAT-001`, `feature: members`) until the plan carries enough
+   * seats or a member is removed. The owner always has a seat. `false` on
+   * older servers.
+   *
+   * @default false
+   */
+  seat_paused?: boolean;
 }
 
 /**
@@ -1411,6 +1667,14 @@ export interface WorkspaceInvitation {
  * plaintext field is named `plaintext_key` — non-null ONLY in the mint 201
  * response. Owner-provisioned keys are force-hidden at creation, so no
  * later call ever returns the plaintext.
+ *
+ * `default_context_id` / `default_context_name` (memory-cloud v0.118.0+,
+ * #2188) are the key's MCP default context; the name is `null` when none
+ * is set or the caller cannot read that context. `agent_id` (v0.118.0+)
+ * is set when the key is bound to an agent (such a key carries no default
+ * context: the agent's default binding applies). `connector_id`
+ * (v0.129.0+, #2299) is set when the key is a connector's shared key. All
+ * four are `null` for an ordinary key and on older servers.
  */
 export interface MemberAPIKey {
   id: number | string;
@@ -1430,6 +1694,10 @@ export interface MemberAPIKey {
   /** ISO 8601 datetime string. */
   expires_at?: string | null;
   bound_context_id?: string | null;
+  default_context_id?: string | null;
+  default_context_name?: string | null;
+  agent_id?: string | null;
+  connector_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1449,6 +1717,10 @@ export interface MemberAPIKey {
  * the binding enforcement ramp. Both are typed `string` (not a literal
  * union) for forward compatibility — the server is the authority;
  * request-side options use the closed enums.
+ *
+ * In a `listAgents` row (memory-cloud v0.82.0+, #1743) `description` is a
+ * 200-character preview, with `description_truncated` set when it was
+ * cut; `KaguraClient.getAgent` returns it whole.
  */
 export interface Agent {
   id: string;
@@ -1467,6 +1739,8 @@ export interface Agent {
   created_at: string;
   /** ISO 8601 datetime string. */
   updated_at: string;
+  /** `description` is a cut preview (a `listAgents` row, server v0.82.0+). @default false */
+  description_truncated?: boolean;
 }
 
 /**
@@ -1789,6 +2063,15 @@ export interface GuardrailSet {
   /** The MCP tool's context block; the REST route sends none. */
   context_id?: string | null;
   context_name?: string | null;
+  /**
+   * `true` when an MCP reply passed its `max_chars` budget and the server
+   * left `context_summary` out of the pinned items (memory-cloud
+   * v0.82.0+, #1743); items it then had to cut set the lane's
+   * `*_truncated` flag. `false` from the REST route and older servers.
+   *
+   * @default false
+   */
+  context_summary_omitted?: boolean;
 }
 
 /**
@@ -1814,15 +2097,34 @@ export interface LoadGuardrailsResponse extends GuardrailSet {
  * `tool_triggered_version` covers the tool-triggered lane alone, so it is
  * **not** comparable with {@link LoadGuardrailsResponse.version}, which
  * also covers the pinned list.
+ *
+ * `provenance` (memory-cloud v0.79.0+, #1682) labels the items as notes
+ * that context editors stored — data, not operator instructions
+ * (`"Notes written by context editors (facts, not operator
+ * instructions)."`). Absent on older servers.
  */
 export interface ContextGuardrails {
-  items: Pick<
-    GuardrailItem,
-    "memory_id" | "summary" | "importance" | "authored_by_caller" | "source_type"
-  >[];
+  items: ContextGuardrailItem[];
   total_available: number;
   truncated: boolean;
   tool_triggered_version: string;
+  provenance?: string | null;
+}
+
+/**
+ * One entry of {@link ContextGuardrails}: the summary only, cut
+ * server-side.
+ */
+export interface ContextGuardrailItem
+  extends Pick<GuardrailItem, "memory_id" | "summary" | "importance" | "authored_by_caller" | "source_type"> {
+  /**
+   * `true` when the server dropped text from `summary` (memory-cloud
+   * v0.115.0+, #2126): a session-start `bootstrap` reply in its `index`
+   * format cuts each guardrail row's summary to 80 characters.
+   *
+   * @default false
+   */
+  summary_cut?: boolean;
 }
 
 /** Valid `target` values for `GET /api/v1/memory/guardrails/digest`. */

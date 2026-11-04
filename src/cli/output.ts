@@ -17,7 +17,14 @@
  * whole SDK rather than of this module.
  */
 
-import { KaguraFeatureNotAvailableError, KaguraQuotaError, excMessage } from "../errors.js";
+import {
+  KaguraCapacityLockedError,
+  KaguraError,
+  KaguraFeatureNotAvailableError,
+  KaguraQuotaError,
+  KaguraServiceUnavailableError,
+  excMessage,
+} from "../errors.js";
 
 /**
  * Serialize a value the way the Python CLI does.
@@ -297,21 +304,52 @@ export function pythonIsoformat(text: string): string | null {
 }
 
 /**
+ * Python's `format(n, "g")` for a whole number: six significant digits,
+ * exponent notation (`1.23457e+06`) from a million on, the halfway case
+ * rounded to even as Python's correctly rounded float formatting does. A
+ * number that is not whole is written as JavaScript writes it; the SDK
+ * builds no such retry window.
+ */
+export function pyFormatG(n: number): string {
+  if (!Number.isSafeInteger(n)) return String(n);
+  const sign = n < 0 ? "-" : "";
+  const digits = String(Math.abs(n));
+  if (digits.length <= 6) return `${sign}${digits}`;
+  let exponent = digits.length - 1;
+  let head = digits.slice(0, 6);
+  const rest = digits.slice(6);
+  const half = `5${"0".repeat(rest.length - 1)}`;
+  const up = rest > half || (rest === half && Number(head.at(-1)) % 2 === 1);
+  if (up) {
+    head = String(Number(head) + 1);
+    if (head.length > 6) {
+      head = head.slice(0, 6);
+      exponent += 1;
+    }
+  }
+  const fraction = head.slice(1).replace(/0+$/, "");
+  const mantissa = fraction ? `${head[0]}.${fraction}` : head[0]!;
+  return `${sign}${mantissa}e+${String(exponent).padStart(2, "0")}`;
+}
+
+/**
  * The text after `Error: ` for a failed command — a port of the Python
- * CLI's `_cli_error_message` (its #256): the error's message, then for a
- * quota refusal when it resets, and for a quota or feature gate the plan
- * that lifts it, so the operator need not dig them out of the prose.
+ * CLI's `_cli_error_message` (its #256 and #299): the error's message,
+ * then for a quota refusal when it resets, and for a quota or feature gate
+ * the plan that lifts it, so the operator need not dig them out of the
+ * prose.
  *
  *   Daily memory quota exceeded (100/100).
  *     Resets at: 2026-09-26T00:00:00+00:00
  *     Required plan: Pro (pro)
  *
  * The plan reads `display (key)` when the server sent both and they
- * differ, else whichever it sent. `firstLine` replaces the message when a
- * command words the failure itself, keeping the gate lines. As in Python,
- * only `KaguraQuotaError` and `KaguraFeatureNotAvailableError` add lines:
- * a `KaguraRateLimitError` (an HTTP 429 on `KaguraClient`'s transport)
- * prints its message alone.
+ * differ, else whichever it sent. The capacity lock adds its cleanup page
+ * (unless the server's `help` already names it), a 503 how long to wait,
+ * and any server error its `help` and `correlation_id`. `firstLine`
+ * replaces the message when a command words the failure itself, keeping
+ * the other lines. As in Python, a `KaguraRateLimitError` (an HTTP 429 on
+ * `KaguraClient`'s transport) adds no gate lines.
  */
 export function cliErrorMessage(e: unknown, firstLine?: string): string {
   const lines = [firstLine ?? excMessage(e)];
@@ -325,6 +363,16 @@ export function cliErrorMessage(e: unknown, firstLine?: string): string {
     const display = e.requiredPlanDisplay;
     const plan = display && key && display !== key ? `${display} (${key})` : display || key;
     if (plan) lines.push(`  Required plan: ${plan}`);
+  }
+  if (e instanceof KaguraCapacityLockedError && e.cleanupUrl && !(e.help ?? "").includes(e.cleanupUrl)) {
+    lines.push(`  Clean up or re-subscribe: ${e.cleanupUrl}`);
+  }
+  if (e instanceof KaguraServiceUnavailableError && e.retryAfter !== null) {
+    lines.push(`  Retry after: ${pyFormatG(e.retryAfter)} s`);
+  }
+  if (e instanceof KaguraError) {
+    if (e.help) lines.push(`  Help: ${e.help}`);
+    if (e.correlationId) lines.push(`  Correlation ID: ${e.correlationId}`);
   }
   return lines.join("\n");
 }

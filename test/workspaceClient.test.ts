@@ -23,6 +23,7 @@ import {
   KaguraQuotaError,
 } from "../src/errors.js";
 import {
+  readMemberKey,
   VALID_ASSIGNABLE_ROLES,
   VALID_INVITE_EXPIRES,
   WorkspaceClient,
@@ -537,7 +538,9 @@ describe("member API keys", () => {
       key_prefix: "p",
       plaintext_key: "kp",
       is_visible: "false",
-      agent_id: "extra",
+      // `agent_id` was the extra key here until the model gained it
+      // (memory-cloud v0.118.0+, Python SDK 0.43.0); a key no model has now.
+      future_field: "extra",
     });
     const client = makeClient(server);
 
@@ -553,7 +556,58 @@ describe("member API keys", () => {
       revoked_at: null,
       expires_at: null,
       bound_context_id: null,
+      default_context_id: null,
+      default_context_name: null,
+      agent_id: null,
+      connector_id: null,
     });
+  });
+
+  it("reads a v0.141.0 key row's default context, agent and connector (memory-cloud v0.118.0+ / v0.129.0+)", async () => {
+    const server = new FakeRest();
+    server.status = 201;
+    // An integer id: `readMemberKey` still reads `id` as an int only (a
+    // v0.89.0+ `akey_…` id is a separate follow-up of #85).
+    server.body = JSON.stringify({
+      id: 7,
+      name: "connector:github",
+      key_prefix: "kgr_abc",
+      plaintext_key: "kp",
+      is_visible: false,
+      visibility_expires_at: null,
+      created_at: "2026-11-01T00:00:00Z",
+      revoked_at: null,
+      default_context_id: "11111111-2222-4333-8444-555555555555",
+      default_context_name: "dev",
+      agent_id: null,
+      connector_id: "conn-1",
+    });
+    const client = makeClient(server);
+
+    const key = await client.mintMemberKey(WS, "u2", "n", 30);
+    expect(key).toMatchObject({
+      id: 7,
+      default_context_id: "11111111-2222-4333-8444-555555555555",
+      default_context_name: "dev",
+      agent_id: null,
+      connector_id: "conn-1",
+    });
+    expect(Object.keys(key).slice(-5)).toEqual([
+      "bound_context_id",
+      "default_context_id",
+      "default_context_name",
+      "agent_id",
+      "connector_id",
+    ]);
+  });
+
+  it("refuses a key row whose connector_id is no string, as the model does", () => {
+    expect(() =>
+      readMemberKey({ id: 1, name: "n", key_prefix: "p", connector_id: 5 }, "WorkspaceClient.list_member_keys"),
+    ).toThrow(
+      "WorkspaceClient.list_member_keys: unexpected server response for MemberAPIKey " +
+        "(connector_id: Input should be a valid string).",
+    );
   });
 
   it("refuses a mint response whose plaintext_key is no string, as the model does", async () => {

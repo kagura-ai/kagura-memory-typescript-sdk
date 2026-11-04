@@ -48,13 +48,29 @@ export interface RefreshOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Whether an auth failure is the server refusing a wider grant. */
+/** The OAuth `error` codes that refuse the scope a refresh asked for. */
+const SCOPE_REFUSALS: readonly string[] = ["insufficient_scope", "invalid_scope"];
+
+/**
+ * Whether an auth failure is the server refusing a wider grant.
+ *
+ * Reads the OAuth `error` the refresh keeps as `code` first: a scope code
+ * is a refusal. Any other error — one with another code, or with none —
+ * falls back to its message, which carries the server's
+ * `error_description`, so a refusal that names the scope problem under
+ * another code (`invalid_request` …) still asks for consent, as before
+ * the code was kept. Python's `_refused_scope` reads the message only for
+ * an error without a code; this keeps the wider check this SDK had.
+ */
 function isScopeRejection(error: unknown): boolean {
   if (!(error instanceof KaguraAuthError)) {
     return false;
   }
+  if (error.code !== undefined && SCOPE_REFUSALS.includes(error.code)) {
+    return true;
+  }
   const message = error.message.toLowerCase();
-  return message.includes("insufficient_scope") || message.includes("invalid_scope");
+  return SCOPE_REFUSALS.some((refusal) => message.includes(refusal));
 }
 
 /**

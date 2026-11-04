@@ -7,7 +7,9 @@
  * does not have, responses without its optional keys, lax values (`"6"`
  * for an int, `12.0` for a float), and ones the model refuses. The
  * lone-surrogate cases (#69) were recorded from the Python CLI 0.42.0
- * (click 8.3.3, pydantic 2.13.4) the same way.
+ * (click 8.3.3, pydantic 2.13.4) the same way, and the indexer-status
+ * cases again from the Python CLI 0.44.0, whose `IndexerStateMetrics` has
+ * `failed_events` (memory-cloud v0.135.0+, #85).
  */
 
 import * as fs from "node:fs";
@@ -72,7 +74,7 @@ const CASES: Case[] = [
     argv: ["resource","indexer-status","-r","products"],
     routes: {"GET /api/v1/resources/products/indexer-status":{"status":200,"raw":"{\"resource_id\": \"products\", \"state\": {\"job_status\": \"running\", \"last_run_at\": \"2026-06-01T00:00:00.123456Z\", \"next_run_at\": null, \"active_version\": 3, \"last_offset\": 1200, \"lag_seconds\": 12.0, \"metrics\": {\"applied_upserts\": 5, \"applied_deletes\": 0, \"errors\": 0, \"skipped_reason\": null, \"extra\": 1}}, \"recent_events\": [{\"id\": 9, \"op\": \"upsert\", \"doc_id\": \"SKU-1\", \"version\": 2, \"created_at\": \"2026-06-01T00:00:00Z\", \"payload\": {\"x\": 1}}]}"}},
     code: 0,
-    stdout: "{\n  \"resource_id\": \"products\",\n  \"state\": {\n    \"job_status\": \"running\",\n    \"last_run_at\": \"2026-06-01T00:00:00.123456Z\",\n    \"next_run_at\": null,\n    \"active_version\": 3,\n    \"last_offset\": 1200,\n    \"lag_seconds\": 12.0,\n    \"metrics\": {\n      \"applied_upserts\": 5,\n      \"applied_deletes\": 0,\n      \"errors\": 0,\n      \"skipped_reason\": null\n    }\n  },\n  \"recent_events\": [\n    {\n      \"id\": 9,\n      \"op\": \"upsert\",\n      \"doc_id\": \"SKU-1\",\n      \"version\": 2,\n      \"created_at\": \"2026-06-01T00:00:00Z\"\n    }\n  ]\n}\n",
+    stdout: "{\n  \"resource_id\": \"products\",\n  \"state\": {\n    \"job_status\": \"running\",\n    \"last_run_at\": \"2026-06-01T00:00:00.123456Z\",\n    \"next_run_at\": null,\n    \"active_version\": 3,\n    \"last_offset\": 1200,\n    \"lag_seconds\": 12.0,\n    \"metrics\": {\n      \"applied_upserts\": 5,\n      \"applied_deletes\": 0,\n      \"errors\": 0,\n      \"failed_events\": 0,\n      \"skipped_reason\": null\n    }\n  },\n  \"recent_events\": [\n    {\n      \"id\": 9,\n      \"op\": \"upsert\",\n      \"doc_id\": \"SKU-1\",\n      \"version\": 2,\n      \"created_at\": \"2026-06-01T00:00:00Z\"\n    }\n  ]\n}\n",
     stderr: "",
   },
   {
@@ -80,7 +82,17 @@ const CASES: Case[] = [
     argv: ["resource","indexer-status","-r","products"],
     routes: {"GET /api/v1/resources/products/indexer-status":{"status":200,"raw":"{\"resource_id\": \"products\", \"state\": {\"job_status\": \"a-new-status\", \"active_version\": 1, \"last_offset\": 0, \"lag_seconds\": 0.000001, \"metrics\": {\"skipped_reason\": \"memories_per_day_exceeded\"}}}"}},
     code: 0,
-    stdout: "{\n  \"resource_id\": \"products\",\n  \"state\": {\n    \"job_status\": \"a-new-status\",\n    \"last_run_at\": null,\n    \"next_run_at\": null,\n    \"active_version\": 1,\n    \"last_offset\": 0,\n    \"lag_seconds\": 1e-6,\n    \"metrics\": {\n      \"applied_upserts\": 0,\n      \"applied_deletes\": 0,\n      \"errors\": 0,\n      \"skipped_reason\": \"memories_per_day_exceeded\"\n    }\n  },\n  \"recent_events\": []\n}\n",
+    stdout: "{\n  \"resource_id\": \"products\",\n  \"state\": {\n    \"job_status\": \"a-new-status\",\n    \"last_run_at\": null,\n    \"next_run_at\": null,\n    \"active_version\": 1,\n    \"last_offset\": 0,\n    \"lag_seconds\": 1e-6,\n    \"metrics\": {\n      \"applied_upserts\": 0,\n      \"applied_deletes\": 0,\n      \"errors\": 0,\n      \"failed_events\": 0,\n      \"skipped_reason\": \"memories_per_day_exceeded\"\n    }\n  },\n  \"recent_events\": []\n}\n",
+    stderr: "",
+  },
+  {
+    // memory-cloud v0.135.0+ failed_events (#2254) and v0.99.0+ plan_suspended (#1939),
+    // recorded from the Python CLI 0.44.0.
+    name: "indexer-status v0.141.0 failed_events, plan_suspended",
+    argv: ["resource","indexer-status","-r","products"],
+    routes: {"GET /api/v1/resources/products/indexer-status":{"status":200,"raw":"{\"resource_id\": \"products\", \"state\": {\"job_status\": \"idle\", \"last_run_at\": \"2026-11-01T00:00:00Z\", \"next_run_at\": null, \"active_version\": 4, \"last_offset\": 88, \"lag_seconds\": null, \"metrics\": {\"applied_upserts\": 0, \"applied_deletes\": 0, \"errors\": 2, \"failed_events\": 3, \"skipped_reason\": \"plan_suspended\"}}, \"recent_events\": []}"}},
+    code: 0,
+    stdout: "{\n  \"resource_id\": \"products\",\n  \"state\": {\n    \"job_status\": \"idle\",\n    \"last_run_at\": \"2026-11-01T00:00:00Z\",\n    \"next_run_at\": null,\n    \"active_version\": 4,\n    \"last_offset\": 88,\n    \"lag_seconds\": null,\n    \"metrics\": {\n      \"applied_upserts\": 0,\n      \"applied_deletes\": 0,\n      \"errors\": 2,\n      \"failed_events\": 3,\n      \"skipped_reason\": \"plan_suspended\"\n    }\n  },\n  \"recent_events\": []\n}\n",
     stderr: "",
   },
   {

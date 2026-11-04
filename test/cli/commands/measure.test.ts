@@ -386,6 +386,83 @@ describe("kagura-memory measure record", () => {
     );
   });
 
+  // Recorded from the Python CLI 0.44.0 (`kagura measure record C m 5 --at
+  // yesterday` against a local MCP stand-in answering the same envelope):
+  // the `  Help:` line follows the message only when the envelope has
+  // `help` (python-sdk#299); exit 1 either way.
+  it.each([
+    [
+      "with help",
+      { help: "Correct the arguments the message describes, then call the tool again." },
+      "Error: record_measurement failed (validation_error): 'measured_at' is not a valid ISO 8601 " +
+        "datetime: 'yesterday'\n  Help: Correct the arguments the message describes, then call the tool again.",
+    ],
+    [
+      "without help",
+      {},
+      "Error: record_measurement failed (validation_error): 'measured_at' is not a valid ISO 8601 " +
+        "datetime: 'yesterday'",
+    ],
+  ])("prints a refusal %s as Python 0.44.0 does (#84)", async (_label, extra, expected) => {
+    const { code, out, err } = await run(["measure", "record", C, "m", "5", "--at", "yesterday"], (h) => {
+      h.server.toolResults.record_measurement = {
+        status: "error",
+        error: "validation_error",
+        message: "'measured_at' is not a valid ISO 8601 datetime: 'yesterday'",
+        ...extra,
+      };
+    });
+    expect(code).toBe(1);
+    expect(out).toBe("");
+    expect(err).toBe(expected);
+  });
+
+  it("adds the server's help and correlation id, as Python's CLI does (#84)", async () => {
+    // memory-cloud v0.78.0+ (#1684): a write that failed server-side, its
+    // outcome unknown. Python 0.43.0's _cli_error_message adds both lines.
+    const { code, err } = await run(["measure", "record", C, "m", "5"], (h) => {
+      h.server.toolResults.record_measurement = {
+        status: "error",
+        error: "record_measurement_error",
+        message: "record_measurement did not finish within the server's time limit.",
+        cause: "timeout",
+        help: "Check with recall_series before calling it again, so it is not applied twice.",
+        correlation_id: "4bf92f3577b34da6",
+        retryable: false,
+        outcome: "unknown",
+      };
+    });
+    expect(code).toBe(1);
+    expect(err).toBe(
+      "Error: record_measurement failed (record_measurement_error): record_measurement did not " +
+        "finish within the server's time limit.\n" +
+        "  Help: Check with recall_series before calling it again, so it is not applied twice.\n" +
+        "  Correlation ID: 4bf92f3577b34da6",
+    );
+  });
+
+  it("names the capacity lock's cleanup page once, as Python's CLI does (#84)", async () => {
+    const url = "https://memory.kagura-ai.com/workspace/settings/plan";
+    const { code, err } = await run(["measure", "record", C, "m", "5"], (h) => {
+      h.server.toolResults.record_measurement = {
+        status: "error",
+        error: "capacity_locked",
+        message: "This workspace is over the Free plan's capacity (250 memories over).",
+        gate: "capacity",
+        over_memories: 250,
+        over_bytes: 0,
+        cleanup_url: url,
+        help: `Remove 250 memories or re-subscribe at ${url}.`,
+      };
+    });
+    expect(code).toBe(1);
+    // The help names the page, so no `Clean up or re-subscribe:` line.
+    expect(err).toBe(
+      "Error: record_measurement failed (capacity_locked): This workspace is over the Free " +
+        `plan's capacity (250 memories over).\n  Help: Remove 250 memories or re-subscribe at ${url}.`,
+    );
+  });
+
   describe("deliberate differences from the Python CLI", () => {
     // Click names an unknown `--name=value` token whole here, value and
     // all; the rest of the bin names it `--name`, since the value may be a

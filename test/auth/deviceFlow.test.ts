@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_CLIENT_ID,
@@ -59,6 +59,16 @@ function failingFetch(message = "connect ECONNREFUSED"): typeof fetch {
 }
 
 const noSleep = async (_ms: number): Promise<void> => {};
+
+/** What `promise` rejects with; fails the test if it resolves instead. */
+async function rejection<E>(promise: Promise<unknown>): Promise<E> {
+  return promise.then(
+    () => {
+      throw new Error("expected the call to reject");
+    },
+    (e: unknown) => e as E,
+  );
+}
 
 const TOKEN_BODY = {
   access_token: "atok",
@@ -135,14 +145,16 @@ describe("authorizeDevice", () => {
   });
 
   it("reports an RFC 6749 error_description rather than the raw body", async () => {
-    // The Python SDK's extract_detail reads error_description too.
+    // The Python SDK's extract_detail reads error_description too. Since
+    // Python 0.43.0 (#299) the OAuth `error` follows the status, as the
+    // RFC 6749 refusal (memory-cloud v0.78.0+, #1671) is read as one.
     const stub = sequenceFetch([
       jsonResponse(400, { error: "invalid_client", error_description: "Unknown client." }),
     ]);
     const message = await authorizeDevice(SERVER, { fetch: stub }).catch(
       (e: unknown) => (e as Error).message,
     );
-    expect(message).toMatch(/^Device authorization failed \(HTTP 400\): Unknown client\.\n/);
+    expect(message).toMatch(/^Device authorization failed \(HTTP 400 invalid_client\): Unknown client\.\n/);
     expect(message).not.toContain("invalid_client\"");
   });
 
@@ -513,6 +525,258 @@ describe("refreshAccessToken", () => {
       }),
     ).rejects.toThrow(/not JSON/);
   });
+
+  it("keeps the OAuth error as the code and the rest as details (#84)", async () => {
+    const stub = sequenceFetch([
+      jsonResponse(400, { error: "invalid_scope", error_description: "Scope not granted." }),
+    ]);
+    const err = await rejection<KaguraAuthError>(
+      refreshAccessToken(SERVER, {
+        clientId: DEFAULT_CLIENT_ID,
+        refreshToken: "rtok-old",
+        scope: "memory:write",
+        fetch: stub,
+      }),
+    );
+    expect(err).toBeInstanceOf(KaguraAuthError);
+    expect(err.code).toBe("invalid_scope");
+    expect(err.details).toEqual({ error_description: "Scope not granted." });
+  });
+
+  it("keeps invalid_grant as the expiry's code (#84)", async () => {
+    const stub = sequenceFetch([jsonResponse(400, { error: "invalid_grant" })]);
+    const err = await rejection<KaguraAuthExpiredError>(
+      refreshAccessToken(SERVER, {
+        clientId: DEFAULT_CLIENT_ID,
+        refreshToken: "rtok-old",
+        fetch: stub,
+      }),
+    );
+    expect(err).toBeInstanceOf(KaguraAuthExpiredError);
+    expect(err.code).toBe("invalid_grant");
+    expect(err.details).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RFC 6749 refusals and temporarily_unavailable (#84, Python's #299)
+// ---------------------------------------------------------------------------
+
+describe("authorizeDevice: RFC 6749 refusals (memory-cloud v0.78.0+)", () => {
+  it.each([
+    ["invalid_request", "Missing required parameter: client_id", null],
+    ["invalid_client", "Unknown client_id", `Verify the server URL and that '${DEFAULT_CLIENT_ID}' is registered.`],
+    ["invalid_scope", "This client is registered without a memory scope.", "The client is registered without a memory scope; ask the server operator."],
+  ])("types %s with its description and code", async (error, description, hint) => {
+    const stub = sequenceFetch([jsonResponse(400, { error, error_description: description })]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err).toBeInstanceOf(KaguraAuthError);
+    const first = `Device authorization failed (HTTP 400 ${error}): ${description}`;
+    expect(err.message).toBe(hint === null ? first : `${first}\n  ${hint}`);
+    expect(err.code).toBe(error);
+    expect(err.details).toEqual({ error_description: description });
+  });
+
+  it("keeps the code when RFC 6749's optional description is missing", async () => {
+    const stub = sequenceFetch([jsonResponse(400, { error: "invalid_client" })]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err.message).toBe(
+      "Device authorization failed (HTTP 400 invalid_client)\n" +
+        `  Verify the server URL and that '${DEFAULT_CLIENT_ID}' is registered.`,
+    );
+    expect([err.code, err.details]).toEqual(["invalid_client", {}]);
+  });
+
+  it("keeps the generic wording and hint for a REST envelope from a wrong server URL", async () => {
+    // memory-cloud's REST 404 (a URL with the wrong path prefix) names a
+    // code but is no OAuth refusal: the "Verify the server URL" hint stays.
+    const stub = sequenceFetch([jsonResponse(404, { error: "HTTP-404", message: "Not Found", details: {} })]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err.message).toBe(
+      `Device authorization failed (HTTP 404): Not Found\n  Verify the server URL and that '${DEFAULT_CLIENT_ID}' is registered.`,
+    );
+    expect([err.code, err.details]).toEqual(["HTTP-404", {}]);
+  });
+
+  it("reads a body with an error_description as a refusal whatever its code", async () => {
+    const stub = sequenceFetch([
+      jsonResponse(503, { error: "temporarily_unavailable", error_description: "Try again shortly." }),
+    ]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err.message).toBe("Device authorization failed (HTTP 503 temporarily_unavailable): Try again shortly.");
+    expect([err.code, err.details]).toEqual(["temporarily_unavailable", { error_description: "Try again shortly." }]);
+  });
+
+  it("keeps the old wording for a body that names no error code", async () => {
+    const stub = sequenceFetch([jsonResponse(400, { detail: "bad" })]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err.message).toBe(
+      `Device authorization failed (HTTP 400): bad\n  Verify the server URL and that '${DEFAULT_CLIENT_ID}' is registered.`,
+    );
+    expect(err.code).toBeUndefined();
+  });
+});
+
+describe("pollForToken: the code of an error it does not know (#84)", () => {
+  function pollOnce(response: Response): Promise<KaguraAuthError> {
+    return rejection<KaguraAuthError>(
+      pollForToken(SERVER, {
+        clientId: DEFAULT_CLIENT_ID,
+        deviceCode: "dc",
+        interval: 5,
+        expiresAt: futureDate(600_000),
+        fetch: sequenceFetch([response]),
+        sleep: noSleep,
+      }),
+    );
+  }
+
+  it("keeps an unknown OAuth error as the code, the rest as details", async () => {
+    const err = await pollOnce(jsonResponse(400, { error: "server_error", error_description: "Boom." }));
+    expect(err.message).toBe("Token endpoint returned unexpected error 'server_error': Boom.");
+    expect([err.code, err.details]).toEqual(["server_error", { error_description: "Boom." }]);
+  });
+
+  it("has no code for a description with no error", async () => {
+    const err = await pollOnce(jsonResponse(400, { error_description: "Boom." }));
+    expect([err.code, err.details]).toEqual([undefined, { error_description: "Boom." }]);
+  });
+
+  it("reads a JSON-RPC error's data when the body has no OAuth error", async () => {
+    const body = {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32603, message: "x", data: { error: "internal_error", correlation_id: "c9" } },
+    };
+    const err = await pollOnce(jsonResponse(500, body));
+    expect(err.message).toMatch(/^Token endpoint returned HTTP 500 with no OAuth error code\. /);
+    expect([err.code, err.correlationId]).toEqual(["internal_error", "c9"]);
+  });
+
+  it("has no code for a body that is not JSON", async () => {
+    const err = await pollOnce(textResponse(502, "<html>Bad Gateway</html>"));
+    expect([err.code, err.details]).toEqual([undefined, {}]);
+  });
+});
+
+describe("pollForToken: temporarily_unavailable (memory-cloud v0.84.0+)", () => {
+  const UNAVAILABLE = { error: "temporarily_unavailable", error_description: "Try again." };
+
+  function withRetryAfter(status: number, seconds: string): Response {
+    return new Response(JSON.stringify(UNAVAILABLE), {
+      status,
+      headers: { "Content-Type": "application/json", "Retry-After": seconds },
+    });
+  }
+
+  async function pollWith(responses: Response[]): Promise<number[]> {
+    const sleeps: number[] = [];
+    const token = await pollForToken(SERVER, {
+      clientId: DEFAULT_CLIENT_ID,
+      deviceCode: "dc",
+      interval: 5,
+      expiresAt: futureDate(600_000),
+      fetch: sequenceFetch(responses),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(token.accessToken).toBe("atok");
+    return sleeps;
+  }
+
+  it("keeps polling at the interval, then succeeds", async () => {
+    const sleeps = await pollWith([jsonResponse(503, UNAVAILABLE), jsonResponse(200, TOKEN_BODY)]);
+    expect(sleeps).toEqual([5_000]);
+  });
+
+  it("honours Retry-After, never polling faster than the interval", async () => {
+    const sleeps = await pollWith([
+      withRetryAfter(503, "12"),
+      // A Retry-After below the interval never polls faster than allowed.
+      withRetryAfter(400, "1"),
+      jsonResponse(400, { error: "authorization_pending" }),
+      jsonResponse(200, TOKEN_BODY),
+    ]);
+    expect(sleeps).toEqual([12_000, 5_000, 5_000]);
+  });
+
+  it("never sleeps past the device code's lifetime", async () => {
+    const sleeps = await pollWith([withRetryAfter(503, "3600"), jsonResponse(200, TOKEN_BODY)]);
+    expect(sleeps).toHaveLength(1);
+    // pollWith's code lives 10 minutes.
+    expect(sleeps[0]).toBeGreaterThan(590_000);
+    expect(sleeps[0]).toBeLessThanOrEqual(600_000);
+  });
+
+  it("raises the expiry once the code's lifetime is spent", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-11-04T00:00:00Z"));
+      const expiresAt = new Date("2026-11-04T00:00:10Z");
+      const sleeps: number[] = [];
+      const err = await pollForToken(SERVER, {
+        clientId: DEFAULT_CLIENT_ID,
+        deviceCode: "dc",
+        interval: 5,
+        expiresAt,
+        // After the cut wait it polls once more, then raises the expiry.
+        fetch: sequenceFetch([withRetryAfter(503, "60"), withRetryAfter(503, "60")]),
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          vi.setSystemTime(expiresAt); // the wait, cut to what was left, is spent
+        },
+      }).catch((e: unknown) => e);
+      expect(sleeps).toEqual([10_000]);
+      expect(err).toBeInstanceOf(KaguraAuthExpiredError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["without Retry-After", null, 12, 5_000],
+    ["with a Retry-After shorter than the interval", "1", 12, 5_000],
+    ["with a Retry-After longer than the interval", "20", 3, 20_000],
+  ])(
+    "stops at the expiry on a server that always answers temporarily_unavailable, %s",
+    async (_label, retryAfter, waits, wait) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const start = new Date("2026-11-04T00:00:00Z").getTime();
+        vi.setSystemTime(start);
+        let calls = 0;
+        const alwaysUnavailable = (async () => {
+          calls += 1;
+          if (calls > 100) throw new Error("pollForToken kept polling past the device code's lifetime");
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (retryAfter !== null) headers["Retry-After"] = retryAfter;
+          return new Response(JSON.stringify(UNAVAILABLE), { status: 503, headers });
+        }) as typeof fetch;
+        const sleeps: number[] = [];
+        const err = await pollForToken(SERVER, {
+          clientId: DEFAULT_CLIENT_ID,
+          deviceCode: "dc",
+          interval: 5,
+          expiresAt: new Date(start + 60_000),
+          fetch: alwaysUnavailable,
+          // Each wait really passes: the clock moves on by what was slept.
+          sleep: async (ms) => {
+            sleeps.push(ms);
+            vi.setSystemTime(Date.now() + ms);
+          },
+        }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(KaguraAuthExpiredError);
+        // Polls at 0, wait, 2 × wait … and once more after the last wait,
+        // which ends at the expiry; never sleeps past it.
+        expect(calls).toBe(waits + 1);
+        expect(sleeps).toEqual(Array<number>(waits).fill(wait));
+        expect(Date.now()).toBe(start + 60_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

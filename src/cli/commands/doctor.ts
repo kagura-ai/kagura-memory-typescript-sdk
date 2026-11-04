@@ -454,6 +454,51 @@ function checkKeyCustody(): DoctorCheck[] {
   return checks;
 }
 
+const KAGURA_KEY_PREFIX = "kagura_";
+
+/**
+ * Python's `_NOT_A_KAGURA_KEY_HINT`. memory-cloud v0.119.0+ (#1994) routes
+ * a bearer by its shape: a `kagura_` value is looked up only among API
+ * keys and any other value only among OAuth tokens, so an OAuth token
+ * configured as the API key is a 401.
+ */
+const NOT_A_KAGURA_KEY_HINT =
+  "This value does not look like a Kagura API key (kagura_…); the server routes bearer " +
+  "tokens by shape, so an OAuth token passed as an API key is a 401.";
+
+/**
+ * Python's `_redact_token`: enough of a token's start and end to tell it
+ * apart, never the whole of it. Counted in code points, as Python counts.
+ */
+function redactToken(token: string): string {
+  const chars = Array.from(token);
+  if (chars.length === 0) return "<empty>";
+  if (chars.length <= 12) return "<redacted>";
+  return `${chars.slice(0, 8).join("")}...${chars.slice(-4).join("")}`;
+}
+
+/**
+ * Python's `_check_api_key_shape` warning for a static key without the
+ * `kagura_` prefix, in its auth section: the server answers such a value
+ * as an OAuth token, so every call is a 401, which the server check
+ * cannot show (`/api/v1/system/info` takes no credential). Only the
+ * redacted preview is printed. A key with the prefix gets no line here.
+ */
+function checkApiKeyShape(resolved: ResolvedAuth): DoctorCheck[] {
+  if (resolved.kind !== "static" || resolved.apiKey.startsWith(KAGURA_KEY_PREFIX)) {
+    return [];
+  }
+  const preview = redactToken(resolved.apiKey);
+  return [
+    {
+      section: "auth",
+      status: "warn",
+      message: `Unusual API key shape: ${preview}. ${NOT_A_KAGURA_KEY_HINT}`,
+      details: { source: resolved.source, preview },
+    },
+  ];
+}
+
 /** Python's message for an OAuth bearer the REST info route refuses. */
 const OAUTH_VERSION_UNVERIFIED =
   "Could not verify server version over REST with an OAuth profile " +
@@ -528,7 +573,17 @@ async function checkServer(deps: CommandDeps, profile: string | undefined): Prom
     if (e instanceof KaguraAuthError) return authUnresolved(e);
     return [{ section: "server", status: "fail", message: excMessage(e) }];
   }
+  // The auth-section line goes with the auth checks, wherever the server
+  // check below stops.
+  return [...checkApiKeyShape(resolved), ...(await checkResolvedServer(deps, profile, resolved))];
+}
 
+/** {@link checkServer} once the credential has resolved. */
+async function checkResolvedServer(
+  deps: CommandDeps,
+  profile: string | undefined,
+  resolved: ResolvedAuth,
+): Promise<DoctorCheck[]> {
   // Python's _check_https: a plaintext URL is a warning, and the server is
   // not contacted with the credential in the clear.
   try {
