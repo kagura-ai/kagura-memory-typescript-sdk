@@ -81,12 +81,6 @@ export type Kind =
   | "datetime"
   /** `dict[str, Any]`: an object, its contents untouched. */
   | "dict"
-  /**
-   * `Any`: whatever the body holds, untouched and never refused — a field
-   * the Python model reads fail-open (`plan_headroom`) and this one does
-   * not read yet.
-   */
-  | "any"
   /** `dict[str, T]`: an object whose every value is read as `T`. */
   | { dictOf: Kind }
   | { literal: readonly string[] }
@@ -99,7 +93,14 @@ export type Kind =
    * reads it: a value the model refuses is `None` (`null`), never a
    * problem of the enclosing reply.
    */
-  | { orNone: Model };
+  | { orNone: Model }
+  /**
+   * `list[Model] | None` read fail-open, as the Python SDK's `PlanHeadroom`
+   * field type reads it (`_plan_headroom_or_none`): an entry the model
+   * refuses is dropped, and a value that is not a list, or keeps no entry,
+   * is `None` (`null`) — never a problem of the enclosing reply.
+   */
+  | { failOpenList: Model };
 
 export interface Field {
   key: string;
@@ -179,21 +180,11 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
       }
       r.issue(at, "Input should be a valid dictionary");
       return undefined;
-    case "any":
-      return untyped(raw);
   }
   if ("nullable" in kind) return value === null ? null : readValue(r, kind.nullable, raw, at);
-  if ("orNone" in kind) {
-    if (value === null) return null;
-    // Read on a reader of its own, so what the model refuses stays out of `r`.
-    const own = new ResponseReader(r.operation, kind.orNone.name);
-    const read = readFields(own, kind.orNone, value, []);
-    try {
-      own.check();
-    } catch {
-      return null;
-    }
-    return read;
+  if ("orNone" in kind) return readOrNull(r.operation, kind.orNone, value);
+  if ("failOpenList" in kind) {
+    return readableReads(value, kind.failOpenList, r.operation)?.map(([, read]) => read) ?? null;
   }
   if ("dictOf" in kind) {
     if (!isObject(value)) {
@@ -232,6 +223,56 @@ function untyped(raw: unknown): unknown {
   // A JsonNumber stays one, so the dump prints the literal the body wrote.
   if ((isObject(raw) && !(raw instanceof JsonNumber)) || Array.isArray(raw)) UNTYPED.add(raw);
   return raw;
+}
+
+/**
+ * `raw` read as `model` on a reader of its own, so what the model refuses
+ * stays out of the enclosing reply's problems: `null` when it refuses it
+ * (or `raw` is `null`), as the Python SDK's `_validate_or_none` reads a
+ * block the server serves fail-open.
+ */
+function readOrNull(operation: string, model: Model, raw: unknown): Record<string, unknown> | null {
+  const value = jsonValue(raw);
+  if (value === null) return null;
+  const own = new ResponseReader(operation, model.name);
+  const read = readFields(own, model, value, []);
+  try {
+    own.check();
+  } catch {
+    return null;
+  }
+  return read ?? null;
+}
+
+/**
+ * The entries of `value` that `model` reads, each as `[index, read]` in
+ * order, or `undefined` where a `failOpenList` field reads `null`: `value`
+ * is not a list, or no entry reads. Python's `_plan_headroom_or_none`,
+ * shared by that reader kind (the reads) and {@link readableEntries} (the
+ * entries as sent).
+ */
+function readableReads(
+  value: unknown,
+  model: Model,
+  operation: string,
+): Array<[index: number, read: Record<string, unknown>]> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const kept: Array<[number, Record<string, unknown>]> = [];
+  value.forEach((_entry, index) => {
+    const read = readOrNull(operation, model, valueAt(value, index));
+    if (read !== null) kept.push([index, read]);
+  });
+  return kept.length > 0 ? kept : undefined;
+}
+
+/**
+ * What a `failOpenList` field keeps of `value`, as sent: the entries
+ * `model` reads, or `undefined` where the field reads `null` (`value` is
+ * not a list, or no entry reads). For the client, which returns a reply as
+ * sent once its model accepted it.
+ */
+export function readableEntries(value: unknown, model: Model, operation: string): unknown[] | undefined {
+  return readableReads(value, model, operation)?.map(([index]) => (value as unknown[])[index]);
 }
 
 function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Record<string, unknown> | undefined {
@@ -772,14 +813,29 @@ const CONTEXT_ECHO_FIELDS: readonly Field[] = [
   optional("context_is_locked", nullable("bool")),
 ];
 
+/** One `plan_headroom` entry, as Python's `PlanHeadroomNotice` reads it (memory-cloud v0.142.0+, #2615). */
+export const PLAN_HEADROOM_NOTICE: Model = {
+  name: "PlanHeadroomNotice",
+  fields: [
+    required("dimension", "str"),
+    required("level", "str"),
+    required("used", "int"),
+    required("limit", "int"),
+    required("percentage", "float"),
+    optional("plan", nullable("str")),
+    optional("remedies", listOf("str"), []),
+    optional("help", nullable("str")),
+    optional("resets_at", nullable("datetime")),
+  ],
+};
+
 /**
- * `plan_headroom` (memory-cloud v0.142.0+, #2615), passed through as sent
- * and printed so by the CLI's dumps: the Python SDK reads it fail-open as
- * `PlanHeadroomNotice` rows, filling a field an entry leaves out with its
- * default (`remedies: []`, `help: null`, …) and dropping an unreadable
- * entry, which this reader does not do yet (#88).
+ * `plan_headroom: PlanHeadroom = None`: the notices read fail-open, as the
+ * server serves them — an entry `PlanHeadroomNotice` refuses is dropped,
+ * and absent, a value that is not a list or one with no readable entry
+ * reads `null` (#88).
  */
-const PLAN_HEADROOM: Field = optional("plan_headroom", "any");
+const PLAN_HEADROOM: Field = optional("plan_headroom", { failOpenList: PLAN_HEADROOM_NOTICE });
 
 const CHANGE_EVENT: Model = {
   name: "ChangeEvent",

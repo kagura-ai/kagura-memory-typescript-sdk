@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs";
 
+import { sentReply } from "../../client.js";
 import { excMessage, KaguraError } from "../../errors.js";
 import type { FilesClient } from "../../filesClient.js";
 import { realPath } from "../../guardrailExport.js";
@@ -152,7 +153,7 @@ async function rememberFileObject(
 ): Promise<unknown> {
   const client = deps.makeClient({});
   try {
-    const result = await client.remember({
+    const written = await client.remember({
       contextId,
       summary: options.summary || `File: ${file.filename}`,
       content:
@@ -170,6 +171,8 @@ async function rememberFileObject(
         content_type: file.content_type,
       },
     });
+    // The reply as sent, as the Python CLI prints its SDK's unchecked dict.
+    const result = sentReply(written);
     const record = result as unknown as Record<string, unknown> | null;
     if (typeof record !== "object" || record === null || Array.isArray(record) || !record.memory_id) {
       throw new KaguraError(`memory write reported an error: ${pyRepr(result)}`);

@@ -16,6 +16,12 @@
  * with the server-info probe before the second write — or, when the probe
  * fails or reports 0.82.0+, nothing more written and exit 1.
  *
+ * A `plan_headroom` notice (memory-cloud v0.142.0+, #88) prints as sent,
+ * a malformed one included: the client reads it fail-open, but these
+ * commands print the reply the server sent (`sentReply`), as the Python
+ * CLI prints its SDK's unchecked dict. Its percentages are not whole: an
+ * MCP command prints a whole float as an int (README, "Command line").
+ *
  * The replies are MCP tool results in call order, so they come from
  * FakeServer's per-tool queues rather than pythonDumpHarness's one
  * recorded body per REST route; its `terminalText` reads what was printed.
@@ -67,6 +73,12 @@ const TEXTS: Record<string, string> = {
   REFERENCE_BOUNDED: "{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details_omitted\": true, \"details_total_chars\": 24000, \"details_next_offset\": 0}}",
   UPDATE_NO_VERSION: "{\"status\": \"success\", \"memory_id\": \"mem-1\", \"operation\": \"updated\", \"re_embedded\": false, \"scope\": \"working\"}",
   SEARCH_OK: "{\"status\": \"success\", \"context_id\": \"ctx\", \"config\": {\"semantic_weight\": 0.6, \"bm25_weight\": 0.4, \"fetch_factor\": 3, \"use_rerank\": false, \"content_chunks_enabled\": true, \"content_chunks_effective\": true, \"llm_selector_enabled\": false, \"llm_selector_effective\": false}}",
+  REMEMBER_HEADROOM: "{\"status\": \"success\", \"memory_id\": \"m-1\", \"scope\": \"working\", \"version\": 1, \"session_id\": \"sess-1\", \"plan_headroom\": [{\"dimension\": \"memories\", \"level\": \"warning\", \"used\": 4120, \"limit\": 5000, \"percentage\": 82.4, \"plan\": \"free\", \"remedies\": [\"cleanup\", \"upgrade\"], \"help\": \"Free capacity: forget memories the user no longer needs (memory_ids takes up to 50) or delete unused contexts, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused.\"}, {\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"used\": 973, \"limit\": 1000, \"percentage\": 97.3, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}], \"context_id\": \"ctx\", \"context_name\": \"dev\", \"context_display_name\": null, \"context_is_private\": true, \"context_is_locked\": false}",
+  REMEMBER_HEADROOM_MALFORMED: "{\"status\": \"success\", \"memory_id\": \"m-1\", \"scope\": \"working\", \"version\": 1, \"session_id\": \"sess-1\", \"plan_headroom\": [null, {\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"limit\": 1000, \"percentage\": 97.3, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}, {\"dimension\": \"memories\", \"level\": \"warning\", \"used\": 4120, \"limit\": 5000, \"percentage\": 82.4, \"plan\": \"free\", \"remedies\": [\"cleanup\", \"upgrade\"], \"help\": \"Free capacity: forget memories the user no longer needs (memory_ids takes up to 50) or delete unused contexts, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused.\"}, \"x\"], \"context_id\": \"ctx\", \"context_name\": \"dev\", \"context_display_name\": null, \"context_is_private\": true, \"context_is_locked\": false}",
+  REMEMBER_HEADROOM_NO_LIST: "{\"status\": \"success\", \"memory_id\": \"m-1\", \"scope\": \"working\", \"version\": 1, \"session_id\": \"sess-1\", \"plan_headroom\": {\"x\": 1}, \"context_id\": \"ctx\", \"context_name\": \"dev\", \"context_display_name\": null, \"context_is_private\": true, \"context_is_locked\": false}",
+  UPDATE_HEADROOM: "{\"status\": \"success\", \"memory_id\": \"mem-1\", \"operation\": \"updated\", \"re_embedded\": false, \"scope\": \"working\", \"version\": 4, \"plan_headroom\": [{\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"used\": 973, \"limit\": 1000, \"percentage\": 97.3, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}], \"context_id\": \"ctx\", \"context_name\": \"dev\", \"context_display_name\": null, \"context_is_private\": true, \"context_is_locked\": false}",
+  UPDATE_HEADROOM_MALFORMED: "{\"status\": \"success\", \"memory_id\": \"mem-1\", \"operation\": \"updated\", \"re_embedded\": false, \"scope\": \"working\", \"version\": 4, \"plan_headroom\": [{\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"limit\": 1000, \"percentage\": 97.3, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}, {\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"used\": 973, \"limit\": 1000, \"percentage\": 97.3, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}], \"context_id\": \"ctx\", \"context_name\": \"dev\", \"context_display_name\": null, \"context_is_private\": true, \"context_is_locked\": false}",
+  UPDATE_HEADROOM_NONE: "{\"status\": \"success\", \"memory_id\": \"mem-1\", \"operation\": \"updated\", \"re_embedded\": false, \"scope\": \"working\", \"version\": 4, \"plan_headroom\": [{\"dimension\": \"memories_per_day\", \"level\": \"critical\", \"limit\": 1000, \"percentage\": 97.3, \"resets_at\": \"2026-11-05T00:00:00Z\", \"plan\": \"free\", \"remedies\": [\"wait\", \"upgrade\"], \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings \\u2192 Plan). At 100 % remember will be refused until the reset.\"}], \"context_id\": \"ctx\", \"context_name\": \"dev\", \"context_display_name\": null, \"context_is_private\": true, \"context_is_locked\": false}",
 };
 
 const CASES: Case[] = [
@@ -556,6 +568,60 @@ const CASES: Case[] = [
     calls: [["update_search_config", {"context_id": "ctx", "fetch_factor": 4, "llm_selector_enabled": true}]],
     code: 0,
     stdout: "{\n  \"status\": \"success\",\n  \"context_id\": \"ctx\",\n  \"config\": {\n    \"semantic_weight\": 0.6,\n    \"bm25_weight\": 0.4,\n    \"fetch_factor\": 3,\n    \"use_rerank\": false,\n    \"content_chunks_enabled\": true,\n    \"content_chunks_effective\": true,\n    \"llm_selector_enabled\": false,\n    \"llm_selector_effective\": false\n  }\n}\n",
+    stderr: "",
+  },
+  {
+    name: "remember: plan_headroom as v0.142.0 sends it",
+    argv: ["remember", "-s", "Release 2.0 shipped", "--content", "..."],
+    replies: {"remember": ["REMEMBER_HEADROOM"]},
+    calls: [["remember", {"context_id": "ctx", "summary": "Release 2.0 shipped", "content": "...", "type": "note", "importance": 0.5}]],
+    code: 0,
+    stdout: "{\n  \"status\": \"success\",\n  \"memory_id\": \"m-1\",\n  \"scope\": \"working\",\n  \"version\": 1,\n  \"session_id\": \"sess-1\",\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories\",\n      \"level\": \"warning\",\n      \"used\": 4120,\n      \"limit\": 5000,\n      \"percentage\": 82.4,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"cleanup\",\n        \"upgrade\"\n      ],\n      \"help\": \"Free capacity: forget memories the user no longer needs (memory_ids takes up to 50) or delete unused contexts, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused.\"\n    },\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"used\": 973,\n      \"limit\": 1000,\n      \"percentage\": 97.3,\n      \"resets_at\": \"2026-11-05T00:00:00Z\",\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\"\n    }\n  ],\n  \"context_id\": \"ctx\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": true,\n  \"context_is_locked\": false\n}\n",
+    stderr: "",
+  },
+  {
+    name: "remember: a malformed plan_headroom prints as sent",
+    argv: ["remember", "-s", "Release 2.0 shipped", "--content", "..."],
+    replies: {"remember": ["REMEMBER_HEADROOM_MALFORMED"]},
+    calls: [["remember", {"context_id": "ctx", "summary": "Release 2.0 shipped", "content": "...", "type": "note", "importance": 0.5}]],
+    code: 0,
+    stdout: "{\n  \"status\": \"success\",\n  \"memory_id\": \"m-1\",\n  \"scope\": \"working\",\n  \"version\": 1,\n  \"session_id\": \"sess-1\",\n  \"plan_headroom\": [\n    null,\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"limit\": 1000,\n      \"percentage\": 97.3,\n      \"resets_at\": \"2026-11-05T00:00:00Z\",\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\"\n    },\n    {\n      \"dimension\": \"memories\",\n      \"level\": \"warning\",\n      \"used\": 4120,\n      \"limit\": 5000,\n      \"percentage\": 82.4,\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"cleanup\",\n        \"upgrade\"\n      ],\n      \"help\": \"Free capacity: forget memories the user no longer needs (memory_ids takes up to 50) or delete unused contexts, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused.\"\n    },\n    \"x\"\n  ],\n  \"context_id\": \"ctx\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": true,\n  \"context_is_locked\": false\n}\n",
+    stderr: "",
+  },
+  {
+    name: "remember: a plan_headroom that is no list prints as sent",
+    argv: ["remember", "-s", "Release 2.0 shipped", "--content", "..."],
+    replies: {"remember": ["REMEMBER_HEADROOM_NO_LIST"]},
+    calls: [["remember", {"context_id": "ctx", "summary": "Release 2.0 shipped", "content": "...", "type": "note", "importance": 0.5}]],
+    code: 0,
+    stdout: "{\n  \"status\": \"success\",\n  \"memory_id\": \"m-1\",\n  \"scope\": \"working\",\n  \"version\": 1,\n  \"session_id\": \"sess-1\",\n  \"plan_headroom\": {\n    \"x\": 1\n  },\n  \"context_id\": \"ctx\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": true,\n  \"context_is_locked\": false\n}\n",
+    stderr: "",
+  },
+  {
+    name: "update-memory: plan_headroom as v0.142.0 sends it",
+    argv: ["update-memory", "-m", "mem-1", "--observed-at", "2026-11-01"],
+    replies: {"update_memory": ["UPDATE_HEADROOM"]},
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "observed_at": "2026-11-01"}]],
+    code: 0,
+    stdout: "{\n  \"status\": \"success\",\n  \"memory_id\": \"mem-1\",\n  \"operation\": \"updated\",\n  \"re_embedded\": false,\n  \"scope\": \"working\",\n  \"version\": 4,\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"used\": 973,\n      \"limit\": 1000,\n      \"percentage\": 97.3,\n      \"resets_at\": \"2026-11-05T00:00:00Z\",\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\"\n    }\n  ],\n  \"context_id\": \"ctx\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": true,\n  \"context_is_locked\": false\n}\n",
+    stderr: "",
+  },
+  {
+    name: "update-memory: a malformed plan_headroom prints as sent",
+    argv: ["update-memory", "-m", "mem-1", "--observed-at", "2026-11-01"],
+    replies: {"update_memory": ["UPDATE_HEADROOM_MALFORMED"]},
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "observed_at": "2026-11-01"}]],
+    code: 0,
+    stdout: "{\n  \"status\": \"success\",\n  \"memory_id\": \"mem-1\",\n  \"operation\": \"updated\",\n  \"re_embedded\": false,\n  \"scope\": \"working\",\n  \"version\": 4,\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"limit\": 1000,\n      \"percentage\": 97.3,\n      \"resets_at\": \"2026-11-05T00:00:00Z\",\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\"\n    },\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"used\": 973,\n      \"limit\": 1000,\n      \"percentage\": 97.3,\n      \"resets_at\": \"2026-11-05T00:00:00Z\",\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\"\n    }\n  ],\n  \"context_id\": \"ctx\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": true,\n  \"context_is_locked\": false\n}\n",
+    stderr: "",
+  },
+  {
+    name: "update-memory --details-patch: no readable notice prints as sent",
+    argv: ["update-memory", "-m", "mem-1", "--details-patch", "{\"status\": \"done\"}"],
+    replies: {"update_memory": ["UPDATE_HEADROOM_NONE"]},
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"status": "done"}}]],
+    code: 0,
+    stdout: "{\n  \"status\": \"success\",\n  \"memory_id\": \"mem-1\",\n  \"operation\": \"updated\",\n  \"re_embedded\": false,\n  \"scope\": \"working\",\n  \"version\": 4,\n  \"plan_headroom\": [\n    {\n      \"dimension\": \"memories_per_day\",\n      \"level\": \"critical\",\n      \"limit\": 1000,\n      \"percentage\": 97.3,\n      \"resets_at\": \"2026-11-05T00:00:00Z\",\n      \"plan\": \"free\",\n      \"remedies\": [\n        \"wait\",\n        \"upgrade\"\n      ],\n      \"help\": \"Wait for the daily reset at 2026-11-05T00:00:00Z, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused until the reset.\"\n    }\n  ],\n  \"context_id\": \"ctx\",\n  \"context_name\": \"dev\",\n  \"context_display_name\": null,\n  \"context_is_private\": true,\n  \"context_is_locked\": false\n}\n",
     stderr: "",
   },
 ];

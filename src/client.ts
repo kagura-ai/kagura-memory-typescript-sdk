@@ -118,6 +118,8 @@ import {
   FORGET_BATCH_RESULT,
   GUIDE_RESPONSE,
   LIST_MATCHING_RESPONSE,
+  PLAN_HEADROOM_NOTICE,
+  readableEntries,
   REMEMBER_BATCH_RESULT,
   REVISIONS_PAGE,
   SESSION_ROLLBACK_RESULT,
@@ -566,8 +568,13 @@ export interface UpdateMemoryOptions {
    * Both memories must be the caller's own. A different declared edge
    * already linking the pair throws {@link KaguraError} with `code`
    * `"edge_exists"` and `details.existing_edge`; nothing is written. Check
-   * `supersede_candidate.acceptance` (on `reference`, v0.137.0+) first.
-   * Only `true` is sent.
+   * `supersede_candidate.acceptance` first, on `reference` (v0.137.0+) or
+   * the `recall` row (v0.142.0+, #2508): it says whether the accept would
+   * be refused, and from v0.142.0 (#2614) reports the guardrail gate a
+   * memory carrying `details.tool_trigger` runs first (context editor or
+   * above, a user credential) as `not_writable`. A candidate written after
+   * this memory is refused (`newer_candidate`); `createEdge` /
+   * `updateEdge` apply no direction check. Only `true` is sent.
    */
   acceptSupersedeCandidate?: boolean;
   /** `true` keeps `persistence.detail` (memory-cloud v0.93.0+, #1851). Only `true` is sent. */
@@ -1573,6 +1580,50 @@ function detailsWithToolTrigger(
     );
   }
   return { ...(details ?? {}), tool_trigger: toolTrigger };
+}
+
+/** A reply {@link withReadablePlanHeadroom} changed → the reply as the server sent it. */
+const SENT_REPLIES = new WeakMap<object, ToolResult>();
+
+/**
+ * The reply `result` was made from, as the server sent it: `result` itself
+ * unless a fail-open read dropped `plan_headroom` entries from it. For the
+ * `kagura-memory` CLI's `remember` / `update-memory`, which print the reply
+ * as the Python CLI prints its SDK's unchecked dict. Internal: not
+ * exported from the package entry point.
+ */
+export function sentReply(result: object): ToolResult {
+  return SENT_REPLIES.get(result) ?? (result as ToolResult);
+}
+
+/**
+ * `reply` with its `plan_headroom` (memory-cloud v0.142.0+, #2615) read
+ * fail-open, as the Python SDK's `PlanHeadroom` field type reads it: the
+ * notice is advisory, so an entry `PlanHeadroomNotice` cannot read is
+ * dropped, and a value that is not a list, or keeps no entry, is left out.
+ * A list that reads whole is returned as sent, and so is a reply without
+ * the key. A reply it changes keeps the one sent for {@link sentReply}.
+ *
+ * @param read The reply's model reading, when the caller has one
+ *   (`readModel` of a model whose `plan_headroom` is a `failOpenList`): a
+ *   list as long as the one sent says every entry reads, `null` that none
+ *   does, so the entries are read again only when some were dropped.
+ */
+function withReadablePlanHeadroom(reply: ToolResult, operation: string, read?: Record<string, unknown>): ToolResult {
+  if (!Object.prototype.hasOwnProperty.call(reply, "plan_headroom")) return reply;
+  const sent = reply.plan_headroom;
+  const modelRead = read?.plan_headroom as unknown[] | null | undefined;
+  if (Array.isArray(sent) && Array.isArray(modelRead) && modelRead.length === sent.length) return reply;
+  const notices = modelRead === null ? undefined : readableEntries(sent, PLAN_HEADROOM_NOTICE, operation);
+  if (notices !== undefined && notices.length === (sent as unknown[]).length) return reply;
+  const out: ToolResult = { ...reply };
+  if (notices === undefined) {
+    delete out.plan_headroom;
+  } else {
+    out.plan_headroom = notices;
+  }
+  SENT_REPLIES.set(out, reply);
+  return out;
 }
 
 /** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
@@ -2777,7 +2828,15 @@ export class KaguraClient {
    * Store a memory. Returns the API response with `memory_id`, `scope`,
    * `version` (v0.113.0+) and the context fields, or with `dedupe:
    * "check"` possibly the `duplicate_candidate` reply instead, with nothing
-   * written: check `status`. See {@link RememberResult}.
+   * written: check `status`. See {@link RememberResult}. From memory-cloud
+   * v0.142.0 (#2615) a success may carry `plan_headroom`, the plan
+   * dimensions at 80 % or more of their limit: a write shows an entry at
+   * most once an hour per workspace, dimension and level. It is read
+   * fail-open, as on {@link bootstrap}: an entry `PlanHeadroomNotice`
+   * cannot read is dropped, and the key is left out when none reads (the
+   * Python SDK returns this reply as an unchecked dict, so it keeps a
+   * malformed notice as sent). The rest of the reply is returned as sent,
+   * unchecked.
    *
    * `toolTrigger`, `observedAt`, `tagsNormalize`, `dedupe` and `verbose`
    * are sent only when set, so a server that predates one never sees it.
@@ -2849,7 +2908,7 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `RememberResult` types
     // every key optional, since `{}` (an empty tool result) comes back too.
-    return (await this.callToolChecked("remember", args)) as RememberResult;
+    return withReadablePlanHeadroom(await this.callToolChecked("remember", args), "remember") as RememberResult;
   }
 
   /**
@@ -2879,6 +2938,13 @@ export class KaguraClient {
    * `"vector_search_unavailable"`) instead of failing. Both keys are absent
    * on a normal search. A degraded result has a different `confidence`
    * basis, and an empty one means "search impaired", not "nothing stored".
+   *
+   * From memory-cloud v0.142.0 (#2508) a row's `supersede_candidate`
+   * carries `acceptance`, as {@link reference}'s has since v0.137.0:
+   * whether {@link updateMemory}'s `acceptSupersedeCandidate` would go
+   * through (`allowed`), and when not, `reason` — `not_writable`,
+   * `not_owner`, `newer_candidate` or `edge_exists`. Absent on an older
+   * server, on a share-key read and where the server could not evaluate it.
    *
    * @throws Error if `query` is empty/whitespace; if neither `contextId`
    *   nor `contextIds` is provided; if `contextIds` has fewer than 2 or
@@ -4004,6 +4070,10 @@ export class KaguraClient {
    * stats; a continuation counts only when it is the session's first read
    * of the memory (v0.122.0+, #2139).
    *
+   * A live `supersede_candidate` carries `acceptance` (v0.137.0+, #2427):
+   * whether {@link updateMemory}'s `acceptSupersedeCandidate` would go
+   * through, and when not, why — see `SupersedeAcceptance`.
+   *
    * @throws Error before any request if `version` is not an integer ≥ 1;
    *   if an offset is not an integer ≥ 0, or more than one is given; if
    *   `fields` is not a list of `"content"`, `"details"`, `"context"`,
@@ -4080,7 +4150,17 @@ export class KaguraClient {
    * ({@link KaguraError}, code `invalid_argument`); one before v0.82.0
    * ignores it — an `addTags` / `detailsPatch` edit then changes nothing,
    * and `expectedVersion` guards nothing. The reply's `version` tells them
-   * apart: a server that read the arguments sends it.
+   * apart: a server that read the arguments sends it. `plan_headroom`
+   * (memory-cloud v0.142.0+, #2615) comes, and is read fail-open, as on
+   * {@link remember}.
+   *
+   * Check `supersede_candidate.acceptance` before an accept — on the
+   * {@link reference} reply (v0.137.0+) or the {@link recall} row
+   * (v0.142.0+, #2508): `allowed: false` says why it would be refused.
+   * Only the accept checks the direction (a candidate written after its
+   * carrier is refused, `newer_candidate`); {@link createEdge} and
+   * {@link updateEdge} apply no direction check — their caller owns it,
+   * source newer and target older.
    *
    * @throws Error before any request, mirroring the server's
    *   `validation_error`: unless exactly one of memoryId/externalId is
@@ -4161,7 +4241,10 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `UpdateMemoryResult`
     // types every key optional, since `{}` (an empty tool result) comes back too.
-    return (await this.callToolChecked("update_memory", args)) as UpdateMemoryResult;
+    return withReadablePlanHeadroom(
+      await this.callToolChecked("update_memory", args),
+      "update_memory",
+    ) as UpdateMemoryResult;
   }
 
   /**
@@ -4470,6 +4553,11 @@ export class KaguraClient {
    * The server uses `(user_id, source_id, target_id)` as a unique key
    * with max-weight UPSERT semantics — not a pure INSERT.
    *
+   * No direction check (memory-cloud #2427): for a `"supersedes"` edge the
+   * caller owns the direction, source newer and target older. Only
+   * `updateMemory({ acceptSupersedeCandidate: true })` refuses a candidate
+   * written after the memory carrying it.
+   *
    * @throws Error if sourceId === targetId (self-loops are rejected).
    */
   async createEdge(options: {
@@ -4499,7 +4587,9 @@ export class KaguraClient {
 
   /**
    * Update an existing edge's weight and/or edge type, identified by the
-   * `(sourceId, targetId)` pair. Omit a field to leave it unchanged.
+   * `(sourceId, targetId)` pair. Omit a field to leave it unchanged. Like
+   * {@link createEdge}, it applies no direction check to a `"supersedes"`
+   * edge.
    */
   async updateEdge(options: {
     contextId: string;
@@ -4984,10 +5074,12 @@ export class KaguraClient {
    * `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
    *
    * Every option is sent only when set. The reply is returned as sent,
-   * once the Python SDK's `BootstrapResponse` model accepts it, with one
-   * exception: a `guardrails` block that model cannot read is `null`, as
-   * Python reads it. Since memory-cloud v0.142.0 (#2615) `plan_headroom`
-   * lists every plan dimension at 80 % or more of its limit.
+   * once the Python SDK's `BootstrapResponse` model accepts it, with two
+   * fail-open reads, as Python's: a `guardrails` block that model cannot
+   * read is `null`, and `plan_headroom` (memory-cloud v0.142.0+, #2615:
+   * every plan dimension at 80 % or more of its limit, on every call)
+   * keeps only the entries `PlanHeadroomNotice` reads, left out when none
+   * does.
    *
    * @throws Error before any request: `maxChars` is not an integer in
    *   [2,000, 100,000], `format` is not `"full"` / `"index"`,
@@ -5028,12 +5120,13 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("bootstrap", args);
     const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
+    const reply = withReadablePlanHeadroom(result, "bootstrap", read);
     // Fail-open, as Python's model reads the block: unreadable is null.
     // Absent (`?guardrails=off`) stays absent.
     if (read.guardrails === null && isSet(result.guardrails)) {
-      return { ...result, guardrails: null } as unknown as BootstrapResponse;
+      return { ...reply, guardrails: null } as unknown as BootstrapResponse;
     }
-    return result as unknown as BootstrapResponse;
+    return reply as unknown as BootstrapResponse;
   }
 
   /**
@@ -5162,6 +5255,9 @@ export class KaguraClient {
    *
    * Check `failed` / `candidates` / `skipped` and each row's `status`; on
    * `committed_after_timeout` every item is stored — do not resend.
+   * `plan_headroom` (memory-cloud v0.142.0+, #2615) is read fail-open, as
+   * on {@link bootstrap}: an entry `PlanHeadroomNotice` cannot read is
+   * dropped, and the key is left out when none reads.
    *
    * @throws Error before any request: `items` is not a list of 1-50
    *   objects, an item carries `dedupe`, `tags_normalize` or `verbose`
@@ -5200,8 +5296,8 @@ export class KaguraClient {
       args.verbose = options.verbose;
     }
     const result = await this.callToolChecked("remember_batch", args);
-    readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
-    return result as unknown as RememberBatchResult;
+    const read = readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
+    return withReadablePlanHeadroom(result, "remember_batch", read) as unknown as RememberBatchResult;
   }
 
   /**
