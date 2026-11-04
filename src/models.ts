@@ -647,11 +647,22 @@ export interface ResourceSchemaResponse {
 // Resource list (workspace-scoped, server v0.14+)
 // ============================================================================
 
-/** Single resource entry in the workspace resource list. */
+/**
+ * Single resource entry in the workspace resource list.
+ *
+ * `context_id` and `context_name` are `null` for a resource whose contexts
+ * have all been deleted while it still holds active tokens (server
+ * v0.94.0+, kagura-ai/memory-cloud#1863): the server lists such a row only
+ * so those tokens stay reachable, and revoking the resource's last token
+ * removes the row. `context_display_name` is `null` then too, and whenever
+ * the context has no display name.
+ */
 export interface ResourceListItem {
   resource_id: string;
-  context_id: string;
-  context_name: string;
+  /** `null` for a resource whose contexts were all deleted (server v0.94.0+). */
+  context_id?: string | null;
+  /** `null` for a resource whose contexts were all deleted (server v0.94.0+). */
+  context_name?: string | null;
   context_display_name?: string | null;
   token_count: number;
   memory_count: number;

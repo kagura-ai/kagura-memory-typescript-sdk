@@ -363,8 +363,10 @@ const RESOURCE_LIST_ITEM: Model = {
   name: "ResourceListItem",
   fields: [
     required("resource_id", "str"),
-    required("context_id", "str"),
-    required("context_name", "str"),
+    // `str | None = None` from the Python SDK 0.42.2: null for a resource
+    // whose contexts were all deleted (memory-cloud v0.94.0+, #1863).
+    optional("context_id", nullable("str")),
+    optional("context_name", nullable("str")),
     optional("context_display_name", nullable("str")),
     required("token_count", "int"),
     required("memory_count", "int"),

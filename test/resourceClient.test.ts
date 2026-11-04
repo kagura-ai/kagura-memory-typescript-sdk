@@ -297,6 +297,46 @@ describe("resource stats", () => {
     await expect(client.getIndexerStatus("ghost")).rejects.toBeInstanceOf(KaguraNotFoundError);
   });
 
+  it("listResources returns a context-less row with its context fields null (#80)", async () => {
+    // memory-cloud v0.94.0+ (memory-cloud#1863) keeps listing a resource
+    // whose contexts were all deleted while it holds active tokens.
+    const bound = {
+      resource_id: "products",
+      context_id: "11111111-2222-4333-8444-555555555555",
+      context_name: "products",
+      context_display_name: "Product Catalog",
+      token_count: 2,
+      memory_count: 150,
+      current_schema_version: 3,
+      created_at: "2026-03-01T00:00:00Z",
+      updated_at: "2026-04-28T00:00:00Z",
+    };
+    const orphaned = {
+      resource_id: "orphaned",
+      context_id: null,
+      context_name: null,
+      context_display_name: null,
+      token_count: 1,
+      memory_count: 0,
+      current_schema_version: null,
+      created_at: "2026-04-01T00:00:00Z",
+      updated_at: "2026-04-27T00:00:00Z",
+    };
+    const server = new FakeRest();
+    server.routes["/api/v1/resources"] = { status: 200, body: { resources: [bound, orphaned], total: 2 } };
+
+    const result = await makeClient(server).listResources();
+
+    expect(server.last().method).toBe("GET");
+    expect(result.total).toBe(2);
+    expect(result.resources[0]!.context_id).toBe("11111111-2222-4333-8444-555555555555");
+    expect(result.resources[1]!.resource_id).toBe("orphaned");
+    expect(result.resources[1]!.context_id).toBeNull();
+    expect(result.resources[1]!.context_name).toBeNull();
+    expect(result.resources[1]!.context_display_name).toBeNull();
+    expect(result.resources[1]!.token_count).toBe(1);
+  });
+
   it("listResourceEvents serializes a Date since to UTC ISO", async () => {
     const server = new FakeRest();
     server.routes["/api/v1/resources/r/events"] = {
