@@ -120,9 +120,9 @@ function harness(over: Partial<CliDeps> = {}): Harness {
       loginCalls.push(o);
       return creds();
     },
-    refresh: async (o: unknown) => {
+    refresh: async (o: { profile?: string }) => {
       refreshCalls.push(o);
-      return creds({ accessToken: "at-2" });
+      return { profile: o.profile ?? "default", credentials: creds({ accessToken: "at-2" }), refreshed: true };
     },
     // Only `--invite` sends a request of the CLI's own; this stub keeps the
     // suite off the network. It does not fail a test that forgets to supply

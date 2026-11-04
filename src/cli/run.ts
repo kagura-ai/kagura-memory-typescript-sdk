@@ -18,13 +18,14 @@ import {
   resolveLoginMcpUrl,
   type LoginOptions,
 } from "../auth/login.js";
-import { refresh, type RefreshOptions } from "../auth/refresh.js";
+import { refreshProfile, type RefreshOptions } from "../auth/refresh.js";
 import {
   deleteCredentialsFile,
   deleteProfile,
   hasProfile,
   isExpired,
   loadCredentialsFile,
+  loadForUpdate,
   profileNamed,
   setDefaultProfile,
   type OAuthCredentials,
@@ -216,7 +217,8 @@ export interface CliDeps extends CommandDeps {
   /** Run a program attached to the terminal (see `execAttached` in `cli/exec.ts`); absent means `setup` never does. */
   execAttached?: (file: string, argv: readonly string[]) => Promise<number>;
   login: typeof login;
-  refresh: typeof refresh;
+  /** `refresh()`, also saying which profile and whether it was adopted. */
+  refresh: typeof refreshProfile;
   /** Overrides for tests; production passes nothing. */
   credentialsPath?: string;
   /** Overrides for tests; production passes nothing (global fetch). */
@@ -488,6 +490,12 @@ async function cmdLogin(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   return 0;
 }
 
+/**
+ * `kagura auth refresh` — Python's lines. The refresh runs under the
+ * cross-process lock after re-reading the file, so when another process
+ * (a client, `kagura-memory-mcp`, another CLI) rotated the token meanwhile,
+ * its profile is kept, nothing is sent, and the first line says so.
+ */
 async function cmdRefresh(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
   const options: RefreshOptions = {
     onUserCode: devicePrompt(deps, !args.flags.has("no-browser")),
@@ -495,9 +503,16 @@ async function cmdRefresh(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pr
   if (args.values.profile !== undefined) options.profile = args.values.profile;
   if (args.values.scope !== undefined) options.scope = args.values.scope;
   if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
+  if (deps.fetch !== undefined) options.fetch = deps.fetch;
 
-  const creds = await deps.refresh(options);
-  deps.write(`Refreshed. Expires ${creds.expiresAt.toISOString()}. Scope: ${creds.scope}`);
+  const result = await deps.refresh(options);
+  deps.write(
+    result.refreshed
+      ? `✓ Refreshed profile '${result.profile}'.`
+      : `✓ Profile '${result.profile}' was already refreshed by another process.`,
+  );
+  deps.write(`  Scope: ${result.credentials.scope}`);
+  deps.write(`  Expires: ${pythonIsoUtc(result.credentials.expiresAt)}`);
   return 0;
 }
 
@@ -762,10 +777,15 @@ function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
  *
  * Refreshes first when the stored token has expired, so a script does not
  * have to distinguish "no token" from "stale token". The value is printed
- * bare, with no trailing decoration, so `$(… auth token)` is exact.
+ * bare, with no trailing decoration, so `$(… auth token)` is exact. The
+ * refresh is the one every client and `kagura-memory-mcp` share: when one
+ * of them already refreshed the profile, its token is printed and nothing
+ * is sent. A refresh that could not be saved exits 1 without the token.
  */
 async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Promise<number> {
-  const cf = loadCredentialsFile(deps.credentialsPath);
+  // Strict: a credentials file that cannot be read is named, not read as
+  // "no profile".
+  const cf = loadForUpdate(deps.credentialsPath);
   const name = args.values.profile ?? cf.defaultProfile;
   const creds = profileNamed(cf, name);
   if (creds === undefined) {
@@ -783,8 +803,9 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   const options: RefreshOptions = {};
   if (args.values.profile !== undefined) options.profile = args.values.profile;
   if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
-  const refreshed = await deps.refresh(options);
-  deps.write(refreshed.accessToken);
+  if (deps.fetch !== undefined) options.fetch = deps.fetch;
+  const { credentials } = await deps.refresh(options);
+  deps.write(credentials.accessToken);
   return 0;
 }
 
@@ -821,12 +842,23 @@ const AUTH_GROUP: CommandGroup = {
     },
     refresh: {
       summary: "Rotate access_token (optionally requesting a new scope).",
-      description: examples(
-        "auth refresh",
-        'auth refresh --scope "memory:read"                       # narrow to read-only',
-        'auth refresh --scope "memory:read memory:write"          # widen (triggers device flow)',
-        "auth refresh --profile work",
-      ),
+      description:
+        examples(
+          "auth refresh",
+          'auth refresh --scope "memory:read"                       # narrow to read-only',
+          'auth refresh --scope "memory:read memory:write"          # widen (triggers device flow)',
+          "auth refresh --profile work",
+        ) +
+        "\n\n" +
+        // Python 0.44.0's paragraph, naming this package's proxy and bin.
+        "  A refresh token works once (memory-cloud v0.79.0+). The refresh is shared\n" +
+        "  with kagura-memory-mcp and every client: all of them refresh under one\n" +
+        "  lock on credentials.json and re-read it first, so when one of them rotated\n" +
+        "  the token meanwhile, this command keeps that token instead of sending the\n" +
+        "  used refresh token again, and says so. With --scope it always asks the\n" +
+        "  server, using the refresh token on file at that moment. A password reset\n" +
+        "  revokes every OAuth token of the account (v0.83.0+), so a refresh after\n" +
+        "  one fails; run `kagura-memory auth login`.",
       spec: REFRESH_SPEC,
       run: (deps, args) => cmdRefresh(deps as CliDeps, args),
     },
@@ -863,6 +895,11 @@ const AUTH_GROUP: CommandGroup = {
     },
     token: {
       summary: "Emit the raw access_token to stdout (for CI / scripts).",
+      description:
+        "  An expired token is refreshed first. That refresh is shared with\n" +
+        "  kagura-memory-mcp and every client: all of them refresh under one lock on\n" +
+        "  credentials.json and re-read it first, so when one of them already\n" +
+        "  refreshed the profile, its token is printed and no second refresh runs.",
       spec: TOKEN_SPEC,
       run: (deps, args) => cmdToken(deps as CliDeps, args),
     },
