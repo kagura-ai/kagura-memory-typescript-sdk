@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { contextsFooter, nextPageFooter } from "../../../src/cli/commands/context.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import type { KaguraConfig } from "../../../src/config.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
@@ -281,6 +282,107 @@ describe("kagura-memory context list", () => {
     );
     expect(help).toContain("kagura-memory context list --name-contains auth --summary");
   });
+
+  it("describes --limit, --cursor and the paging in the Python CLI 0.44.0's words (#89)", async () => {
+    const h = harness();
+    expect(await runCli(["context", "list", "--help"], h.deps)).toBe(0);
+    const help = h.out.join("\n").replace(/\s+/g, " ");
+    expect(help).toContain(
+      "--limit INTEGER Contexts per page, 1-200 (server default 100; with --details and no " +
+        "--name-contains at most 20, the default there; memory-cloud 0.82.0+).",
+    );
+    expect(help).toContain(
+      "--cursor TEXT next_cursor of the previous page, with the same other options; a blank " +
+        "one is ignored (memory-cloud 0.82.0+).",
+    );
+    expect(help).toContain(
+      "From memory-cloud 0.82.0 the list comes a page at a time (100 contexts by default, and " +
+        "a page also stops at 20,000 characters). When a page was cut, has_more and next_cursor " +
+        "follow the JSON on stderr: pass next_cursor as --cursor, with the same other options, " +
+        "for the next page. Older servers return every context and ignore --limit and --cursor.",
+    );
+  });
+
+  it("checks --limit before an extra argument, and the --details cap after it, as click does", async () => {
+    // Recorded from the Python CLI 0.44.0: click converts the options, then
+    // refuses an extra argument, then runs the command's own checks.
+    const a = await wire(["context", "list", "extra", "--limit", "0"]);
+    expect(a.code).toBe(2);
+    expect(a.h.err).toEqual(["Error: Invalid value for '--limit': 0 is not in the range 1<=x<=200."]);
+    const b = await wire(["context", "list", "extra", "--details", "--limit", "21"]);
+    expect(b.code).toBe(2);
+    expect(b.h.err).toEqual(["Error: Got unexpected extra argument (extra)"]);
+    expect([...a.h.server.requests, ...b.h.server.requests]).toHaveLength(0);
+  });
+
+  it("passes the next page's cursor through as given, a padded one included", async () => {
+    // Only a blank one is unset; the server refuses anything but digits.
+    const { code, args } = await wire(["context", "list", "--cursor", " 100 "]);
+    expect(code).toBe(0);
+    expect(args).toEqual({ cursor: " 100 " });
+  });
+});
+
+describe("the context list paging footer (#89)", () => {
+  it.each([
+    { has_more: false, next_cursor: null },
+    { has_more: true, next_cursor: null }, // nothing to continue from
+    { has_more: true, next_cursor: "" },
+    { has_more: true, next_cursor: 2 }, // not a string
+    { has_more: "true", next_cursor: "2" }, // not the JSON boolean
+    { has_more: 1, next_cursor: "2" },
+    { contexts: [] }, // a server before v0.82.0
+    null,
+  ])("prints nothing for %j", (result) => {
+    expect(nextPageFooter(result)).toBeNull();
+    expect(contextsFooter(result)).toBeNull();
+  });
+
+  it.each([
+    "2\x1b[31m", // a terminal escape
+    "$(touch pwned)", // expanded by a shell inside double quotes
+    "`id`",
+    "2\n3",
+    "2\n",
+    "\u0662", // an Arabic-Indic digit: Python's isdigit(), but not ASCII
+    "\uff12", // a fullwidth digit
+    "-1",
+  ])("shows only a cursor the server takes back, not %j", (cursor) => {
+    expect(nextPageFooter({ has_more: true, next_cursor: cursor })).toBe(
+      "has_more: true. For the next page, run the command again with the same options and " +
+        "--cursor set to next_cursor from the JSON.",
+    );
+    expect(contextsFooter({ has_more: true, next_cursor: cursor })).toBe(
+      "has_more: true. For the next page, run kagura-memory context list --cursor set to " +
+        "next_cursor from the JSON.",
+    );
+  });
+
+  it("names an ASCII-digit cursor and the command for the next page", () => {
+    expect(nextPageFooter({ has_more: true, next_cursor: "0100" })).toBe(
+      'has_more: true; next_cursor: "0100". For the next page, run the command again with the ' +
+        'same options and --cursor "0100".',
+    );
+    expect(contextsFooter({ has_more: true, next_cursor: "100" })).toBe(
+      'has_more: true; next_cursor: "100". For the next page, run kagura-memory context list ' +
+        '--cursor "100".',
+    );
+  });
+
+  it("prints nothing on stderr when the command fails", async () => {
+    const h = harness();
+    h.server.toolResults.list_contexts = {
+      status: "error",
+      error: "validation_error",
+      message: "'cursor' must be the next_cursor of a previous list_contexts response.",
+      has_more: true,
+      next_cursor: "2",
+    };
+    expect(await runCli(["context", "list", "--cursor", "abc"], h.deps)).toBe(1);
+    expect(h.out).toEqual([]);
+    expect(h.err).toHaveLength(1);
+    expect(h.err[0]).toMatch(/^Error: /);
+  });
 });
 
 describe("kagura-memory contexts (alias)", () => {
@@ -305,15 +407,49 @@ describe("kagura-memory contexts (alias)", () => {
     },
   );
 
+  it.each(["--limit=5", "--cursor=100"])(
+    "rejects %s with exit 2: the alias pages through `context list --cursor`",
+    async (flag) => {
+      const { code, h } = await wire(["contexts", flag]);
+      expect(code).toBe(2);
+      expect(h.err.join("\n")).toContain(flag.split("=")[0]!);
+      expect(h.server.requests).toHaveLength(0);
+    },
+  );
+
+  it("prints one page, and the `context list --cursor` call for the next on stderr", async () => {
+    const h = harness();
+    h.server.toolResults.list_contexts = {
+      status: "success",
+      contexts: [],
+      has_more: true,
+      next_cursor: "100",
+    };
+    expect(await runCli(["contexts"], h.deps)).toBe(0);
+    expect(h.server.toolCallArgs(0)).toEqual({});
+    expect(JSON.parse(h.out.join("\n"))).toMatchObject({ has_more: true, next_cursor: "100" });
+    expect(h.err).toEqual([
+      'has_more: true; next_cursor: "100". For the next page, run kagura-memory context list --cursor "100".',
+    ]);
+  });
+
   it("points at `context list` for the options, in the Python CLI's words", async () => {
+    // The Python CLI 0.44.0's help (#89): it names --limit/--cursor too, and
+    // says the alias prints one page, with `kagura ` written `kagura-memory `.
     const h = harness();
     expect(await runCli(["contexts", "--help"], h.deps)).toBe(0);
-    const help = h.out.join("\n");
+    const help = h.out.join("\n").replace(/\s+/g, " ");
     expect(help).toContain(
       "List available contexts (short form of 'context list', without its options).",
     );
     expect(help).toContain(
-      "For --name-contains/--summary/--details/--stats use 'kagura-memory context list'.",
+      "Prints one page: from memory-cloud 0.82.0 that is the 100 most recently used " +
+        "contexts. When more follow, a line on stderr names the 'kagura-memory context " +
+        "list --cursor' call for the next page.",
+    );
+    expect(help).toContain(
+      "For --name-contains/--summary/--details/--stats/--limit/--cursor use " +
+        "'kagura-memory context list'.",
     );
   });
 });
