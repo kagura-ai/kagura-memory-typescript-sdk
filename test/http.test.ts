@@ -392,7 +392,7 @@ describe("ErrorBody (python-sdk#311)", () => {
       const body = new ErrorBody(text);
       void body.text;
       expect(parses()).toBe(0);
-      void [body.detail, body.envelope, body.fields, body.detail, body.envelope, body.fields, body.decoded];
+      void [body.detail, body.envelope, body.fields, body.detail, body.envelope, body.fields];
       expect(responseRetryAfter(new Headers(), body)).toBe(3);
       expect(parses()).toBe(1);
     } finally {
@@ -408,11 +408,23 @@ describe("ErrorBody (python-sdk#311)", () => {
     const fields = body.fields!;
     expect(envelope.details).not.toBe(fields[1]);
     expect(envelope.details.nested).not.toBe(fields[1].nested);
-    expect(envelope.details.nested).not.toBe((body.decoded as { details: { nested: unknown } }).details.nested);
     // A change one reader's caller makes reaches no other reader.
     (fields[1].nested as Record<string, unknown>).a = 2;
     expect(envelope.details).toEqual({ nested: { a: 1 } });
-    expect(body.decoded).toEqual({ error: "E-1", message: "m", details: { nested: { a: 1 } } });
+    // @ts-expect-error The decoded body is private, as Python's `_decoded`.
+    void body.decoded;
+  });
+
+  it.each(["fields", "envelope"] as const)("keeps the body the next reader reads unchanged by %s's caller", (first) => {
+    // Read one reader, change what it returned, then read the other: it
+    // still sees the body as received, so the first reader's copy was its own.
+    const body = new ErrorBody(JSON.stringify({ error: "E-1", message: "m", details: { nested: { a: [1] } } }));
+    const details = first === "fields" ? body.fields![1] : body.envelope!.details;
+    (details.nested as { a: number[] }).a.push(2);
+    details.added = true;
+    const other = first === "fields" ? body.envelope!.details : body.fields![1];
+    expect(other).toEqual({ nested: { a: [1] } });
+    expect(body.detail).toBe("m");
   });
 });
 

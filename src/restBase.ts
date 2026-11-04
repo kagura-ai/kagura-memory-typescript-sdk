@@ -159,7 +159,8 @@ export interface FromMcpUrlOptions {
 }
 
 /**
- * Envelope returned by {@link KaguraRestClient.request} for 2xx responses.
+ * Envelope returned by {@link KaguraRestClient.request} for 2xx responses,
+ * and handed to the error hooks for any other.
  *
  * Beyond the `{status, headers, text}` triple, it carries the request
  * method and path so {@link KaguraRestClient.json} / `expectList` can name
@@ -177,13 +178,16 @@ export interface RestResponse {
    * `%XX` escapes decoded — `/kagura/api/v1/…/members/a@b/credentials`.
    */
   path: string;
+  /**
+   * A non-2xx response's body, decoded at most once — the `body` Python's
+   * `_request` hands every hook (python-sdk#311). Set by
+   * {@link KaguraRestClient.request} and read through
+   * {@link KaguraRestClient.errorBody}, so a hook handed a copy of the
+   * response (`{...response}`) reads the same decoded body. Absent on a
+   * 2xx response.
+   */
+  errorBody?: ErrorBody;
 }
-
-/**
- * Each error response's {@link ErrorBody}, built the first time the
- * request spine or a hook reads it ({@link KaguraRestClient.errorBody}).
- */
-const ERROR_BODIES = new WeakMap<RestResponse, ErrorBody>();
 
 /**
  * Python's `urllib.parse.unquote`, which httpx's `URL.path` applies: each
@@ -511,9 +515,10 @@ export class KaguraRestClient {
       path: requestPath(url, path),
     };
     if (response.status < 200 || response.status >= 300) {
-      // The body's code and fields, for the scope and 503 errors and for
-      // the annotation below; the hooks read the same decoded body.
-      const fields = this.errorBody(envelope).fields;
+      // Decoded once, for the scope and 503 errors and the annotation
+      // below, and carried on the response for every hook.
+      envelope.errorBody = new ErrorBody(envelope.text);
+      const fields = envelope.errorBody.fields;
       const err = this.mapStatusError(
         envelope,
         {
@@ -542,14 +547,17 @@ export class KaguraRestClient {
    * `_request` builds and hands to every hook (python-sdk#311). A hook
    * reads the server's detail, envelope and fields here rather than
    * decoding `response.text` again.
+   *
+   * {@link request} sets {@link RestResponse.errorBody}, and a copy of the
+   * response carries it along. A response without one, or whose `text` is
+   * not the one it decoded (a hook rebuilt it with other text), gets a new
+   * one, kept on the response for the next reader.
    */
   protected errorBody(response: RestResponse): ErrorBody {
-    let body = ERROR_BODIES.get(response);
-    if (body === undefined) {
-      body = new ErrorBody(response.text);
-      ERROR_BODIES.set(response, body);
+    if (response.errorBody === undefined || response.errorBody.text !== response.text) {
+      response.errorBody = new ErrorBody(response.text);
     }
-    return body;
+    return response.errorBody;
   }
 
   /**

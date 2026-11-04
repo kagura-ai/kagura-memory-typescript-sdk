@@ -784,17 +784,69 @@ describe("the error body, decoded once (python-sdk#311)", () => {
     expect(parses).toBe(1);
   });
 
-  it("gives each hook the same ErrorBody for a response", () => {
-    class BodyProbe extends ProbeClient {
-      bodyOf(response: RestResponse) {
-        return this.errorBody(response);
-      }
+  class BodyProbe extends ProbeClient {
+    bodyOf(response: RestResponse) {
+      return this.errorBody(response);
     }
+  }
+
+  it("gives each hook the same ErrorBody for a response", () => {
     const probe = new BodyProbe({ apiKey: "k", baseUrl: "https://x.test" });
     const response = envelopeOf(JSON.stringify(QUOTA), 429);
     expect(probe.bodyOf(response)).toBe(probe.bodyOf(response));
     expect(probe.bodyOf(response).text).toBe(response.text);
     expect(probe.bodyOf(envelopeOf(response.text, 429))).not.toBe(probe.bodyOf(response));
+  });
+
+  it("carries the ErrorBody on the response: a copy reads the same one, other text a new one", () => {
+    // Python's `_request` hands every hook the `body` it built; here it
+    // rides on the response, so a hook handed `{...response}` decodes
+    // nothing again.
+    const probe = new BodyProbe({ apiKey: "k", baseUrl: "https://x.test" });
+    const response = envelopeOf(JSON.stringify(QUOTA), 429);
+    const body = probe.bodyOf(response);
+    expect(response.errorBody).toBe(body);
+    expect(probe.bodyOf({ ...response })).toBe(body);
+    // Rebuilt with other text, it is read as that text.
+    const other = { ...response, text: JSON.stringify(RATE) };
+    expect(probe.bodyOf(other)).not.toBe(body);
+    expect(probe.bodyOf(other).text).toBe(other.text);
+    expect(probe.bodyOf(other).envelope?.code).toBe("RATE-001");
+    expect(probe.bodyOf(response)).toBe(body);
+  });
+
+  it.each([
+    [403, ROLE, KaguraConnectionError],
+    [403, PLAN, KaguraFeatureNotAvailableError],
+    [429, QUOTA, KaguraQuotaError],
+    [429, RATE, KaguraQuotaError],
+  ] as const)("decodes a %i once when a hook hands a copy of the response on", async (status, body, expected) => {
+    // A subclass hook that rebuilds the response before calling the base
+    // one (`{...response}`): request() set the body on it, so the copy
+    // carries it and the base hooks read it without decoding again.
+    class Spreading extends ProbeClient {
+      protected override error403(response: RestResponse, context: RequestContext): KaguraError {
+        return super.error403({ ...response }, context);
+      }
+      protected override error429(response: RestResponse): KaguraError {
+        return super.error429({ ...response });
+      }
+    }
+    const rest = new FakeRest();
+    rest.status = status;
+    rest.body = JSON.stringify(body);
+    const probe = new Spreading({ apiKey: "k", baseUrl: "https://x.test", fetch: rest.fetch });
+    const parse = vi.spyOn(JSON, "parse");
+    let err: unknown;
+    let parses: number;
+    try {
+      err = await caught(probe.requestPublic("GET", "/api/v1/things"));
+      parses = parse.mock.calls.filter(([text]) => text === rest.body).length;
+    } finally {
+      parse.mockRestore();
+    }
+    expect(err).toBeInstanceOf(expected);
+    expect(parses).toBe(1);
   });
 });
 

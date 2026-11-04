@@ -1200,9 +1200,12 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
  * error mapping needs it — Python's `ErrorBody` (python-sdk#311).
  *
  * Nothing is decoded until a reader asks (a 401 never does), and each
- * reader is computed once, from its own copy of the decoded body, so no
- * two of them share a mutable object — as when every reader decoded the
- * body itself. A body that is not JSON reads as nothing in every reader.
+ * reader is computed once. The decoded body is never handed out, and each
+ * reader that returns part of it returns its own deep copy of that part
+ * (Python copies the whole body per reader, `_copy`), so no two readers,
+ * and no reader and the body, share a mutable object — as when every
+ * reader decoded the body itself. A body that is not JSON reads as
+ * nothing in every reader.
  *
  * `KaguraRestClient` builds one per error response (its `errorBody`), and
  * its hooks read that instead of decoding the body again;
@@ -1223,16 +1226,14 @@ export class ErrorBody {
     this.text = text;
   }
 
-  /** The body decoded as JSON ({@link parseJsonBody}); `undefined` when it is not JSON. */
-  get decoded(): unknown {
+  /**
+   * The body decoded as JSON ({@link parseJsonBody}); `undefined` when it
+   * is not JSON. Private, as Python's `_decoded`: the readers below only
+   * read it.
+   */
+  private get decoded(): unknown {
     this.decodedBody ??= { value: parseJsonBody(this.text) };
     return this.decodedBody.value;
-  }
-
-  /** The decoded body for one reader: a JSON object deep-copied (the only shape read), as Python's `_copy`. */
-  private copy(): unknown {
-    const decoded = this.decoded;
-    return isRecord(decoded) ? structuredClone(decoded) : decoded;
   }
 
   /** {@link extractDetail} of the body: the server's message, or `""`. */
@@ -1241,18 +1242,27 @@ export class ErrorBody {
     return this.detailText;
   }
 
-  /** {@link parseErrorEnvelope} of the body: its code and `details`, or `null` for a body that is no JSON object. */
+  /**
+   * {@link parseErrorEnvelope} of the body: its code and `details`, or
+   * `null` for a body that is no JSON object. `details` is this reader's
+   * own copy.
+   */
   get envelope(): ErrorEnvelope | null {
     if (this.envelopeBlock === undefined) {
-      this.envelopeBlock = envelopeOf(this.copy());
+      const envelope = envelopeOf(this.decoded);
+      this.envelopeBlock = envelope === null ? null : { code: envelope.code, details: structuredClone(envelope.details) };
     }
     return this.envelopeBlock;
   }
 
-  /** {@link serverErrorFields} of the body: `[code, fields]`, or `null` when it names no error code. */
+  /**
+   * {@link serverErrorFields} of the body: `[code, fields]`, or `null` when
+   * it names no error code. `fields` is this reader's own copy.
+   */
   get fields(): ServerErrorFields | null {
     if (this.errorFields === undefined) {
-      this.errorFields = serverErrorFieldsOf(this.copy());
+      const fields = serverErrorFieldsOf(this.decoded);
+      this.errorFields = fields === null ? null : [fields[0], structuredClone(fields[1])];
     }
     return this.errorFields;
   }
