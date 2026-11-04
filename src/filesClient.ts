@@ -24,7 +24,7 @@ import {
   KaguraError,
   KaguraIntegrityError,
 } from "./errors.js";
-import { extractDetail, sanitizeServerDetail, SDK_VERSION } from "./http.js";
+import { sanitizeServerDetail, SDK_VERSION } from "./http.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import type {
   FileDownloadUrlResponse,
@@ -392,7 +392,7 @@ export class FilesClient extends KaguraRestClient {
           authSource: this.authSource,
           sourceWorkspaceHint: this.workspaceIdHint,
           requestedWorkspace: extractRequestedWorkspace(context.requestJson, context.requestParams),
-          serverDetail: extractDetail(response.text),
+          serverDetail: this.errorBody(response).detail,
         }),
       )
     );

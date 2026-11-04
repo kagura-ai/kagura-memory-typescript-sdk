@@ -684,10 +684,12 @@ export function bodyRetryAfter(block: Record<string, unknown>, key: string): num
 /**
  * Seconds to wait before retrying a REST error response: its numeric
  * `Retry-After` header, else the `details.retry_after` of a canonical
- * error body, else `null`.
+ * error body, else `null`. `body` is the response text, or its
+ * {@link ErrorBody} when the caller has one, so the body is not decoded
+ * again.
  */
-export function responseRetryAfter(headers: Headers, bodyText: string): number | null {
-  return envelopeRetryAfter(headers, parseErrorEnvelope(bodyText));
+export function responseRetryAfter(headers: Headers, body: string | ErrorBody): number | null {
+  return envelopeRetryAfter(headers, typeof body === "string" ? parseErrorEnvelope(body) : body.envelope);
 }
 
 /** {@link responseRetryAfter} with the body's envelope already read. */
@@ -1134,7 +1136,7 @@ function statusMessage(status: number, detail: string): string {
 }
 
 /** A canonical REST error body split into its code and details block. */
-interface ErrorEnvelope {
+export interface ErrorEnvelope {
   code: string | null;
   details: Record<string, unknown>;
 }
@@ -1160,6 +1162,69 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
 }
 
 /**
+ * A non-2xx response's body, decoded at most once and read each way the
+ * error mapping needs it — Python's `ErrorBody` (python-sdk#311).
+ *
+ * Nothing is decoded until a reader asks (a 401 never does), and each
+ * reader is computed once, from its own copy of the decoded body, so no
+ * two of them share a mutable object — as when every reader decoded the
+ * body itself. A body that is not JSON reads as nothing in every reader.
+ *
+ * `KaguraRestClient` builds one per error response (its `errorBody`), and
+ * its hooks read that instead of decoding the body again;
+ * {@link throwForKaguraStatus} and {@link responseRetryAfter} take one in
+ * place of the text.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export class ErrorBody {
+  /** The body as received. */
+  readonly text: string;
+  private decodedBody: { value: unknown } | undefined;
+  private detailText: string | undefined;
+  private envelopeBlock: ErrorEnvelope | null | undefined;
+  private errorFields: ServerErrorFields | null | undefined;
+
+  constructor(text: string) {
+    this.text = text;
+  }
+
+  /** The body decoded as JSON ({@link parseJsonBody}); `undefined` when it is not JSON. */
+  get decoded(): unknown {
+    this.decodedBody ??= { value: parseJsonBody(this.text) };
+    return this.decodedBody.value;
+  }
+
+  /** The decoded body for one reader: a JSON object deep-copied (the only shape read), as Python's `_copy`. */
+  private copy(): unknown {
+    const decoded = this.decoded;
+    return isRecord(decoded) ? structuredClone(decoded) : decoded;
+  }
+
+  /** {@link extractDetail} of the body: the server's message, or `""`. */
+  get detail(): string {
+    this.detailText ??= detailOf(this.decoded);
+    return this.detailText;
+  }
+
+  /** {@link parseErrorEnvelope} of the body: its code and `details`, or `null` for a body that is no JSON object. */
+  get envelope(): ErrorEnvelope | null {
+    if (this.envelopeBlock === undefined) {
+      this.envelopeBlock = envelopeOf(this.copy());
+    }
+    return this.envelopeBlock;
+  }
+
+  /** {@link serverErrorFields} of the body: `[code, fields]`, or `null` when it names no error code. */
+  get fields(): ServerErrorFields | null {
+    if (this.errorFields === undefined) {
+      this.errorFields = serverErrorFieldsOf(this.copy());
+    }
+    return this.errorFields;
+  }
+}
+
+/**
  * Translate a non-2xx HTTP response into the matching Kagura error.
  *
  * Maps 401 → KaguraAuthError, a 403 `insufficient_scope` (an OAuth token
@@ -1172,7 +1237,9 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
  * status is never left bare. The error code and fields the body carried
  * (a JSON-RPC error's `data`, the REST `details`, an OAuth body's fields)
  * are kept as the error's `code` / `details`. The body is decoded once,
- * for every reader. This function always throws.
+ * for every reader: `body` is the response text, or the {@link ErrorBody}
+ * a caller that read the body itself already built (Python's `body=`), so
+ * it is decoded at most once between them. This function always throws.
  *
  * A 429 that is a typed quota refusal (the daily call quota) keeps its
  * class, which existing handlers catch, but carries the quota's gate
@@ -1181,24 +1248,24 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
 export function throwForKaguraStatus(
   status: number,
   headers: Headers,
-  bodyText: string,
+  body: string | ErrorBody,
   fallbackMessage?: string,
 ): never {
   if (status === 401) {
     throw new KaguraAuthError("Authentication failed. Check your API key.");
   }
-  const body = parseJsonBody(bodyText);
-  const fields = serverErrorFieldsOf(body);
+  const read = typeof body === "string" ? new ErrorBody(body) : body;
+  const fields = read.fields;
   if (status === 403) {
     const scopeError = insufficientScopeFrom(headers, fields);
     if (scopeError !== null) {
       throw scopeError;
     }
   }
-  const detail = detailOf(body) || fallbackMessage || "";
+  const detail = read.detail || fallbackMessage || "";
   let err: KaguraError;
   if (status === 429) {
-    const envelope = envelopeOf(body);
+    const envelope = read.envelope;
     err = new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       envelopeRetryAfter(headers, envelope),

@@ -16,7 +16,6 @@
  */
 
 import { KaguraConnectionError, KaguraError, KaguraSecretError } from "../errors.js";
-import { extractDetail } from "../http.js";
 import type {
   AuditVerifyResponse,
   PubkeyResponse,
@@ -70,7 +69,7 @@ export class SecretClient extends KaguraRestClient {
     if (gated !== null) {
       return gated;
     }
-    const detail = extractDetail(response.text);
+    const detail = this.errorBody(response).detail;
     const base =
       "Access denied (HTTP 403): you may not have a grant on this secret, " +
       "it may not exist, or you lack permission for this operation.";

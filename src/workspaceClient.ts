@@ -17,7 +17,7 @@
 
 import { SOURCE_LABEL } from "./auth/types.js";
 import { KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseError } from "./errors.js";
-import { extractDetail, responseRetryAfter, sanitizeServerDetail } from "./http.js";
+import { responseRetryAfter, sanitizeServerDetail } from "./http.js";
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "./models.js";
 import { pyTypeName } from "./python.js";
 import {
@@ -511,7 +511,7 @@ export class WorkspaceClient extends KaguraRestClient {
     // than pass it through as a connection error.
     return (
       this.gateRefusal(response) ??
-      new KaguraConnectionError(this.format403(extractDetail(response.text)))
+      new KaguraConnectionError(this.format403(this.errorBody(response).detail))
     );
   }
 
@@ -526,9 +526,10 @@ export class WorkspaceClient extends KaguraRestClient {
     if (gated instanceof KaguraQuotaError) {
       return gated;
     }
+    const body = this.errorBody(response);
     return new KaguraQuotaError(
-      sanitizeServerDetail(extractDetail(response.text)) ?? "Quota exceeded. Try again later.",
-      responseRetryAfter(response.headers, response.text),
+      sanitizeServerDetail(body.detail) ?? "Quota exceeded. Try again later.",
+      responseRetryAfter(response.headers, body),
     );
   }
 }

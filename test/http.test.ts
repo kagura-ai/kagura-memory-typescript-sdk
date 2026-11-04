@@ -1,21 +1,47 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   KaguraAuthError,
   KaguraConnectionError,
   KaguraRateLimitError,
+  KaguraServiceUnavailableError,
 } from "../src/errors.js";
 import {
   baseUrlFromMcp,
+  ErrorBody,
   extractDetail,
   mcpSessionExpired,
   mcpSessionHeader,
   normalizeUrl,
+  parseErrorEnvelope,
+  responseRetryAfter,
   retryAfterSeconds,
   sanitizeServerDetail,
+  serverErrorFields,
   throwForKaguraStatus,
   validateHttpsUrl,
 } from "../src/http.js";
+
+/** `run()`'s result, and how often JSON.parse read `text` while it ran. */
+function parsesOf<T>(text: string, run: () => T): { result: T; parses: number } {
+  const spy = vi.spyOn(JSON, "parse");
+  try {
+    const result = run();
+    return { result, parses: spy.mock.calls.filter(([arg]) => arg === text).length };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+/** What `run()` threw. */
+function thrown(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (e) {
+    return e;
+  }
+  throw new Error("did not throw");
+}
 
 describe("baseUrlFromMcp", () => {
   it("strips /mcp", () => {
@@ -301,6 +327,92 @@ describe("throwForKaguraStatus", () => {
     expect(() => throwForKaguraStatus(503, new Headers(), "", "went away")).toThrow(
       /HTTP 503: went away/,
     );
+  });
+
+  // Python's `raise_for_kagura_status(e, body=)` (python-sdk#311).
+  it.each<[number, Record<string, string>, unknown]>([
+    [403, { "WWW-Authenticate": 'Bearer error="insufficient_scope"' }, { error: "insufficient_scope", required_scope: "memory:write" }],
+    [403, {}, { error: "HTTP-403", message: "Owner only", details: { role: "member" } }],
+    [429, {}, { error: "QUOTA-001", message: "Daily quota.", details: { gate: "quota", retry_after: 60 } }],
+    [503, {}, { error: "DB-002", message: "Database connection failed", details: { reason: "deadlock" } }],
+    [500, {}, { jsonrpc: "2.0", error: { code: -32603, message: "boom", data: { error: "internal_error" } } }],
+  ])("takes the ErrorBody of a %i, decoding it once, as it does the text", (status, raw, body) => {
+    const text = JSON.stringify(body);
+    const headers = new Headers(raw);
+    const fromText = thrown(() => throwForKaguraStatus(status, headers, text)) as Error;
+    const { result, parses } = parsesOf(text, () =>
+      thrown(() => throwForKaguraStatus(status, headers, new ErrorBody(text))),
+    );
+    expect(parses).toBe(1);
+    expect(result).toEqual(fromText);
+    expect((result as Error).constructor).toBe(fromText.constructor);
+    // The text alone is decoded once too.
+    expect(parsesOf(text, () => thrown(() => throwForKaguraStatus(status, headers, text))).parses).toBe(1);
+  });
+
+  it("never decodes a 401's body", () => {
+    const text = '{"detail":"no"}';
+    const { result, parses } = parsesOf(text, () => thrown(() => throwForKaguraStatus(401, new Headers(), new ErrorBody(text))));
+    expect(result).toBeInstanceOf(KaguraAuthError);
+    expect(parses).toBe(0);
+  });
+
+  it("keeps a 503 typed when it reads the ErrorBody", () => {
+    const body = new ErrorBody(JSON.stringify({ error: "DB-002", message: "down", details: { reason: "deadlock" } }));
+    const e = thrown(() => throwForKaguraStatus(503, new Headers({ "Retry-After": "5" }), body));
+    expect(e).toBeInstanceOf(KaguraServiceUnavailableError);
+    expect([(e as KaguraServiceUnavailableError).retryAfter, (e as KaguraServiceUnavailableError).reason]).toEqual([5, "deadlock"]);
+  });
+});
+
+describe("ErrorBody (python-sdk#311)", () => {
+  it.each([
+    JSON.stringify({ error: "QUOTA-001", message: "Over: 3/3.", details: { gate: "quota", nested: { a: [1] }, retry_after: 9 } }),
+    JSON.stringify({ detail: [{ loc: ["body", "name"], msg: "field required" }] }),
+    JSON.stringify({ error: "invalid_token", error_description: "expired" }),
+    JSON.stringify({ jsonrpc: "2.0", error: { code: -32600, message: "Bad", data: { error: "invalid_request", help: "x" } } }),
+    JSON.stringify([1, 2]),
+    "null",
+    "not json",
+    "",
+  ])("reads %s as the text helpers do", (text) => {
+    const body = new ErrorBody(text);
+    expect(body.text).toBe(text);
+    expect(body.detail).toBe(extractDetail(text));
+    expect(body.envelope).toEqual(parseErrorEnvelope(text));
+    expect(body.fields).toEqual(serverErrorFields(text));
+    expect(responseRetryAfter(new Headers(), body)).toBe(responseRetryAfter(new Headers(), text));
+  });
+
+  it("decodes nothing until a reader asks, then once for every reader", () => {
+    const text = JSON.stringify({ error: "RATE-001", message: "Slow.", details: { retry_after: 3 } });
+    const spy = vi.spyOn(JSON, "parse");
+    try {
+      const parses = () => spy.mock.calls.filter(([arg]) => arg === text).length;
+      const body = new ErrorBody(text);
+      void body.text;
+      expect(parses()).toBe(0);
+      void [body.detail, body.envelope, body.fields, body.detail, body.envelope, body.fields, body.decoded];
+      expect(responseRetryAfter(new Headers(), body)).toBe(3);
+      expect(parses()).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("computes each reader once, from its own copy of the body", () => {
+    const body = new ErrorBody(JSON.stringify({ error: "E-1", message: "m", details: { nested: { a: 1 } } }));
+    expect(body.envelope).toBe(body.envelope);
+    expect(body.fields).toBe(body.fields);
+    const envelope = body.envelope!;
+    const fields = body.fields!;
+    expect(envelope.details).not.toBe(fields[1]);
+    expect(envelope.details.nested).not.toBe(fields[1].nested);
+    expect(envelope.details.nested).not.toBe((body.decoded as { details: { nested: unknown } }).details.nested);
+    // A change one reader's caller makes reaches no other reader.
+    (fields[1].nested as Record<string, unknown>).a = 2;
+    expect(envelope.details).toEqual({ nested: { a: 1 } });
+    expect(body.decoded).toEqual({ error: "E-1", message: "m", details: { nested: { a: 1 } } });
   });
 });
 
