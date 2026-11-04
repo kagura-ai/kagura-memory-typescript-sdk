@@ -363,11 +363,11 @@ export interface ContextListItem {
  * at all, and says how to create one or get access.
  *
  * Since server v0.82.0 (memory-cloud#1743) the directory is paged: 100
- * contexts a page (20 with `include_details` and no `name_contains`), and
- * a page also stops at the server's 20,000-character budget. `has_more`
- * says more contexts follow; pass `next_cursor` back as
- * `listContexts({ cursor })` for the next page. Both are absent before
- * v0.82.0.
+ * contexts a page by default (20 with `include_details` and no
+ * `name_contains`), or `listContexts({ limit })`, and a page also stops at
+ * the server's 20,000-character budget. `has_more` says more contexts
+ * follow; pass `next_cursor` back as `listContexts({ cursor })` for the
+ * next page. Both are absent before v0.82.0.
  */
 export interface ListContextsResponse {
   /** @default "success" */
@@ -375,6 +375,7 @@ export interface ListContextsResponse {
   contexts: ContextListItem[];
   count: number;
   total?: number;
+  /** The plan's context maximum, not the page size `listContexts({ limit })` asked for. */
   limit?: number;
   can_create?: boolean;
   /** More contexts follow this page (server v0.82.0+). */

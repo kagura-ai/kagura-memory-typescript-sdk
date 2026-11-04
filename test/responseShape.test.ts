@@ -13,10 +13,12 @@ import {
   UPGRADE_HINT,
   boolFromNumberLiteral,
   formatResponseIssues,
+  intOrStr,
   laxBool,
   laxExactInt,
   laxFloat,
   laxInt,
+  laxIntOrStr,
   laxStr,
   nullable,
   responseModelError,
@@ -361,6 +363,95 @@ describe("the coercers given a number literal (#69)", () => {
     expect(() => r.check()).toThrow(
       "op: unexpected server response for M (count: Unable to parse input string as an integer, exceeded maximum size).",
     );
+  });
+});
+
+/**
+ * `id: int | str` (#102), pinned against the Python SDK 0.44.0's
+ * `MemberAPIKey` (pydantic 2.13.4): each body `{"id": <literal>, …}`
+ * through `parse_response`, the value it held or the problems it named.
+ */
+const INT_OR_STR_CASES: ReadonlyArray<[literal: string, expected: { ok: unknown } | { int: string }]> = [
+  ["7", { ok: 7 }],
+  ['"7"', { ok: "7" }],
+  ['" 7 "', { ok: " 7 " }],
+  ['"7.0"', { ok: "7.0" }],
+  ['"1_000"', { ok: "1_000" }],
+  ['""', { ok: "" }],
+  ['"akey_3fJ0kQ7xWm2Lp9RtZa4bNc"', { ok: "akey_3fJ0kQ7xWm2Lp9RtZa4bNc" }],
+  ['"9007199254740993"', { ok: "9007199254740993" }],
+  ["9007199254740993", { ok: 9007199254740993n }],
+  ["7.0", { ok: 7 }],
+  ["-0", { ok: 0 }],
+  ["true", { ok: 1 }],
+  ["7.5", { int: "Input should be a valid integer, got a number with a fractional part" }],
+  ["1e20", { int: "Unable to parse input string as an integer, exceeded maximum size" }],
+  ["null", { int: "Input should be a valid integer" }],
+  ["[]", { int: "Input should be a valid integer" }],
+  ["{}", { int: "Input should be a valid integer" }],
+];
+
+describe("intOrStr: `int | str` as pydantic's smart-mode union reads it (#102)", () => {
+  it.each(INT_OR_STR_CASES)("reads an id of %s as the Python SDK 0.44.0 does", (literal, expected) => {
+    const body = parseJsonLossless(`{"id": ${literal}, "name": "n"}`) as Record<string, unknown>;
+    const r = new ResponseReader("WorkspaceClient.list_member_keys", "MemberAPIKey");
+    const value = r.field(body, "id", intOrStr(laxExactInt));
+    if ("ok" in expected) {
+      r.check();
+      expect(value).toEqual(expected.ok);
+      return;
+    }
+    expect(messageOf(() => r.check())).toBe(
+      "WorkspaceClient.list_member_keys: unexpected server response for MemberAPIKey " +
+        `(id.int: ${expected.int}; id.str: Input should be a valid string). ${HINT}`,
+    );
+  });
+
+  it("keeps any string the string: its exact type wins over the int's lax reading", () => {
+    expect(laxIntOrStr("42")).toEqual({ ok: true, value: "42" });
+    expect(laxIntOrStr("winv_4hT9xQ2mLp8vZr1sKc3dEf")).toEqual({ ok: true, value: "winv_4hT9xQ2mLp8vZr1sKc3dEf" });
+  });
+
+  it("reads anything else with the int member it is given: laxInt's nearest number, laxExactInt's exact int", () => {
+    const n = new JsonNumber("9007199254740993");
+    expect(laxIntOrStr(n)).toEqual({ ok: true, value: 9007199254740992 });
+    expect(intOrStr(laxExactInt)(n)).toEqual({ ok: true, value: 9007199254740993n });
+    expect(laxIntOrStr(42)).toEqual({ ok: true, value: 42 });
+  });
+
+  it("refuses under each member, the int's message first", () => {
+    expect(laxIntOrStr(1.5)).toEqual({
+      ok: false,
+      msg: "Input should be a valid integer, got a number with a fractional part",
+      members: [
+        ["int", "Input should be a valid integer, got a number with a fractional part"],
+        ["str", "Input should be a valid string"],
+      ],
+    });
+  });
+
+  it("counts each member's problem toward the three listed, as pydantic lists them", () => {
+    const r = new ResponseReader("op", "M");
+    const obj = r.object({ a: null, b: null })!;
+    r.field(obj, "a", laxIntOrStr);
+    r.field(obj, "b", laxIntOrStr);
+    expect(messageOf(() => r.check())).toBe(
+      "op: unexpected server response for M (a.int: Input should be a valid integer; " +
+        "a.str: Input should be a valid string; b.int: Input should be a valid integer (+1 more)). " +
+        HINT,
+    );
+  });
+
+  it("passes null through nullable() and a union refusal out of it unchanged", () => {
+    expect(nullable(laxIntOrStr)(null)).toEqual({ ok: true, value: null });
+    expect(nullable(laxIntOrStr)([])).toEqual(laxIntOrStr([]));
+  });
+
+  it("records a plain refusal at the field itself through refuse()", () => {
+    const r = new ResponseReader("op", "M");
+    r.refuse(["x", 0], { ok: false, msg: "Input should be a valid string" });
+    r.refuse(["y"], { ok: false, msg: "m", members: [["int", "i"], ["str", "s"]] });
+    expect(messageOf(() => r.check())).toBe(`op: unexpected server response for M (x.0: Input should be a valid string; y.int: i; y.str: s). ${HINT}`);
   });
 });
 

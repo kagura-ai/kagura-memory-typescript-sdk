@@ -13,6 +13,10 @@
  * prints each id's row on stderr when every id failed. A usage error
  * prints the Python CLI's `Error:` line.
  *
+ * The fake server is `FakeServer` with the recorded `content[0].text` per
+ * tool, as in `sleepDumps.test.ts`: the shared `recordedFetch` replays REST
+ * routes, not MCP's JSON-RPC.
+ *
  * The `plan_headroom` notice is passed through as sent until #88 models
  * it; the recorded one is in the model's own key order, so the two print
  * the same.
@@ -22,6 +26,7 @@ import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
+import { terminalText } from "../../pythonDumpHarness.js";
 
 interface Case {
   name: string;
@@ -493,11 +498,11 @@ describe("bootstrap / changes / list / forget --ids output, byte for byte the Py
     } as unknown as CliDeps;
 
     expect(await runCli(c.argv, deps)).toBe(c.code);
-    expect(out.map((line) => `${line}\n`).join("")).toBe(c.stdout);
+    expect(terminalText(out)).toBe(c.stdout);
     // A usage error: this bin prints click's `Error:` line without the
     // `Usage:` / `Try '… --help'` lines before it, as for every command.
     const stderr = c.code === 2 ? c.stderr.slice(c.stderr.indexOf("Error: ")) : c.stderr;
-    expect(err.map((line) => `${line}\n`).join("")).toBe(stderr);
+    expect(terminalText(err)).toBe(stderr);
     const calls = server.requests.filter((r) => r.body?.method === "tools/call");
     expect(calls.map((r) => (r.body?.params as { arguments: unknown }).arguments)).toEqual(c.calls);
   });

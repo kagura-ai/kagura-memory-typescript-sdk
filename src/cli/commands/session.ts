@@ -26,7 +26,7 @@ import {
 import { MAX_CHARS_MAX, MAX_CHARS_MIN } from "../../responseBudget.js";
 import { examples, rejectExtraArgs, requireArg, type Command, type CommandDeps } from "../command.js";
 import { formatDumpsJson } from "../modelDump.js";
-import { CliUsageError, parseChoice, parseRanged, parseTags } from "../parse.js";
+import { CliUsageError, optionalRanged, parseChoice, parseTags } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
 
@@ -52,8 +52,7 @@ const BOOTSTRAP_MIN_CHARS = 2_000;
 
 /** A `click.IntRange(min, max)` option, or `undefined` when it was not given. */
 function rangedInt(args: ParsedArgs, flag: FlagSpec, min: number, max: number): number | undefined {
-  const raw = args.values[flag.name];
-  return raw === undefined ? undefined : parseRanged(flag, raw, { min, max, rangeLabel: `${min}<=x<=${max}`, integer: true });
+  return optionalRanged(args, flag, { min, max, rangeLabel: `${min}<=x<=${max}`, integer: true });
 }
 
 /** A `click.Choice` option, or `undefined` when it was not given. */

@@ -70,6 +70,8 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory context list",
     "    kagura-memory context list --name-contains auth --summary",
     "    kagura-memory context list --stats",
+    // Added in the Python CLI 0.44.0 (#89), recorded from it.
+    "    kagura-memory context list --limit 50 --cursor 50",
   ]],
   ["context search-config", [
     "  Examples:",

@@ -31,6 +31,7 @@ import { JsonNumber, jsonValue, orderedEntries, valueAt } from "./losslessJson.j
 import { pydanticDatetime } from "./pydanticDatetime.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import {
+  intOrStr,
   laxBool,
   laxExactInt,
   laxFloat,
@@ -68,10 +69,11 @@ export type Kind =
   | "str"
   | "int"
   /**
-   * `int | str`, tried left to right: whatever reads as an int is one
-   * (`"7"` reads `7`, as the `int` field did), any other string stays the
-   * string. A public id (memory-cloud#1008): an integer before server
-   * v0.89.0, an opaque prefixed string (`rtok_…`) from v0.89.0 on.
+   * `int | str`, as pydantic's smart-mode union reads it ({@link intOrStr}):
+   * a string stays the string (`"7"` stays `"7"`), anything else is read
+   * as `int` (`7.0` is 7), an int past 2^53 exactly. A public id
+   * (memory-cloud#1008): an integer before server v0.89.0, an opaque
+   * prefixed string (`rtok_…`) from v0.89.0 on.
    */
   | "intOrStr"
   | "float"
@@ -141,9 +143,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function coerced(r: ResponseReader, at: Loc, result: Coerced<unknown>): unknown {
   if (result.ok) return result.value;
-  r.issue(at, result.msg);
+  r.refuse(at, result);
   return undefined;
 }
+
+/** `int | str` with the int kept exact, as a number literal of the body reaches it. */
+const exactIntOrStr = intOrStr(laxExactInt);
 
 /**
  * `raw` read as `kind`. A number literal (`valueAt`'s `JsonNumber`) reaches
@@ -157,15 +162,8 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
       return coerced(r, at, laxStr(value));
     case "int":
       return coerced(r, at, laxExactInt(raw));
-    case "intOrStr": {
-      const asInt = laxExactInt(raw);
-      if (asInt.ok) return asInt.value;
-      if (typeof value === "string") return coerced(r, at, laxStr(value));
-      // Pydantic names each member of the union that refused it.
-      r.issue([...at, "int"], asInt.msg);
-      r.issue([...at, "str"], "Input should be a valid string");
-      return undefined;
-    }
+    case "intOrStr":
+      return coerced(r, at, exactIntOrStr(raw));
     case "float": {
       const result = laxFloat(raw);
       return coerced(r, at, result.ok ? { ok: true, value: new PyFloat(result.value) } : result);
