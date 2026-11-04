@@ -157,6 +157,21 @@ describe("kagura-memory sleep", () => {
     expect(h.err.join("\n")).toContain("'abc' is not a valid integer range.");
   });
 
+  // Recorded from the Python CLI 0.44.0 (click 8.3.3): click converts every
+  // option before it checks for leftover positionals, so a bad option value
+  // wins over an extra argument; the extra argument alone is reported as such.
+  it.each([
+    [["sleep", "history", "ctx-1", "extra", "--source", "nope"], "Error: Invalid value for '--source': 'nope' is not one of 'sleep', 'analysis', 'all'."],
+    [["sleep", "history", "ctx-1", "extra", "--limit", "0"], "Error: Invalid value for '--limit': 0 is not in the range 1<=x<=50."],
+    [["sleep", "report", "ctx-1", "r-1", "extra", "--actions-limit", "0"], "Error: Invalid value for '--actions-limit': 0 is not in the range 1<=x<=200."],
+    [["sleep", "history", "ctx-1", "extra"], "Error: Got unexpected extra argument (extra)"],
+  ])("%j reports what the Python CLI reports first", async (argv, message) => {
+    const { code, h } = await wire(argv);
+    expect(code).toBe(2);
+    expect(h.err).toEqual([message]);
+    expect(h.server.requests).toEqual([]);
+  });
+
   it("sends REPORT_ID only; CONTEXT_ID is required and not sent (#79)", async () => {
     // memory-cloud v0.82.0+ refuses the context_id 0.14.1 sent here. The
     // reply is a whole report: since #85 `sleep report` reads it through

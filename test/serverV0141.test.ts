@@ -22,6 +22,7 @@ import type {
   ContextInfo,
   ListContextsResponse,
   MemoryListResponse,
+  SleepReport,
   SleepReportDetail,
   SleepReportSource,
 } from "../src/models.js";
@@ -180,6 +181,31 @@ describe("v0.141.0 response fields", () => {
     expect(readModel({ ...row, source }, SLEEP_REPORT, "get_sleep_history").source).toBe("analysis");
     expect(readModel({ ...row, source: "future" }, SLEEP_REPORT, "get_sleep_history").source).toBe("future");
     expect(readModel(row, SLEEP_REPORT, "get_sleep_history").source).toBeNull();
+  });
+
+  it("SleepReport.llm_call_failures is null, not 0, when the server sends none or null", async () => {
+    // Python's `llm_call_failures: int | None = None`; the type says so too
+    // (this assignment would not compile with `number`).
+    const older: SleepReport = {
+      report_id: "r-1",
+      status: "completed",
+      memories_processed: 1,
+      edges_created: 0,
+      memories_merged: 0,
+      memories_promoted: 0,
+      llm_calls_made: 0,
+      llm_tokens_used: 0,
+      llm_call_failures: null,
+    };
+    expect(readModel(older, SLEEP_REPORT, "get_sleep_history").llm_call_failures).toBeNull();
+    const absent: Record<string, unknown> = { ...older };
+    delete absent.llm_call_failures;
+    expect(readModel(absent, SLEEP_REPORT, "get_sleep_history").llm_call_failures).toBeNull();
+
+    const server = new FakeServer();
+    server.toolResults.get_sleep_history = { status: "success", reports: [older], count: 1 };
+    const [report] = await makeClient(server).getSleepHistory({ contextId: CTX });
+    expect(report!.llm_call_failures).toBeNull();
   });
 
   it("SleepReportDetail reads the page fields and an omitted action's marker", () => {
@@ -685,6 +711,32 @@ describe("listEdges cut directions (v0.82.0+) and min_weight (v0.117.0+)", () =>
     server.toolResults.list_edges = { status: "success", edges: [] };
     await makeClient(server).listEdges({ contextId: CTX, memoryId: "m-1" });
     expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, memory_id: "m-1", min_weight: 0 });
+  });
+
+  it("routes this warning and checkServerVersion's through the warn option, not console.warn", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_edges = { status: "success", edges: [edge], outgoing_has_more: true };
+    server.restResults["/api/v1/system/info"] = { name: "Kagura Memory Cloud", version: "0.70.0", features: {} };
+    const messages: string[] = [];
+    const client = makeClient(server, { warn: (message: string) => void messages.push(message) });
+
+    await client.listEdges({ contextId: CTX, memoryId: "m-1" });
+    await client.checkServerVersion();
+
+    expect(messages).toEqual([
+      "list_edges returned 1 edges of memory m-1, but more outgoing edges exist past the " +
+        "per-direction limit: raise limit (max 200), or narrow with min_weight / edge_types",
+      "Server version 0.70.0 is below the SDK's tested minimum 0.75.0. Some features may not work; " +
+        "older servers may silently ignore unknown parameters.",
+    ]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("a no-op warn option silences them", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_edges = { status: "success", edges: [], incoming_has_more: true };
+    await makeClient(server, { warn: () => {} }).listEdges({ contextId: CTX, memoryId: "m-1" });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

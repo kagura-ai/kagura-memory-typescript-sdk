@@ -1242,7 +1242,7 @@ the counterpart to `recall`'s probabilistic search.
 |--------|--------------|
 | `listTags` | Tag vocabulary with counts and recency. `prefix` narrows by spelling; `withTags` is a multi-tag AND drill-down that also excludes those tags from the result — the two compose into server-side faceted browsing with no local index. A drill-down calls the REST tags endpoint on every server, because the MCP tool has `with_tags` only from server v0.77.0 and an older one ignores it; the result has the same shape. Its `context_name` is the one the endpoint sends (server v0.77.0+), else one MCP `list_tags` call names the context, once per client. Its values are trimmed and blank ones dropped, and at most 50 of up to 200 characters each are accepted. Over MCP a reply holds at most 200 tags whatever the `limit` (v0.82.0+), with `has_more: true` when more matched; there is no cursor, so narrow with `prefix` or `minCount`. |
 | `explore` | Graph traversal from a seed memory (`depth` 1–5, `minWeight`). |
-| `listEdges` | Edges touching a memory, incoming and outgoing, deduplicated, heaviest first. Each direction is cut at `limit` (the server's default is 50 from v0.82.0, its maximum 200), and the tool has no cursor: when the server's default or its clamp cut a direction (`outgoing_has_more` / `incoming_has_more`), the client logs a warning with `console.warn`; raise `limit` or `minWeight`, or narrow `edgeTypes`. `minWeight` is always sent, `0.0` unless set, so every edge comes back: the server's own default is 0.05 since v0.117.0, which hides weak automatic edges. |
+| `listEdges` | Edges touching a memory, incoming and outgoing, deduplicated, heaviest first. Each direction is cut at `limit` (the server's default is 50 from v0.82.0, its maximum 200), and the tool has no cursor: when the server's default or its clamp cut a direction (`outgoing_has_more` / `incoming_has_more`), the client logs a warning (to `console.warn` unless the client's `warn` option routes it); raise `limit` or `minWeight`, or narrow `edgeTypes`. `minWeight` is always sent, `0.0` unless set, so every edge comes back: the server's own default is 0.05 since v0.117.0, which hides weak automatic edges. |
 | `createEdge` / `updateEdge` / `deleteEdge` | Manual edge curation. `(sourceId, targetId)` is the identity; self-loops are rejected. |
 | `findDuplicates` | Near-duplicate pairs above `threshold` (0.5–1.0, default 0.90). |
 | `feedback` | Record whether a recalled memory was useful — an append-only signal in its own lane, not a memory edit. |
@@ -1310,6 +1310,11 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 | `getToolDefinitions` | Raw MCP `tools/list` output — every tool the server exposes, including any this SDK does not wrap yet. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
+
+The advisory warnings `checkServerVersion` and `listEdges` log go to
+`console.warn` unless the client is built with a `warn` option:
+`new KaguraClient({ warn: (message) => logger.warn(message) })` routes
+them, and `warn: () => {}` silences them.
 
 Agent Registry and binding methods are covered in
 [Agent control plane](#agent-control-plane-memory-cloud-v0490) below.

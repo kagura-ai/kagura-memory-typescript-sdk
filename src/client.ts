@@ -108,11 +108,16 @@ const MIN_SERVER_VERSION_TRIPLE = requireVersion(MIN_SERVER_VERSION, "MIN_SERVER
  * meets it or cannot be compared. `doctor` gives it after its own read of
  * the body, as Python's `check_server_version` does after its model's.
  *
+ * @param warn Where the warning goes (`KaguraClientOptions.warn`); default
+ *   `console.warn`.
  * @internal Not exported from the package entry point.
  */
-export function warnBelowMinimum(version: unknown): void {
+export function warnBelowMinimum(
+  version: unknown,
+  warn: (message: string) => void = (message) => console.warn(message),
+): void {
   if (meetsMinimum(version, MIN_SERVER_VERSION_TRIPLE) === false) {
-    console.warn(
+    warn(
       `Server version ${String(version)} is below the SDK's tested minimum ` +
         `${MIN_SERVER_VERSION}. Some features may not work; older servers ` +
         "may silently ignore unknown parameters.",
@@ -169,6 +174,13 @@ export interface KaguraClientOptions {
   env?: Record<string, string | undefined>;
   /** Home directory override (for tests). */
   home?: string;
+  /**
+   * Where the client's advisory warnings go — the ones the Python SDK logs
+   * on its `kagura_memory` logger: `checkServerVersion`'s below-minimum
+   * notice and `listEdges`' cut-direction notice. Default `console.warn`;
+   * pass `() => {}` to silence them, or a logger's method to route them.
+   */
+  warn?: (message: string) => void;
 }
 
 export interface RememberOptions {
@@ -993,6 +1005,8 @@ export class KaguraClient {
   private readonly baseUrl: string;
   private readonly auth: AuthProvider;
   private readonly fetchImpl: typeof globalThis.fetch;
+  /** {@link KaguraClientOptions.warn}. */
+  private readonly warn: (message: string) => void;
   private sessionId: string | null = null;
   /** The in-flight `initialize`, shared by every caller (see initializeSession). */
   private sessionOpening: Promise<string> | null = null;
@@ -1024,6 +1038,8 @@ export class KaguraClient {
     this.baseUrl = baseUrlFromMcp(strippedUrl);
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    // Looked up per warning, so a console.warn replaced later still gets it.
+    this.warn = options.warn ?? ((message) => console.warn(message));
 
     if (resolved.kind === "static") {
       // Long-lived API key path: bake the bearer header once.
@@ -1883,8 +1899,8 @@ export class KaguraClient {
    * Read ephemeral agent run-state. Supply `key` to read one value, omit
    * it to list the context's live entries.
    *
-   * Since memory-cloud v0.82.0 (#1743) the list is paged in key order: 50
-   * entries a page within the server's 20,000-character budget. The reply
+   * Since memory-cloud v0.82.0 (#1743) the list is paged in key order, at
+   * the server's page size and within its response budget. The reply
    * then carries `has_more` and `next_cursor`; pass `next_cursor` back as
    * `cursor` for the next page. A value too large for the page is named
    * in `omitted_keys` instead (read it by `key`). Older servers return
@@ -2770,8 +2786,9 @@ export class KaguraClient {
    * direction held more, its `outgoing_has_more` / `incoming_has_more`
    * flag is set, which this list cannot carry. When the cut came from the
    * server's default (no `limit`) or its 200 clamp, not from the `limit`
-   * passed, the client logs a warning (`console.warn`), as the Python SDK
-   * logs one on its `kagura_memory` logger. Raise `limit` to get more of
+   * passed, the client logs a warning through
+   * {@link KaguraClientOptions.warn} (default `console.warn`), as the
+   * Python SDK logs one on its `kagura_memory` logger. Raise `limit` to get more of
    * them, or raise `minWeight` / narrow `edgeTypes` so the ones that
    * matter fit.
    */
@@ -2811,7 +2828,7 @@ export class KaguraClient {
     // A cut at the caller's own limit is what they asked for: warn only when
     // the server's default or its clamp made it.
     if (cut.length > 0 && (options.limit === undefined || options.limit > LIST_EDGES_MAX_LIMIT)) {
-      console.warn(
+      this.warn(
         `list_edges returned ${edges.length} edges of memory ${options.memoryId}, but more ` +
           `${cut.join(" and ")} edges exist past the per-direction limit: raise limit (max 200), ` +
           "or narrow with min_weight / edge_types",
@@ -3001,7 +3018,7 @@ export class KaguraClient {
    */
   async checkServerVersion(): Promise<ServerInfo> {
     const info = await this.getServerInfo();
-    warnBelowMinimum(info.version);
+    warnBelowMinimum(info.version, this.warn);
     return info;
   }
 

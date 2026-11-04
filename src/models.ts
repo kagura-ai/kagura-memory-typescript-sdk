@@ -931,10 +931,12 @@ export interface SleepReport {
   /**
    * Judge-LLM calls that raised, across all phases (server v0.43.0+). It
    * can be 0 on a `degraded` run whose grade came from a failed phase.
+   * `null` (or absent) from servers older than v0.43.0, as the Python
+   * SDK's `int | None` reads it, and in replies that carry `null`.
    *
-   * @default 0
+   * @default null
    */
-  llm_call_failures?: number;
+  llm_call_failures?: number | null;
   /**
    * `"sleep"` or `"analysis"` (memory-cloud v0.138.0+, #2219; see
    * {@link SleepReportSource}); absent on older servers. Typed `string`
