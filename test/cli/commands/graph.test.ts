@@ -157,11 +157,29 @@ describe("kagura-memory sleep", () => {
     expect(h.err.join("\n")).toContain("'abc' is not a valid integer range.");
   });
 
-  it("sends both ids for a report", async () => {
+  it("sends the report id only: the server declares no context_id on get_sleep_report", async () => {
+    // Until #85 (and #79) this sent `context_id` too, which memory-cloud
+    // v0.82.0+ refuses with invalid_argument; the positional stays.
     const h = harness();
-    h.server.toolResults.get_sleep_report = { status: "success", report: { id: "r-1" } };
+    h.server.toolResults.get_sleep_report = {
+      status: "success",
+      report: {
+        report_id: "r-1",
+        status: "completed",
+        memories_processed: 0,
+        edges_created: 0,
+        memories_merged: 0,
+        memories_promoted: 0,
+        llm_calls_made: 0,
+        llm_tokens_used: 0,
+        memories_flagged: 0,
+        embedding_calls_made: 0,
+      },
+      actions: [],
+      action_count: 0,
+    };
     expect(await runCli(["sleep", "report", "ctx-1", "r-1"], h.deps)).toBe(0);
-    expect(h.server.toolCallArgs(0)).toMatchObject({ context_id: "ctx-1", report_id: "r-1" });
+    expect(h.server.toolCallArgs(0)).toEqual({ report_id: "r-1" });
   });
 });
 

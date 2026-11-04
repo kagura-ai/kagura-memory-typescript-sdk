@@ -74,7 +74,7 @@ import {
 } from "./pyModels.js";
 import { hasLoneSurrogate, STRING_UNICODE } from "./pydanticNumber.js";
 import { meetsMinimum, requireVersion } from "./versionCheck.js";
-import { pyRepr, pyStr, pyTypeName } from "./python.js";
+import { pyFloatRepr, pyRepr, pyStr, pyTypeName } from "./python.js";
 import {
   ResponseReader,
   laxFloat,
@@ -180,6 +180,11 @@ export interface RememberOptions {
   type?: string;
   /** Importance score (0.0-1.0). */
   importance?: number;
+  /**
+   * At most 50 tags, each at most 100 characters — the caps memory-cloud
+   * v0.82.0+ enforces on a write (#1743), checked before any request on
+   * every server.
+   */
   tags?: string[];
   /** Origin URI (e.g. `file:///`, `https://`, `vault://`). */
   sourceUri?: string;
@@ -293,6 +298,10 @@ export interface UpdateMemoryOptions {
   content?: string;
   type?: string;
   importance?: number;
+  /**
+   * Replaces the list; `[]` clears it. At most 50 tags, each at most 100
+   * characters, as for {@link RememberOptions.tags}.
+   */
   tags?: string[];
   contextSummary?: string;
   /**
@@ -346,6 +355,12 @@ export interface ListContextsOptions {
   includeDetails?: boolean;
   /** Add `memory_count` per context. Works on every supported server. */
   includeStats?: boolean;
+  /**
+   * The `next_cursor` of the previous page. Sent only when set
+   * (memory-cloud v0.82.0+; an older server sends every context in one
+   * reply and no cursor).
+   */
+  cursor?: string;
 }
 
 export interface CreateContextOptions {
@@ -748,6 +763,8 @@ const ROLLBACK_COUNTS = [
   "importance_kept",
   "promotions_kept",
   "archives_restored",
+  "chunks_requeued",
+  "points_requeued",
 ] as const;
 
 /**
@@ -773,6 +790,126 @@ function readRollbackSummary(raw: unknown, operation: string): RollbackSummary {
   }
   r.check();
   return raw as RollbackSummary;
+}
+
+// ---------------------------------------------------------------------------
+// memory-cloud v0.82.0 bounds (#1743): write caps and cursor paging
+// ---------------------------------------------------------------------------
+
+/** `remember` / `updateMemory` tag caps (server `MEMORY_TAGS_MAX_COUNT` / `MEMORY_TAG_MAX_CHARS`). */
+const MEMORY_TAGS_MAX_COUNT = 50;
+const MEMORY_TAG_MAX_CHARS = 100;
+/** `setState` value cap (server `STATE_VALUE_MAX_CHARS`), in characters of compact JSON. */
+const STATE_VALUE_MAX_CHARS = 16_384;
+/** Pages a plain-list method follows before giving up on an unfinished list. */
+const MAX_AUTO_PAGES = 50;
+/** `list_edges` per-direction clamp (server `LIST_EDGES_MAX_LIMIT`). */
+const LIST_EDGES_MAX_LIMIT = 200;
+/** `get_sleep_report` envelope keys merged into the flattened report. */
+const SLEEP_REPORT_ENVELOPE_KEYS = [
+  "actions",
+  "action_count",
+  "actions_has_more",
+  "actions_next_cursor",
+  "note",
+] as const;
+
+/**
+ * Refuse a `tags` list the server would refuse on a write, before any
+ * request: more than 50 tags, or a tag longer than 100 characters. Measured
+ * as the server measures it, and as Python's `_validate_memory_tags` does:
+ * the list as given (no trimming or deduplication) and each tag's length
+ * in code points.
+ *
+ * @throws Error in the Python SDK's words.
+ */
+function validateMemoryTags(tags: readonly unknown[] | undefined): void {
+  if (!Array.isArray(tags)) return;
+  if (tags.length > MEMORY_TAGS_MAX_COUNT) {
+    throw new Error(`tags accepts at most ${MEMORY_TAGS_MAX_COUNT} tags, got ${tags.length}`);
+  }
+  let longest = 0;
+  for (const tag of tags) {
+    if (typeof tag === "string") longest = Math.max(longest, [...tag].length);
+  }
+  if (longest > MEMORY_TAG_MAX_CHARS) {
+    throw new Error(`each tag must be at most ${MEMORY_TAG_MAX_CHARS} characters, got ${longest}`);
+  }
+}
+
+/** A string's length as Python's `json.dumps(…, ensure_ascii=False)` writes it, quotes included. */
+function pyJsonStringChars(text: string): number {
+  let chars = 2;
+  for (const point of text) {
+    const code = point.codePointAt(0) as number;
+    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) {
+      chars += 2;
+    } else {
+      chars += code < 0x20 ? 6 : 1;
+    }
+  }
+  return chars;
+}
+
+/** The characters of a parsed JSON value as Python's compact `json.dumps` writes it. */
+function pyCompactJsonChars(value: unknown): number {
+  if (value === null) return 4;
+  switch (typeof value) {
+    case "boolean":
+      return value ? 4 : 5;
+    case "number": {
+      // What the wire carries for this number decides how the server reads
+      // it: digits only are an int, anything else a float, which Python
+      // writes back as its repr (`1e-05`, not `0.00001`).
+      const sent = JSON.stringify(value);
+      return /[.eE]/.test(sent) ? pyFloatRepr(value).length : sent.length;
+    }
+    case "string":
+      return pyJsonStringChars(value);
+    default:
+      break;
+  }
+  if (Array.isArray(value)) {
+    return value.reduce((n: number, item) => n + pyCompactJsonChars(item), 1 + Math.max(value.length, 1));
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  return entries.reduce(
+    (n, [key, item]) => n + pyJsonStringChars(key) + 1 + pyCompactJsonChars(item),
+    1 + Math.max(entries.length, 1),
+  );
+}
+
+/**
+ * Refuse a `setState` value longer than the server's cap, before any
+ * request. The length is the server's measure (its `json_chars`: compact
+ * JSON, `ensure_ascii=False`, in code points) of the value as this SDK
+ * sends it. A value `JSON.stringify` cannot write is not measured: sending
+ * it fails as before.
+ *
+ * @throws Error in the Python SDK's words.
+ */
+function validateStateValue(value: unknown): void {
+  let sent: string | undefined;
+  try {
+    sent = JSON.stringify(value);
+  } catch {
+    return;
+  }
+  if (sent === undefined) return;
+  const size = pyCompactJsonChars(JSON.parse(sent));
+  if (size > STATE_VALUE_MAX_CHARS) {
+    throw new Error(
+      `value must be at most ${STATE_VALUE_MAX_CHARS} characters as compact JSON, got ${size}; ` +
+        "store large data as a memory and keep its id in the state",
+    );
+  }
+}
+
+/** A row's `id` for de-duplication across pages, or `undefined` when it has none. */
+function rowId(row: unknown): unknown {
+  if (typeof row !== "object" || row === null) return undefined;
+  const id = (row as Record<string, unknown>).id;
+  return id === null ? undefined : id;
 }
 
 /**
@@ -1328,8 +1465,15 @@ export class KaguraClient {
     throw new KaguraError(failure);
   }
 
-  /** Store a memory. Returns the API response with `memory_id`. */
+  /**
+   * Store a memory. Returns the API response with `memory_id`.
+   *
+   * @throws Error if `tags` holds more than 50 tags or a tag longer than
+   *   100 characters (the caps memory-cloud v0.82.0+ enforces), before any
+   *   request.
+   */
   async remember(options: RememberOptions): Promise<ToolResult> {
+    validateMemoryTags(options.tags);
     const args: Record<string, unknown> = {
       context_id: options.contextId,
       summary: options.summary,
@@ -1705,16 +1849,25 @@ export class KaguraClient {
    * Set ephemeral agent run-state at `(contextId, key)` — a TTL-bounded
    * key/value lane kept separate from memories and excluded from recall.
    * Use remember() for durable knowledge.
+   *
+   * @throws Error if `value` is longer than 16,384 characters as compact
+   *   JSON (the cap memory-cloud v0.82.0+ enforces), before any request.
    */
   async setState(options: {
     contextId: string;
     /** State key (max 255 chars); re-use overwrites. */
     key: string;
-    /** Arbitrary JSON value. */
+    /**
+     * Arbitrary JSON value, at most 16,384 characters as compact JSON —
+     * measured as the server measures it (`ensure_ascii=False`, no
+     * spaces, in code points). Store large data as a memory and keep its
+     * id here.
+     */
     value: unknown;
     /** TTL in seconds (server clamps to 30 days); omit for no expiry. */
     ttlSeconds?: number;
   }): Promise<ToolResult> {
+    validateStateValue(options.value);
     const args: Record<string, unknown> = {
       context_id: options.contextId,
       key: options.key,
@@ -1728,12 +1881,37 @@ export class KaguraClient {
 
   /**
    * Read ephemeral agent run-state. Supply `key` to read one value, omit
-   * it to list all live keys for the context.
+   * it to list the context's live entries.
+   *
+   * Since memory-cloud v0.82.0 (#1743) the list is paged in key order: 50
+   * entries a page within the server's 20,000-character budget. The reply
+   * then carries `has_more` and `next_cursor`; pass `next_cursor` back as
+   * `cursor` for the next page. A value too large for the page is named
+   * in `omitted_keys` instead (read it by `key`). Older servers return
+   * every entry and no paging fields.
+   *
+   * @throws Error if `cursor` is given together with `key`, before any
+   *   request.
    */
-  async getState(options: { contextId: string; key?: string }): Promise<ToolResult> {
+  async getState(options: {
+    contextId: string;
+    /** The state key to read; omit to list the live entries. */
+    key?: string;
+    /**
+     * List mode only: the `next_cursor` of the previous page. Sent only
+     * when set (memory-cloud v0.82.0+).
+     */
+    cursor?: string;
+  }): Promise<ToolResult> {
+    if (options.key !== undefined && options.cursor !== undefined) {
+      throw new Error("cursor pages the list of entries; omit key to list them");
+    }
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.key !== undefined) {
       args.key = options.key;
+    }
+    if (options.cursor !== undefined) {
+      args.cursor = options.cursor;
     }
     return this.callToolChecked("get_state", args);
   }
@@ -1811,11 +1989,73 @@ export class KaguraClient {
     return KaguraClient.expectEnvelope(result, "agent", "get_agent") as unknown as Agent;
   }
 
-  /** List the workspace's registered agents, newest first (owner/admin only). */
+  /**
+   * List the workspace's registered agents, newest first (owner/admin
+   * only).
+   *
+   * Since memory-cloud v0.82.0 (#1743) the tool returns 50 agents a page
+   * with `has_more` / `next_cursor`; this method follows the cursor and
+   * returns every agent, at most 50 pages (an older server answers in one
+   * page). The cursor is an offset, so an agent registered or deleted
+   * between two calls shifts the rows: an agent an earlier page returned
+   * is dropped from a later one (each `id` once), but one deleted between
+   * calls can make the next page skip an agent. Each row's `description`
+   * is a 200-character preview there, with `description_truncated` set
+   * when it was cut — {@link getAgent} returns it whole.
+   *
+   * @throws KaguraResponseError when a page says `has_more` without a
+   *   `next_cursor` or repeats an earlier one, or the list is not complete
+   *   after 50 pages.
+   */
   async listAgents(): Promise<Agent[]> {
-    const result = await this.callToolChecked("list_agents", {});
-    const agents = result.agents;
-    return Array.isArray(agents) ? (agents as unknown as Agent[]) : [];
+    return (await this.collectPages("list_agents", "agents")) as Agent[];
+  }
+
+  /**
+   * Every row of a cursor-paged MCP list tool (memory-cloud v0.82.0+,
+   * #1743), as Python's `_collect_pages` gathers them.
+   *
+   * The first call sends no paging argument, so an older server, which
+   * pages nothing and sends no `has_more`, answers in one call. Each later
+   * call sends only `cursor`, the `next_cursor` of the page before. A row
+   * whose `id` an earlier page already returned is dropped (the first
+   * occurrence is kept).
+   *
+   * @throws KaguraResponseError labelled `tool` when `has_more` comes
+   *   without a usable `next_cursor` or with one an earlier page already
+   *   sent, or the list is not complete after 50 pages.
+   */
+  private async collectPages(tool: string, key: string): Promise<unknown[]> {
+    const rows: unknown[] = [];
+    const returnedIds = new Set<unknown>();
+    const seen = new Set<string>();
+    let args: Record<string, unknown> = {};
+    for (let page = 0; page < MAX_AUTO_PAGES; page++) {
+      const result = await this.callToolChecked(tool, args);
+      const items = Array.isArray(result[key]) ? (result[key] as unknown[]) : [];
+      rows.push(...items.filter((row) => !returnedIds.has(rowId(row))));
+      for (const row of items) {
+        const id = rowId(row);
+        if (id !== undefined) returnedIds.add(id);
+      }
+      if (result.has_more !== true) return rows;
+      const cursor = result.next_cursor;
+      if (typeof cursor !== "string" || cursor === "") {
+        throw new KaguraResponseError(
+          `${tool}: unexpected server response (has_more without a next_cursor)`,
+          tool,
+        );
+      }
+      if (seen.has(cursor)) {
+        throw new KaguraResponseError(
+          `${tool}: unexpected server response (a page repeated an earlier next_cursor)`,
+          tool,
+        );
+      }
+      seen.add(cursor);
+      args = { cursor };
+    }
+    throw new KaguraResponseError(`${tool}: the list did not end within ${MAX_AUTO_PAGES} pages`, tool);
   }
 
   /**
@@ -2018,6 +2258,12 @@ export class KaguraClient {
    * `count` is workspace quota usage, not the number returned — that is
    * `total`. When the caller can see no context at all, `hint` says how
    * to create one or get access.
+   *
+   * Since server v0.82.0 (memory-cloud#1743) the directory is paged: 100
+   * contexts a page (20 with `includeDetails` and no `nameContains`), and
+   * a page also stops at the server's 20,000-character budget. `has_more`
+   * says more contexts follow; pass `next_cursor` back as `cursor` for the
+   * next page.
    */
   async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
     const args: Record<string, unknown> = {};
@@ -2032,6 +2278,9 @@ export class KaguraClient {
     }
     if (options.includeStats) {
       args.include_stats = true;
+    }
+    if (options.cursor !== undefined) {
+      args.cursor = options.cursor;
     }
     const result = await this.callToolChecked("list_contexts", args);
     return result as unknown as ListContextsResponse;
@@ -2243,7 +2492,9 @@ export class KaguraClient {
    * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
    *
    * @throws Error unless exactly one of memoryId/externalId is provided,
-   *   or if `dismissSupersedeCandidate` is combined with `externalId`.
+   *   if `dismissSupersedeCandidate` is combined with `externalId`, or if
+   *   `tags` holds more than 50 tags or a tag longer than 100 characters
+   *   — each before any request.
    */
   async updateMemory(options: UpdateMemoryOptions): Promise<ToolResult> {
     if (!options.memoryId && !options.externalId) {
@@ -2261,6 +2512,7 @@ export class KaguraClient {
           "replaces the memory and its suggestion",
       );
     }
+    validateMemoryTags(options.tags);
 
     const args: Record<string, unknown> = { context_id: options.contextId };
     if (options.memoryId !== undefined) {
@@ -2505,20 +2757,39 @@ export class KaguraClient {
 
   /**
    * List neural memory edges connected to a memory (outgoing and
-   * incoming, deduplicated).
+   * incoming, deduplicated, heaviest first).
    *
    * Note: the server applies `limit` to outgoing AND incoming queries
    * independently, so the practical maximum returned is `2 * limit`
    * minus dedup overlap.
+   *
+   * Since memory-cloud v0.82.0 (#1743) each direction is cut at `limit`
+   * edges (50 unless set, at most 200). The tool takes no cursor: when a
+   * direction held more, its `outgoing_has_more` / `incoming_has_more`
+   * flag is set, which this list cannot carry. When the cut came from the
+   * server's default (no `limit`) or its 200 clamp, not from the `limit`
+   * passed, the client logs a warning (`console.warn`), as the Python SDK
+   * logs one on its `kagura_memory` logger. Raise `limit` to get more of
+   * them, or raise `minWeight` / narrow `edgeTypes` so the ones that
+   * matter fit.
    */
   async listEdges(options: {
     contextId: string;
     memoryId: string;
-    /** Minimum edge weight (0.0-3.0, default 0.0). */
+    /**
+     * Minimum edge weight (0.0-3.0, default 0.0). Always sent: since
+     * memory-cloud v0.117.0 (#2127) the server's own default is 0.05,
+     * which hides weak automatic edges, while this method keeps sending
+     * `0.0` (every edge), as on every earlier server.
+     */
     minWeight?: number;
     /** Restrict to these edge types; omit for all. */
     edgeTypes?: string[];
-    /** Maximum edges per direction; omit for no limit. */
+    /**
+     * Maximum edges per direction (the server clamps it to 1-200). Omit
+     * for the server's default: 50 per direction since v0.82.0, no limit
+     * before.
+     */
     limit?: number;
   }): Promise<Edge[]> {
     const args: Record<string, unknown> = {
@@ -2533,8 +2804,18 @@ export class KaguraClient {
       args.limit = options.limit;
     }
     const result = await this.callToolChecked("list_edges", args);
-    const edges = result.edges;
-    return Array.isArray(edges) ? (edges as unknown as Edge[]) : [];
+    const edges = Array.isArray(result.edges) ? (result.edges as unknown as Edge[]) : [];
+    const cut = (["outgoing", "incoming"] as const).filter((d) => result[`${d}_has_more`] === true);
+    // A cut at the caller's own limit is what they asked for: warn only when
+    // the server's default or its clamp made it.
+    if (cut.length > 0 && (options.limit === undefined || options.limit > LIST_EDGES_MAX_LIMIT)) {
+      console.warn(
+        `list_edges returned ${edges.length} edges of memory ${options.memoryId}, but more ` +
+          `${cut.join(" and ")} edges exist past the per-direction limit: raise limit (max 200), ` +
+          "or narrow with min_weight / edge_types",
+      );
+    }
+    return edges;
   }
 
   /**
@@ -2850,16 +3131,32 @@ export class KaguraClient {
 
   /**
    * List recent Sleep Maintenance runs for a context, newest first.
+   *
+   * Since memory-cloud v0.138.0 (#2219) the tool lists Sleep runs only
+   * (`source: "sleep"`) unless `source` says otherwise, and each row
+   * carries `source`. Older servers have no filter, may list the rows
+   * Memory Analysis writes for its LLM spend among the Sleep runs, and
+   * send no `source`.
    */
   async getSleepHistory(options: {
     contextId: string;
     /** Maximum runs (server clamps to 1-50, default 10). */
     limit?: number;
+    /**
+     * `"sleep"` (Sleep runs, the server's default), `"analysis"` (Memory
+     * Analysis spend rows) or `"all"`. Sent only when set (memory-cloud
+     * v0.138.0+).
+     */
+    source?: "sleep" | "analysis" | "all";
   }): Promise<SleepReport[]> {
-    const result = await this.callToolChecked("get_sleep_history", {
+    const args: Record<string, unknown> = {
       context_id: options.contextId,
       limit: options.limit ?? 10,
-    });
+    };
+    if (options.source !== undefined) {
+      args.source = options.source;
+    }
+    const result = await this.callToolChecked("get_sleep_history", args);
     // Match Python's `result["reports"]`: a missing/malformed key is a
     // contract violation, surfaced loudly rather than as an empty success.
     const reports = result.reports;
@@ -2874,23 +3171,55 @@ export class KaguraClient {
   /**
    * Get a detailed Sleep Maintenance report including the per-action
    * audit log.
+   *
+   * `contextId` is never sent: besides `report_id`, only the paging
+   * options below go out, each only when set. No memory-cloud release
+   * declares a `context_id` on this tool, and since v0.82.0 the server
+   * refuses an argument the tool does not declare.
+   *
+   * Since memory-cloud v0.82.0 (#1743) `actions` is one page of the run's
+   * actions in id order, 50 by default, within a 20,000-character budget:
+   * `action_count` is the run's total, and while `actions_has_more` is
+   * `true` pass `actions_next_cursor` back as `actionsCursor` for the next
+   * page. An action too large for its page comes with `details_omitted`
+   * instead of `details`. Older servers send every action at once. An
+   * analysis report (`source: "analysis"`) carries a `note` (v0.140.0+,
+   * #2547): it records Memory Analysis spend and has no Sleep actions.
    */
   async getSleepReport(options: {
+    /** Unused; kept for backwards compatibility. The server scopes the call by `reportId`. */
     contextId: string;
     reportId: string;
+    /** The `actions_next_cursor` of the previous page (memory-cloud v0.82.0+). */
+    actionsCursor?: string;
+    /** Actions per page; the server clamps it to 1-200, default 50 (v0.82.0+). */
+    actionsLimit?: number;
+    /**
+     * Response budget in characters, not tokens: 10,000 to 100,000,
+     * default 20,000; the server refuses other values with
+     * `validation_error` (v0.82.0+).
+     */
+    maxChars?: number;
   }): Promise<SleepReportDetail> {
-    const result = await this.callToolChecked("get_sleep_report", {
-      context_id: options.contextId,
-      report_id: options.reportId,
-    });
+    const args: Record<string, unknown> = { report_id: options.reportId };
+    if (options.actionsCursor !== undefined) {
+      args.actions_cursor = options.actionsCursor;
+    }
+    if (options.actionsLimit !== undefined) {
+      args.actions_limit = options.actionsLimit;
+    }
+    if (options.maxChars !== undefined) {
+      args.max_chars = options.maxChars;
+    }
+    const result = await this.callToolChecked("get_sleep_report", args);
     // The MCP tool wraps the report fields under a "report" key; flatten
-    // so SleepReportDetail reads naturally without an extra `.report.`.
+    // so SleepReportDetail reads naturally without an extra `.report.`,
+    // with the envelope's action page and paging keys where it sent them.
     const report = KaguraClient.expectEnvelope(result, "report", "get_sleep_report");
-    return {
-      ...report,
-      actions: result.actions,
-      action_count: result.action_count,
-    } as unknown as SleepReportDetail;
+    const envelope = SLEEP_REPORT_ENVELOPE_KEYS.filter((key) =>
+      Object.prototype.hasOwnProperty.call(result, key),
+    ).map((key) => [key, result[key]] as const);
+    return { ...report, ...Object.fromEntries(envelope) } as unknown as SleepReportDetail;
   }
 
   /**

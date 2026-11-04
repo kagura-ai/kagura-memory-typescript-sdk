@@ -7,8 +7,9 @@
  * re-running with the right one.
  */
 
+import { readModel, SLEEP_REPORT, SLEEP_REPORT_DETAIL } from "../../pyModels.js";
 import { examples, requireArg, rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
-import { CliError, parseFloatOption, parseIntOption, parseRanged, parseTags } from "../parse.js";
+import { CliError, parseChoice, parseFloatOption, parseIntOption, parseRanged, parseTags } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
 
@@ -191,39 +192,99 @@ const SLEEP_LIMIT: FlagSpec = {
   defaultLabel: "10",
 };
 
+const SLEEP_SOURCES = ["sleep", "analysis", "all"] as const;
+
+const SLEEP_SOURCE: FlagSpec = {
+  name: "source",
+  type: "value",
+  metavar: "[sleep|analysis|all]",
+  help: "Sleep runs (the server's default), Memory Analysis spend rows, or all (memory-cloud 0.138.0+).",
+};
+
+/**
+ * Both commands print what the Python CLI prints: each report read through
+ * the Python SDK's model (`SleepReport`, `SleepReportDetail`) — its keys
+ * in its order, its default for a key the server left out, no key it does
+ * not have — and a report the model refuses exits 1 with the Python SDK's
+ * `KaguraResponseError` text.
+ */
 const sleepHistory: Command = {
   summary: "List recent Sleep Maintenance runs for a context.",
   args: "CONTEXT_ID",
-  spec: { flags: [SLEEP_LIMIT] },
+  spec: { flags: [SLEEP_LIMIT, SLEEP_SOURCE] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
-    rejectExtraArgs(args, 1);
     const raw = args.values.limit;
     const limit =
       raw === undefined
         ? 10
         : parseRanged(SLEEP_LIMIT, raw, { min: 1, max: 50, rangeLabel: "1<=x<=50", integer: true });
+    const rawSource = args.values.source;
+    const source = rawSource === undefined ? undefined : parseChoice(SLEEP_SOURCE, rawSource, SLEEP_SOURCES);
+    rejectExtraArgs(args, 1);
     return runClientCommand(
       deps,
       undefined,
-      (client) => client.getSleepHistory({ contextId, limit }),
+      async (client) => {
+        const reports = await client.getSleepHistory({
+          contextId,
+          limit,
+          ...(source !== undefined ? { source } : {}),
+        });
+        return { reports: reports.map((report) => readModel(report, SLEEP_REPORT, "get_sleep_history")) };
+      },
       { needsContext: false },
     );
   },
 };
 
+const ACTIONS_CURSOR: FlagSpec = {
+  name: "actions-cursor",
+  type: "value",
+  help: "actions_next_cursor of the previous page (memory-cloud 0.82.0+).",
+};
+
+const ACTIONS_LIMIT: FlagSpec = {
+  name: "actions-limit",
+  type: "value",
+  metavar: "INTEGER",
+  help: "Actions per page (1-200; the server's default is 50; memory-cloud 0.82.0+).",
+};
+
 const sleepReport: Command = {
   summary: "Get a detailed Sleep Maintenance report including audit log.",
   args: "CONTEXT_ID REPORT_ID",
-  spec: { flags: [] },
+  description:
+    "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
+    "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on\n" +
+    "  the run's own context). From memory-cloud 0.82.0 the audit log comes a\n" +
+    "  page at a time: while actions_has_more is true, pass actions_next_cursor\n" +
+    "  as --actions-cursor.",
+  spec: { flags: [ACTIONS_CURSOR, ACTIONS_LIMIT] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
     const reportId = requireArg(args, 1, "REPORT_ID");
+    const actionsCursor = args.values["actions-cursor"];
+    const rawLimit = args.values["actions-limit"];
+    const actionsLimit =
+      rawLimit === undefined
+        ? undefined
+        : parseRanged(ACTIONS_LIMIT, rawLimit, { min: 1, max: 200, rangeLabel: "1<=x<=200", integer: true });
     rejectExtraArgs(args, 2);
     return runClientCommand(
       deps,
       undefined,
-      (client) => client.getSleepReport({ contextId, reportId }),
+      async (client) =>
+        readModel(
+          await client.getSleepReport({
+            contextId,
+            reportId,
+            ...(actionsCursor !== undefined ? { actionsCursor } : {}),
+            ...(actionsLimit !== undefined ? { actionsLimit } : {}),
+          }),
+          SLEEP_REPORT_DETAIL,
+          "get_sleep_report",
+        ),
       { needsContext: false },
     );
   },
