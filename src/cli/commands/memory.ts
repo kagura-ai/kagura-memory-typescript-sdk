@@ -12,17 +12,29 @@
  *     an omitted field there means "leave unchanged".
  */
 
-import type { KaguraClient, RecallOptions, SourceType } from "../../client.js";
-import { KaguraError } from "../../errors.js";
-import type { RecallResponse, RecallVerbosity } from "../../models.js";
+import {
+  checkRememberOptions,
+  checkUpdateMemoryOptions,
+  type KaguraClient,
+  type RecallOptions,
+  type RememberOptions,
+  type SourceType,
+  type UpdateMemoryOptions,
+} from "../../client.js";
+import { excMessage, KaguraError } from "../../errors.js";
+import type { DedupeMode, RecallResponse, RecallVerbosity, UpdateMemoryResult } from "../../models.js";
+import { pyStrip } from "../../pyCompat.js";
 import { pyTruthy } from "../../python.js";
 import { MAX_CHARS_MAX, MAX_CHARS_MIN, RECALL_FULL_MAX } from "../../responseBudget.js";
+import { meetsMinimum } from "../../versionCheck.js";
 import { examples, requireArg, requireOption, rejectExtraArgs, type Command } from "../command.js";
+import { formatJson } from "../output.js";
 import {
   CliError,
   buildDetails,
   pairedFlag,
   parseChoice,
+  parseDetails,
   parseFloatOption,
   parseIntOption,
   parseRanged,
@@ -102,6 +114,31 @@ function intOr(args: ParsedArgs, flag: FlagSpec, fallback: number): number {
   return raw === undefined ? fallback : parseIntOption(flag, raw);
 }
 
+/** `undefined` for an unset or blank value — Python's `_blank_to_none`. */
+function blankToUndefined(value: string | undefined): string | undefined {
+  return value !== undefined && pyStrip(value) ? value : undefined;
+}
+
+const REMEMBER_OBSERVED_AT: FlagSpec = {
+  name: "observed-at",
+  type: "value",
+  help:
+    "When the fact held, not the write time: YYYY-MM-DD or an ISO 8601 datetime " +
+    "(naive = UTC). Stored as details.observed_at (server v0.127.0+).",
+};
+
+const DEDUPE_MODES: readonly DedupeMode[] = ["suggest", "check", "off"];
+
+const DEDUPE: FlagSpec = {
+  name: "dedupe",
+  type: "value",
+  metavar: "[suggest|check|off]",
+  help:
+    "suggest (server default); check: write nothing when a near-duplicate exists " +
+    "and print it (status duplicate_candidate, exit 0: a result, not an error); off: " +
+    "never suggest a supersede for this memory, permanently (server v0.93.0+).",
+};
+
 const remember: Command = {
   summary: "Store a memory directly (without AI analysis).",
   description:
@@ -116,6 +153,8 @@ const remember: Command = {
       "  --source-uri file:///spec.md --source-type file",
       'remember -s "Coffee with Sato" --content "..." \\',
       '  --location "35.68,139.76,Tokyo HQ"',
+      'remember -s "Release 2.0 shipped" --content "..." --observed-at 2026-11-01',
+      'remember -s "Deploy key rotated" --content "..." --dedupe check',
     ),
   spec: {
     flags: [
@@ -153,12 +192,24 @@ const remember: Command = {
         type: "value",
         help: "Shorthand for details.location: 'lat,lon' or 'lat,lon,label'",
       },
+      REMEMBER_OBSERVED_AT,
+      DEDUPE,
+      {
+        name: "tags-normalize",
+        type: "switch",
+        help:
+          "Store each tag under the context's established spelling; lint reports each " +
+          "mapping as tag_normalized (server v0.93.0+).",
+      },
     ],
   },
   run: async (deps, args) => {
     rejectExtraArgs(args);
     const summary = requireOption(args, SUMMARY);
     const content = requireOption(args, CONTENT);
+    // click.Choice: a bad value is a usage error (exit 2) before the body.
+    const rawDedupe = args.values.dedupe;
+    const dedupe = rawDedupe === undefined ? undefined : parseChoice(DEDUPE, rawDedupe, DEDUPE_MODES);
     const details = buildDetails(args.values.details, args.values.location);
     const tags = parseTags(args.values.tags);
     const linkedMemoryIds = parseTags(args.values["linked-memory-ids"]);
@@ -169,9 +220,11 @@ const remember: Command = {
     // declares them on the option and therefore always sends them.
     const type = args.values.type ?? "note";
     const importance = optionalFloat(args, IMPORTANCE) ?? 0.5;
+    const observedAt = blankToUndefined(args.values["observed-at"]);
+    const tagsNormalize = args.flags.has("tags-normalize");
 
-    return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
-      client.remember({
+    return runClientCommand(deps, args.values["context-id"], (client, contextId) => {
+      const options: RememberOptions = {
         contextId,
         summary,
         content,
@@ -183,8 +236,16 @@ const remember: Command = {
         ...(linkedMemoryIds ? { linkedMemoryIds } : {}),
         ...(linkedSourceUris ? { linkedSourceUris } : {}),
         ...(details !== undefined ? { details } : {}),
-      }),
-    );
+        ...(observedAt !== undefined ? { observedAt } : {}),
+        ...(dedupe !== undefined ? { dedupe } : {}),
+        ...(tagsNormalize ? { tagsNormalize } : {}),
+      };
+      // The client's own checks, worded as the Python CLI prints them.
+      // A `duplicate_candidate` reply (`--dedupe check`) is printed with
+      // exit 0: a result, not an error.
+      checkRememberOptions(options, "wire");
+      return client.remember(options);
+    });
   },
 };
 
@@ -491,8 +552,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The memory's current `details` for `update-memory --merge-details`: the
- * port of `_current_details_for_merge` (src/kagura_memory/cli.py, 0.42.0).
+ * The memory's current `details` for `update-memory`'s merge fallback: the
+ * port of `_current_details_for_merge` (src/kagura_memory/cli.py, 0.44.0).
+ * Only on a server without `details_patch` (before memory-cloud 0.140.0); a
+ * newer one merges `--merge-details` / `--details-patch` in one call.
  *
  * `null` or absent details are `{}`. Anything short of the whole object is
  * refused, because merging onto a partial read would drop the keys that
@@ -502,13 +565,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * `details_omitted`, a `details_json` page, or a size without the `details`
  * key itself can only mean a bounded read.
  *
- * An absent key with no marker is read as null details only because
- * `reference()` sends no `fields` selection; a future one must keep
+ * An absent key with no marker is read as null details only because this
+ * `reference()` call sends no `fields` selection; one that does must keep
  * "details" in it, or this would merge onto `{}`.
  *
  * `details_total_chars` is printed when it is an integer. JSON.parse cannot
  * tell `24000.0` from `24000`, which Python (an `int` check) leaves out.
  *
+ * @param flag The option the messages are about.
  * @throws CliError (exit 1) when the reply carries no memory object, its
  *   details were omitted or paged, or they are not a JSON object.
  */
@@ -516,11 +580,13 @@ export async function currentDetailsForMerge(
   client: KaguraClient,
   contextId: string,
   memoryId: string,
+  flag = "--merge-details",
 ): Promise<Record<string, unknown>> {
-  // `reference()` returns the tool's structured object (`callToolChecked`).
-  const memory = (await client.reference({ contextId, memoryId })).memory;
+  // `reference()` returns the tool's structured object (`callToolChecked`),
+  // unchecked: `memory` may be anything the server sent.
+  const memory: unknown = (await client.reference({ contextId, memoryId })).memory;
   if (!isPlainObject(memory)) {
-    throw new CliError("--merge-details: the reference reply carried no memory object");
+    throw new CliError(`${flag}: the reference reply carried no memory object`);
   }
   if (
     pyTruthy(memory.details_omitted) ||
@@ -530,9 +596,9 @@ export async function currentDetailsForMerge(
     const total = memory.details_total_chars;
     const size = typeof total === "number" && Number.isInteger(total) ? ` (${total} characters)` : "";
     throw new CliError(
-      `--merge-details: the memory's current details could not be read in full${size}; ` +
+      `${flag}: the memory's current details could not be read in full${size}; ` +
         "the server bounds a reference reply and this CLI cannot page it yet. Send the " +
-        "complete object with --details and without --merge-details (the MCP reference " +
+        `complete object with --details and without ${flag} (the MCP reference ` +
         "tool returns the whole object with max_chars up to 100000 or details_offset " +
         "paging).",
     );
@@ -540,19 +606,189 @@ export async function currentDetailsForMerge(
   const current = memory.details;
   if (current === undefined || current === null) return {};
   if (!isPlainObject(current)) {
-    throw new CliError("--merge-details: the memory's current details are not a JSON object");
+    throw new CliError(`${flag}: the memory's current details are not a JSON object`);
   }
   return current;
+}
+
+/**
+ * What `details_patch` makes of `current`: a shallow merge into a new
+ * object, `null` deleting a key — the server's rule
+ * (`MemoryService._merge_details_patch`, memory-cloud v0.140.0) for the
+ * read-then-write fallback on a server without it; Python's
+ * `_apply_details_patch`. A top-level `observedAt` lands in the merged
+ * details, as the server folds it into the patch, so a stored
+ * `observed_at` cannot contradict it.
+ */
+export function applyDetailsPatch(
+  current: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  observedAt: string | undefined,
+): Record<string, unknown> {
+  const merged = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete merged[key];
+    } else {
+      merged[key] = value;
+    }
+  }
+  if (observedAt !== undefined) merged.observed_at = observedAt;
+  return merged;
+}
+
+/** memory-cloud refuses an undeclared argument from 0.82.0 (#1742); an older server ignores it. */
+const REFUSES_UNKNOWN_ARGUMENTS_SINCE: readonly [number, number, number] = [0, 82, 0];
+
+/**
+ * Whether `err` is a server refusing `details_patch`, and nothing else, as
+ * unknown — Python's `_details_patch_refused`.
+ *
+ * memory-cloud 0.82.0-0.139.x answers `invalid_argument` and lists the
+ * arguments it does not declare in `unknown_arguments` (#1742); read from
+ * the code and that list, never the message. Without the list, or with
+ * another argument in it (which the fallback would send again), the error
+ * stands, so a write is never retried on a guess.
+ */
+export function detailsPatchRefused(err: unknown): boolean {
+  if (!(err instanceof KaguraError) || err.code !== "invalid_argument") return false;
+  const listed = unknownArguments(err);
+  return listed !== undefined && listed.length > 0 && listed.every((name) => name === "details_patch");
 }
 
 const MERGE_DETAILS: FlagSpec = {
   name: "merge-details",
   type: "switch",
   help:
-    "Read the memory first (reference) and merge --details/--location over its current details, " +
-    "top-level keys only, so unmentioned keys are kept. Needs --memory-id and one of " +
-    "--details/--location; two calls, not one atomic update.",
+    "Merge --details/--location into the memory's current details, top-level keys only, so " +
+    "unmentioned keys are kept; a null value deletes a key. One call (details_patch, server " +
+    "v0.140.0+). Needs --memory-id and one of --details/--location.",
 };
+
+const DETAILS_PATCH: FlagSpec = {
+  name: "details-patch",
+  type: "value",
+  help:
+    "JSON object merged into the stored details, top-level keys only; a null value deletes " +
+    "the key: '{\"status\": \"done\", \"assignee\": null}'. Needs --memory-id; not with " +
+    "--details/--location/--merge-details (server v0.140.0+)",
+};
+
+const EXPECTED_VERSION: FlagSpec = {
+  name: "expected-version",
+  type: "value",
+  metavar: "INTEGER RANGE",
+  help:
+    "Apply the update only while the memory is at this version (the 'version' that reference " +
+    "prints); else nothing is written and the current version is printed (server v0.113.0+)",
+};
+
+/** The update-memory edit the flags build, every field omitted unless given. */
+type MemoryEdit = Omit<UpdateMemoryOptions, "contextId" | "details" | "detailsPatch">;
+
+/**
+ * `update-memory`'s `details_patch` call and its fallbacks — the Python
+ * CLI's `op` (0.44.0, python-sdk #302 and #247).
+ *
+ * One call carries the patch (memory-cloud 0.140.0+). A server of
+ * 0.82.0-0.139.x refuses it (`invalid_argument` listing exactly
+ * `details_patch`), having written nothing: the memory is read with
+ * `reference()` and the merged object written with the other edits. A
+ * server before 0.82.0 ignores it and answers without `version`; that is
+ * confirmed with `GET /api/v1/system/info` before anything is written
+ * again, then the merged details go in a second call, and the command
+ * exits 1 naming each other new flag that server ignored. A reply without
+ * `version` from any other server (or an unreadable version) writes
+ * nothing more and exits 1.
+ */
+async function updateWithPatch(
+  deps: { write: (line: string) => void; writeError: (line: string) => void },
+  client: KaguraClient,
+  contextId: string,
+  memoryId: string,
+  patch: Record<string, unknown>,
+  flag: string,
+  edit: MemoryEdit,
+): Promise<UpdateMemoryResult> {
+  const observedAt = typeof edit.observedAt === "string" ? edit.observedAt : undefined;
+  const mergeViaReference = async (note: string, write: MemoryEdit): Promise<UpdateMemoryResult> => {
+    deps.writeError(
+      `note: --details-patch/--merge-details in one call needs memory-cloud 0.140.0+; this server ${note}`,
+    );
+    const current = await currentDetailsForMerge(client, contextId, memoryId, flag);
+    const details = applyDetailsPatch(current, patch, observedAt);
+    checkUpdateMemoryOptions({ contextId, ...write, details }, "wire");
+    return client.updateMemory({ contextId, ...write, details });
+  };
+
+  let result: UpdateMemoryResult;
+  try {
+    result = await client.updateMemory({ contextId, ...edit, detailsPatch: patch });
+  } catch (e) {
+    if (!detailsPatchRefused(e)) throw e;
+    // 0.82.0-0.139.x refused the call: nothing was written.
+    return mergeViaReference("refused it, merging via reference() instead.", edit);
+  }
+  if ("version" in result) return result;
+  // Only a server before 0.82.0 (which ignores an argument it does not
+  // declare) succeeds without a version (0.113.0+): the other edits were
+  // applied and the details were not. Confirm the version before writing
+  // again: a reply without one from any other server is not understood,
+  // and merging onto it could undo what it did.
+  let older: boolean;
+  let probe: string;
+  try {
+    const info = await client.getServerInfo();
+    older = meetsMinimum(info.version, REFUSES_UNKNOWN_ARGUMENTS_SINCE) === false;
+    probe = `reports version ${String(info.version)}`;
+  } catch (e) {
+    if (!(e instanceof KaguraError)) throw e;
+    older = false;
+    probe = `its version could not be read (${excMessage(e)})`;
+  }
+  if (!older) {
+    throw new CliError(
+      `the server answered update_memory without 'version' and ${probe}, ` +
+        `so whether it applied ${flag} cannot be confirmed. Nothing more was ` +
+        "written, but the call's other changes may have been: read the " +
+        "memory with `kagura-memory reference` before trying again.",
+    );
+  }
+  const merged = await mergeViaReference(
+    "ignored it (before 0.82.0), merging via reference() in a second call.",
+    { memoryId },
+  );
+  // The same server ignored the other arguments it does not know too.
+  const dropped = (
+    [
+      ["--add-tag", edit.addTags !== undefined],
+      ["--remove-tag", edit.removeTags !== undefined],
+      ["--expected-version", edit.expectedVersion !== undefined],
+      ["--accept-supersede-candidate", edit.acceptSupersedeCandidate === true],
+      ["--observed-at", observedAt !== undefined],
+    ] as const
+  )
+    .filter(([, given]) => given)
+    .map(([name]) => name);
+  if (dropped.length === 0) return merged;
+  deps.write(formatJson(merged));
+  const observedNote =
+    observedAt !== undefined
+      ? " (--observed-at went into details.observed_at only, which this server does not read)"
+      : "";
+  throw new CliError(
+    `the server (before memory-cloud 0.82.0) ignored ${dropped.join(", ")}${observedNote}. ` +
+      "Both writes happened (the first call applied the other changes, the second the " +
+      "merged details); those flags need a newer server, so check the memory with " +
+      "`kagura-memory reference` before editing it again.",
+  );
+}
+
+/** Repeated tag flags, blanks dropped and each stripped as Python strips; `undefined` when none is left. */
+function tagList(values: readonly string[] | undefined): string[] | undefined {
+  const tags = (values ?? []).map(pyStrip).filter((tag) => tag);
+  return tags.length > 0 ? tags : undefined;
+}
 
 const updateMemory: Command = {
   summary: "Update an existing memory or upsert by external ID.",
@@ -562,19 +798,30 @@ const updateMemory: Command = {
     "  deep-merge — so a bare --location without --merge-details drops every other\n" +
     "  details key (including the resource_id an --external-id upsert stores there:\n" +
     "  without it the next upsert of that id creates a new memory instead of\n" +
-    "  replacing this one), and '{}' clears them. --merge-details reads the memory\n" +
-    "  first with reference() and merges the top-level keys of --details/--location\n" +
-    "  over its current details, so unmentioned keys are kept, and it is two calls,\n" +
-    "  not one atomic update (the read is a reference() of the memory and counts in\n" +
-    "  its access stats). It cannot remove a key (for that, send the full object\n" +
-    "  without --merge-details), except '\"tool_trigger\": null', which the server\n" +
-    "  treats as unmark; '\"location\": null' is rejected by the server (422).\n" +
+    "  replacing this one), and '{}' clears them. --merge-details sends\n" +
+    "  --details/--location as a details_patch: the server merges their top-level\n" +
+    "  keys over the current details in one call, keeps the keys they do not\n" +
+    "  mention, and deletes a key given as null ('\"location\": null' too).\n" +
+    "  --details-patch sends a patch you write yourself. On a server before memory-\n" +
+    "  cloud 0.140.0 either falls back to reading the memory first with reference()\n" +
+    "  and writing the merged object: two calls, not one atomic update (--expected-\n" +
+    "  version still guards the write on 0.113.0+), and the read counts in the\n" +
+    "  memory's access stats. A server before 0.82.0 ignores the patch instead of\n" +
+    "  refusing it; the command confirms that version first, writes the merged\n" +
+    "  details in a second call, and exits 1 naming any other new flag that server\n" +
+    "  ignored (--add-tag, --remove-tag, --expected-version, --observed-at).\n" +
     "  Coordinates must be JSON numbers, not strings: the server rejects string-\n" +
     "  typed lat/lon with a 422 by design.\n\n" +
+    "  --add-tag/--remove-tag edit the stored tags without resending them, and\n" +
+    "  --expected-version makes the update fail, writing nothing, when another edit\n" +
+    "  landed since you read the memory.\n\n" +
     examples(
       'update-memory -m MEM_UUID -s "updated summary"',
       'update-memory --external-id ext-key -s "summary" --content "..." -t note',
       "update-memory -m MEM_UUID --dismiss-supersede-candidate",
+      "update-memory -m MEM_UUID --accept-supersede-candidate",
+      "update-memory -m MEM_UUID --add-tag status:done --remove-tag status:open \\",
+      "  --details-patch '{\"status\": \"done\"}' --expected-version 3",
       "update-memory -m MEM_UUID \\",
       "  --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'",
       "update-memory -m MEM_UUID --merge-details \\",
@@ -589,7 +836,21 @@ const updateMemory: Command = {
       { ...CONTENT, help: "Updated content" },
       { ...TYPE, help: "Updated memory type" },
       { ...IMPORTANCE, help: "Updated importance 0.0-1.0" },
-      { ...TAGS, help: "Comma-separated tags" },
+      { ...TAGS, help: "Comma-separated tags (replaces the whole list)" },
+      {
+        name: "add-tag",
+        type: "multiple",
+        help:
+          "Tag to add to the stored list, keeping the others (repeatable; not with --tags; " +
+          "server v0.140.0+)",
+      },
+      {
+        name: "remove-tag",
+        type: "multiple",
+        help:
+          "Tag to remove from the stored list; one that is not there is ignored " +
+          "(repeatable; not with --tags; server v0.140.0+)",
+      },
       {
         name: "dismiss-supersede-candidate",
         type: "switch",
@@ -597,9 +858,26 @@ const updateMemory: Command = {
           "Reject this memory's supersede_candidate suggestion (needs --memory-id; " +
           "server v0.65.0+, older servers drop it silently)",
       },
+      {
+        name: "accept-supersede-candidate",
+        type: "switch",
+        help:
+          "Accept this memory's supersede_candidate: the candidate is shadowed by a " +
+          "supersedes edge. Needs --memory-id and no field edits in the same call " +
+          "(server v0.126.0+)",
+      },
+      EXPECTED_VERSION,
+      {
+        name: "observed-at",
+        type: "value",
+        help:
+          "When the fact held: YYYY-MM-DD or an ISO 8601 datetime (naive = UTC). " +
+          "Alone it changes only details.observed_at (server v0.127.0+)",
+      },
       UPDATE_DETAILS,
       UPDATE_LOCATION,
       MERGE_DETAILS,
+      DETAILS_PATCH,
     ],
   },
   run: async (deps, args) => {
@@ -607,61 +885,110 @@ const updateMemory: Command = {
     const memoryId = args.values["memory-id"];
     const externalId = args.values["external-id"];
     const dismissSupersedeCandidate = args.flags.has("dismiss-supersede-candidate");
+    const acceptSupersedeCandidate = args.flags.has("accept-supersede-candidate");
     const mergeDetails = args.flags.has("merge-details");
-    // Click converts `type=float` before the function body runs, so a bad
-    // -i is a usage error (exit 2) even when the checks below would fail.
+    // Click converts `type=float` and `IntRange(min=1)` before the function
+    // body runs, so a bad -i or --expected-version is a usage error (exit 2)
+    // even when the checks below would fail.
     const importance = optionalFloat(args, IMPORTANCE);
+    const rawExpected = args.values["expected-version"];
+    const expectedVersion =
+      rawExpected === undefined
+        ? undefined
+        : parseRanged(EXPECTED_VERSION, rawExpected, {
+            min: 1,
+            max: Number.POSITIVE_INFINITY,
+            rangeLabel: "x>=1",
+            integer: true,
+          });
     if (!memoryId && !externalId) {
       throw new CliError("Either --memory-id or --external-id is required");
     }
     if (memoryId && externalId) {
       throw new CliError("Provide only one of --memory-id or --external-id");
     }
+    const addTags = tagList(args.many["add-tag"]);
+    const removeTags = tagList(args.many["remove-tag"]);
+    // `_parse_json_object` as Python calls it: a usage error (exit 2) before
+    // the --external-id check.
+    let patch = parseDetails(args.values["details-patch"], "--details-patch");
     // Python tests `external_id` for truthiness; this tests for presence,
     // as `updateMemory` does, because an empty `--external-id=` still goes
-    // out as external_id and the client would refuse the pair itself.
-    if (dismissSupersedeCandidate && externalId !== undefined) {
-      throw new CliError("--dismiss-supersede-candidate requires --memory-id (not --external-id)");
+    // out as external_id and the server refuses it beside a memory id.
+    if (externalId !== undefined) {
+      const inPlaceOnly = (
+        [
+          ["--dismiss-supersede-candidate", dismissSupersedeCandidate],
+          ["--accept-supersede-candidate", acceptSupersedeCandidate],
+          ["--merge-details", mergeDetails],
+          ["--details-patch", patch !== undefined],
+          ["--add-tag", addTags !== undefined],
+          ["--remove-tag", removeTags !== undefined],
+          ["--expected-version", expectedVersion !== undefined],
+        ] as const
+      )
+        .filter(([, given]) => given)
+        .map(([flag]) => flag);
+      if (inPlaceOnly.length > 0) {
+        const verb = inPlaceOnly.length === 1 ? "requires" : "require";
+        throw new CliError(`${inPlaceOnly.join(", ")} ${verb} --memory-id (not --external-id)`);
+      }
     }
-    // Python tests `external_id` for truthiness here, and so does this: an
-    // empty `--external-id=` beside -m goes out as Python sends it.
-    if (mergeDetails && externalId) {
-      throw new CliError("--merge-details requires --memory-id (not --external-id)");
+    const tags = parseTags(args.values.tags);
+    if (tags !== undefined && (addTags !== undefined || removeTags !== undefined)) {
+      throw new CliError(
+        "--tags replaces the whole list; --add-tag/--remove-tag edit it. Use one or the other.",
+      );
     }
+    // Port of `_build_details` as update_memory calls it (cli.py): a usage
+    // error (exit 2) before anything is sent; blank is unset (leave details
+    // alone), '{}' clears them.
+    let details = buildDetails(args.values.details, args.values.location);
+    if (patch !== undefined && (details !== undefined || mergeDetails)) {
+      throw new CliError("--details-patch cannot be combined with --details/--location/--merge-details");
+    }
+    let flag = "--details-patch";
+    if (mergeDetails) {
+      if (details === undefined) {
+        throw new CliError("--merge-details needs --details or --location");
+      }
+      [patch, details, flag] = [details, undefined, "--merge-details"];
+    }
+    const observedAt = blankToUndefined(args.values["observed-at"]);
     const summary = args.values.summary;
     const content = args.values.content;
     const type = args.values.type;
-    const tags = parseTags(args.values.tags);
-    // Port of `_build_details` as update_memory calls it (cli.py): after the
-    // id checks, a usage error (exit 2) before anything is sent; blank is
-    // unset (leave details alone), '{}' clears them.
-    const details = buildDetails(args.values.details, args.values.location);
-    if (mergeDetails && details === undefined) {
-      throw new CliError("--merge-details needs --details or --location");
-    }
+    // Every field is omitted unless given: an absent key means "leave
+    // unchanged", so forwarding undefined defaults would silently
+    // overwrite the stored value.
+    const edit: MemoryEdit = {
+      ...(memoryId !== undefined ? { memoryId } : {}),
+      ...(externalId !== undefined ? { externalId } : {}),
+      ...(summary !== undefined ? { summary } : {}),
+      ...(content !== undefined ? { content } : {}),
+      ...(type !== undefined ? { type } : {}),
+      ...(importance !== undefined ? { importance } : {}),
+      ...(tags ? { tags } : {}),
+      ...(addTags ? { addTags } : {}),
+      ...(removeTags ? { removeTags } : {}),
+      ...(dismissSupersedeCandidate ? { dismissSupersedeCandidate } : {}),
+      ...(acceptSupersedeCandidate ? { acceptSupersedeCandidate } : {}),
+      ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      ...(observedAt !== undefined ? { observedAt } : {}),
+    };
 
     return runClientCommand(deps, args.values["context-id"], async (client, contextId) => {
-      let payload = details;
-      if (mergeDetails && payload !== undefined) {
-        // `{**current, **payload}` in Python: a shallow merge into a new
-        // object. The checks above make memoryId a non-empty string here.
-        payload = { ...(await currentDetailsForMerge(client, contextId, memoryId!)), ...payload };
-      }
-      return client.updateMemory({
+      const options: UpdateMemoryOptions = {
         contextId,
-        // Every field is omitted unless given: an absent key means "leave
-        // unchanged", so forwarding undefined defaults would silently
-        // overwrite the stored value.
-        ...(memoryId !== undefined ? { memoryId } : {}),
-        ...(externalId !== undefined ? { externalId } : {}),
-        ...(summary !== undefined ? { summary } : {}),
-        ...(content !== undefined ? { content } : {}),
-        ...(type !== undefined ? { type } : {}),
-        ...(importance !== undefined ? { importance } : {}),
-        ...(tags ? { tags } : {}),
-        ...(payload !== undefined ? { details: payload } : {}),
-        ...(dismissSupersedeCandidate ? { dismissSupersedeCandidate } : {}),
-      });
+        ...edit,
+        ...(details !== undefined ? { details } : {}),
+        ...(patch !== undefined ? { detailsPatch: patch } : {}),
+      };
+      // The client's own checks, worded as the Python CLI prints them.
+      checkUpdateMemoryOptions(options, "wire");
+      if (patch === undefined) return client.updateMemory(options);
+      // A patch without --memory-id was refused above.
+      return updateWithPatch(deps, client, contextId, memoryId!, patch, flag, edit);
     });
   },
 };

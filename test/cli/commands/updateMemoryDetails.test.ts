@@ -1,10 +1,20 @@
 /**
  * `update-memory --details / --location / --merge-details` against the
- * Python CLI (python-sdk #247). Each case is an argv, the `reference` reply
- * the fake server sends (content[0].text, byte for byte), and the Python
- * CLI's tool calls, stdout, stderr and exit code for it, recorded from the
- * Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4) against a fake MCP
- * server sending these exact bytes, with KAGURA_CONTEXT_ID=ctx.
+ * Python CLI (python-sdk #247). Each case is an argv, the content[0].text
+ * of each tool reply in turn the fake server sends, byte for byte, and the
+ * Python CLI's tool calls, stdout, stderr and exit code for it, recorded
+ * against a fake MCP server sending these exact bytes, with
+ * KAGURA_CONTEXT_ID=ctx: first from the Python CLI 0.42.0 (click 8.3.3,
+ * pydantic 2.13.4), and again from the Python CLI 0.44.0, which prints the
+ * same for every case before a call.
+ *
+ * From 0.44.0 (python-sdk #302) `--merge-details` sends `--details` /
+ * `--location` as one `details_patch` call (memory-cloud 0.140.0+; those
+ * cases are in memoryEditDumps.test.ts). The read-then-write round-trip of
+ * 0.42.0 is left for a server that refuses the patch: the cases from
+ * "merges top-level keys" on are that fallback, re-recorded from the Python
+ * CLI 0.44.0 against a server of 0.82.0–0.139.x, which refuses
+ * `details_patch` as an unknown argument and writes nothing.
  *
  * A usage error (exit 2) is compared by its `Error:` line: click prints its
  * usage line and a `Try …` hint before it, and this bin its help after it
@@ -22,8 +32,8 @@ interface Case {
   name: string;
   /** After `update-memory`. */
   argv: string[];
-  /** content[0].text of the `reference` reply. */
-  reference?: string;
+  /** Tool name → content[0].text of each of its replies, in turn. */
+  replies?: Record<string, string[]>;
   /** Every tools/call the Python CLI sent, in order, as [tool, arguments]. */
   calls: Array<[string, Record<string, unknown>]>;
   code: number;
@@ -40,7 +50,7 @@ async function run(c: Case) {
   const out: string[] = [];
   const err: string[] = [];
   const server = new FakeServer();
-  if (c.reference !== undefined) server.toolTexts.reference = c.reference;
+  for (const [tool, texts] of Object.entries(c.replies ?? {})) server.toolTextQueues[tool] = [...texts];
   const deps = {
     write: (line: string) => void out.push(line),
     writeError: (line: string) => void err.push(line),
@@ -71,13 +81,14 @@ async function expectPython(c: Case): Promise<FakeServer> {
   expect(code).toBe(c.code);
   expect(out.length > 0 ? `${out.join("\n")}\n` : "").toBe(c.stdout);
   const pyError = c.stderr.split("\n").find((l) => l.startsWith("Error: "));
-  if (pyError === undefined) {
-    expect(err).toEqual([]);
-  } else if (c.errorPrefix !== undefined) {
-    expect(pyError.startsWith(c.errorPrefix)).toBe(true);
+  if (c.errorPrefix !== undefined) {
+    expect(pyError?.startsWith(c.errorPrefix)).toBe(true);
     expect(err[0]?.startsWith(c.errorPrefix)).toBe(true);
-  } else {
+  } else if (c.code === 2) {
     expect(err[0]).toBe(pyError);
+  } else {
+    // The whole stderr: the fallback's `note:` line comes before the error.
+    expect(err.length > 0 ? `${err.join("\n")}\n` : "").toBe(c.stderr);
   }
   return server;
 }
@@ -166,7 +177,7 @@ const DETAILS_CASES: Case[] = [
   },
 ];
 
-describe("update-memory --details / --location, as the Python CLI 0.42.0", () => {
+describe("update-memory --details / --location, as the Python CLI 0.42.0 and 0.44.0", () => {
   it.each(DETAILS_CASES.map((c) => [c.name, c] as const))("%s", async (_, c) => {
     await expectPython(c);
   });
@@ -180,13 +191,17 @@ describe("update-memory --details / --location, as the Python CLI 0.42.0", () =>
   });
 });
 
-const BOUNDED = (size: string) =>
-  `Error: --merge-details: the memory's current details could not be read in full${size}; the server ` +
-  "bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details " +
-  "and without --merge-details (the MCP reference tool returns the whole object with max_chars up to " +
-  "100000 or details_offset paging).\n";
-const REFERENCE_CALL: [string, Record<string, unknown>] = ["reference", { context_id: "ctx", memory_id: "mem-1" }];
-const MERGE_LOCATION = ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"];
+/** A 0.82.0–0.139.x server's refusal of `details_patch`: nothing was written. */
+const REFUSED =
+  '{"status": "error", "error": "invalid_argument", "message": "update_memory does not accept the argument ' +
+  "'details_patch'. Arguments its inputSchema declares: context_id, memory_id.\", \"unknown_arguments\": " +
+  '["details_patch"], "allowed_arguments": ["context_id", "memory_id"], "suggestions": {}, "help": "Remove the ' +
+  "unknown arguments or rename them as suggested, then call the tool again. tools/list shows each tool's " +
+  'inputSchema."}';
+const SUCCESS_TEXT = '{"status": "success"}';
+const REFUSED_NOTE =
+  "note: --details-patch/--merge-details in one call needs memory-cloud 0.140.0+; this server refused it, " +
+  "merging via reference() instead.\n";
 
 const MERGE_CASES: Case[] = [
   {
@@ -248,150 +263,156 @@ const MERGE_CASES: Case[] = [
   },
   {
     name: "merges top-level keys over the current details; --dismiss-supersede-candidate rides along",
-    argv: ["-m", "mem-1", "--location", "35.68,139.76,Tokyo HQ", "--details", '{"n": 2}', "--merge-details", "--dismiss-supersede-candidate"],
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": {"location": {"lat": 1.0, "lon": 2.0, "label": "old"}, "client": "acme", "n": 1}}}',
-    calls: [
-      REFERENCE_CALL,
-      ["update_memory", { context_id: "ctx", memory_id: "mem-1", details: { location: { lat: 35.68, lon: 139.76, label: "Tokyo HQ" }, client: "acme", n: 2 }, dismiss_supersede_candidate: true }],
-    ],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76,Tokyo HQ", "--details", "{\"n\": 2}", "--merge-details", "--dismiss-supersede-candidate"],
+    replies: { update_memory: [REFUSED, SUCCESS_TEXT], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": {\"location\": {\"lat\": 1.0, \"lon\": 2.0, \"label\": \"old\"}, \"client\": \"acme\", \"n\": 1}}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "dismiss_supersede_candidate": true, "details_patch": {"n": 2, "location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}], ["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details": {"location": {"lat": 35.68, "lon": 139.76, "label": "Tokyo HQ"}, "client": "acme", "n": 2}, "dismiss_supersede_candidate": true}]],
     code: 0,
     stdout: SUCCESS,
-    stderr: "",
+    stderr: REFUSED_NOTE,
   },
   {
     name: "null details merge onto {}",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": null}}',
-    calls: [REFERENCE_CALL, ["update_memory", { context_id: "ctx", memory_id: "mem-1", details: { location: { lat: 35.68, lon: 139.76 } } }]],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED, SUCCESS_TEXT], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": null}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}], ["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details": {"location": {"lat": 35.68, "lon": 139.76}}}]],
     code: 0,
     stdout: SUCCESS,
-    stderr: "",
+    stderr: REFUSED_NOTE,
   },
   {
     name: "an absent details key with no marker merges onto {}",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1"}}',
-    calls: [REFERENCE_CALL, ["update_memory", { context_id: "ctx", memory_id: "mem-1", details: { location: { lat: 35.68, lon: 139.76 } } }]],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED, SUCCESS_TEXT], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\"}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}], ["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details": {"location": {"lat": 35.68, "lon": 139.76}}}]],
     code: 0,
     stdout: SUCCESS,
-    stderr: "",
+    stderr: REFUSED_NOTE,
   },
   {
     name: "--details '{}' re-sends the current details",
     argv: ["-m", "mem-1", "--details", "{}", "--merge-details"],
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme"}}}',
-    calls: [REFERENCE_CALL, ["update_memory", { context_id: "ctx", memory_id: "mem-1", details: { location: { lat: 1.0, lon: 2.0 }, client: "acme" } }]],
+    replies: { update_memory: [REFUSED, SUCCESS_TEXT], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": {\"location\": {\"lat\": 1.0, \"lon\": 2.0}, \"client\": \"acme\"}}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}], ["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details": {"location": {"lat": 1.0, "lon": 2.0}, "client": "acme"}}]],
     code: 0,
     stdout: SUCCESS,
-    stderr: "",
+    stderr: REFUSED_NOTE,
+  },
+  {
+    name: "a null value deletes the key in the fallback too",
+    argv: ["-m", "mem-1", "--details", "{\"client\": null, \"absent\": null}", "--merge-details"],
+    replies: { update_memory: [REFUSED, SUCCESS_TEXT], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": {\"location\": {\"lat\": 1.0, \"lon\": 2.0}, \"client\": \"acme\"}}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"client": null, "absent": null}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}], ["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details": {"location": {"lat": 1.0, "lon": 2.0}}}]],
+    code: 0,
+    stdout: SUCCESS,
+    stderr: REFUSED_NOTE,
   },
   {
     name: "a bounded reply that omitted details is refused, naming its size",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details_omitted": true, "details_total_chars": 24000, "details_next_offset": 0}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details_omitted\": true, \"details_total_chars\": 24000, \"details_next_offset\": 0}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: BOUNDED(" (24000 characters)"),
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details could not be read in full (24000 characters); the server bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details and without --merge-details (the MCP reference tool returns the whole object with max_chars up to 100000 or details_offset paging).\n",
   },
   {
     name: "a details_json page is refused",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details_json": "{\\"client\\": \\"ac", "details_offset": 0, "details_total_chars": 1000, "details_truncated": true, "details_next_offset": 14}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details_json\": \"{\\\"client\\\": \\\"ac\", \"details_offset\": 0, \"details_total_chars\": 1000, \"details_truncated\": true, \"details_next_offset\": 14}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: BOUNDED(" (1000 characters)"),
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details could not be read in full (1000 characters); the server bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details and without --merge-details (the MCP reference tool returns the whole object with max_chars up to 100000 or details_offset paging).\n",
   },
   {
     name: "a truthy non-bool details_omitted is refused",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details_omitted": 1, "details_total_chars": 100}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details_omitted\": 1, \"details_total_chars\": 100}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: BOUNDED(" (100 characters)"),
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details could not be read in full (100 characters); the server bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details and without --merge-details (the MCP reference tool returns the whole object with max_chars up to 100000 or details_offset paging).\n",
   },
   {
     name: "a size marker without the details key is refused",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details_total_chars": 100}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details_total_chars\": 100}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: BOUNDED(" (100 characters)"),
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details could not be read in full (100 characters); the server bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details and without --merge-details (the MCP reference tool returns the whole object with max_chars up to 100000 or details_offset paging).\n",
   },
   {
     name: "details_omitted wins over a details key, and no size leaves the count out",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": null, "details_omitted": true}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": null, \"details_omitted\": true}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: BOUNDED(""),
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details could not be read in full; the server bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details and without --merge-details (the MCP reference tool returns the whole object with max_chars up to 100000 or details_offset paging).\n",
   },
   {
     name: "a details_json page wins over a details key",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": null, "details_json": "{\\"client\\": \\"ac", "details_next_offset": 14}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": null, \"details_json\": \"{\\\"client\\\": \\\"ac\", \"details_next_offset\": 14}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: BOUNDED(""),
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details could not be read in full; the server bounds a reference reply and this CLI cannot page it yet. Send the complete object with --details and without --merge-details (the MCP reference tool returns the whole object with max_chars up to 100000 or details_offset paging).\n",
   },
   {
     name: "current details that are not an object are refused",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": ["not", "an", "object"]}}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": [\"not\", \"an\", \"object\"]}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: "Error: --merge-details: the memory's current details are not a JSON object\n",
+    stderr: REFUSED_NOTE + "Error: --merge-details: the memory's current details are not a JSON object\n",
   },
   {
     name: "a reply without a memory object is refused",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success"}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\"}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: "Error: --merge-details: the reference reply carried no memory object\n",
+    stderr: REFUSED_NOTE + "Error: --merge-details: the reference reply carried no memory object\n",
   },
   {
     name: "a memory that is not an object is refused",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "success", "memory": "mem-1"}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": \"mem-1\"}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: "Error: --merge-details: the reference reply carried no memory object\n",
+    stderr: REFUSED_NOTE + "Error: --merge-details: the reference reply carried no memory object\n",
   },
   {
     name: "a failed read fails the command and never writes",
-    argv: MERGE_LOCATION,
-    reference: '{"status": "error", "error": "memory_not_found", "message": "Memory not found or you don\'t have access: mem-1"}',
-    calls: [REFERENCE_CALL],
+    argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"error\", \"error\": \"memory_not_found\", \"message\": \"Memory not found or you don't have access: mem-1\"}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"location": {"lat": 35.68, "lon": 139.76}}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
     code: 1,
     stdout: "",
-    stderr: "Error: reference: Memory not found or you don't have access: mem-1\n",
+    stderr: REFUSED_NOTE + "Error: reference: Memory not found or you don't have access: mem-1\n",
   },
   {
-    name: "an empty --external-id= beside -m is sent, as Python tests it for truthiness",
-    argv: ["-m", "mem-1", "--external-id=", "--merge-details", "--location", "1,2"],
-    reference: '{"status": "success", "memory": {"memory_id": "mem-1", "details": null}}',
-    calls: [REFERENCE_CALL, ["update_memory", { context_id: "ctx", memory_id: "mem-1", external_id: "", details: { location: { lat: 1.0, lon: 2.0 } } }]],
-    code: 0,
-    stdout: SUCCESS,
-    stderr: "",
+    name: "--details-patch names itself in the fallback's refusals",
+    argv: ["-m", "mem-1", "--details-patch", "{\"a\": 1}"],
+    replies: { update_memory: [REFUSED], reference: ["{\"status\": \"success\", \"memory\": {\"memory_id\": \"mem-1\", \"details\": [\"not\", \"an\", \"object\"]}}"] },
+    calls: [["update_memory", {"context_id": "ctx", "memory_id": "mem-1", "details_patch": {"a": 1}}], ["reference", {"context_id": "ctx", "memory_id": "mem-1"}]],
+    code: 1,
+    stdout: "",
+    stderr: REFUSED_NOTE + "Error: --details-patch: the memory's current details are not a JSON object\n",
   },
 ];
 
-describe("update-memory --merge-details, as the Python CLI 0.42.0", () => {
+describe("update-memory --merge-details, as the Python CLI 0.44.0", () => {
   it.each(MERGE_CASES.map((c) => [c.name, c] as const))("%s", async (_, c) => {
     await expectPython(c);
   });
 
-  it("sends nothing at all when it refuses before the read", async () => {
+  it("sends nothing at all when it refuses before the first call", async () => {
     // Not even the MCP initialize: the checks come before a client is used.
     for (const c of MERGE_CASES.slice(0, 7)) {
       const server = await expectPython(c);
@@ -399,19 +420,20 @@ describe("update-memory --merge-details, as the Python CLI 0.42.0", () => {
     }
   });
 
-  it("never writes after a read that is not JSON", async () => {
+  it("never writes after a fallback read that is not JSON", async () => {
     const { code, err, calls } = await run({
       name: "transport",
-      argv: MERGE_LOCATION,
-      reference: "not json",
+      argv: ["-m", "mem-1", "--location", "35.68,139.76", "--merge-details"],
+      replies: { update_memory: [REFUSED], reference: ["not json"] },
       calls: [],
       code: 1,
       stdout: "",
       stderr: "",
     });
     expect(code).toBe(1);
-    expect(calls.map(([tool]) => tool)).toEqual(["reference"]);
-    expect(err[0]).toMatch(/^Error: Invalid response format: /);
+    expect(calls.map(([tool]) => tool)).toEqual(["update_memory", "reference"]);
+    expect(err[0]).toBe(REFUSED_NOTE.trimEnd());
+    expect(err[1]).toMatch(/^Error: Invalid response format: /);
   });
 
   it("does not change the details it read", async () => {
@@ -428,7 +450,7 @@ describe("update-memory --merge-details, as the Python CLI 0.42.0", () => {
     const { code, out } = await run({ name: "help", argv: ["--help"], calls: [], code: 0, stdout: "", stderr: "" });
     expect(code).toBe(0);
     const text = out.join("\n").split(/\s+/).join(" ");
-    // The four claims python-sdk's test_update_memory_help_states_wholesale_replace pins.
+    // The claims python-sdk's test_update_memory_help_states_wholesale_replace pins.
     expect(text).toContain("REPLACES the memory's details wholesale");
     expect(text).toContain("--merge-details");
     expect(text).toContain("top-level keys");
