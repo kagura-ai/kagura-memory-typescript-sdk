@@ -536,8 +536,9 @@ describe("kagura-memory doctor", () => {
       process.chdir(sandbox);
       const h = harness();
       expect(await runCli(["doctor"], h.deps)).toBe(1);
-      // Node 18's V8 reports a position for this error, Node 20+ does not.
-      expect(h.out.some((l) => /^FAIL \.mcp\.json is not valid JSON( \(line \d+ column \d+\))?$/.test(l))).toBe(true);
+      // No position: V8 on every supported Node (20.19+) words an "Unexpected
+      // token" error without one. The case below is one it does locate.
+      expect(h.out).toContain("FAIL .mcp.json is not valid JSON");
       expect(h.out.join("\n")).not.toContain("kagura_X");
 
       fs.writeFileSync(path.join(sandbox, ".mcp.json"), '{\n  "mcpServers": {} "x": 1}');
@@ -1521,10 +1522,10 @@ describe("kagura-memory setup claude", () => {
     fs.writeFileSync(path.join(sandbox, file), text);
     const h = harness({});
     expect(await runCli(claude(), h.deps)).toBe(1);
-    // A position follows when V8 reports one (Node 18 does for these, 20+ does not).
-    expect(h.err).toHaveLength(1);
-    expect(h.err[0]!.startsWith(`Error: refusing to rewrite ${path.join(sandbox, file)}: ${reason}`)).toBe(true);
-    expect(h.err[0]).toMatch(/(: line \d+ column \d+| \(line \d+ column \d+\))?$/);
+    // Nothing follows the reason: V8 on every supported Node (20.19+) words
+    // an "Unexpected token" error with no position, and the last case is
+    // not a parse error at all.
+    expect(h.err).toEqual([`Error: refusing to rewrite ${path.join(sandbox, file)}: ${reason}`]);
     expect(h.err[0]).not.toContain("FILECANARY");
   });
 

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 
 import {
   KaguraOAuth,
@@ -25,7 +26,7 @@ import type {
 import { KaguraAuthError } from "../../src/errors.js";
 
 let home: string;
-let warnSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: MockInstance<typeof console.warn>;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "kagura-home-"));
