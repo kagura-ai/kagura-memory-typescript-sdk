@@ -285,23 +285,56 @@ describe("desktop OAuth", () => {
       expect(readFileSync(credentialsPath, "utf-8")).toBe("not json {{{");
     });
 
-    it("names a refresh it could not save, and keeps working on the token it holds", async () => {
+    const notSavedLog = () =>
+      `Refreshed profile 'desktop', but could not save it to ${credentialsPath}: EROFS: read-only file system\n` +
+      "  The refresh used up the refresh token on file, so the profile on file cannot be refreshed again.\n" +
+      "  Fix the cause, then run: kagura-memory auth login";
+    const erofs = () => Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+
+    // The request goes on with the rotated token the shared state keeps;
+    // the save failure is logged once, without a token.
+    it("after a 401, serves the refresh it could not save, logging why once", async () => {
       await stored();
       const s = setup([Response.json(token)]);
-      failRename.errors = [Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" })];
-      const error = await s.auth.forceRefresh().catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(ProxyError);
-      expect(safeError(error)).toBe(
-        `Refreshed profile 'desktop', but could not save it to ${credentialsPath}: EROFS: read-only file system\n` +
-          "  The refresh used up the refresh token on file, so the profile on file cannot be refreshed again.\n" +
-          "  Fix the cause, then run: kagura-memory auth login",
-      );
-      expect(safeError(error)).not.toContain("private-");
+      failRename.errors = [erofs()];
+      await s.auth.forceRefresh();
+      expect(s.log.mock.calls).toEqual([[notSavedLog()]]);
       // The file still holds the revoked pair; the proxy reloads it per
-      // request, and must keep the rotated one it holds instead.
+      // request, and must keep the rotated one it holds instead, without
+      // refreshing again.
       expect(loadCredentialsFile(credentialsPath).profiles.desktop?.accessToken).toBe("old-access");
       expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
       expect(s.fetcher).toHaveBeenCalledOnce();
+      expect(s.log).toHaveBeenCalledOnce();
+      expect(JSON.stringify(s.log.mock.calls)).not.toContain("private-");
+      expect(s.open).not.toHaveBeenCalled();
+    });
+
+    it("logs a save that keeps failing the same way once", async () => {
+      await stored({ expiresAt: new Date(Date.now() + 10_000) });
+      // Tokens issued inside the skew window, so each request refreshes.
+      const s = setup([
+        Response.json({ ...token, expires_in: 10 }),
+        Response.json({ ...token, access_token: "private-access-2", refresh_token: "private-refresh-2", expires_in: 10 }),
+      ]);
+      failRename.errors = [erofs(), erofs()];
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access-2");
+      expect(s.fetcher).toHaveBeenCalledTimes(2);
+      expect(s.log.mock.calls).toEqual([[notSavedLog()]]);
+    });
+
+    it("near expiry, answers with the refresh it could not save, and does not refresh again", async () => {
+      await stored({ expiresAt: new Date(Date.now() + 10_000) }); // inside the skew window
+      const s = setup([Response.json(token)]);
+      failRename.errors = [erofs()];
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(await s.auth.getAuthHeader()).toBe("Bearer private-access");
+      expect(s.fetcher).toHaveBeenCalledOnce();
+      expect(s.log.mock.calls).toEqual([[notSavedLog()]]);
+      expect(JSON.stringify(s.log.mock.calls)).not.toContain("private-");
+      expect(loadCredentialsFile(credentialsPath).profiles.desktop?.accessToken).toBe("old-access");
       expect(s.open).not.toHaveBeenCalled();
     });
   });

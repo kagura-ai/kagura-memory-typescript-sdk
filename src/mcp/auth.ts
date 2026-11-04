@@ -2,11 +2,12 @@ import { ProxyError } from "./errors.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   CredentialsFileError,
-  getSharedState,
   KaguraOAuth,
+  RefreshNotSavedError,
   loadCredentialsFile,
   loadForUpdate,
   profileNamed,
+  sharedStateFrom,
   type CredentialsFile,
 } from "../auth/credentials.js";
 import { login } from "../auth/login.js";
@@ -77,6 +78,7 @@ export class ProxyAuth {
   private oauth?: KaguraOAuth;
   private loginAttempt?: Promise<void>;
   private loginAttempted = false;
+  private lastUnsaved?: string;
   private readonly authFetch: typeof fetch;
 
   constructor(private readonly options: ProxyAuthOptions) {
@@ -140,10 +142,11 @@ export class ProxyAuth {
   }
 
   private reload(): void {
-    // Before any login or refresh: getSharedState reads an unreadable file
-    // as "no profile", which would start a browser login.
-    readCredentials(this.options.credentialsPath);
-    const state = getSharedState(this.options.credentialsPath, this.profile);
+    // Strict, before any login or refresh: read leniently, an unreadable
+    // file is "no profile", which would start a browser login. The state is
+    // built from this one read.
+    const file = readCredentials(this.options.credentialsPath);
+    const state = sharedStateFrom(file, this.options.credentialsPath, this.profile);
     if (state) {
       const base = checkedUrl(baseUrlFromMcp(this.mcpUrl)).href;
       if (
@@ -164,6 +167,10 @@ export class ProxyAuth {
     try {
       return await this.oauth!.getAuthHeader();
     } catch (error) {
+      if (error instanceof RefreshNotSavedError) {
+        this.reportUnsaved(error);
+        return `Bearer ${error.credentials.accessToken}`;
+      }
       if (!(error instanceof KaguraAuthExpiredError)) throw credentialsFileError(error);
       await this.authenticate();
       return this.oauth!.getAuthHeader();
@@ -176,9 +183,24 @@ export class ProxyAuth {
     try {
       await this.oauth.forceRefresh();
     } catch (error) {
+      if (error instanceof RefreshNotSavedError) return this.reportUnsaved(error);
       if (!(error instanceof KaguraAuthExpiredError)) throw credentialsFileError(error);
       await this.authenticate();
     }
+  }
+
+  /**
+   * The refresh worked, but credentials.json could not be saved: the
+   * request goes on with the rotated token, which the shared state keeps
+   * (so the next request neither re-reads the revoked pair on file nor
+   * refreshes again), and the log says why the file is behind, once per
+   * distinct failure. The message names the file and the next step, never
+   * a token.
+   */
+  private reportUnsaved(error: RefreshNotSavedError): void {
+    if (error.message === this.lastUnsaved) return;
+    this.lastUnsaved = error.message;
+    this.options.log(error.message);
   }
 
   private async authenticate(): Promise<void> {
