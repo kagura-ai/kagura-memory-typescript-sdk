@@ -181,6 +181,12 @@ npx kagura-memory recall "deploy runbook" --full 1 --max-chars 40000   # content
 # A server that refuses one of --verbosity/--full/--max-chars (invalid_argument) gets one
 # retry without the ones it names (every one it sent when it names none), with a note on stderr.
 npx kagura-memory remember -s "FastAPI DI" --content "Use Depends()" --tags "python,fastapi"
+npx kagura-memory remember -s "Release 2.0 shipped" --content "..." --observed-at 2026-11-01   # when the fact held (v0.127.0+)
+npx kagura-memory remember -s "Deploy key rotated" --content "..." --dedupe check   # a duplicate_candidate prints with exit 0 (v0.93.0+)
+npx kagura-memory update-memory -m MEM_UUID --add-tag status:done --remove-tag status:open \
+  --details-patch '{"status": "done"}' --expected-version 3   # partial edits (v0.140.0+), guarded (v0.113.0+)
+npx kagura-memory update-memory -m MEM_UUID --accept-supersede-candidate   # shadow the suggested older memory (v0.126.0+)
+npx kagura-memory context search-config CTX_UUID --content-chunks --no-llm-selector   # owner only (v0.110.0+ / v0.115.0+)
 npx kagura-memory measure record <context-id> weight_kg 71.5 --unit kg
 npx kagura-memory setup codex --dry-run   # show the command and the entry; change nothing
 npx kagura-memory setup claude --add-tools explore --context <context-id>   # ?add_tools= (v0.129.0+), ?context= (v0.114.0+)
@@ -215,6 +221,30 @@ used contexts; when more follow, its stderr line names the
 npx kagura-memory context list --limit 50
 npx kagura-memory context list --limit 50 --cursor 50   # the next_cursor of the page before
 ```
+
+**`update-memory --merge-details`** (and `--details-patch`, a patch you
+write yourself) sends `--details` / `--location` as one `details_patch`
+call, as the Python CLI 0.44.0 does: the server merges their top-level keys
+over the stored details, keeps the rest, and deletes a key given as `null`.
+Before memory-cloud 0.140.0 there is no `details_patch`, so the command
+falls back to reading the memory with `reference()` and writing the merged
+object — two calls, not one atomic update — and says so on stderr:
+
+| Server | First call | Then | Exit |
+|---|---|---|---|
+| 0.140.0+ | `update_memory` with `details_patch` and every other flag | nothing | 0 |
+| 0.82.0–0.139.x | refused: `invalid_argument` listing exactly `details_patch` in `unknown_arguments`, nothing written | `reference()`, then the merged object as `details` with every other flag (`--expected-version` still guards it on 0.113.0+) | 0 |
+| 0.82.0+, refused for any other reason (or naming another argument too) | the error | nothing | 1 |
+| before 0.82.0 | ignored: success without `version`, the other flags applied (or ignored) | `GET /api/v1/system/info`; below 0.82.0, `reference()` and the merged details alone | 0, or 1 naming each of `--add-tag` / `--remove-tag` / `--expected-version` / `--accept-supersede-candidate` / `--observed-at` it sent, after printing the reply |
+| a reply without `version` from 0.82.0+, an unparseable version or a failed probe | — | nothing more written | 1 |
+
+The fallback merge follows the server's rule (`null` deletes) and folds
+`--observed-at` into the merged details. A bounded `reference()` reply
+(`details_omitted`, a `details_json` page) is refused, never merged.
+`--details-patch` cannot be combined with `--details` / `--location` /
+`--merge-details`, `--tags` replaces the whole list where `--add-tag` /
+`--remove-tag` edit it, and a refused `--expected-version` prints the
+server's message with `  Current version: N` (and `  Help:`).
 
 **`resource setup`** names the new context after the resource, or `-n/--name`
 (lowercase letters, digits, `-` and `_`, at most 100), which a workspace
@@ -769,13 +799,17 @@ would accept.
 - `context update --lock --unlock` is a usage error (exit 2, "mutually
   exclusive; pick one"), where click takes whichever flag comes last.
 - `--rerank --no-rerank` is the same usage error, on `recall` and on
-  `context search-config`.
+  `context search-config`, and so are `--content-chunks
+  --no-content-chunks` and `--llm-selector --no-llm-selector`.
 - `auth logout --all --profile NAME` is the same usage error, where click
   ignores `--profile` and logs out every profile.
-- `update-memory --dismiss-supersede-candidate` exits 1 beside any
-  `--external-id`, before anything is sent. The Python CLI refuses only a
-  non-empty one, and sends an empty `--external-id=` to the server; this
-  CLI refuses that too, as `updateMemory` does.
+- `update-memory --dismiss-supersede-candidate`, and the other flags
+  that need `--memory-id` (`--accept-supersede-candidate`,
+  `--merge-details`, `--details-patch`, `--add-tag`, `--remove-tag`,
+  `--expected-version`), exit 1 beside any `--external-id`, before
+  anything is sent. The Python CLI refuses only a non-empty one, and sends
+  an empty `--external-id=` to the server beside `-m`, which refuses both
+  ids; this CLI refuses that too, as `updateMemory` does.
 - `-k=5` (a short option, `=`, a value) reads `5`, where click reads `=5`
   as the value and then refuses it.
 - An option that takes a value does not take a following argument that
@@ -808,6 +842,9 @@ purpose or out of reach:
   `reference` reply when `details_total_chars` is a whole number sent as a
   float (`24000.0`), which Python leaves out: JSON.parse cannot tell it
   from `24000`.
+- A message of `update-memory` (0.44.0) that names a command says
+  `kagura-memory reference`, where the Python CLI's says `kagura
+  reference`.
 - `getServerInfo`, `checkServerVersion`, `getEmbeddingStatus`,
   `getMemoryStats`, `findDuplicates` and `listEmbeddingModels` check the
   body against the Python model and return it as the server sent it:
@@ -1363,8 +1400,9 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraServiceUnavailableError` | any HTTP 503 from `/mcp` or a REST route (the OAuth endpoints keep their own errors): `/mcp`'s `temporarily_unavailable` (the credential could not be verified, v0.82.0+) and its JSON-RPC transport failures (a dependency down or timed out), REST `DB-002` (the database unavailable). A `KaguraConnectionError`, so existing handlers keep catching it | `retryAfter` (the `Retry-After` header, else `data.retry_after_seconds`; `null` on a write whose outcome is unknown), `reason` (REST `details.reason`, else the MCP `cause`, else the code) |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. That includes `getServerInfo`, `checkServerVersion` (as `KaguraClient.get_server_info`), `getEmbeddingStatus`, `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`, which check the body against the Python model and return it as sent. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
+| `KaguraVersionConflictError` | memory-cloud v0.113.0+: an `updateMemory({ expectedVersion })` that found the memory at another version, so nothing was written — MCP `version_conflict`, REST 409 `RES-002` with `details.reason` `"version_conflict"` (the files API's dedup 409 shares `RES-002` without that reason and stays a `KaguraConnectionError`). Read the memory again and resend with its version, or drop `expectedVersion` to overwrite | `currentVersion`, `expectedVersion`, `memoryId` (MCP only), all read from `details` |
 | `KaguraPermissionError` | MCP `permission_denied` — usually the caller's role is too low. `updateSearchConfig` also sends it for a context that does not exist or that the caller cannot see. Only some tools send a role — `updateSearchConfig`, `updateContext`, `deleteContext`, the file tools and the analysis tools do not — so `requiredRole` is often `null`, and on `updateSearchConfig` it cannot tell a missing context from a role denial | `requiredRole` |
-| `KaguraError` | any other code — `payload_too_large` among them, a memory over 1 MB on MCP (memory-cloud v0.108.0+; it replaced `quota_exceeded` there, and REST keeps `429 QUOTA-001`): no plan lifts it, so it is no quota | `code`, `details` (`limit` / `actual` for `payload_too_large`) |
+| `KaguraError` | any other code — `payload_too_large` among them, a memory over 1 MB on MCP (memory-cloud v0.108.0+; it replaced `quota_exceeded` there, and REST keeps `429 QUOTA-001`): no plan lifts it, so it is no quota. Also `edge_exists` (v0.126.0+), an `acceptSupersedeCandidate` that met a different declared edge between the pair (nothing written), and `dedupe_unavailable` (v0.93.0+), a `dedupe: "check"` that could not run | `code`, `details` (`limit` / `actual` for `payload_too_large`, `existing_edge` for `edge_exists`) |
 
 The codes the SDK types, by surface:
 
@@ -1475,12 +1513,38 @@ when `undefined`.
 
 | Method | What it does |
 |--------|--------------|
-| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. |
-| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". Returns a typed `RecallResponse` (`confidence` first: read `confidence.level` before the hits); see [Recall result shape](#recall-result-shape). |
-| `reference` | Full detail for one memory, under `result.memory`. |
-| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; it needs `memoryId` and throws locally with `externalId`. `tags` replaces the list, with `remember`'s caps. |
+| `remember` | Store a memory. `details` accepts arbitrary JSON, including `location` (see below) and the reserved `tool_trigger`, which marks a tool guardrail and needs context editor or above on a user (not agent) credential; `supersedes` declares this the newer version of an existing memory, shadowing the old one from default recall without destroying it; `deliveryMode: "always"` pins it. `tags` takes at most 50 tags of at most 100 characters each, the caps memory-cloud v0.82.0+ enforces: more throws before any request, on every server. `toolTrigger` marks the guardrail without writing the key yourself. `observedAt` (v0.127.0+) says when the fact held — a `YYYY-MM-DD` date or an extended ISO 8601 datetime, or a `Date` (sent as its UTC instant), stored as `details.observed_at`; a basic form (`20240307`), a time without seconds, an impossible day or a disagreeing `details.observed_at` throws before any request. `dedupe` (v0.93.0+): `"check"` writes nothing when a near-duplicate exists and returns `{ status: "duplicate_candidate", candidate }` instead of throwing, `"off"` opts the memory out of supersede suggestions for good; `tagsNormalize: true` stores each tag under the context's established spelling; `verbose: true` keeps `persistence.detail`. The reply (`RememberResult`, returned unchecked as Python's dict, so every key is optional) carries `version` (v0.113.0+), `session_id` (v0.113.0+) and, when a summary over 500 characters was cut, `summary_truncated` / `summary_original_length` (v0.108.0+). |
+| `recall` | Hybrid semantic + keyword search. Takes `filters` (`type`, `scope`, `tags` with `tags_match` and `tags_normalize`, `importance` bounds, created/updated date bounds, `source_uri_prefix`, `source_type`, `trust_tier`, and the `near` / `within` geo filters), `searchMode`, `useRerank`, `includeExploreHints`, `includeSuperseded` (read back what `supersedes` shadowed, annotated with `superseded_by`), and `contextIds` for 2–20-context search. `useRerank` is tri-state (memory-cloud v0.69.0+): omit it to follow the context's search config (the first context's, with `contextIds`), `true` requests reranking where the context allows it, `false` skips it for the call. A tag filter that matches nothing can return `tag_suggestions`. When the semantic half is unavailable, the result is keyword-only and carries `degraded: true` and `degraded_reason` (v0.66.0+) — an empty one then means "search impaired", not "nothing stored". `observedAfter` (inclusive) / `observedBefore` (exclusive) keep the memories whose fact held in that range (`filters.observed_after` / `observed_before`, v0.127.0+; a date is the start of its UTC day, and a memory without `observed_at` never matches); one beside the same key in `filters` throws. Returns a typed `RecallResponse` (`confidence` first: read `confidence.level` before the hits); see [Recall result shape](#recall-result-shape). |
+| `reference` | Full detail for one memory, under `result.memory` (`ReferenceResponse`), with its `version` (v0.113.0+) — the `expectedVersion` for `updateMemory` — and `observed_at` (v0.127.0+). Since v0.78.0 the reply is bounded (`maxChars`, 10,000–100,000, default 20,000): cut `content` comes with `content_truncated` / `content_next_offset`, and a `details` / `context` / links field that does not fit is left out with `<field>_omitted` / `<field>_total_chars`. Page the rest with `contentOffset`, `detailsOffset` (`details_json` slices) or `contextOffset` — one per call — and pick fields with `fields` (`content`, `details`, `context`, `links`). `version` (v0.113.0+) reads an earlier version (`historical: true`, `current_version`). Every one is checked locally (an integer in range, more than one offset refused first, a known field, an offset's own field listed) before any request. The reply comes back as sent once its `status` (a string) and `memory` (an object) are checked: otherwise `KaguraResponseError` (the CLI's `reference` prints the raw reply, as Python's does). |
+| `updateMemory` | Update in place by `memoryId`, or upsert by `externalId`. `details` **replaces** the stored object wholesale — round-trip keys you want to keep; dropping `tool_trigger` turns a guardrail off — and `detailsPatch` (v0.140.0+) merges into it instead: each key replaces the stored one, `null` deletes it, the rest are kept. `tags` replaces the list, with `remember`'s caps; `addTags` / `removeTags` (v0.140.0+) edit it (removals first, each new tag once; `addTags` takes the caps, `removeTags` none). `expectedVersion` (v0.113.0+) applies the edit only while the memory is at that version, else throws `KaguraVersionConflictError` with `currentVersion` and writes nothing. `dismissSupersedeCandidate: true` rejects the server's `supersede_candidate` suggestion; `acceptSupersedeCandidate: true` (v0.126.0+) accepts it — the candidate is shadowed by a `supersedes` edge, named in the reply's `superseded_memory_id`, and a different edge already linking the pair throws `KaguraError` `code` `"edge_exists"`. `observedAt`, `toolTrigger` and `verbose` work as on `remember`. The reply (`UpdateMemoryResult`, returned unchecked as Python's dict, so every key is optional) carries `version`. See [the local rules](#updatememorys-local-rules) below. |
 | `forget` | Soft-delete by `memoryId` or by `query`. The rows are kept, but not restorable through the API, until the deployment's cleanup window passes (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days). For a caller who may write to the workspace, a target it may not delete, or one already gone, is skipped silently — including every guardrail for a caller below context editor or on an agent credential — so `deleted_count` can be 0. A workspace viewer may not delete at all and is refused with `KaguraPermissionError` (`requiredRole: "member"`). |
 | `listMemories` | Browse with substring, facet, time-window and bounding-box filters. Omit `contextId` for the caller's cross-context view. `latMin` / `latMax` / `lonMin` / `lonMax` (server v0.54.0+) keep only memories with a location, each then carrying `location: { lat, lon }`; see [the WHERE axis](#the-where-axis--geospatial-memories). A row carries `observed_at` (v0.127.0+), when the fact held, as the text the server stores: a date `YYYY-MM-DD` or a UTC datetime `YYYY-MM-DDTHH:MM:SSZ`, never parsed (a date sorts and filters as the start of its UTC day). |
+
+#### `updateMemory`'s local rules
+
+`updateMemory` refuses before any request what memory-cloud's
+`UpdateMemoryRequest` refuses (`validation_error`), with the Python SDK
+0.44.0's checks: exactly one of `memoryId` / `externalId`; with
+`externalId` (an upsert replaces the memory under a new id) none of
+`dismissSupersedeCandidate`, `acceptSupersedeCandidate`,
+`expectedVersion`, `addTags`, `removeTags`, `detailsPatch` — an empty
+`externalId: ""` counts as given, as on the server; not both supersede
+flags; not `tags` beside `addTags` / `removeTags`, nor `details` beside
+`detailsPatch`; `expectedVersion` an integer ≥ 1 (a boolean is none); the
+tag caps on `tags` and `addTags`; `toolTrigger` beside a `tool_trigger` key
+in the object it is merged into (`detailsPatch` when given, else
+`details`); `observedAt` in a form the server refuses, or disagreeing with
+`details.observed_at` / `detailsPatch.observed_at` (a patch's
+`observed_at: null` disagrees too); and `acceptSupersedeCandidate` beside
+any field edit (`toolTrigger` and `observedAt` included) — it is a graph
+action, so send the edit in a separate call. Each throws a plain `Error`.
+
+Every new argument is sent only when set. From memory-cloud v0.82.0 a
+server refuses an argument it does not declare (`KaguraError`, `code`
+`"invalid_argument"`, the names in `details.unknown_arguments`); one before
+v0.82.0 ignores it — an `addTags` / `detailsPatch` edit then changes
+nothing, and `expectedVersion` guards nothing, which the reply's missing
+`version` gives away.
 
 #### Recall result shape
 
@@ -1572,7 +1636,7 @@ the counterpart to `recall`'s probabilistic search.
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraFeatureNotAvailableError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
-| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). Owner/editor only; a context that does not exist, or that the caller cannot see, also throws `KaguraPermissionError`. Returns the whole updated `config`, the only place the reinforce and routing fields come back; it also carries the content-chunk state (`content_chunks_enabled`, `_effective`, `_supported`, `_can_change`, `_disabled_reason`, `_in_use`, `_limit`, `_backfill_pending`, and `embedding_provider`; v0.110.0–v0.113.0) and the recall LLM selector's (`llm_selector_*`, v0.115.0+). |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). The weights and reranker settings need context editor or above; a context that does not exist, or that the caller cannot see, also throws `KaguraPermissionError`. Returns the whole updated `config`, the only place the reinforce and routing fields come back; it also carries the content-chunk state (`content_chunks_enabled`, `_effective`, `_supported`, `_can_change`, `_disabled_reason`, `_in_use`, `_limit`, `_backfill_pending`, and `embedding_provider`; v0.110.0–v0.113.0) and the recall LLM selector's (`llm_selector_*`, v0.115.0+). `contentChunksEnabled` (v0.110.0+; on, memory content — not only summaries — goes to the embedding and rerank providers) and `llmSelectorEnabled` (v0.115.0+) turn them on or off; both need the context owner or a workspace owner/admin, and where the deployment gates them by plan, the plan's feature and a free slot (`KaguraFeatureNotAvailableError` / `KaguraQuotaError`). Write back the stored `*_enabled` flag, never `*_effective`. |
 | `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. The context is named `name`, or `resourceId` when that is omitted. `summary` is deprecated and no longer sent, since the server ignores it: set it afterwards with `updateContext`. Plan-gated: throws `KaguraFeatureNotAvailableError` on a plan without resources. |
 
 ### Agent run-state
@@ -1779,7 +1843,9 @@ const pacific = await client.listMemories({ contextId, lonMin: 170, lonMax: -170
 
 > **Gotcha:** `updateMemory()` replaces `details` **wholesale** — the
 > server does not deep-merge. Round-trip `location` when updating details
-> or the memory silently drops off the spatial axis.
+> or the memory silently drops off the spatial axis — or change only the
+> keys you name with `detailsPatch` (memory-cloud v0.140.0+), which keeps
+> `location`.
 
 ## The HOW-MUCH axis — measurement series
 

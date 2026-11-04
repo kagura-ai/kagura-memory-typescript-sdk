@@ -318,25 +318,30 @@ export function quote(value: string): string {
 }
 
 /**
- * Parse `--details`, a JSON *object*.
+ * Parse `--details`, or another JSON-*object* flag (`--details-patch`).
  *
- * Port of `_parse_details`. Blank means unset rather than a usage error,
- * so `--details "$MAYBE_EMPTY"` behaves.
+ * Port of `_parse_json_object` (the Python CLI 0.44.0; `_parse_details`
+ * before it). Blank means unset rather than a usage error, so
+ * `--details "$MAYBE_EMPTY"` behaves. `flag` names the option in the
+ * messages; the example is `--details`' for every flag, as in Python.
  */
-export function parseDetails(raw: string | undefined): Record<string, unknown> | undefined {
+export function parseDetails(
+  raw: string | undefined,
+  flag = "--details",
+): Record<string, unknown> | undefined {
   if (raw === undefined || !raw.trim()) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
     throw new CliUsageError(
-      `Invalid JSON for --details: ${e instanceof Error ? e.message : String(e)}`,
+      `Invalid JSON for ${flag}: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new CliUsageError(
-      `--details must be a JSON object, got ${pyTypeName(parsed)}. ` +
-        `Example: --details '{"location": {"lat": 35.68, "lon": 139.76}}'`,
+      `${flag} must be a JSON object, got ${pyTypeName(parsed)}. ` +
+        `Example: ${flag} '{"location": {"lat": 35.68, "lon": 139.76}}'`,
     );
   }
   return parsed as Record<string, unknown>;

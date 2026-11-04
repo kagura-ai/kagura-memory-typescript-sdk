@@ -12,6 +12,7 @@ import {
   KaguraFeatureNotAvailableError,
   KaguraQuotaError,
   KaguraServiceUnavailableError,
+  KaguraVersionConflictError,
 } from "../src/errors.js";
 import { FilesClient } from "../src/filesClient.js";
 import { SDK_VERSION } from "../src/http.js";
@@ -759,6 +760,14 @@ describe("the error body, decoded once (python-sdk#311)", () => {
     ["a RATE-001 (429)", 429, RATE, {}, probeGet, KaguraQuotaError],
     ["the database down (503)", 503, DB, {}, probeGet, KaguraServiceUnavailableError],
     ["a 500", 500, { detail: "boom" }, {}, probeGet, KaguraConnectionError],
+    [
+      "a refused expectedVersion (409)",
+      409,
+      { error: "RES-002", message: "Version conflict: memory is at version 4.", details: { reason: "version_conflict", current_version: 4 } },
+      {},
+      probeGet,
+      KaguraVersionConflictError,
+    ],
     ["WorkspaceClient's 403", 403, ROLE, {}, workspace, KaguraConnectionError],
     ["WorkspaceClient's 403 plan refusal", 403, PLAN, {}, workspace, KaguraFeatureNotAvailableError],
     ["WorkspaceClient's 429", 429, { error: "HTTP-429", message: "Member limit reached", details: {} }, {}, workspace, KaguraQuotaError],
