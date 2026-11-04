@@ -10,7 +10,8 @@
  * next page, the cursor itself only when it is ASCII digits, the only form
  * the server takes back; a blank `--cursor` is unset; and `--details
  * --limit 21` without a non-blank `--name-contains` is a usage error
- * before any request.
+ * before any request. A server that refuses an argument (here a
+ * v0.82.0+ schema without `limit`) exits 1 with its message and `help`.
  */
 
 import { describe, expect, it } from "vitest";
@@ -192,6 +193,15 @@ const CASES: Case[] = [
     code: 1,
     stdout: "",
     stderr: "Error: list_contexts failed (validation_error): 'cursor' must be the next_cursor of a previous list_contexts response.\n",
+  },
+  {
+    name: "context list refused limit",
+    argv: ["context","list","--limit","50"],
+    toolTexts: {"list_contexts": "{\"status\": \"error\", \"error\": \"invalid_argument\", \"message\": \"list_contexts does not accept the argument 'limit'. Arguments its inputSchema declares: cursor, include_details, include_stats, include_summary, name_contains.\", \"unknown_arguments\": [\"limit\"], \"allowed_arguments\": [\"cursor\", \"include_details\", \"include_stats\", \"include_summary\", \"name_contains\"], \"suggestions\": {}, \"help\": \"Remove the unknown arguments or rename them as suggested, then call the tool again. tools/list shows each tool's inputSchema.\"}"},
+    calls: [{"limit":50}],
+    code: 1,
+    stdout: "",
+    stderr: "Error: list_contexts failed (invalid_argument): list_contexts does not accept the argument 'limit'. Arguments its inputSchema declares: cursor, include_details, include_stats, include_summary, name_contains.\n  Help: Remove the unknown arguments or rename them as suggested, then call the tool again. tools/list shows each tool's inputSchema.\n",
   },
   {
     name: "contexts cut page",

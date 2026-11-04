@@ -204,10 +204,13 @@ describe("listContexts({ limit }) (memory-cloud v0.82.0+, #89)", () => {
       .listContexts({ limit: 50 })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(KaguraError);
+    expect((error as KaguraError).code).toBe("invalid_argument");
+    expect((error as KaguraError).details.unknown_arguments).toEqual(["limit"]);
     expect((error as KaguraError).message).toContain(
       "list_contexts does not accept the argument 'limit'. Arguments its inputSchema declares: " +
         "cursor, include_details, include_stats, include_summary, name_contains.",
     );
+    // One call: the SDK never retries.
     expect(toolCalls(server).map((c) => c.arguments)).toEqual([{ limit: 50 }]);
   });
 });
