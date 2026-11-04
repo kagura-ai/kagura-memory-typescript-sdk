@@ -1,5 +1,21 @@
 # SDK ↔ memory-cloud Compatibility
 
+The unreleased quota classifier matches Python SDK 0.44.0's `_http.gate_error`.
+The REST status hooks keep their own mappings, so the HTTP status and entry
+point also determine the exception class.
+
+| Entry point and refusal | Error class |
+| --- | --- |
+| Shared gate classifier, `QUOTA-001` / `quota_exceeded` with `gate=quota`, a known tier `quota_type`, or an integer retry window | `KaguraQuotaError` |
+| Shared gate classifier, those codes without any of those descriptors | `KaguraError` |
+| Shared gate classifier, `QUOTA-002` / `CONNECTOR-001` | `KaguraQuotaError` |
+| REST base client HTTP 429, with or without quota descriptors | `KaguraQuotaError` |
+| REST base client HTTP 402, with or without quota descriptors | `KaguraConnectionError` |
+
+All paths retain the server's `code`, `details`, `help`, and `correlationId`.
+The Python reference is the
+[`v0.44.0` source](https://github.com/kagura-ai/kagura-memory-python-sdk/tree/v0.44.0/src/kagura_memory).
+
 Which memory-cloud server each release of the `kagura-memory` npm package
 needs, and the newest one it was checked against: one section per release,
 newest first. Each surface newer than the SDK-wide floor carries its own

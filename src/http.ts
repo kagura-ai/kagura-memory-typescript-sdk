@@ -681,6 +681,27 @@ export const REST_GATE_CODES: GateCodes = {
   quota: ["QUOTA-001", "QUOTA-002", "CONNECTOR-001"],
 };
 
+/** Python 0.44.0's tier quotas; QUOTA-001 also covers non-tier payload limits. */
+const TIER_QUOTA_TYPES = new Set([
+  "contexts",
+  "members",
+  "workspace_limit_reached",
+  "memories_per_day",
+  "memory_analysis",
+  "sleep_enabled_contexts",
+  "storage_bytes",
+  "agents",
+  "resource_tokens",
+  "connectors",
+  "content_chunk_contexts",
+  "llm_selector_contexts",
+  "embedding_spend_daily",
+  "embedding_spend_monthly",
+  "api_mcp_daily",
+  "api_rest_daily",
+  "api_public_daily",
+]);
+
 function stringField(block: Record<string, unknown>, key: string): string | null {
   const value = block[key];
   return typeof value === "string" ? value : null;
@@ -745,7 +766,7 @@ const CAPACITY_GATE = "capacity";
 const CAPACITY_CODES: readonly string[] = ["capacity_locked", "CAPACITY-001"];
 
 /**
- * Which refusal `block` is: `"capacity"`, `"plan"`, `"quota"`, or `null`
+ * Which refusal `block` is: `"capacity"`, `"plan"`, `"quota"`, `"generic"`, or `null`
  * for none of them.
  *
  * `block` holds the gate fields: the MCP envelope itself, or a REST
@@ -757,13 +778,15 @@ const CAPACITY_CODES: readonly string[] = ["capacity_locked", "CAPACITY-001"];
  * `allowlist` and `deployment` are the other two reasons a feature is
  * unavailable, so they count as `"plan"` — the kind an older server's bare
  * `FEAT-001` already gets. With no gate, `code` decides against the
- * surface's `codes`.
+ * surface's `codes`. Ambiguous quota codes also need a known tier quota
+ * type or a retry window; otherwise they describe a generic refusal.
  */
 function gateKind(
   block: Record<string, unknown>,
   code: string | null,
   codes: GateCodes,
-): "capacity" | "plan" | "quota" | null {
+  retryAfter: number | null = null,
+): "capacity" | "plan" | "quota" | "generic" | null {
   const gate = stringField(block, "gate");
   if (gate === CAPACITY_GATE || (code !== null && CAPACITY_CODES.includes(code))) {
     return "capacity";
@@ -775,6 +798,13 @@ function gateKind(
     return "plan";
   }
   if (code !== null && codes.quota.includes(code)) {
+    if (
+      (code === "QUOTA-001" || code === "quota_exceeded") &&
+      !TIER_QUOTA_TYPES.has(stringField(block, "quota_type") ?? "") &&
+      retryAfter === null
+    ) {
+      return "generic";
+    }
     return "quota";
   }
   if (code !== null && codes.plan.includes(code)) {
@@ -913,7 +943,8 @@ export function oauthBodyFields(body: Record<string, unknown>): Record<string, u
  * default `block` itself, as the server sent it, before the daily cap's
  * canonical names are filled in. The MCP caller passes the envelope
  * without its frame ({@link mcpEnvelopeFields}); a REST `details` block is
- * kept whole.
+ * kept whole. An ambiguous quota code without quota descriptors returns
+ * a plain {@link KaguraError}, matching Python's non-tier payload limits.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -926,11 +957,18 @@ export function gateError(
   if (code === MCP_DAILY_CAP_CODE) {
     block = withMcpDailyCapFields(block);
   }
-  const kind = gateKind(block, code, codes);
+  const bodyRetry = numberField(block, "retry_after_seconds");
+  if (retryAfter === null && bodyRetry !== null && Number.isInteger(bodyRetry)) {
+    retryAfter = bodyRetry;
+  }
+  const kind = gateKind(block, code, codes, retryAfter);
   if (kind === null) {
     return null;
   }
   const server = code === null ? { details } : { code, details };
+  if (kind === "generic") {
+    return new KaguraError(message, server);
+  }
   if (kind === "capacity") {
     return new KaguraCapacityLockedError(message, { ...capacityOptions(block), ...server });
   }
@@ -1338,7 +1376,8 @@ export function throwForKaguraStatus(
     err = new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       envelopeRetryAfter(headers, envelope),
-      envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
+      envelope !== null &&
+        gateKind(envelope.details, envelope.code, REST_GATE_CODES, envelopeRetryAfter(headers, envelope)) === "quota"
         ? gateOptions(envelope.details)
         : {},
     );

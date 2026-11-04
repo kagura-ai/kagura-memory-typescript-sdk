@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Match Python SDK 0.44.0's shared quota classifier. `QUOTA-001` and
+  `quota_exceeded` need a quota gate, a known tier quota type, or a retry
+  window to produce `KaguraQuotaError`. Other refusals with these codes
+  produce `KaguraError`, retaining server metadata. REST HTTP 429 and 402
+  retain their status-specific mappings, as in Python.
+
 ## [0.15.0] - 2026-11-05
 
 Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud
