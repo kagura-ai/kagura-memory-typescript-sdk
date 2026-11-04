@@ -111,15 +111,17 @@ export class KaguraError extends Error {
    * (`"payload_too_large"`, `"capacity_locked"` …), the REST `error`
    * (`"FEAT-001"`, `"CAPACITY-001"`, `"DB-002"` …), the OAuth `error`
    * (`"invalid_client"`, `"insufficient_scope"` …) or a JSON-RPC error's
-   * `data.error` — when the SDK read one, else `undefined`.
+   * `data.error` — when the SDK read one, else `undefined` (the SDK raised
+   * the error itself, or the server named no code).
    */
   readonly code: string | undefined;
   /**
-   * The other fields the server sent with the error — the MCP envelope
-   * without `status` / `error` / `message`, the REST `details`, a JSON-RPC
-   * error's `data` or an OAuth body's other fields. `{}` when the SDK
-   * raised the error itself or the server sent nothing more. The getters
-   * below read the MCP error-envelope fields from it.
+   * The other fields the server sent with the error, as sent — the MCP
+   * envelope without `status` / `error` / `message`, the REST `details`
+   * whole, a JSON-RPC error's `data` without its `error` (the code) or an
+   * OAuth body without its `error`. `{}` when the SDK raised the error
+   * itself or the server sent nothing more. The getters below read the MCP
+   * error-envelope fields from it.
    */
   readonly details: Record<string, unknown>;
 

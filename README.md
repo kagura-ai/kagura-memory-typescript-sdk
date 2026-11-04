@@ -1121,10 +1121,16 @@ code: the MCP envelope's `error` (`payload_too_large`, `capacity_locked`
 …), the REST body's `error` (`FEAT-001`, `CAPACITY-001`, `DB-002` …), the
 OAuth `error` (`invalid_client`, `insufficient_scope` …) or a JSON-RPC
 error's `data.error`; it is `undefined` when the SDK raised the error
-itself. `details` holds the other fields (the MCP envelope without
-`status` / `error` / `message`, the REST `details`, the JSON-RPC `data`),
-`{}` when there are none. **Branch on `code` and the class, never on the
-message**: memory-cloud words its messages for people and changes them.
+itself or the server named no code (an MCP envelope without `error`,
+whose message still reads `failed (unknown)`). `details` holds the other
+fields as sent (the MCP envelope without `status` / `error` / `message`,
+the REST `details` whole, the JSON-RPC `data` without its `error`, an
+OAuth body without its `error`), `{}` when there are none. A JSON-RPC
+error that `/mcp` answers with HTTP 200 (a `tools/call` whose plumbing
+failed) stays a `KaguraConnectionError` (`MCP error: …`), as in Python,
+and keeps its `data` the same way. **Branch on `code` and the class,
+never on the message**: memory-cloud words its messages for people and
+changes them.
 
 Since memory-cloud v0.78.0 an MCP tool refusal carries `help`, the next
 step, and a tool's server failure `help`, `cause`, `correlation_id`,
@@ -1205,8 +1211,13 @@ server's `help` and correlation id, as the Python CLI does.
 
 `authorizeDevice` turns an RFC 6749 refusal from `device/authorize`
 (memory-cloud v0.78.0+) into a `KaguraAuthError` whose `code` is the OAuth
-`error` and whose message carries the `error_description`.
-`pollForToken` treats `temporarily_unavailable` (v0.84.0+) as transient:
+`error` and whose message carries the `error_description`. Only an RFC
+6749 code or a body with an `error_description` reads so: any other error
+body — memory-cloud's REST `HTTP-404` from a server URL with the wrong
+path — keeps the generic `Device authorization failed (HTTP 404): …`
+message and its "Verify the server URL" hint, with the body's code as
+`code` (Python 0.44.0 drops that hint). `pollForToken` keeps the OAuth
+`error` of a refusal it does not know as `code` too. `pollForToken` treats `temporarily_unavailable` (v0.84.0+) as transient:
 it keeps polling until the device code expires, after the `Retry-After`
 wait when the server sent one (never less than the interval, never past
 the expiry), else the interval.

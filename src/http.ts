@@ -89,12 +89,15 @@ function jsonRpcError(body: unknown): Record<string, unknown> | null {
  * - Anything else — returns an empty string so callers can fall back.
  */
 export function extractDetail(bodyText: string): string {
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return "";
-  }
+  return detailOf(parseJsonBody(bodyText));
+}
+
+/**
+ * {@link extractDetail} of a body already decoded ({@link parseJsonBody}).
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function detailOf(body: unknown): string {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return "";
   }
@@ -279,11 +282,15 @@ export function bodyRetryAfter(block: Record<string, unknown>, key: string): num
  * error body, else `null`.
  */
 export function responseRetryAfter(headers: Headers, bodyText: string): number | null {
+  return envelopeRetryAfter(headers, parseErrorEnvelope(bodyText));
+}
+
+/** {@link responseRetryAfter} with the body's envelope already read. */
+function envelopeRetryAfter(headers: Headers, envelope: ErrorEnvelope | null): number | null {
   const header = retryAfterSeconds(headers);
   if (header !== null) {
     return header;
   }
-  const envelope = parseErrorEnvelope(bodyText);
   return envelope === null ? null : bodyRetryAfter(envelope.details, "retry_after");
 }
 
@@ -414,15 +421,40 @@ function capacityOptions(block: Record<string, unknown>): KaguraCapacityLockedEr
 /** Envelope keys that frame an MCP refusal rather than describe it. */
 const ENVELOPE_KEYS: readonly string[] = ["status", "error", "message"];
 
-/** `fields` without the {@link ENVELOPE_KEYS}, as a fresh object. */
-function withoutEnvelopeKeys(fields: Record<string, unknown>): Record<string, unknown> {
+/** `record` without the keys in `drop`, as a fresh object. */
+function without(record: Record<string, unknown>, drop: readonly string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(fields)) {
-    if (!ENVELOPE_KEYS.includes(key)) {
+  for (const [key, value] of Object.entries(record)) {
+    if (!drop.includes(key)) {
       out[key] = value;
     }
   }
   return out;
+}
+
+/**
+ * An MCP tool-error envelope without its frame (`status` / `error` /
+ * `message`), as a fresh object: what the error's `details` keep.
+ *
+ * Only the MCP envelope is stripped so: there the whole `result` is the
+ * refusal. A REST `details` object, a JSON-RPC `data` and an OAuth body are
+ * kept as sent, so a server field that happens to be named `status` or
+ * `message` there is not lost.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function mcpEnvelopeFields(result: Record<string, unknown>): Record<string, unknown> {
+  return without(result, ENVELOPE_KEYS);
+}
+
+/**
+ * An OAuth-style error body without its `error` (the code), as a fresh
+ * object: `error_description` and whatever else the server sent.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function oauthBodyFields(body: Record<string, unknown>): Record<string, unknown> {
+  return without(body, ["error"]);
 }
 
 /**
@@ -435,9 +467,11 @@ function withoutEnvelopeKeys(fields: Record<string, unknown>): Record<string, un
  * ({@link MCP_DAILY_CAP_CODE}) is the `api_mcp_daily` quota, resetting at
  * the next UTC midnight.
  *
- * The error's `code` is `code`, and its `details` every field of `block`
- * but `status` / `error` / `message` — as the server sent them, before the
- * daily cap's canonical names are filled in.
+ * The error's `code` is `code`, and its `details` are `details` — by
+ * default `block` itself, as the server sent it, before the daily cap's
+ * canonical names are filled in. The MCP caller passes the envelope
+ * without its frame ({@link mcpEnvelopeFields}); a REST `details` block is
+ * kept whole.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -445,8 +479,8 @@ export function gateError(
   codes: GateCodes,
   message: string,
   retryAfter: number | null = null,
+  details: Record<string, unknown> = block,
 ): KaguraError | null {
-  const details = withoutEnvelopeKeys(block);
   if (code === MCP_DAILY_CAP_CODE) {
     block = withMcpDailyCapFields(block);
   }
@@ -468,33 +502,56 @@ export function gateError(
  * Keep the server's error `code` and its other fields on `err` (Python's
  * `annotate_server_error`).
  *
- * `fields` is what came with the code — the MCP envelope, the REST
- * `details`, a JSON-RPC error's `data` or an OAuth body's other fields;
- * `status` / `error` / `message` frame the envelope and are left out. A
- * `code` or `details` the error already has (a typed error builds its own)
- * is kept.
+ * `code` is the server's error code, `undefined` when it sent none (the
+ * error then keeps whatever code it has, usually none). `fields` is what
+ * came with it, stored as a copy as given — the REST `details`, a JSON-RPC
+ * error's `data` or an OAuth body's other fields ({@link serverErrorFields}
+ * reads all three); an MCP envelope is passed through
+ * {@link mcpEnvelopeFields} first. A `code` or `details` the error already
+ * has (a typed error builds its own) is kept.
  *
  * @internal Shared by the SDK's error mapping; not exported from the package.
  */
 export function annotateServerError<E extends KaguraError>(
   err: E,
-  code: string,
+  code: string | undefined,
   fields: Record<string, unknown>,
 ): E {
   // Written once, here, where the server's answer is read; readonly to callers.
   const target = err as unknown as { code: string | undefined; details: Record<string, unknown> };
-  if (target.code === undefined) {
+  if (target.code === undefined && code !== undefined) {
     target.code = code;
   }
   if (Object.keys(target.details).length === 0) {
-    target.details = withoutEnvelopeKeys(fields);
+    target.details = { ...fields };
   }
   return err;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+/** @internal */
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/**
+ * An error response body decoded as JSON, `undefined` when it is not JSON.
+ *
+ * Decoded once per error response and handed to the readers below
+ * ({@link detailOf}, {@link envelopeOf}, {@link serverErrorFieldsOf}), as
+ * {@link throwForKaguraStatus} does.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function parseJsonBody(bodyText: string): unknown {
+  try {
+    return JSON.parse(bodyText);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `[code, fields]` of an error body: see {@link serverErrorFieldsOf}. */
+export type ServerErrorFields = [string, Record<string, unknown>];
 
 /**
  * `[code, fields]` of an error body that names an error code, else `null`
@@ -505,39 +562,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * `details`); a JSON-RPC error whose `data` carries `error` — the `/mcp`
  * transport's refusals and server failures, with `cause`,
  * `correlation_id`, `help` and `retryable` (memory-cloud v0.82.0+, #1742;
- * `fields` is `data`); and the OAuth-style `{"error": <code>,
- * "error_description": …}` (`fields` is the body without `error`).
+ * `fields` is `data` without its `error`, the code itself); and the
+ * OAuth-style `{"error": <code>, "error_description": …}` (`fields` is the
+ * body without `error`). `fields` is always a fresh object.
  *
  * @internal Shared by the SDK's error mapping; not exported from the package.
  */
-export function serverErrorFields(bodyText: string): [string, Record<string, unknown>] | null {
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return null;
-  }
+export function serverErrorFieldsOf(body: unknown): ServerErrorFields | null {
   if (!isRecord(body)) {
     return null;
   }
   const error = body.error;
   if (isRecord(error)) {
     const data = error.data;
-    return isRecord(data) && typeof data.error === "string" ? [data.error, data] : null;
+    return isRecord(data) && typeof data.error === "string" ? [data.error, without(data, ["error"])] : null;
   }
   if (typeof error !== "string") {
     return null;
   }
   if (isRecord(body.details)) {
-    return [error, body.details];
+    return [error, { ...body.details }];
   }
-  const rest: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(body)) {
-    if (key !== "error") {
-      rest[key] = value;
-    }
-  }
-  return [error, rest];
+  return [error, oauthBodyFields(body)];
+}
+
+/**
+ * {@link serverErrorFieldsOf} of a body still to be decoded.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function serverErrorFields(bodyText: string): ServerErrorFields | null {
+  return serverErrorFieldsOf(parseJsonBody(bodyText));
 }
 
 const INSUFFICIENT_SCOPE = "insufficient_scope";
@@ -599,7 +654,16 @@ function bearerChallenge(headers: Headers): Record<string, string> {
  * @internal Shared by the SDK's error mapping; not exported from the package.
  */
 export function insufficientScopeError(headers: Headers, bodyText: string): KaguraAuthError | null {
-  const fields = serverErrorFields(bodyText);
+  return insufficientScopeFrom(headers, serverErrorFields(bodyText));
+}
+
+/**
+ * {@link insufficientScopeError} with the body's {@link serverErrorFieldsOf}
+ * already read.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function insufficientScopeFrom(headers: Headers, fields: ServerErrorFields | null): KaguraAuthError | null {
   const data = fields !== null && fields[0] === INSUFFICIENT_SCOPE ? fields[1] : null;
   const challenge = bearerChallenge(headers);
   if (data === null && challenge.error !== INSUFFICIENT_SCOPE) {
@@ -636,7 +700,20 @@ export function serviceUnavailableError(
   message: string,
   bodyText: string,
 ): KaguraServiceUnavailableError {
-  const fields = serverErrorFields(bodyText);
+  return serviceUnavailableFrom(headers, message, serverErrorFields(bodyText));
+}
+
+/**
+ * {@link serviceUnavailableError} with the body's
+ * {@link serverErrorFieldsOf} already read.
+ *
+ * @internal Shared by the SDK's error mapping; not exported from the package.
+ */
+export function serviceUnavailableFrom(
+  headers: Headers,
+  message: string,
+  fields: ServerErrorFields | null,
+): KaguraServiceUnavailableError {
   const code = fields === null ? null : fields[0];
   const data = fields === null ? {} : fields[1];
   const retryAfter = retryAfterSeconds(headers) ?? intField(data, "retry_after_seconds");
@@ -651,30 +728,29 @@ function statusMessage(status: number, detail: string): string {
   return detail ? `HTTP ${status}: ${detail}` : `HTTP ${status}`;
 }
 
+/** A canonical REST error body split into its code and details block. */
+interface ErrorEnvelope {
+  code: string | null;
+  details: Record<string, unknown>;
+}
+
 /**
  * Split a canonical `{"error", "message", "details"}` REST body into its
  * code and details block; `null` for any other body.
  */
-export function parseErrorEnvelope(
-  bodyText: string,
-): { code: string | null; details: Record<string, unknown> } | null {
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
+export function parseErrorEnvelope(bodyText: string): ErrorEnvelope | null {
+  return envelopeOf(parseJsonBody(bodyText));
+}
+
+/** {@link parseErrorEnvelope} of a body already decoded ({@link parseJsonBody}). */
+function envelopeOf(body: unknown): ErrorEnvelope | null {
+  if (!isRecord(body)) {
     return null;
   }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return null;
-  }
-  const rec = body as Record<string, unknown>;
-  const details = rec.details;
+  const details = body.details;
   return {
-    code: typeof rec.error === "string" ? rec.error : null,
-    details:
-      typeof details === "object" && details !== null && !Array.isArray(details)
-        ? (details as Record<string, unknown>)
-        : {},
+    code: typeof body.error === "string" ? body.error : null,
+    details: isRecord(details) ? details : {},
   };
 }
 
@@ -690,7 +766,8 @@ export function parseErrorEnvelope(
  * is appended when present, otherwise `fallbackMessage` is used so the
  * status is never left bare. The error code and fields the body carried
  * (a JSON-RPC error's `data`, the REST `details`, an OAuth body's fields)
- * are kept as the error's `code` / `details`. This function always throws.
+ * are kept as the error's `code` / `details`. The body is decoded once,
+ * for every reader. This function always throws.
  *
  * A 429 that is a typed quota refusal (the daily call quota) keeps its
  * class, which existing handlers catch, but carries the quota's gate
@@ -705,29 +782,30 @@ export function throwForKaguraStatus(
   if (status === 401) {
     throw new KaguraAuthError("Authentication failed. Check your API key.");
   }
+  const body = parseJsonBody(bodyText);
+  const fields = serverErrorFieldsOf(body);
   if (status === 403) {
-    const scopeError = insufficientScopeError(headers, bodyText);
+    const scopeError = insufficientScopeFrom(headers, fields);
     if (scopeError !== null) {
       throw scopeError;
     }
   }
-  const detail = extractDetail(bodyText) || fallbackMessage || "";
+  const detail = detailOf(body) || fallbackMessage || "";
   let err: KaguraError;
   if (status === 429) {
-    const envelope = parseErrorEnvelope(bodyText);
+    const envelope = envelopeOf(body);
     err = new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
-      responseRetryAfter(headers, bodyText),
+      envelopeRetryAfter(headers, envelope),
       envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
         ? gateOptions(envelope.details)
         : {},
     );
   } else if (status === 503) {
-    err = serviceUnavailableError(headers, statusMessage(status, detail), bodyText);
+    err = serviceUnavailableFrom(headers, statusMessage(status, detail), fields);
   } else {
     err = new KaguraConnectionError(statusMessage(status, detail));
   }
-  const fields = serverErrorFields(bodyText);
   throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
 }
 

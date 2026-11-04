@@ -26,11 +26,16 @@ import {
 } from "../errors.js";
 import {
   annotateServerError,
+  detailOf,
   extractDetail,
+  oauthBodyFields,
+  parseJsonBody,
   retryAfterSeconds,
   serverErrorFields,
+  serverErrorFieldsOf,
   validateHttpsUrl,
 } from "../http.js";
+import type { ServerErrorFields } from "../http.js";
 import { SDK_VERSION } from "../version.js";
 
 // OAuth2 endpoint paths under {server}.
@@ -185,10 +190,19 @@ const DEVICE_AUTHORIZE_HINTS = new Map<string, (clientId: string) => string>([
   ["invalid_scope", () => "The client is registered without a memory scope; ask the server operator."],
 ]);
 
+/** The error codes of RFC 6749 §5.2, which `device/authorize` refuses with (RFC 8628 §3.2). */
+const RFC6749_ERRORS: readonly string[] = [
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+];
+
 /**
  * The `KaguraAuthError` for an RFC 6749 §5.2 `device/authorize` refusal,
- * else `null` for a body that names no error code (Python's
- * `_oauth_refusal`).
+ * else `null` (Python's `_oauth_refusal`, narrowed).
  *
  * memory-cloud v0.78.0+ (#1671) answers `{"error": …,
  * "error_description": …}`: `invalid_request` (a missing or malformed body
@@ -196,15 +210,29 @@ const DEVICE_AUTHORIZE_HINTS = new Map<string, (clientId: string) => string>([
  * `invalid_scope`. The OAuth `error` becomes the error's `code`; the
  * description, which RFC 6749 makes optional, goes into its message and
  * `details`.
+ *
+ * Only an RFC 6749 code, or a body that carries an `error_description`,
+ * is such a refusal. Any other coded body — memory-cloud's REST envelope
+ * `{"error": "HTTP-404", …}` from a server URL with the wrong path, say — is
+ * `null`, so the caller keeps its generic message and its "Verify the
+ * server URL" hint. (Python 0.44.0 reads every coded body as a refusal and
+ * drops that hint for it.)
  */
-function oauthRefusal(status: number, bodyText: string, clientId: string): KaguraAuthError | null {
-  const fields = serverErrorFields(bodyText);
+function oauthRefusal(
+  status: number,
+  body: unknown,
+  fields: ServerErrorFields | null,
+  clientId: string,
+): KaguraAuthError | null {
   if (fields === null) {
     return null;
   }
   const [error, details] = fields;
+  if (!RFC6749_ERRORS.includes(error) && typeof details.error_description !== "string") {
+    return null;
+  }
   let message = `Device authorization failed (HTTP ${status} ${error})`;
-  const description = extractDetail(bodyText);
+  const description = detailOf(body);
   if (description) {
     message += `: ${description}`;
   }
@@ -215,15 +243,14 @@ function oauthRefusal(status: number, bodyText: string, clientId: string): Kagur
   return annotateServerError(new KaguraAuthError(message), error, details);
 }
 
-/** An OAuth error body without its `error`: what the error's `details` keep. */
-function oauthFields(body: Record<string, unknown>): Record<string, unknown> {
-  const fields: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(body)) {
-    if (key !== "error") {
-      fields[key] = value;
-    }
-  }
-  return fields;
+/**
+ * `err` with the code and fields of `bodyText` when it names an error code
+ * (a JSON-RPC `data.error`, a REST envelope), else as it is: an OAuth
+ * endpoint's answer with no OAuth `error` field.
+ */
+function withBodyFields<E extends KaguraAuthError>(err: E, bodyText: string): E {
+  const fields = serverErrorFields(bodyText);
+  return fields === null ? err : annotateServerError(err, fields[0], fields[1]);
 }
 
 /**
@@ -299,15 +326,19 @@ export async function authorizeDevice(
     throw new KaguraAuthError(deviceRateLimitedMessage(response.headers, text));
   }
   if (!response.ok) {
-    const refusal = oauthRefusal(response.status, text, clientId);
+    const refused = parseJsonBody(text);
+    const fields = serverErrorFieldsOf(refused);
+    const refusal = oauthRefusal(response.status, refused, fields, clientId);
     if (refusal !== null) {
       throw refusal;
     }
-    const detail = extractDetail(text) || text;
-    throw new KaguraAuthError(
+    const detail = detailOf(refused) || text;
+    const err = new KaguraAuthError(
       `Device authorization failed (HTTP ${response.status}): ${detail}\n` +
         `  Verify the server URL and that '${clientId}' is registered.`,
     );
+    // The body's code (`HTTP-404` …) is kept, as on every server error.
+    throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
   }
 
   const body = safeJsonObject(text, response.status, "Device authorization");
@@ -463,14 +494,21 @@ export async function pollForToken(
     // non-JSON bodies that make `error` come back empty).
     const description = stringOr(body.error_description, "");
     if (error || description) {
-      throw new KaguraAuthError(
-        `Token endpoint returned unexpected error '${error}': ${description}`,
+      // The OAuth `error` (when there is one) as `code`, the rest in
+      // `details`, as authorizeDevice and refreshAccessToken keep them.
+      throw annotateServerError(
+        new KaguraAuthError(`Token endpoint returned unexpected error '${error}': ${description}`),
+        error || undefined,
+        oauthBodyFields(body),
       );
     }
     const detail = extractDetail(text) || text.slice(0, 200);
-    throw new KaguraAuthError(
-      `Token endpoint returned HTTP ${response.status} with no OAuth error code. ` +
-        `Body: ${detail}`,
+    throw withBodyFields(
+      new KaguraAuthError(
+        `Token endpoint returned HTTP ${response.status} with no OAuth error code. ` +
+          `Body: ${detail}`,
+      ),
+      text,
     );
   }
 }
@@ -528,7 +566,7 @@ export async function refreshAccessToken(
   const error = stringOr(body.error, "");
   // The OAuth `error` becomes the error's `code` (`refresh` branches on
   // `invalid_scope`); `error_description` and the rest go to `details`.
-  const fields = oauthFields(body);
+  const fields = oauthBodyFields(body);
 
   if (error === "invalid_grant") {
     throw annotateServerError(
@@ -552,8 +590,9 @@ export async function refreshAccessToken(
   }
   // Non-OAuth failure (HTML 5xx, network proxy returning text/plain, etc.).
   const detail = extractDetail(text) || text.slice(0, 200);
-  throw new KaguraAuthError(
-    `Refresh failed: HTTP ${response.status} with no OAuth error code. Body: ${detail}`,
+  throw withBodyFields(
+    new KaguraAuthError(`Refresh failed: HTTP ${response.status} with no OAuth error code. Body: ${detail}`),
+    text,
   );
 }
 

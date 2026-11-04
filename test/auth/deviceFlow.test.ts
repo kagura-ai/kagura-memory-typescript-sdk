@@ -587,6 +587,26 @@ describe("authorizeDevice: RFC 6749 refusals (memory-cloud v0.78.0+)", () => {
     expect([err.code, err.details]).toEqual(["invalid_client", {}]);
   });
 
+  it("keeps the generic wording and hint for a REST envelope from a wrong server URL", async () => {
+    // memory-cloud's REST 404 (a URL with the wrong path prefix) names a
+    // code but is no OAuth refusal: the "Verify the server URL" hint stays.
+    const stub = sequenceFetch([jsonResponse(404, { error: "HTTP-404", message: "Not Found", details: {} })]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err.message).toBe(
+      `Device authorization failed (HTTP 404): Not Found\n  Verify the server URL and that '${DEFAULT_CLIENT_ID}' is registered.`,
+    );
+    expect([err.code, err.details]).toEqual(["HTTP-404", {}]);
+  });
+
+  it("reads a body with an error_description as a refusal whatever its code", async () => {
+    const stub = sequenceFetch([
+      jsonResponse(503, { error: "temporarily_unavailable", error_description: "Try again shortly." }),
+    ]);
+    const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
+    expect(err.message).toBe("Device authorization failed (HTTP 503 temporarily_unavailable): Try again shortly.");
+    expect([err.code, err.details]).toEqual(["temporarily_unavailable", { error_description: "Try again shortly." }]);
+  });
+
   it("keeps the old wording for a body that names no error code", async () => {
     const stub = sequenceFetch([jsonResponse(400, { detail: "bad" })]);
     const err = await rejection<KaguraAuthError>(authorizeDevice(SERVER, { fetch: stub }));
@@ -594,6 +614,48 @@ describe("authorizeDevice: RFC 6749 refusals (memory-cloud v0.78.0+)", () => {
       `Device authorization failed (HTTP 400): bad\n  Verify the server URL and that '${DEFAULT_CLIENT_ID}' is registered.`,
     );
     expect(err.code).toBeUndefined();
+  });
+});
+
+describe("pollForToken: the code of an error it does not know (#84)", () => {
+  function pollOnce(response: Response): Promise<KaguraAuthError> {
+    return rejection<KaguraAuthError>(
+      pollForToken(SERVER, {
+        clientId: DEFAULT_CLIENT_ID,
+        deviceCode: "dc",
+        interval: 5,
+        expiresAt: futureDate(600_000),
+        fetch: sequenceFetch([response]),
+        sleep: noSleep,
+      }),
+    );
+  }
+
+  it("keeps an unknown OAuth error as the code, the rest as details", async () => {
+    const err = await pollOnce(jsonResponse(400, { error: "server_error", error_description: "Boom." }));
+    expect(err.message).toBe("Token endpoint returned unexpected error 'server_error': Boom.");
+    expect([err.code, err.details]).toEqual(["server_error", { error_description: "Boom." }]);
+  });
+
+  it("has no code for a description with no error", async () => {
+    const err = await pollOnce(jsonResponse(400, { error_description: "Boom." }));
+    expect([err.code, err.details]).toEqual([undefined, { error_description: "Boom." }]);
+  });
+
+  it("reads a JSON-RPC error's data when the body has no OAuth error", async () => {
+    const body = {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32603, message: "x", data: { error: "internal_error", correlation_id: "c9" } },
+    };
+    const err = await pollOnce(jsonResponse(500, body));
+    expect(err.message).toMatch(/^Token endpoint returned HTTP 500 with no OAuth error code\. /);
+    expect([err.code, err.correlationId]).toEqual(["internal_error", "c9"]);
+  });
+
+  it("has no code for a body that is not JSON", async () => {
+    const err = await pollOnce(textResponse(502, "<html>Bad Gateway</html>"));
+    expect([err.code, err.details]).toEqual([undefined, {}]);
   });
 });
 

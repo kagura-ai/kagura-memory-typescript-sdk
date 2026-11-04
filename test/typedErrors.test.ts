@@ -10,7 +10,7 @@
  * `details`.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { KaguraClient } from "../src/client.js";
 import {
@@ -27,8 +27,10 @@ import {
 import {
   annotateServerError,
   insufficientScopeError,
+  mcpEnvelopeFields,
   serverErrorFields,
   serviceUnavailableError,
+  throwForKaguraStatus,
 } from "../src/http.js";
 import { KaguraRestClient } from "../src/restBase.js";
 import type { HttpMethod, RestResponse } from "../src/restBase.js";
@@ -373,11 +375,20 @@ describe("serverErrorFields", () => {
     ]);
   });
 
-  it("reads a JSON-RPC error's data", async () => {
+  it("reads a JSON-RPC error's data, without the code it lifts", async () => {
     const text = await mcpInsufficientScope().text();
     const [code, fields] = serverErrorFields(text)!;
     expect(code).toBe("insufficient_scope");
     expect(fields.required_scope).toBe("memory:write");
+    expect("error" in fields).toBe(false);
+  });
+
+  it("keeps a REST details key named like the MCP frame", () => {
+    const body = { error: "RES-002", message: "m", details: { status: "pending", message: "inner", error: "e" } };
+    expect(serverErrorFields(JSON.stringify(body))).toEqual([
+      "RES-002",
+      { status: "pending", message: "inner", error: "e" },
+    ]);
   });
 
   it("reads an OAuth-style body without its error", async () => {
@@ -401,10 +412,25 @@ describe("serverErrorFields", () => {
 });
 
 describe("annotateServerError", () => {
-  it("sets the code and the fields without the envelope's frame", () => {
-    const e = annotateServerError(new KaguraError("x"), "payload_too_large", MCP_PAYLOAD_TOO_LARGE);
+  it("sets the code and a copy of the fields as given", () => {
+    const fields = { limit: 1_000_000, actual: 1_200_000, status: "kept" };
+    const e = annotateServerError(new KaguraError("x"), "payload_too_large", fields);
     expect(e.code).toBe("payload_too_large");
-    expect(e.details).toEqual({ limit: 1_000_000, actual: 1_200_000, help: MCP_PAYLOAD_TOO_LARGE.help });
+    expect(e.details).toEqual(fields);
+    expect(e.details).not.toBe(fields);
+  });
+
+  it("strips the frame only from an MCP envelope", () => {
+    expect(mcpEnvelopeFields(MCP_PAYLOAD_TOO_LARGE)).toEqual({
+      limit: 1_000_000,
+      actual: 1_200_000,
+      help: MCP_PAYLOAD_TOO_LARGE.help,
+    });
+  });
+
+  it("leaves the code undefined when the server named none", () => {
+    const e = annotateServerError(new KaguraError("x"), undefined, { help: "h" });
+    expect([e.code, e.help]).toEqual([undefined, "h"]);
   });
 
   it("keeps a code and details the error already has", () => {
@@ -597,6 +623,23 @@ describe("MCP envelope → class", () => {
     expect([e.code, e.details]).toEqual(["context_not_found", { help: "Check the id." }]);
   });
 
+  it("an envelope without error has no code; the message still says (unknown)", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = { status: "error", message: "Something failed.", help: "Try later." };
+    const e = await rejection(remember(makeClient(server)));
+    expect(e.constructor).toBe(KaguraError);
+    expect(e.message).toBe("remember failed (unknown): Something failed.");
+    expect([e.code, e.details]).toEqual([undefined, { help: "Try later." }]);
+  });
+
+  it("a gated envelope without error keeps no code either", async () => {
+    const server = new FakeServer();
+    server.toolResults.remember = { status: "error", message: "Locked.", gate: "capacity", over_memories: 2 };
+    const e = (await rejection(remember(makeClient(server)))) as KaguraCapacityLockedError;
+    expect(e).toBeInstanceOf(KaguraCapacityLockedError);
+    expect([e.code, e.details, e.overMemories]).toEqual([undefined, { gate: "capacity", over_memories: 2 }, 2]);
+  });
+
   it("a quota keeps the envelope as details", async () => {
     const server = new FakeServer();
     server.toolResults.remember = {
@@ -692,6 +735,53 @@ describe("/mcp HTTP status → class", () => {
     const e = (await rejection(remember(makeClient(failingToolCall(() => mcpTransportFailure(data)))))) as KaguraServiceUnavailableError;
     expect(e).toBeInstanceOf(KaguraServiceUnavailableError);
     expect([e.retryAfter, e.reason, e.retryable, e.outcome]).toEqual([null, "timeout", false, "unknown"]);
+  });
+
+  it("a JSON-RPC error in a 200 keeps data's code and fields; the class stays Python's", async () => {
+    // memory-cloud answers a tools/call whose plumbing failed (outside the
+    // tool handler) with HTTP 200 and a JSON-RPC error in the tool-error
+    // vocabulary (transport.py, #1684).
+    const data = {
+      error: "timeout",
+      cause: "timeout",
+      help: "This tool only reads, so calling it again is safe.",
+      correlation_id: "c5",
+      retryable: true,
+      retry_after_seconds: 5,
+    };
+    const inBand = () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          error: { code: -32001, message: "The server did not finish the request within its time limit.", data },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    const e = await rejection(
+      makeClient(failingToolCall(inBand)).recall({ contextId: "c", query: "q" }),
+    );
+    expect(e.constructor).toBe(KaguraConnectionError);
+    expect(e.message).toBe("MCP error: The server did not finish the request within its time limit.");
+    expect(e.code).toBe("timeout");
+    expect(e.details).toEqual({
+      cause: "timeout",
+      help: data.help,
+      correlation_id: "c5",
+      retryable: true,
+      retry_after_seconds: 5,
+    });
+    expect([e.serverCause, e.correlationId, e.retryable]).toEqual(["timeout", "c5", true]);
+  });
+
+  it("a JSON-RPC error in a 200 without data has no code", async () => {
+    const inBand = () =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found: x" } }), {
+        status: 200,
+      });
+    const e = await rejection(remember(makeClient(failingToolCall(inBand))));
+    expect(e.constructor).toBe(KaguraConnectionError);
+    expect([e.message, e.code, e.details]).toEqual(["MCP error: Method not found: x", undefined, {}]);
   });
 
   it("500 internal_error stays a KaguraConnectionError with the envelope", async () => {
@@ -850,11 +940,53 @@ describe("REST status → class", () => {
     expect([e.code, e.details]).toEqual(["RES-002", { existing_file: { id: "f1" } }]);
   });
 
+  it("keeps a REST details key named status or message", async () => {
+    const body = { error: "RES-002", message: "Conflict", details: { status: "pending", message: "inner", id: "r1" } };
+    const e = await rejection(probe(restAnswering(409, body)).get("/api/v1/files"));
+    expect([e.code, e.details]).toEqual(["RES-002", { status: "pending", message: "inner", id: "r1" }]);
+    const gated = await rejection(
+      probe(restAnswering(403, { ...REST_CAPACITY_LOCKED, details: { ...REST_CAPACITY_LOCKED.details, status: "locked" } })).get(
+        "/api/v1/memory",
+      ),
+    );
+    expect(gated).toBeInstanceOf(KaguraCapacityLockedError);
+    expect(gated.details.status).toBe("locked");
+  });
+
   it("a validation error keeps VAL-001's errors", async () => {
     const errors = [{ loc: ["body", "summary"], msg: "Field required", type: "missing" }];
     const body = { error: "VAL-001", message: "Request validation failed", details: { errors } };
     const e = await rejection(probe(restAnswering(422, body)).get("/api/v1/memory"));
     expect([e.code, e.details]).toEqual(["VAL-001", { errors }]);
+  });
+});
+
+describe("throwForKaguraStatus decodes the body once", () => {
+  it.each([
+    [
+      403,
+      JSON.stringify({ jsonrpc: "2.0", id: 2, error: { code: -32001, message: "m", data: { error: "insufficient_scope" } } }),
+      { "WWW-Authenticate": 'Bearer error="insufficient_scope"' },
+    ],
+    [429, JSON.stringify({ error: "QUOTA-001", message: "q", details: { gate: "quota", quota_type: "api_mcp_daily" } }), {}],
+    [503, JSON.stringify({ error: "DB-002", message: "Database connection failed", details: { reason: "deadlock" } }), {}],
+    [500, JSON.stringify({ error: "INT-001", message: "boom", details: {} }), {}],
+  ])("for an HTTP %d", (status, text, headers) => {
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const e = (() => {
+        try {
+          throwForKaguraStatus(status, new Headers(headers), text);
+        } catch (err) {
+          return err as KaguraError;
+        }
+        throw new Error("expected a throw");
+      })();
+      expect(e.code).toBeDefined();
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally {
+      parse.mockRestore();
+    }
   });
 });
 

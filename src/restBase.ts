@@ -36,16 +36,17 @@ import {
   baseUrlFromMcp,
   extractDetail,
   gateError,
-  insufficientScopeError,
+  insufficientScopeFrom,
   parseErrorEnvelope,
   responseRetryAfter,
   REST_GATE_CODES,
   sanitizeServerDetail,
   SDK_VERSION,
   serverErrorFields,
-  serviceUnavailableError,
+  serviceUnavailableFrom,
   validateHttpsUrl,
 } from "./http.js";
+import type { ServerErrorFields } from "./http.js";
 import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
 
@@ -503,12 +504,19 @@ export class KaguraRestClient {
       path: requestPath(url, path),
     };
     if (response.status < 200 || response.status >= 300) {
-      const err = this.mapStatusError(envelope, {
-        requestJson: opts.json,
-        requestParams: opts.params,
-      });
-      // One place for every hook: a typed error keeps what it already set.
+      // The body's code and fields, read once for the scope and 503 errors
+      // and for the annotation below (the per-status hooks read the body
+      // themselves).
       const fields = serverErrorFields(envelope.text);
+      const err = this.mapStatusError(
+        envelope,
+        {
+          requestJson: opts.json,
+          requestParams: opts.params,
+        },
+        fields,
+      );
+      // One place for every hook: a typed error keeps what it already set.
       throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
     }
     return envelope;
@@ -529,13 +537,17 @@ export class KaguraRestClient {
    * owns the single throw site — one uniform chain and a compiler-checked
    * `KaguraError` contract on every hook.
    */
-  protected mapStatusError(response: RestResponse, context: RequestContext): KaguraError {
+  protected mapStatusError(
+    response: RestResponse,
+    context: RequestContext,
+    fields: ServerErrorFields | null = serverErrorFields(response.text),
+  ): KaguraError {
     const status = response.status;
     if (status === 401) {
       return this.error401(response);
     }
     if (status === 403) {
-      return insufficientScopeError(response.headers, response.text) ?? this.error403(response, context);
+      return insufficientScopeFrom(response.headers, fields) ?? this.error403(response, context);
     }
     if (status === 404) {
       return new KaguraNotFoundError(extractDetail(response.text) || "Not found");
@@ -545,11 +557,7 @@ export class KaguraRestClient {
     }
     if (status === 503) {
       const detail = extractDetail(response.text);
-      return serviceUnavailableError(
-        response.headers,
-        detail ? `HTTP 503: ${detail}` : "HTTP 503",
-        response.text,
-      );
+      return serviceUnavailableFrom(response.headers, detail ? `HTTP 503: ${detail}` : "HTTP 503", fields);
     }
     return this.genericError(response);
   }

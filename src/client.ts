@@ -21,13 +21,16 @@ import {
   annotateServerError,
   baseUrlFromMcp,
   bodyRetryAfter,
-  extractDetail,
+  detailOf,
   gateError,
+  isRecord,
   MCP_GATE_CODES,
+  mcpEnvelopeFields,
   mcpSessionExpired,
   mcpSessionHeader,
+  parseJsonBody,
   SDK_VERSION,
-  serverErrorFields,
+  serverErrorFieldsOf,
   throwForKaguraStatus,
   validateHttpsUrl,
 } from "./http.js";
@@ -1083,12 +1086,13 @@ export class KaguraClient {
       response = await this.post(this.mcpUrl, body, mcpSessionHeader(retrySessionId));
       text = await this.safeText(response);
       if (mcpSessionExpired(response.status, text, retrySessionId)) {
-        const detail = extractDetail(text);
+        const expired = parseJsonBody(text);
+        const detail = detailOf(expired);
         const err = new KaguraConnectionError(
           "MCP session expired; the client re-initialized once and the retry still got " +
             (detail ? `HTTP 404: ${detail}` : "HTTP 404"),
         );
-        const fields = serverErrorFields(text);
+        const fields = serverErrorFieldsOf(expired);
         throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
       }
     }
@@ -1113,7 +1117,15 @@ export class KaguraClient {
         typeof error === "object" && error !== null && Object.prototype.hasOwnProperty.call(error, "message")
           ? (error as Record<string, unknown>).message
           : error;
-      throw new KaguraConnectionError(`MCP error: ${pyStr(message)}`);
+      // Streamable HTTP answers a JSON-RPC error in a 200 too: memory-cloud
+      // sends a tools/call whose plumbing failed that way, its `data` in
+      // the tool-error vocabulary (`error`, `help`, `cause`,
+      // `correlation_id`, `retryable`, `outcome`). The class stays
+      // Python's, KaguraConnectionError; only a JSON-RPC error object's
+      // `data` is read for `code` / `details`.
+      const err = new KaguraConnectionError(`MCP error: ${pyStr(message)}`);
+      const fields = isRecord(error) ? serverErrorFieldsOf(data) : null;
+      throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
     }
 
     const result = data.result;
@@ -1128,16 +1140,17 @@ export class KaguraClient {
    * An array param is sent as one repeated key per item (`?k=a&k=b`), which
    * is how FastAPI reads a `list[str]` query; joined, `a,b` is one value.
    *
-   * Without `operation`, every non-2xx goes through the standard status
+   * Without `mcpTool`, every non-2xx goes through the standard status
    * mapping (a 404 is a {@link KaguraConnectionError}). With it, a 404 and a
    * 422 get the classes and messages the MCP path gives that tool's
-   * `*_not_found` and `invalid_argument` errors, so a method that moved
-   * from MCP to REST throws what it always threw.
+   * not-found code (`mcpTool.notFoundCode`, e.g. `list_tags`'s
+   * `context_not_found`) and `invalid_argument` errors, so a method that
+   * moved from MCP to REST throws what it always threw, with that code.
    */
   private async restGet<T>(
     path: string,
     params?: Record<string, unknown>,
-    operation?: string,
+    mcpTool?: { operation: string; notFoundCode: string },
   ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
     if (params) {
@@ -1176,12 +1189,14 @@ export class KaguraClient {
 
     const text = await this.safeText(response);
     if (!response.ok) {
-      if (operation !== undefined) {
-        const detail = extractDetail(text);
+      if (mcpTool !== undefined) {
+        const { operation, notFoundCode } = mcpTool;
+        const body = parseJsonBody(text);
+        const detail = detailOf(body);
         let mapped: KaguraError | null = null;
         if (response.status === 404) {
           mapped = new KaguraNotFoundError(`${operation}: ${detail || "Not found"}`, {
-            code: "context_not_found",
+            code: notFoundCode,
           });
         } else if (response.status === 422) {
           mapped = new KaguraError(`${operation} failed (invalid_argument): ${detail || "HTTP 422"}`, {
@@ -1191,7 +1206,7 @@ export class KaguraClient {
         if (mapped !== null) {
           // `code` stays the MCP tool's; the REST body's fields are what
           // the server sent with it (Python's `_rest_get_json`).
-          const fields = serverErrorFields(text);
+          const fields = serverErrorFieldsOf(body);
           throw fields === null ? mapped : annotateServerError(mapped, fields[0], fields[1]);
         }
       }
@@ -1340,8 +1355,9 @@ export class KaguraClient {
    * {@link KaguraError} — `payload_too_large` among them (a memory over
    * 1 MB, v0.108.0+, with `limit` / `actual` in `details`).
    *
-   * Every error keeps the envelope: `code` is its `error` and `details`
-   * everything but `status` / `error` / `message` — `help` and, on a server
+   * Every error keeps the envelope: `code` is its `error` (`undefined` for
+   * an envelope without one, whose message still says `failed (unknown)`)
+   * and `details` everything but `status` / `error` / `message` — `help` and, on a server
    * failure, `cause`, `correlation_id`, `retryable` and for a write
    * `outcome` (all v0.78.0+, #1684), which {@link KaguraError} reads as
    * getters.
@@ -1353,15 +1369,21 @@ export class KaguraClient {
     // Python: result.get(key, default), then str() of it -- a present null
     // is "None", a number or an object its repr.
     const has = (key: string) => Object.prototype.hasOwnProperty.call(result, key);
-    const code = has("error") ? pyStr(result.error) : "unknown";
+    // An envelope without `error` names no code: the message says
+    // `(unknown)`, as before, but `code` stays undefined.
+    const code = has("error") ? pyStr(result.error) : undefined;
     const message = has("message") ? pyStr(result.message) : "Unknown error";
-    throw annotateServerError(KaguraClient.mcpError(result, code, message, operation), code, result);
+    throw annotateServerError(
+      KaguraClient.mcpError(result, code, message, operation),
+      code,
+      mcpEnvelopeFields(result),
+    );
   }
 
   /** The error {@link raiseForMcpError} throws, before it keeps the envelope on it. */
   private static mcpError(
     result: ToolResult,
-    code: string,
+    code: string | undefined,
     message: string,
     operation: string,
   ): KaguraError {
@@ -1374,7 +1396,7 @@ export class KaguraClient {
     ) {
       return new KaguraNotFoundError(`${operation}: ${message}`);
     }
-    const failure = `${operation} failed (${code}): ${message}`;
+    const failure = `${operation} failed (${code ?? "unknown"}): ${message}`;
     if (code === "partial_rollback") {
       const reportId = typeof result.report_id === "string" ? result.report_id : null;
       let summary: RollbackSummary;
@@ -1392,10 +1414,11 @@ export class KaguraClient {
     }
     const gated = gateError(
       result,
-      code,
+      code ?? null,
       MCP_GATE_CODES,
       failure,
       bodyRetryAfter(result, "retry_after_seconds"),
+      mcpEnvelopeFields(result),
     );
     if (gated !== null) {
       return gated;
@@ -2199,7 +2222,7 @@ export class KaguraClient {
     const body = await this.restGet<unknown>(
       `/api/v1/contexts/${contextSegment(contextId)}/tags`,
       params,
-      "list_tags",
+      { operation: "list_tags", notFoundCode: "context_not_found" },
     );
     const record =
       typeof body === "object" && body !== null && !Array.isArray(body)
