@@ -385,6 +385,7 @@ const INDEXER_STATE_METRICS: Model = {
     optional("applied_upserts", "int", 0),
     optional("applied_deletes", "int", 0),
     optional("errors", "int", 0),
+    optional("failed_events", "int", 0),
     optional("skipped_reason", nullable("str")),
   ],
 };
@@ -461,6 +462,8 @@ const SERVER_FEATURES: Model = {
     optional("referrals", "bool", false),
     optional("beta_invites", "bool", false),
     optional("reranking", "bool", false),
+    optional("content_chunks_require_plan", "bool", false),
+    optional("llm_selector_require_plan", "bool", false),
   ],
 };
 
@@ -495,6 +498,7 @@ const FAILED_MEMORY_INFO: Model = {
     optional("embedding_error", nullable("str")),
     required("created_at", "datetime"),
     optional("updated_at", nullable("datetime")),
+    optional("embedding_attempted_at", nullable("datetime")),
   ],
 };
 
@@ -574,4 +578,67 @@ const EMBEDDING_MODEL: Model = {
 export const EMBEDDING_MODELS_RESPONSE: Model = {
   name: "EmbeddingModelsResponse",
   fields: [required("models", listOf({ model: EMBEDDING_MODEL })), required("default_model", "str")],
+};
+
+// Sleep Maintenance (`get_sleep_history` / `get_sleep_report`), for the
+// `sleep history` / `sleep report` dumps.
+
+const SLEEP_REPORT_FIELDS: readonly Field[] = [
+  required("report_id", "str"),
+  optional("context_id", nullable("str")),
+  required("status", "str"),
+  optional("started_at", nullable("datetime")),
+  optional("completed_at", nullable("datetime")),
+  required("memories_processed", "int"),
+  required("edges_created", "int"),
+  required("memories_merged", "int"),
+  required("memories_promoted", "int"),
+  required("llm_calls_made", "int"),
+  required("llm_tokens_used", "int"),
+  optional("llm_call_failures", nullable("int")),
+  optional("source", nullable("str")),
+];
+
+/** One `get_sleep_history` row, as Python's `SleepReport` reads it. */
+export const SLEEP_REPORT: Model = { name: "SleepReport", fields: SLEEP_REPORT_FIELDS };
+
+const SLEEP_ACTION: Model = {
+  name: "SleepAction",
+  fields: [
+    required("id", "str"),
+    required("phase", "str"),
+    required("action_type", "str"),
+    optional("memory_id", nullable("str")),
+    optional("target_id", nullable("str")),
+    optional("details", nullable("dict")),
+    optional("created_at", nullable("datetime")),
+    optional("details_omitted", "bool", false),
+    optional("details_total_chars", nullable("int")),
+  ],
+};
+
+/**
+ * A `get_sleep_report` reply flattened as `getSleepReport` returns it (the
+ * `report` block plus the envelope's paging keys), as Python's
+ * `SleepReportDetail` reads it.
+ */
+export const SLEEP_REPORT_DETAIL: Model = {
+  name: "SleepReportDetail",
+  fields: [
+    ...SLEEP_REPORT_FIELDS,
+    required("memories_flagged", "int"),
+    required("embedding_calls_made", "int"),
+    optional("error_message", nullable("str")),
+    optional("edge_discovery_result", nullable("dict")),
+    optional("dedup_result", nullable("dict")),
+    optional("merge_retention_result", nullable("dict")),
+    optional("importance_result", nullable("dict")),
+    optional("consolidation_result", nullable("dict")),
+    optional("reindex_result", nullable("dict")),
+    optional("actions", listOf({ model: SLEEP_ACTION }), []),
+    required("action_count", "int"),
+    optional("actions_has_more", "bool", false),
+    optional("actions_next_cursor", nullable("str")),
+    optional("note", nullable("str")),
+  ],
 };
