@@ -945,14 +945,27 @@ export interface MemoryLocation {
 /**
  * One entry in a `recall_nearby` result list, ordered nearest first.
  *
- * `details` is the memory's full details object; when the memory was
- * stored with a location it contains `location: MemoryLocation`.
+ * Since memory-cloud v0.82.0 (#1743) an item carries `location` — the
+ * memory's `details.location` — and no `details`. With
+ * `recallNearby({ includeDetails: true })` it carries the full `details`
+ * object instead (`details.location` is inside it), held to the reply
+ * budget (about 20,000 characters): from the last item backwards, an item
+ * that does not fit carries `details_omitted: true` and
+ * `details_total_chars` in place of `details` — read it with `reference()`.
+ * An older server always sends `details` and no `location`.
  */
 export interface NearbyMemory {
   memory_id: string;
   summary: string;
   type: string;
+  /** The memory's `details.location` (server v0.82.0+, without `includeDetails`). */
+  location?: MemoryLocation | null;
+  /** The whole details object: with `includeDetails`, or from a server before v0.82.0. */
   details?: Record<string, unknown> | null;
+  /** `true` when `details` did not fit the reply budget (with `includeDetails`). */
+  details_omitted?: boolean;
+  /** The size of the omitted `details`, in characters of JSON. */
+  details_total_chars?: number;
   /** Great-circle distance from the query point, in meters. */
   distance_m: number;
 }
@@ -966,6 +979,192 @@ export interface RecallNearbyResponse {
   context_display_name?: string | null;
   context_is_private?: boolean;
   context_is_locked?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Recall results (memory-cloud v0.82.0 / v0.108.0 / v0.114.0, SDK issue #82)
+// ---------------------------------------------------------------------------
+
+/**
+ * Valid `recall` `verbosity` values (memory-cloud v0.108.0+, #2002;
+ * request side only).
+ *
+ * `"compact"` is the server default: a 160-character `summary` head and no
+ * `tags`, `context_summary` or `scope`. `"full"` adds those, `version`
+ * (v0.113.0+) and the uncut `summary`.
+ */
+export type RecallVerbosity = "compact" | "full";
+
+/**
+ * `recall`'s relevance verdict, the reply's first key: read `level` before
+ * the hits. `"none"` / `"low"` mean probably not stored here; `"high"` /
+ * `"moderate"` that the hits are worth reading — the content is still the
+ * source of truth.
+ */
+export interface RecallConfidence {
+  /** `"high"`, `"moderate"`, `"low"` or `"none"`. */
+  level: string;
+  top_score?: number | null;
+  prominence?: number | null;
+  relative_margin?: number | null;
+  result_count: number;
+  rationale: string;
+}
+
+/**
+ * A near-duplicate this memory may supersede — a suggestion, never an edge.
+ * Accept it by creating a `"supersedes"` edge; reject it with
+ * `updateMemory({ memoryId, dismissSupersedeCandidate: true })`.
+ *
+ * Since memory-cloud v0.109.0 (#2016) `detected_at` is absent rather than
+ * `null` when it has no value, and `verified` is a key only when `true`:
+ * the deployment's judge (`SUPERSEDE_VERIFY_MODE=llm`) confirmed that this
+ * memory replaces the candidate. Keys a newer server adds pass through.
+ */
+export interface SupersedeCandidate {
+  memory_id: string;
+  summary: string;
+  similarity: number;
+  /** ISO 8601. Absent when unset (v0.109.0+); older servers send `null`. */
+  detected_at?: string | null;
+  /** `true` when judge-verified (v0.109.0+); absent otherwise. */
+  verified?: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * What the recall LLM selector did to the page (memory-cloud v0.115.0+,
+ * #2144) — only on a context with `llm_selector_enabled`.
+ *
+ * `applied: true` carries `model`, `kept` / `dropped` (rows left and
+ * removed) and `dropped_memory_ids` (at most 20, page order);
+ * `applied: false` carries only `reason` (`timeout`, `provider_error`,
+ * `invalid_answer`, `daily_cap`, `too_large`, `no_provider`,
+ * `counter_unavailable`, `inactive`), and the page is the unselected one.
+ */
+export interface RecallSelector {
+  applied: boolean;
+  model?: string;
+  kept?: number;
+  dropped?: number;
+  dropped_memory_ids?: string[];
+  reason?: string;
+}
+
+/**
+ * One `recall` hit. Which keys it has depends on `verbosity` (memory-cloud
+ * v0.108.0+, #2002), and every optional key is absent, never `null`, when
+ * it does not apply (servers before v0.73.0 sent `null` / `[]` for the
+ * annotations, so test them for truthiness).
+ *
+ * - **compact** (the server default): `memory_id`, the first 160
+ *   characters of `summary` (`summary_cut: true` when it was shortened),
+ *   `type`, `importance`, `score`, `created_at` (v0.110.0+) and
+ *   `updated_at`.
+ * - **full** (`verbosity: "full"`, and every server before v0.108.0): the
+ *   uncut `summary` plus `context_summary`, `scope`, `tags` and `version`
+ *   (v0.113.0+).
+ * - Both: `content` on the top `full` rows (v0.114.0+, up to 1,500
+ *   characters; `content_truncated` / `content_next_offset` when cut,
+ *   `spans` when the LLM selector cut it to passages, v0.115.0+),
+ *   `observed_at` (v0.127.0+), `superseded_by`, `contradicts`,
+ *   `supersede_candidate` and `folded` (v0.114.0+).
+ */
+export interface RecallResult {
+  memory_id: string;
+  /** The uncut summary on `verbosity: "full"`, else at most 160 characters. */
+  summary: string;
+  /** `true` when `summary` is a cut head (compact only). */
+  summary_cut?: boolean;
+  /** Up to 1,500 characters of content, on the top `full` rows (v0.114.0+). */
+  content?: string;
+  /** `true` when `content` was cut at 1,500 characters. */
+  content_truncated?: boolean;
+  /**
+   * Where the rest of the content starts — the server `reference` tool's
+   * `content_offset`. `reference()` reads the whole memory.
+   */
+  content_next_offset?: number;
+  /**
+   * Verbatim passages the LLM selector kept (v0.115.0+, #2144): character
+   * offsets into the stored content, `end` exclusive.
+   */
+  spans?: Array<{ start: number; end: number }>;
+  type: string;
+  importance: number;
+  score: number | null;
+  /** `verbosity: "full"` only. */
+  context_summary?: string | null;
+  /** `verbosity: "full"` only. */
+  scope?: string;
+  /** ISO 8601. Compact rows carry it from v0.110.0. */
+  created_at?: string;
+  /** ISO 8601; `null` on a memory never edited. */
+  updated_at?: string | null;
+  /** When the fact held, a date or a UTC datetime (v0.127.0+, #2330). */
+  observed_at?: string;
+  /** The memory's version, `verbosity: "full"` only (v0.113.0+). */
+  version?: number;
+  /** `verbosity: "full"` only; absent when the memory has none. */
+  tags?: string[];
+  /** Set only under `includeSuperseded: true`. */
+  superseded_by?: string | null;
+  contradicts?: string[] | null;
+  supersede_candidate?: SupersedeCandidate | null;
+  /**
+   * Judge-verified older versions of the same fact, folded under this, the
+   * newest, row (v0.114.0+, #2123). `includeSuperseded: true` turns
+   * folding off.
+   */
+  folded?: { count: number; memory_ids: string[] };
+  [key: string]: unknown;
+}
+
+/**
+ * Response from `recall`. Optional keys are absent when they do not apply.
+ *
+ * Over `maxChars` the server takes `content` off the lowest-ranked rows
+ * first (`full_applied` then counts the rows that kept it), then
+ * `context_summary` off every row (`context_summary_omitted: true`), then
+ * drops the lowest-ranked rows (`truncated: true`; `count` is the rows
+ * returned).
+ */
+export interface RecallResponse {
+  confidence?: RecallConfidence;
+  status: string;
+  results: RecallResult[];
+  count: number;
+  /** The LLM selector's report (v0.115.0+). */
+  selector?: RecallSelector;
+  /** Rows that kept their content after `maxChars` took some (v0.114.0+). */
+  full_applied?: number;
+  /** `true` when `maxChars` took `context_summary` off every row (v0.82.0+). */
+  context_summary_omitted?: boolean;
+  /** `true` when `maxChars` dropped rows (v0.82.0+). */
+  truncated?: boolean;
+  /** Omitted when empty since v0.93.0. */
+  related_tags?: Array<Pick<TagInfo, "tag" | "count">>;
+  /**
+   * Seeds for `explore()`, with `includeExploreHints`. Since v0.135.0
+   * (#2470) only on an MCP URL that lists `explore`.
+   */
+  explore_hints?: Array<{ memory_id: string; reason: string }>;
+  /**
+   * In place of `explore_hints` on a URL that does not list `explore`
+   * (v0.135.0+): a sentence naming the opt-in.
+   */
+  explore_hints_omitted?: string;
+  /** Stored tags close to each requested one, when a tag filter matched nothing (v0.65.0+). */
+  tag_suggestions?: Record<string, string[]>;
+  /** `true` when the semantic half was unavailable and the results are keyword-only (v0.66.0+). */
+  degraded?: boolean;
+  degraded_reason?: string | null;
+  context_id?: string | null;
+  context_name?: string | null;
+  context_display_name?: string | null;
+  context_is_private?: boolean | null;
+  context_is_locked?: boolean | null;
+  [key: string]: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1570,12 @@ export interface AgentBootstrapResponse {
   correlation?: AgentBootstrapCorrelation | null;
   /** ISO 8601 datetime string. */
   generated_at?: string | null;
+  /**
+   * `true` when the reply budget (`maxChars`, server v0.82.0+) took
+   * `context_summary` off the component items; each component it then cut
+   * items from says `truncated: true`. Absent otherwise.
+   */
+  context_summary_omitted?: boolean;
 }
 
 // ---------------------------------------------------------------------------
