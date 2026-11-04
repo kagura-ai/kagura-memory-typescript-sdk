@@ -475,6 +475,22 @@ export async function refreshAccessToken(
  * (`kagura auth logout`) deletes the local profile regardless of the
  * return value, on the principle that local logout must succeed even when
  * the server is unreachable.
+ *
+ * `client_id` is always sent (`DEFAULT_CLIENT_ID` when `clientId` is not
+ * given). What a server does with the request depends on its version:
+ *
+ * - `client_id`: memory-cloud v0.82.0+ requires it on `/revoke`, and
+ *   answers a token issued to another client `200` without revoking it,
+ *   as it answers an unknown or already revoked token
+ *   (memory-cloud#1741). An older server ignores it.
+ * - Which tokens: v0.82.0+ revokes, for a refresh token, the access
+ *   token issued with it too (memory-cloud#1741). An older server revokes
+ *   only the token sent, and revoking an access token alone leaves its
+ *   refresh token valid on any version.
+ *
+ * So `kagura-memory auth logout` sends a profile's refresh token, then
+ * its access token, which a server before v0.82.0 would otherwise leave
+ * valid until it expires.
  */
 export async function revokeToken(
   server: string,

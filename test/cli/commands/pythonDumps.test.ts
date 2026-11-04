@@ -554,6 +554,42 @@ const LOSSLESS_CASES: Case[] = [
   },
 ];
 
+/**
+ * #80: from memory-cloud v0.94.0 (memory-cloud#1863) a resource whose
+ * contexts were all deleted while it holds active tokens is listed with
+ * `context_id` and `context_name` null. Recorded from the Python CLI 0.44.0
+ * (click 8.3.3, pydantic 2.13.4) against a fake server sending these exact
+ * bytes: the server's context-less row, a row without the context keys
+ * (the model's `None` default), and a `context_id` that is neither a
+ * string nor null, which the model still refuses.
+ */
+const NULL_CONTEXT_CASES: Case[] = [
+  {
+    name: "resource list context-less row (server v0.94.0+)",
+    argv: ["resource","list"],
+    routes: {"GET /api/v1/resources":{"status":200,"raw":"{\"resources\": [{\"resource_id\": \"products\", \"context_id\": \"11111111-2222-4333-8444-555555555555\", \"context_name\": \"products\", \"context_display_name\": \"Product Catalog\", \"token_count\": 2, \"memory_count\": 150, \"current_schema_version\": 3, \"created_at\": \"2026-03-01T00:00:00Z\", \"updated_at\": \"2026-04-28T00:00:00Z\"}, {\"resource_id\": \"orphaned\", \"context_id\": null, \"context_name\": null, \"context_display_name\": null, \"token_count\": 1, \"memory_count\": 0, \"current_schema_version\": null, \"created_at\": \"2026-04-01T00:00:00Z\", \"updated_at\": \"2026-04-27T00:00:00Z\"}], \"total\": 2}"}},
+    code: 0,
+    stdout: "{\n  \"resources\": [\n    {\n      \"resource_id\": \"products\",\n      \"context_id\": \"11111111-2222-4333-8444-555555555555\",\n      \"context_name\": \"products\",\n      \"context_display_name\": \"Product Catalog\",\n      \"token_count\": 2,\n      \"memory_count\": 150,\n      \"current_schema_version\": 3,\n      \"created_at\": \"2026-03-01T00:00:00Z\",\n      \"updated_at\": \"2026-04-28T00:00:00Z\"\n    },\n    {\n      \"resource_id\": \"orphaned\",\n      \"context_id\": null,\n      \"context_name\": null,\n      \"context_display_name\": null,\n      \"token_count\": 1,\n      \"memory_count\": 0,\n      \"current_schema_version\": null,\n      \"created_at\": \"2026-04-01T00:00:00Z\",\n      \"updated_at\": \"2026-04-27T00:00:00Z\"\n    }\n  ],\n  \"total\": 2\n}\n",
+    stderr: "",
+  },
+  {
+    name: "resource list context keys absent",
+    argv: ["resource","list"],
+    routes: {"GET /api/v1/resources":{"status":200,"raw":"{\"resources\": [{\"resource_id\": \"orphaned\", \"token_count\": 1, \"memory_count\": 0, \"created_at\": \"2026-04-01T00:00:00Z\", \"updated_at\": \"2026-04-27T00:00:00Z\"}], \"total\": 1}"}},
+    code: 0,
+    stdout: "{\n  \"resources\": [\n    {\n      \"resource_id\": \"orphaned\",\n      \"context_id\": null,\n      \"context_name\": null,\n      \"context_display_name\": null,\n      \"token_count\": 1,\n      \"memory_count\": 0,\n      \"current_schema_version\": null,\n      \"created_at\": \"2026-04-01T00:00:00Z\",\n      \"updated_at\": \"2026-04-27T00:00:00Z\"\n    }\n  ],\n  \"total\": 1\n}\n",
+    stderr: "",
+  },
+  {
+    name: "resource list context_id not a string",
+    argv: ["resource","list"],
+    routes: {"GET /api/v1/resources":{"status":200,"raw":"{\"resources\": [{\"resource_id\": \"orphaned\", \"context_id\": 7, \"context_name\": null, \"token_count\": 1, \"memory_count\": 0, \"created_at\": \"2026-04-01T00:00:00Z\", \"updated_at\": \"2026-04-27T00:00:00Z\"}], \"total\": 1}"}},
+    code: 1,
+    stdout: "",
+    stderr: "Error: ResourceClient.list_resources: unexpected server response for ResourceListResponse (resources.0.context_id: Input should be a valid string). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
+  },
+];
+
 const AUTH: ResolvedAuth = { kind: "static", apiKey: "k", mcpUrl: "https://api.test/mcp", source: "config" };
 
 let dir: string;
@@ -575,7 +611,7 @@ function rawFetch(routes: Case["routes"]): typeof globalThis.fetch {
 }
 
 describe("resource and files output, byte for byte the Python CLI's (#66)", () => {
-  it.each([...CASES, ...LOSSLESS_CASES].map((c) => [c.name, c] as const))("%s", async (_name, c) => {
+  it.each([...CASES, ...LOSSLESS_CASES, ...NULL_CONTEXT_CASES].map((c) => [c.name, c] as const))("%s", async (_name, c) => {
     const out: string[] = [];
     const err: string[] = [];
     const fetch = rawFetch(c.routes);

@@ -435,6 +435,10 @@ export class ResourceClient extends KaguraRestClient {
    * endpoint is currently non-paginated; the server caps a workspace at
    * well under 50 resources by design.
    *
+   * A row with `context_id` / `context_name` `null` is a resource whose
+   * contexts were all deleted (server v0.94.0+); `ResourceListItem` says
+   * what still works for it.
+   *
    * Workspace owners only — non-owners receive 403.
    *
    * @throws KaguraResponseError when the body does not match the Python
@@ -505,13 +509,16 @@ export class ResourceClient extends KaguraRestClient {
    * {@link listTokens} which uses `limit`/`offset`.
    *
    * Uses Bearer auth (workspace read), not the `X-Resource-API-Key`
-   * ingestion credential. An unknown `resourceId` returns an empty page
-   * (`events=[]`, `next_cursor=null`) rather than a 404 — observed
-   * against memory-cloud production.
+   * ingestion credential. memory-cloud resolves `resourceId` through the
+   * workspace's `resources` row, not through a context, and has since the
+   * route was added (v0.26.0): an unknown `resourceId` returns an empty page
+   * (`events=[]`, `next_cursor=null`) rather than a 404, and a resource
+   * whose contexts were all deleted (listed by {@link listResources} with
+   * null context fields, server v0.94.0+) still returns its events.
    *
    * @throws KaguraNotFoundError The server returned 404 for this
-   *   resource (cross-workspace probe protection); applies only if the
-   *   server does respond with 404.
+   *   resource; memory-cloud answers an unknown id with an empty page
+   *   instead, so this applies only if a server does respond with 404.
    * @throws KaguraResponseError when the body does not match the Python
    *   SDK's ResourceEventsListResponse (#69).
    */
