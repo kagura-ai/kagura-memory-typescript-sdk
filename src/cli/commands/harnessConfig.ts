@@ -1,6 +1,7 @@
 /**
- * Text helpers for `setup`: MCP URL query edits, the blocks printed for a
- * user to paste, and read-only scans for an existing entry.
+ * Text helpers for `setup`: the MCP URL query edits (from `http.ts`), the
+ * blocks printed for a user to paste, and read-only scans for an existing
+ * entry.
  *
  * None of this parses TOML, YAML or JSON5, and none of it rewrites those
  * files. The package takes no runtime dependencies, so a harness config is
@@ -12,6 +13,8 @@
  */
 
 import * as net from "node:net";
+
+import { queryParam, withoutQuery } from "../../http.js";
 
 /**
  * The variable Codex and OpenClaw entries read the key from unless
@@ -84,131 +87,24 @@ export function isHttpUrl(url: string): boolean {
   return nfkcNetlocOk(netloc);
 }
 
-interface SplitUrl {
-  base: string;
-  params: string[];
-  fragment: string;
-}
-
 /**
- * Split a URL by hand rather than through `URL`: `searchParams` re-encodes
- * every parameter on the way out (`tools=a,b` becomes `tools=a%2Cb`), and
- * the other parameters are meant to be kept as written.
+ * The MCP URL query edits, from `http.ts`: the one composer
+ * (`mcpUrlWithQuery`, Python's `mcp_url_with_query`) and the readers every
+ * command shares, so `setup`, `guardrails digest`, `doctor` and
+ * `kagura-memory-mcp` read and write a URL's query alike, as the server
+ * reads it.
  */
-function splitUrl(url: string): SplitUrl {
-  const hash = url.indexOf("#");
-  const fragment = hash === -1 ? "" : url.slice(hash);
-  const rest = hash === -1 ? url : url.slice(0, hash);
-  const q = rest.indexOf("?");
-  return {
-    base: q === -1 ? rest : rest.slice(0, q),
-    params: q === -1 ? [] : rest.slice(q + 1).split("&").filter((p) => p !== ""),
-    fragment,
-  };
-}
-
-/**
- * A parameter's name, decoded: the server (`parse_qsl`) and Python's
- * `_query_without` both compare names that way, so `guard%72ails` is
- * `guardrails`.
- */
-function paramName(param: string): string {
-  const eq = param.indexOf("=");
-  return unquotePlus(eq === -1 ? param : param.slice(0, eq));
-}
-
-/**
- * The decoded value of the first `key` in the URL's query — the one the
- * server reads — or undefined. Names compare decoded.
- */
-export function queryParam(url: string, key: string): string | undefined {
-  const param = splitUrl(url).params.find((p) => paramName(p) === key);
-  if (param === undefined) return undefined;
-  const eq = param.indexOf("=");
-  if (eq === -1) return "";
-  return unquotePlus(param.slice(eq + 1));
-}
-
-/**
- * A split URL put back together with a new query, as Python's
- * `urlunsplit(urlsplit(url)._replace(query=…))` rebuilds it: the scheme
- * lower-cased (`HTTP://` is written `http://`), no `?` for an empty query
- * and no `#` for an empty fragment. The rest stays as written.
- */
-function joinUrl(base: string, params: string[], fragment: string): string {
-  const scheme = base.replace(/^[A-Za-z][A-Za-z0-9+.-]*:/, (s) => s.toLowerCase());
-  return `${scheme}${params.length > 0 ? `?${params.join("&")}` : ""}${fragment.length > 1 ? fragment : ""}`;
-}
-
-/** A name or value as Python's `unquote_plus` reads it; left raw if malformed. */
-function unquotePlus(text: string): string {
-  const raw = text.replace(/\+/g, " ");
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
-/**
- * A value as Python's `urlencode` writes it (`quote_plus`): `+` for a
- * space, and `!'()*`, which `encodeURIComponent` leaves bare, escaped.
- */
-function quotePlus(text: string): string {
-  return encodeURIComponent(text)
-    .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
-    .replace(/%20/g, "+");
-}
-
-/**
- * The MCP URL with memory-cloud's `guardrails` / `profile` parameters set
- * — the port of Python's `mcp_url_with_query`, so both CLIs write the same
- * entry for the same flags.
- *
- * A key being set loses every earlier value of it (the server reads only
- * the first it finds) and goes at the end, `guardrails` before `profile`.
- * Every other parameter is kept as written; an unset key is left alone,
- * and with nothing to set the URL comes back as written. A URL it rewrites
- * is rebuilt as Python's is ({@link joinUrl}).
- */
-export function mcpUrlWithQuery(
-  url: string,
-  updates: { guardrails?: string | undefined; profile?: string | undefined },
-): string {
-  const set = (["guardrails", "profile"] as const).filter((key) => updates[key] !== undefined);
-  if (set.length === 0) return url;
-  const { base, params, fragment } = splitUrl(url);
-  const kept = params.filter((param) => !(set as readonly string[]).includes(paramName(param)));
-  const added = set.map((key) => `${key}=${quotePlus(updates[key]!)}`);
-  return joinUrl(base, [...kept, ...added], fragment);
-}
-
-/**
- * Drop `key` from the URL's query, every occurrence, keeping the other
- * parameters as written and leaving no bare `?` behind — Python's
- * `mcp_url_without_query_param`. Names compare decoded; a URL without the
- * key comes back as written, and one it rewrites is rebuilt as Python's is
- * ({@link joinUrl}).
- */
-export function withoutQueryParam(url: string, key: string): string {
-  const { base, params, fragment } = splitUrl(url);
-  const kept = params.filter((param) => paramName(param) !== key);
-  if (kept.length === params.length) return url;
-  return joinUrl(base, kept, fragment);
-}
-
-/** The URL with its query and fragment dropped. */
-export function withoutQuery(url: string): string {
-  return splitUrl(url).base;
-}
+export { mcpUrlWithQuery, queryParam, withoutQuery, withoutQueryParam } from "../../http.js";
 
 /**
  * The URL for the Claude plugin's `server_url` setting.
  *
- * The plugin's hooks call the server themselves, so the entry's tool
- * profile and guardrails context mean nothing there. `guardrails=off` is
- * the one parameter kept: it is what stops the server from also sending
- * a digest of the memories the hooks already deliver.
+ * The plugin's hooks call the server themselves with their own
+ * `context_id`, so the entry's tool view (`profile`, `add_tools`), default
+ * `context` and guardrails context mean nothing there; they stay on the MCP
+ * entry. `guardrails=off` is the one parameter kept: it is what stops the
+ * server from also sending a digest of the memories the hooks already
+ * deliver.
  */
 export function pluginServerUrl(url: string): string {
   const base = withoutQuery(url);
