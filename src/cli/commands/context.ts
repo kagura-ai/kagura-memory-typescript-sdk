@@ -17,8 +17,10 @@ import {
   type Command,
   type CommandGroup,
 } from "../command.js";
+import { detailsPageOverCap } from "../../client.js";
+import { pyStrip } from "../../pyCompat.js";
 import { formatJson } from "../output.js";
-import { CliError, pairedFlag, parseChoice, parseRanged } from "../parse.js";
+import { CliError, CliUsageError, pairedFlag, parseChoice, parseRanged } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
 
@@ -47,36 +49,114 @@ const NAME_CONTAINS: FlagSpec = {
     "(case-insensitive, max 100 chars)",
 };
 
+const LIMIT: FlagSpec = {
+  name: "limit",
+  type: "value",
+  metavar: "INTEGER",
+  help:
+    "Contexts per page, 1-200 (server default 100; with --details and no " +
+    "--name-contains at most 20, the default there; memory-cloud 0.82.0+).",
+};
+const CURSOR: FlagSpec = {
+  name: "cursor",
+  type: "value",
+  help:
+    "next_cursor of the previous page, with the same other options; a blank one " +
+    "is ignored (memory-cloud 0.82.0+).",
+};
+
+/**
+ * The stderr line after a cut `list_contexts` page (memory-cloud v0.82.0+,
+ * #1743) — the Python CLI 0.44.0's `_page_footer`, word for word.
+ *
+ * `rerun` is what to run for the next page, up to its `--cursor` flag.
+ * `null` on the last page, and from a server before v0.82.0, which sends
+ * no `has_more`. The line is a command to paste into a shell, so the
+ * cursor is shown only in the form the server takes back as `cursor`
+ * (ASCII digits): nothing a shell expands inside double quotes (`$`, a
+ * backtick) and no control character reaches the terminal. Any other
+ * `next_cursor` is left to the JSON on stdout.
+ */
+function pageFooter(result: unknown, rerun: string): string | null {
+  if (typeof result !== "object" || result === null) return null;
+  const { has_more: hasMore, next_cursor: cursor } = result as Record<string, unknown>;
+  if (hasMore !== true || typeof cursor !== "string" || cursor === "") return null;
+  if (!/^[0-9]+$/.test(cursor)) {
+    return `has_more: true. For the next page, run ${rerun} --cursor set to next_cursor from the JSON.`;
+  }
+  return `has_more: true; next_cursor: "${cursor}". For the next page, run ${rerun} --cursor "${cursor}".`;
+}
+
+/** The `context list` footer: the same command, with the next cursor. */
+export function nextPageFooter(result: unknown): string | null {
+  return pageFooter(result, "the command again with the same options and");
+}
+
+/** The `contexts` footer: the shortcut takes no cursor, `context list` does. */
+export function contextsFooter(result: unknown): string | null {
+  return pageFooter(result, "kagura-memory context list");
+}
+
 const list: Command = {
   summary: "List available contexts.",
   description:
     "  Rows are slim by default (id, name, is_private, is_locked, last_used_at);\n" +
     "  memory-cloud v0.73.0+ is needed for --name-contains/--summary/--details.\n\n" +
+    "  From memory-cloud 0.82.0 the list comes a page at a time (100 contexts by\n" +
+    "  default, and a page also stops at 20,000 characters). When a page was cut,\n" +
+    "  has_more and next_cursor follow the JSON on stderr: pass next_cursor as\n" +
+    "  --cursor, with the same other options, for the next page. Older servers return\n" +
+    "  every context and ignore --limit and --cursor.\n\n" +
     "  Examples:\n" +
     "    kagura-memory context list\n" +
     "    kagura-memory context list --name-contains auth --summary\n" +
-    "    kagura-memory context list --stats",
+    "    kagura-memory context list --stats\n" +
+    "    kagura-memory context list --limit 50 --cursor 50",
   spec: {
     flags: [
       NAME_CONTAINS,
       { name: "summary", type: "switch", help: "Add summaries (300-char preview)" },
       { name: "details", type: "switch", help: "Add full summaries and embedding_model" },
       { name: "stats", type: "switch", help: "Add memory_count per context" },
+      LIMIT,
+      CURSOR,
     ],
   },
   run: async (deps, args) => {
+    // click converts the options before it looks for extra arguments.
+    const rawLimit = args.values.limit;
+    const limit =
+      rawLimit === undefined
+        ? undefined
+        : parseRanged(LIMIT, rawLimit, { min: 1, max: 200, rangeLabel: "1<=x<=200", integer: true });
     rejectExtraArgs(args);
     // Python forwards the filter only when truthy (`if name_contains:`), so
     // an empty `--name-contains=` lists everything; the client would send "".
     const nameContains = args.values["name-contains"] || undefined;
+    const details = args.flags.has("details");
+    // Blank is unset, as for --name-contains: a script feeding back the last
+    // page's next_cursor (`jq -r '.next_cursor // empty'`) passes "".
+    const rawCursor = args.values.cursor;
+    const cursor = rawCursor !== undefined && pyStrip(rawCursor) !== "" ? rawCursor : undefined;
+    if (detailsPageOverCap(details, nameContains, limit)) {
+      // The SDK would refuse it too, naming its own option names; the CLI
+      // names its flags, as the Python CLI does.
+      throw new CliUsageError(
+        "--details returns full summaries: pass --name-contains or " +
+          `--limit 20 or less (got ${limit}).`,
+      );
+    }
     const options = {
       ...(nameContains !== undefined ? { nameContains } : {}),
       ...(args.flags.has("summary") ? { includeSummary: true } : {}),
-      ...(args.flags.has("details") ? { includeDetails: true } : {}),
+      ...(details ? { includeDetails: true } : {}),
       ...(args.flags.has("stats") ? { includeStats: true } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
+      ...(limit !== undefined ? { limit } : {}),
     };
     return runClientCommand(deps, undefined, (client) => client.listContexts(options), {
       needsContext: false,
+      footer: nextPageFooter,
     });
   },
 };
@@ -301,12 +381,18 @@ export const CONTEXT_GROUP: CommandGroup = {
  */
 export const CONTEXTS_ALIAS: Command = {
   summary: "List available contexts (short form of 'context list', without its options).",
-  description: "  For --name-contains/--summary/--details/--stats use 'kagura-memory context list'.",
+  description:
+    "  Prints one page: from memory-cloud 0.82.0 that is the 100 most recently used\n" +
+    "  contexts. When more follow, a line on stderr names the 'kagura-memory context\n" +
+    "  list --cursor' call for the next page.\n\n" +
+    "  For --name-contains/--summary/--details/--stats/--limit/--cursor use\n" +
+    "  'kagura-memory context list'.",
   spec: { flags: [] },
   run: async (deps, args) => {
     rejectExtraArgs(args);
     return runClientCommand(deps, undefined, (client) => client.listContexts(), {
       needsContext: false,
+      footer: contextsFooter,
     });
   },
 };
