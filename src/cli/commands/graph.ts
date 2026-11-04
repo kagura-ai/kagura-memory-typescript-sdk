@@ -251,15 +251,20 @@ const ACTIONS_LIMIT: FlagSpec = {
   help: "Actions per page (1-200; the server's default is 50; memory-cloud 0.82.0+).",
 };
 
+// CONTEXT_ID stays a required positional, as in the Python CLI 0.42.2+, so
+// existing scripts keep working; getSleepReport ignores it, since
+// memory-cloud v0.82.0+ refuses a context_id on this tool (#79). The
+// paragraph is the Python CLI 0.44.0's, wrapped at 78 columns as click
+// wraps it in a terminal (`--actions-` / `cursor.` split included).
 const sleepReport: Command = {
   summary: "Get a detailed Sleep Maintenance report including audit log.",
   args: "CONTEXT_ID REPORT_ID",
   description:
     "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
-    "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on\n" +
-    "  the run's own context). From memory-cloud 0.82.0 the audit log comes a\n" +
-    "  page at a time: while actions_has_more is true, pass actions_next_cursor\n" +
-    "  as --actions-cursor.",
+    "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
+    "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
+    "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
+    "  cursor.",
   spec: { flags: [ACTIONS_CURSOR, ACTIONS_LIMIT] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");

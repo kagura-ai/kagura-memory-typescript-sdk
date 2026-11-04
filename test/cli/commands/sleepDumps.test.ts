@@ -139,6 +139,16 @@ const CASES: Case[] = [
     stdout: "",
     stderr: "Error: get_sleep_report: unexpected server response for SleepReportDetail (actions.0.action_type: Field required; actions.0.details_omitted: Input should be a valid boolean, unable to interpret input). The server may be newer than this SDK; upgrading kagura-memory may help.\n",
   },
+  {
+    // #79's recorded 0.42.2 reply (PR #96), as the Python CLI 0.44.0 prints it.
+    name: "report: #79 reply, the 0.43.0 model fields filled",
+    argv: ["sleep","report","ctx-1","11111111-2222-4333-8444-555555555555"],
+    toolTexts: {"get_sleep_report": "{\"status\": \"success\", \"report\": {\"report_id\": \"11111111-2222-4333-8444-555555555555\", \"context_id\": \"c0ffee00-0000-4000-8000-000000000001\", \"status\": \"completed\", \"started_at\": \"2026-06-01T00:00:00Z\", \"completed_at\": \"2026-06-01T00:05:00Z\", \"memories_processed\": 12, \"edges_created\": 3, \"memories_merged\": 1, \"memories_promoted\": 0, \"llm_calls_made\": 4, \"llm_tokens_used\": 900, \"llm_call_failures\": null, \"memories_flagged\": 0, \"embedding_calls_made\": 2, \"error_message\": null, \"edge_discovery_result\": {\"edges\": 3}, \"dedup_result\": null, \"merge_retention_result\": null, \"importance_result\": null, \"consolidation_result\": null, \"reindex_result\": null}, \"actions\": [{\"id\": \"a1\", \"phase\": \"edge_discovery\", \"action_type\": \"create_edge\", \"memory_id\": \"m1\", \"target_id\": \"m2\", \"details\": {\"similarity\": 0.91}, \"created_at\": \"2026-06-01T00:01:00Z\"}], \"action_count\": 1}"},
+    calls: [{"report_id":"11111111-2222-4333-8444-555555555555"}],
+    code: 0,
+    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"context_id\": \"c0ffee00-0000-4000-8000-000000000001\",\n  \"status\": \"completed\",\n  \"started_at\": \"2026-06-01T00:00:00Z\",\n  \"completed_at\": \"2026-06-01T00:05:00Z\",\n  \"memories_processed\": 12,\n  \"edges_created\": 3,\n  \"memories_merged\": 1,\n  \"memories_promoted\": 0,\n  \"llm_calls_made\": 4,\n  \"llm_tokens_used\": 900,\n  \"llm_call_failures\": null,\n  \"source\": null,\n  \"memories_flagged\": 0,\n  \"embedding_calls_made\": 2,\n  \"error_message\": null,\n  \"edge_discovery_result\": {\n    \"edges\": 3\n  },\n  \"dedup_result\": null,\n  \"merge_retention_result\": null,\n  \"importance_result\": null,\n  \"consolidation_result\": null,\n  \"reindex_result\": null,\n  \"actions\": [\n    {\n      \"id\": \"a1\",\n      \"phase\": \"edge_discovery\",\n      \"action_type\": \"create_edge\",\n      \"memory_id\": \"m1\",\n      \"target_id\": \"m2\",\n      \"details\": {\n        \"similarity\": 0.91\n      },\n      \"created_at\": \"2026-06-01T00:01:00Z\",\n      \"details_omitted\": false,\n      \"details_total_chars\": null\n    }\n  ],\n  \"action_count\": 1,\n  \"actions_has_more\": false,\n  \"actions_next_cursor\": null,\n  \"note\": null\n}\n",
+    stderr: "",
+  },
 ];
 
 describe("sleep history / report output, byte for byte the Python CLI's (#85)", () => {
