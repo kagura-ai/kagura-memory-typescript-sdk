@@ -384,6 +384,30 @@ whichever of the three it came from, before anything is written or run
 (exit 1, `Connection failed: MCP URL must use HTTPS for security …`, the
 Python CLI's words, whose connection test refuses it).
 
+`setup claude` makes no connection unless the context (`--context-id`,
+else that file's `context_id`, else `KAGURA_CONTEXT_ID`) is a name, which
+it resolves through `list_contexts` on that key and URL, as the Python
+CLI 0.44.0 does (python-sdk#309): any value but a UUID in the dashed form
+(a dashless 32-hex one included) up to 100 characters is trimmed and
+matched by id or exact name on the first page, then by exact name on
+every page, with `name_contains` and the cursor when the first page says
+`has_more` (memory-cloud 0.73.0 / 0.82.0; an older server's one reply is
+the whole list), at most 50 pages, and the context's id is written. A
+value no page matches, or a longer one, is still written, trimmed, after
+`Warning: no context named 'NAME' is visible to this credential; using it
+as a raw context id.` on stderr when it is not a UUID, although the
+server takes only a UUID there, so later commands refuse it. Pages that
+do not add up (`Setup failed: …`) and a failed request (`Authentication
+failed: …` or `Cannot connect to …` with Python's hints, else
+`Connection failed: …` on the first page) stop setup (exit 1) before
+anything is written or run, as does a blank key, which the lookup never
+replaces with another credential, and a context that is only whitespace
+(`Invalid context_id: '' — must be alphanumeric, hyphens, or underscores
+only`, Python's words); an empty `--context-id` counts as none, as in
+Python. A dashed UUID is never looked up, even
+one that is a context's name, which Python 0.44.0 would resolve when that
+context is on its first page.
+
 Without `--agents-md`, `setup codex`, `setup hermes` and `setup openclaw`
 never see, write, print or pass the key, as in the Python CLI. The entry
 names the environment variable the harness reads the key from, and the
@@ -536,7 +560,9 @@ one, and show the command or block without changing anything. A name is
 Python: it is a bare argument to `codex` and `openclaw`, which would read
 `--help` as an option. Their `--context-id` must be a context UUID
 (exit 2 otherwise, a padded or empty one included), as in Python without
-`--profile`: this port lists no contexts.
+`--profile`: this port lists no contexts. `--dry-run` shows one not in
+the dashed form (dashless, `{braced}`, `urn:uuid:`) as `<UUID of context
+VALUE>`, as Python 0.44.0 does.
 
 **The AGENTS.md export.** `--agents-md [PATH]` on `setup codex`, `setup
 hermes` and `setup openclaw` (memory-cloud v0.74.0+) fetches the

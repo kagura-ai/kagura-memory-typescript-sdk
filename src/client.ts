@@ -1558,6 +1558,49 @@ function rowId(row: unknown): unknown {
 }
 
 /**
+ * Each page of a cursor-paged MCP list tool, in order (memory-cloud
+ * v0.82.0+, #1743) — the Python SDK's `_iter_pages`, shared by
+ * `listAgents` and `setup`'s context lookup.
+ *
+ * `fetchPage(undefined)` is the first call, which sends no cursor, so an
+ * older server, which pages nothing and sends no `has_more`, answers in
+ * one call; each later call is `fetchPage(cursor)` with the `next_cursor`
+ * of the page before. The next page is fetched only when the caller asks
+ * for it, so a `for await` that stops early sends no further request.
+ *
+ * @internal Not part of the package's API.
+ * @param tool The MCP list tool; also the error's `operation`.
+ * @throws KaguraResponseError labelled `tool` when `has_more` comes
+ *   without a usable `next_cursor` or with one an earlier page already
+ *   sent, or the list is not complete after 50 pages.
+ */
+export async function* iterPages<T extends object>(
+  tool: string,
+  fetchPage: (cursor: string | undefined) => Promise<T>,
+): AsyncGenerator<T, void, undefined> {
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_AUTO_PAGES; page++) {
+    const result = await fetchPage(cursor);
+    yield result;
+    const next = result as { has_more?: unknown; next_cursor?: unknown };
+    if (next.has_more !== true) return;
+    if (typeof next.next_cursor !== "string" || next.next_cursor === "") {
+      throw new KaguraResponseError(`${tool}: unexpected server response (has_more without a next_cursor)`, tool);
+    }
+    if (seen.has(next.next_cursor)) {
+      throw new KaguraResponseError(
+        `${tool}: unexpected server response (a page repeated an earlier next_cursor)`,
+        tool,
+      );
+    }
+    seen.add(next.next_cursor);
+    cursor = next.next_cursor;
+  }
+  throw new KaguraResponseError(`${tool}: the list did not end within ${MAX_AUTO_PAGES} pages`, tool);
+}
+
+/**
  * Read a `recall_series` payload as the Python SDK's `MeasurementSeries`
  * model reads it; a missing `series` is `[]`, but a `null` one is drift.
  *
@@ -2951,9 +2994,9 @@ export class KaguraClient {
    *
    * The first call sends no paging argument, so an older server, which
    * pages nothing and sends no `has_more`, answers in one call. Each later
-   * call sends only `cursor`, the `next_cursor` of the page before. A row
-   * whose `id` an earlier page already returned is dropped (the first
-   * occurrence is kept).
+   * call sends only `cursor`, the `next_cursor` of the page before
+   * ({@link iterPages}). A row whose `id` an earlier page already returned
+   * is dropped (the first occurrence is kept).
    *
    * @throws KaguraResponseError labelled `tool` when `has_more` comes
    *   without a usable `next_cursor` or with one an earlier page already
@@ -2962,34 +3005,16 @@ export class KaguraClient {
   private async collectPages(tool: string, key: string): Promise<unknown[]> {
     const rows: unknown[] = [];
     const returnedIds = new Set<unknown>();
-    const seen = new Set<string>();
-    let args: Record<string, unknown> = {};
-    for (let page = 0; page < MAX_AUTO_PAGES; page++) {
-      const result = await this.callToolChecked(tool, args);
+    const pages = iterPages(tool, (cursor) => this.callToolChecked(tool, cursor === undefined ? {} : { cursor }));
+    for await (const result of pages) {
       const items = Array.isArray(result[key]) ? (result[key] as unknown[]) : [];
       rows.push(...items.filter((row) => !returnedIds.has(rowId(row))));
       for (const row of items) {
         const id = rowId(row);
         if (id !== undefined) returnedIds.add(id);
       }
-      if (result.has_more !== true) return rows;
-      const cursor = result.next_cursor;
-      if (typeof cursor !== "string" || cursor === "") {
-        throw new KaguraResponseError(
-          `${tool}: unexpected server response (has_more without a next_cursor)`,
-          tool,
-        );
-      }
-      if (seen.has(cursor)) {
-        throw new KaguraResponseError(
-          `${tool}: unexpected server response (a page repeated an earlier next_cursor)`,
-          tool,
-        );
-      }
-      seen.add(cursor);
-      args = { cursor };
     }
-    throw new KaguraResponseError(`${tool}: the list did not end within ${MAX_AUTO_PAGES} pages`, tool);
+    return rows;
   }
 
   /**
