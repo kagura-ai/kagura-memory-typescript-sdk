@@ -33,7 +33,7 @@ function response(
     { headers: session ? { "mcp-session-id": session } : {} },
   );
 }
-function setup(responses: Response[], options: { timeoutMs?: number } = {}) {
+function setup(responses: Response[], options: { timeoutMs?: number; sessionId?: string } = {}) {
   const calls: RequestInit[] = [];
   const auth = {
     getAuthHeader: vi.fn(async () => "Bearer test"),
@@ -621,4 +621,28 @@ it("validates disjoint JSON-RPC forms while retaining valid IDs and payloads", (
       .map((error) => ({ id: 1, error })),
     ...[NaN, Infinity, true, {}, []].map((id) => ({ id, result: {} })),
   ]) expect(isMessage({ jsonrpc: "2.0", ...fields })).toBe(false);
+});
+
+describe("Kagura-Session-Id (memory-cloud v0.114.0+, #83)", () => {
+  it("sends the configured session id on every upstream request, beside the MCP session", async () => {
+    const s = setup([response(0, { protocolVersion: "2025-06-18" }, "mcp-1"), response("call")], {
+      sessionId: "run-1",
+    });
+    await s.transport.forward(init, s.emit);
+    await s.transport.forward(call, s.emit);
+    const headers = s.calls.map((c) => c.headers as Record<string, string>);
+    expect(headers.map((h) => h["Kagura-Session-Id"])).toEqual(["run-1", "run-1"]);
+    expect(headers.map((h) => h["Mcp-Session-Id"])).toEqual([undefined, "mcp-1"]);
+  });
+
+  it("never invents one: without it the header is absent, and a message's _meta passes through untouched", async () => {
+    const meta: RpcMessage = {
+      ...call,
+      params: { name: "remember", arguments: {}, _meta: { "ai.kagura/sessionId": "conv-7" } },
+    };
+    const s = setup([response("call")]);
+    await s.transport.forward(meta, s.emit);
+    expect(Object.keys(s.calls[0]!.headers as Record<string, string>)).not.toContain("Kagura-Session-Id");
+    expect(JSON.parse(String(s.calls[0]!.body))).toEqual(meta);
+  });
 });

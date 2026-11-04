@@ -28,7 +28,7 @@ import type { GuardrailDigest, GuardrailDigestTarget, GuardrailSet } from "../..
 import { rejectExtraArgs, type Command, type CommandGroup } from "../command.js";
 import { resolveCliAuth } from "../credentialSource.js";
 import { cliErrorMessage, formatJsonLine } from "../output.js";
-import { CliError, CliUsageError, parseChoice, parseRanged, pyRepr } from "../parse.js";
+import { CliError, CliUsageError, parseAddTools, parseChoice, parseRanged, pyRepr } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { pathlibString } from "../pathlib.js";
 import { resolveConfig, runClientCommand } from "../runClientCommand.js";
@@ -149,9 +149,10 @@ const digest: Command = {
     "  untracked file, or keep a tracked one out of commits (git update-index\n" +
     "  --skip-worktree AGENTS.md) — in a public repository a committed block\n" +
     "  publishes the guardrail summaries.\n\n" +
-    "  --target instructions previews a bare MCP URL (the full tool view). For a\n" +
-    "  URL with ?profile= or ?tools=, repeat them with --profile / --tools: they\n" +
-    "  decide which tool the truncation note names.\n\n" +
+    "  --target instructions previews a bare MCP URL (on memory-cloud 0.93.0+ the\n" +
+    "  core tool view). For a URL with ?profile=, ?tools= or ?add_tools=, repeat\n" +
+    "  them with --profile / --tools / --add-tools: they decide which tool the\n" +
+    "  truncation note names.\n\n" +
     "  Examples:\n" +
     "    kagura-memory guardrails digest CTX_UUID\n" +
     "    kagura-memory guardrails digest CTX_UUID --out AGENTS.md\n" +
@@ -166,6 +167,14 @@ const digest: Command = {
         help: "With --target instructions: the MCP URL's ?profile= value (full | core)",
       },
       { name: "tools", type: "value", help: "With --target instructions: the MCP URL's ?tools= allowlist" },
+      {
+        name: "add-tools",
+        type: "multiple",
+        metavar: "NAME[,NAME...]",
+        help:
+          "With --target instructions: the MCP URL's ?add_tools= names (server v0.129.0+); " +
+          "comma-separated, may repeat",
+      },
     ],
   },
   run: async (deps, args) => {
@@ -177,14 +186,15 @@ const digest: Command = {
     const target = rawTarget === undefined ? "export" : parseChoice(TARGET, rawTarget, TARGETS);
     const rawOut = args.values.out;
     if (rawOut !== undefined) checkOutPath(rawOut);
+    const addTools = parseAddTools(args.many["add-tools"]);
     rejectExtraArgs(args, 1);
     const { profile, tools } = args.values;
     if (rawOut !== undefined && target !== "export") {
       throw new CliUsageError("--out writes the export block; drop --target instructions");
     }
-    if ((profile !== undefined || tools !== undefined) && target !== "instructions") {
+    if ((profile !== undefined || tools !== undefined || addTools !== undefined) && target !== "instructions") {
       throw new CliUsageError(
-        "--profile / --tools shape the instructions preview; add --target instructions",
+        "--profile / --tools / --add-tools shape the instructions preview; add --target instructions",
       );
     }
 
@@ -198,6 +208,7 @@ const digest: Command = {
         target,
         ...(profile !== undefined ? { profile } : {}),
         ...(tools !== undefined ? { tools } : {}),
+        ...(addTools !== undefined ? { addTools } : {}),
       });
     } catch (e) {
       throw new CliError(cliErrorMessage(e));

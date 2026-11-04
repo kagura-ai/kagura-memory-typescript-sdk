@@ -5,6 +5,8 @@
  * `kagura <command> --help`, with `kagura ` written `kagura-memory `.
  * `bootstrap`, `changes`, `list` and `forget` (its `--ids` line) are the
  * Python CLI 0.44.0's (#86).
+ * `setup claude`'s is the Python CLI 0.44.0's, which adds the `--add-tools`
+ * / `--context` example (python-sdk#300).
  *
  * Not here: `ingest`, which this bin does not have.
  */
@@ -257,6 +259,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory setup claude --profile default        # OAuth via kagura-mcp (recommended)",
     "    kagura-memory setup claude --profile default --scope user   # one entry for every project",
     "    kagura-memory setup claude --profile default --guardrails off --tool-profile core",
+    "    kagura-memory setup claude --profile default --add-tools explore --context CTX_UUID",
     "    kagura-memory setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}",
     "    kagura-memory setup claude -y --api-key kagura_xxx --context-id my-project",
     "    kagura-memory setup claude --no-commands      # plugin users: its /kagura-memory:* instead",

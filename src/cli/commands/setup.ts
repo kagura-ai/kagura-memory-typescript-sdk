@@ -45,7 +45,18 @@ import { jsonErrorWhere, type KaguraConfig } from "../../config.js";
 import type { KaguraClient } from "../../client.js";
 import { KaguraAuthError, KaguraConnectionError, KaguraNotFoundError, excMessage } from "../../errors.js";
 import { hasGuardrailBlock, writeGuardrailBlock, type GuardrailBlockStatus } from "../../guardrailExport.js";
-import { baseUrlFromMcp, validateHttpsUrl } from "../../http.js";
+import {
+  baseUrlFromMcp,
+  mcpQueryToolView,
+  mcpUrlQueryValues,
+  mcpUrlToolView,
+  mcpUrlWithQuery,
+  normalizeGuardrails,
+  normalizeToolProfile,
+  queryParam,
+  validateHttpsUrl,
+  withoutQueryParam,
+} from "../../http.js";
 import type { GuardrailDigest } from "../../models.js";
 import { normalizeUuid, pyStrip } from "../../pyCompat.js";
 import { pyRepr, pyTruthy } from "../../python.js";
@@ -54,7 +65,7 @@ import { examples, rejectExtraArgs, type Command, type CommandDeps, type Command
 import type { ExecOptions } from "../exec.js";
 import { formatJson } from "../output.js";
 import { pathlibString } from "../pathlib.js";
-import { CliError, CliUsageError, parseChoice, quote } from "../parse.js";
+import { CliError, CliUsageError, parseAddTools, parseChoice } from "../parse.js";
 import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
 import type { CliDeps } from "../run.js";
 import { resolveConfig } from "../runClientCommand.js";
@@ -68,18 +79,15 @@ import {
   hermesYamlOauthBlock,
   isHttpUrl,
   json5HasServer,
-  mcpUrlWithQuery,
   normalizeUrl,
   openclawBlock,
   openclawEntry,
   openclawOauthBlock,
   openclawOauthEntry,
   pluginServerUrl,
-  queryParam,
   shellCommand,
   shellQuote,
   tomlHasServer,
-  withoutQueryParam,
   yamlHasServer,
   yamlServersIndent,
   yamlServersInline,
@@ -129,16 +137,51 @@ const GUARDRAILS: FlagSpec = {
   metavar: "off|CONTEXT_ID",
   help: "Set the URL's guardrails parameter (server v0.74.0+): a context id, or off",
 };
-// Python's floor and names (memory-cloud's PROFILES); worded to hold for
-// codex, which shares the flag.
+/**
+ * Python's `_TOOL_PROFILE_HELP` and `_ADD_TOOLS_HELP` (python-sdk#300), the
+ * floors and names memory-cloud's: `core` is the bare URL's listing from
+ * v0.93.0 (memory-cloud#1849), `add_tools` v0.129.0 (#2354).
+ */
+const TOOL_PROFILE_HELP =
+  "Add ?profile=NAME to the upstream MCP URL (server v0.73.0+): the tools tools/list shows. Without it " +
+  "memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); 'full' lists every tool (72). The server knows " +
+  "only these two (case-sensitive) and fails tools/list for any other name. A profile is a view, not an " +
+  "authorization boundary: tools/call reaches an unlisted tool too. A ?tools= allowlist already on the URL " +
+  "wins over it.";
+const ADD_TOOLS_HELP =
+  "Add ?add_tools= to the upstream MCP URL (server v0.129.0+): tools listed on top of the profile, e.g. " +
+  "explore, which recall's explore_hints need (or --tool-profile full). Comma-separated, may repeat. The " +
+  "server ignores an unknown name, and the list under a ?tools= allowlist.";
 const TOOL_PROFILE: FlagSpec = {
   name: "tool-profile",
   type: "value",
   metavar: "NAME",
+  help: `${TOOL_PROFILE_HELP} An unknown name leaves Claude Code with no Kagura tools.`,
+};
+const ADD_TOOLS: FlagSpec = {
+  name: "add-tools",
+  type: "multiple",
+  metavar: "NAME[,NAME...]",
+  help: `${ADD_TOOLS_HELP} A re-run without it drops an earlier list.`,
+};
+const DEFAULT_CONTEXT: FlagSpec = {
+  name: "context",
+  type: "value",
+  metavar: "CONTEXT_ID",
   help:
-    "Set the URL's profile parameter (server v0.73.0+): the server knows 'full' and 'core' " +
-    "(case-sensitive) and fails tools/list for any other name, leaving no Kagura tools; " +
-    "a ?tools= allowlist wins",
+    "Add ?context= to the upstream MCP URL (server v0.114.0+): the default context for context-scoped " +
+    "tools called without context_id, so a session can skip list_contexts. An explicit context_id wins, " +
+    "and the default is checked like one. Unlike --context-id (the project's .kagura.json), it is a UUID.",
+};
+// The harness setups write a URL entry only, so Python's words for the
+// stdio entry's `kagura-mcp` arguments are left out.
+const HARNESS_TOOL_PROFILE: FlagSpec = {
+  ...TOOL_PROFILE,
+  help: `${TOOL_PROFILE_HELP} A ?profile= already in --mcp-url is kept without it.`,
+};
+const HARNESS_ADD_TOOLS: FlagSpec = {
+  ...ADD_TOOLS,
+  help: `${ADD_TOOLS_HELP} An ?add_tools= already in --mcp-url is kept without it.`,
 };
 const SCOPE: FlagSpec = {
   name: "scope",
@@ -476,29 +519,43 @@ function protectSecrets(projectDir: string, files: string[]): string[] {
  */
 function parseGuardrails(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  const value = pyStrip(raw);
-  if (value.toLowerCase() === "off") return "off";
   try {
-    return normalizeUuid(value, "guardrails");
-  } catch {
+    return normalizeGuardrails(raw);
+  } catch (e) {
     // The server silently ignores any other value, so a typo would read
     // as success here and change nothing there. Python's message, as
     // click reports it.
-    throw new CliUsageError(
-      `Invalid value for '--guardrails': guardrails must be 'off' or a context UUID, got ${quote(raw)}`,
-    );
+    throw new CliUsageError(`Invalid value for '--guardrails': ${excMessage(e)}`);
   }
 }
 
 /**
- * Validate `--tool-profile`, stripped; an empty one is refused as Python
- * refuses it, since `profile=` would ask the server for no profile.
+ * Validate `--tool-profile`, stripped — Python 0.44.0's
+ * `_tool_profile_option`: a blank name is refused, since `profile=` would
+ * ask the server for no profile, and so is one starting with `-`, which a
+ * stored `kagura-mcp --tool-profile -x` would read as a flag.
  */
 function parseToolProfile(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  const value = pyStrip(raw);
-  if (!value) throw new CliUsageError("Invalid value for '--tool-profile': must not be empty");
-  return value;
+  try {
+    return normalizeToolProfile(raw);
+  } catch (e) {
+    throw new CliUsageError(`Invalid value for '--tool-profile': ${excMessage(e)}`);
+  }
+}
+
+/**
+ * `--context`: a context UUID, written canonically — Python's
+ * `_default_context_option`. memory-cloud refuses every call that relies
+ * on any other value (`invalid_context_id_format`), so it is refused here.
+ */
+function parseDefaultContext(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  try {
+    return normalizeUuid(pyStrip(raw), "--context");
+  } catch (e) {
+    throw new CliUsageError(`Invalid value for '--context': ${excMessage(e)}`);
+  }
 }
 
 /**
@@ -539,6 +596,10 @@ interface SetupInput {
   guardrails: string | undefined;
   /** `--tool-profile`, trimmed; undefined when absent or not taken. */
   toolProfile: string | undefined;
+  /** `--add-tools`, every value's names in one normalized list; undefined when absent. */
+  addTools: string[] | undefined;
+  /** `--context`, the default context: a canonical UUID; undefined when absent. */
+  defaultContext: string | undefined;
   /**
    * The project's `.kagura.json`, read before anything is written or run,
    * so one this cannot parse stops the command with nothing changed.
@@ -572,6 +633,8 @@ function resolveInput(args: ParsedArgs): SetupInput {
   // First, as click runs Python's option callbacks while it parses.
   const guardrails = parseGuardrails(args.values.guardrails);
   const toolProfile = parseToolProfile(args.values["tool-profile"]);
+  const addTools = parseAddTools(args.many["add-tools"]);
+  const defaultContext = parseDefaultContext(args.values.context);
   const apiKey = args.values["api-key"];
   const profile = args.values.profile;
 
@@ -624,6 +687,8 @@ function resolveInput(args: ParsedArgs): SetupInput {
     contextFlag,
     guardrails,
     toolProfile,
+    addTools,
+    defaultContext,
     kagura,
     secrets: knownKeys(apiKey, own("api_key")),
   };
@@ -718,8 +783,9 @@ function writeKaguraJson(input: SetupInput): string {
   const target = path.join(input.projectDir, ".kagura.json");
   const kagura = { ...input.kagura };
   kagura.api_key = input.apiKey;
-  // As given, as Python writes it: --guardrails and --tool-profile belong
-  // to the harness entry, not to this bin, and baseUrlFromMcp finds the
+  // As given, as Python writes it: --guardrails, --tool-profile,
+  // --add-tools and --context belong to the harness entry, not to this
+  // bin (its own calls name their context), and baseUrlFromMcp finds the
   // REST base in the path, so a query the user gave does no harm here.
   kagura.mcp_url = input.baseUrl;
   if (input.contextId) kagura.context_id = input.contextId;
@@ -1292,45 +1358,54 @@ function refuseShadowedEntry(
   );
 }
 
-/** Python's `_QUERY_FLAGS`: each flag and the URL parameter it sets. */
-const QUERY_FLAGS = [
-  ["--guardrails", "guardrails"],
-  ["--tool-profile", "profile"],
-] as const;
+/**
+ * Python's `_QUERY_FLAGS`: the flags that set `?guardrails=` / `?profile=`
+ * / `?add_tools=` / `?context=` on the upstream URL.
+ */
+const QUERY_FLAGS = ["--guardrails", "--tool-profile", "--add-tools", "--context"] as const;
 
 /**
- * The `--guardrails` / `--tool-profile` values an entry puts on the MCP
- * URL — Python's `_query_flags`: from the `kagura-mcp` arguments of a
- * stdio entry (which the Python CLI's `--profile` setup writes), or from
- * the first value of each parameter in an http entry's URL. An empty value
- * does not count, as `parse_qsl` drops it.
+ * The query flag values an entry puts on the MCP URL, by flag — Python's
+ * `_query_flags`. From the `kagura-mcp` arguments of a stdio entry (which
+ * the Python CLI's `--profile` setup writes): the last value of a repeated
+ * flag, as the proxy reads it, except `--add-tools`, whose values add up.
+ * From an http entry's URL as the server reads it: the first value of a
+ * repeated key, trimmed, the tool view by {@link mcpUrlToolView}. A blank
+ * value is left out: setup refuses one, so it is no flag to re-run with.
  */
 function queryFlags(entry: Record<string, unknown>): Map<string, string> {
   const found = new Map<string, string>();
   if (classifyMcpEntry(entry) === "stdio") {
     const args: unknown[] = Array.isArray(entry.args) ? entry.args : [];
     const argv = args.filter((a): a is string => typeof a === "string");
-    for (const [flag] of QUERY_FLAGS) {
+    for (const flag of QUERY_FLAGS) {
+      const values: string[] = [];
       argv.forEach((arg, i) => {
-        if (arg === flag && i + 1 < argv.length) found.set(flag, argv[i + 1]!);
-        else if (arg.startsWith(`${flag}=`)) found.set(flag, arg.slice(flag.length + 1));
+        if (arg === flag && i + 1 < argv.length) values.push(argv[i + 1]!);
+        else if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1));
       });
+      if (values.length > 0) found.set(flag, flag === "--add-tools" ? values.join(",") : values.at(-1)!);
     }
     return found;
   }
   if (typeof entry.url !== "string") return found;
-  for (const [flag, key] of QUERY_FLAGS) {
-    const value = queryParam(entry.url, key);
-    if (value) found.set(flag, value);
-  }
+  const query = mcpUrlQueryValues(entry.url);
+  const view = mcpQueryToolView(query);
+  const settings: [string, string][] = [
+    ["--guardrails", pyStrip(query.get("guardrails") ?? "")],
+    ["--tool-profile", view.profile ?? ""],
+    ["--add-tools", view.addTools.join(",")],
+    ["--context", pyStrip(query.get("context") ?? "")],
+  ];
+  for (const [flag, value] of settings) if (value) found.set(flag, value);
   return found;
 }
 
 /**
- * The note for the `--guardrails` / `--tool-profile` settings the replaced
- * entry had and the new one leaves out — Python's `_dropped_query_flags`
- * and its text. `.kagura.json` keeps `--mcp-url` as given, so a re-run
- * rebuilds the URL from its own flags alone.
+ * The note for the query flag settings the replaced entry had and the new
+ * one leaves out — Python's `_dropped_query_flags` and its text.
+ * `.kagura.json` keeps `--mcp-url` as given, so a re-run rebuilds the URL
+ * from its own flags alone.
  */
 function droppedFlagsNote(
   scope: ClaudeScope,
@@ -1351,14 +1426,19 @@ function droppedFlagsNote(
 
 /**
  * Python's `_warn_tools_allowlist`: memory-cloud applies a `?tools=`
- * allowlist before it reads `profile`, so `--tool-profile` on such a URL
- * does nothing.
+ * allowlist instead of `profile` and `add_tools`, so `--tool-profile` and
+ * `--add-tools` on such a URL do nothing.
  */
-function toolsAllowlistWarning(url: string, toolProfile: string | undefined): string[] {
-  if (toolProfile === undefined || queryParam(url, "tools") === undefined) return [];
+function toolsAllowlistWarning(
+  url: string,
+  toolProfile: string | undefined,
+  addTools: readonly string[] | undefined,
+): string[] {
+  const flags = toolProfile !== undefined ? [`--tool-profile ${toolProfile}`] : [];
+  if (addTools !== undefined && addTools.length > 0) flags.push(`--add-tools ${addTools.join(",")}`);
+  if (flags.length === 0 || mcpUrlToolView(url).tools === null) return [];
   return [
-    "Warning: the MCP URL has a ?tools= allowlist, which the server applies instead of " +
-      `--tool-profile ${toolProfile}.`,
+    `Warning: the MCP URL has a ?tools= allowlist, which the server applies instead of ${flags.join(" and ")}.`,
   ];
 }
 
@@ -1415,7 +1495,7 @@ async function writeUserEntry(
 async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
   const input = resolveInput(args);
   const scope = parseChoice(SCOPE, args.values.scope ?? "project", CLAUDE_TARGET_SCOPES);
-  const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile);
+  const notes = toolsAllowlistWarning(input.baseUrl, input.toolProfile, input.addTools);
   const asked = ASKS_FOR_HOOKS.filter((name) => args.flags.has(name)).map((name) => `--${name}`);
   if (asked.length > 0) {
     notes.push(
@@ -1423,7 +1503,12 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
         "this port installs no hooks or slash commands",
     );
   }
-  const url = mcpUrlWithQuery(input.baseUrl, { guardrails: input.guardrails, profile: input.toolProfile });
+  const url = mcpUrlWithQuery(input.baseUrl, {
+    guardrails: input.guardrails,
+    profile: input.toolProfile,
+    addTools: input.addTools,
+    context: input.defaultContext,
+  });
   // At user scope the entry goes on `claude mcp add-json`'s command line,
   // so it names the variable Claude Code reads the key from instead; a
   // project .mcp.json is a file, 0600 and gitignored, as in Python.
@@ -1593,8 +1678,10 @@ interface HarnessInput {
   contextFlag: boolean;
   /** `--guardrails`, validated and normalised; undefined when absent. */
   guardrails: string | undefined;
-  /** `--tool-profile`, trimmed; undefined when absent or not taken. */
+  /** `--tool-profile`, trimmed; undefined when absent. */
   toolProfile: string | undefined;
+  /** `--add-tools`, every value's names in one normalized list; undefined when absent. */
+  addTools: string[] | undefined;
   /**
    * `--agents-md`: undefined when absent, `""` for the harness's default
    * file, else the path as given.
@@ -1735,6 +1822,7 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
   rejectExtraArgs(args);
   const guardrails = parseGuardrails(args.values.guardrails);
   const toolProfile = parseToolProfile(args.values["tool-profile"]);
+  const addTools = parseAddTools(args.many["add-tools"]);
   const agentsMd = parseAgentsMd(args.values["agents-md"]);
   // Then Python's _check_flags, in its order, each a usage error. The
   // --profile refusal (exit 1) comes last, so that `--profile p
@@ -1831,6 +1919,7 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
     contextFlag,
     guardrails,
     toolProfile,
+    addTools,
     agentsMd,
     exportContext: flagContext ?? (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
     contextGiven: flagContext !== undefined ? rawContext : undefined,
@@ -2536,6 +2625,34 @@ function codexHooksEnabled(codexHome: string, name: string): boolean {
 }
 
 /**
+ * The entry URL's tool view as `guardrails digest --target instructions`
+ * flags — Python's `_digest_view_args` for a URL entry (python-sdk#300):
+ * the preview's truncation note then names a tool the entry's `tools/list`
+ * shows. Read by {@link mcpUrlToolView}, as the server reads it; a blank
+ * value is left out, and so is a list naming no tool.
+ */
+function digestViewArgs(url: string): string[] {
+  const view = mcpUrlToolView(url);
+  const values = [view.profile, (view.tools ?? []).join(","), view.addTools.join(",")];
+  return (["--profile", "--tools", "--add-tools"] as const).flatMap((flag, i) =>
+    values[i] ? [flag, values[i]!] : [],
+  );
+}
+
+/** The `guardrails digest` preview of `context` on the entry `url`'s tool view, in this bin's name. */
+function digestPreview(context: string, url: string): string {
+  return shellCommand([
+    "kagura-memory",
+    "guardrails",
+    "digest",
+    context,
+    "--target",
+    "instructions",
+    ...digestViewArgs(url),
+  ]);
+}
+
+/**
  * Python's closing notes on a Codex entry whose URL names a guardrails
  * context, with its preview command in this bin's name.
  */
@@ -2543,10 +2660,7 @@ function codexDigestNotes(context: string, url: string, keyEnv: string): string[
   // On the entry's own credential: its key variable, on its server.
   const env = keyEnv === KEY_ENV_VAR ? [] : [`KAGURA_API_KEY="\${${keyEnv}}"`];
   env.push(`KAGURA_MCP_URL=${shellQuote(url)}`);
-  const preview = [
-    ...env,
-    shellCommand(["kagura-memory", "guardrails", "digest", context, "--target", "instructions"]),
-  ];
+  const preview = [...env, digestPreview(context, url)];
   return [
     `Codex should get the tool guardrail digest of context ${context} in the MCP instructions when ` +
       "it connects. The server sends only its base text instead when the entry's credential cannot " +
@@ -2647,7 +2761,7 @@ function brokenConfig(deps: CliDeps): string | null {
  */
 function codexOauthDigestNotes(deps: CliDeps, input: HarnessInput, context: string, url: string): string[] {
   const server = deployment(url);
-  const digest = shellCommand(["kagura-memory", "guardrails", "digest", context, "--target", "instructions"]);
+  const digest = digestPreview(context, url);
   const reads = "(Codex gets what the account it signed in with can read):";
   let preview: string;
   let command: string;
@@ -2720,10 +2834,10 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
       placeholder = guardrails !== input.contextId;
     }
   }
-  notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile));
+  notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile, input.addTools));
   const url = mcpUrlWithQuery(
     input.baseUrl,
-    { guardrails, profile: input.toolProfile },
+    { guardrails, profile: input.toolProfile, addTools: input.addTools },
     { guardrailsAsIs: placeholder },
   );
 
@@ -2813,9 +2927,12 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
  * `guardrails` value in the URL, and one warning names what was dropped.
  * A first `guardrails` value of `off`, the one the server reads, is kept
  * as asked, alone and with a warning of its own: it takes away the one
- * lane left. The flag's `off` never gets here: it is refused.
+ * lane left. The flag's `off` never gets here: it is refused. The tool
+ * view (`--tool-profile`, `--add-tools`) goes on last, after the warning
+ * that a `?tools=` allowlist overrides it, in Python's order.
  */
 function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
+  notes.push(...toolsAllowlistWarning(input.baseUrl, input.toolProfile, input.addTools));
   const title = LABEL[input.harness];
   // The configured mcp_url (a fallback only this port has) keeps its word.
   const source = input.urlFlag ? "--mcp-url" : "the MCP URL";
@@ -2840,7 +2957,7 @@ function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
         "default) and the AGENTS.md export (--agents-md).",
     );
   }
-  return url;
+  return mcpUrlWithQuery(url, { profile: input.toolProfile, addTools: input.addTools });
 }
 
 /** The full case folds `toLowerCase` lacks that yield ASCII: ß, long s and the Latin ligatures. */
@@ -3258,7 +3375,8 @@ const claude: Command = {
     "  scope is the git repository's (a linked worktree's main working tree),\n" +
     "  and project scope the closest .mcp.json defining kagura-memory, here or\n" +
     "  in a parent directory, as Claude Code reads them. A re-run without\n" +
-    "  --guardrails or --tool-profile drops an earlier value, and says so.\n\n" +
+    "  --guardrails, --tool-profile, --add-tools or --context drops an\n" +
+    "  earlier value, and says so.\n\n" +
     "  A context (-c, else .kagura.json's, else KAGURA_CONTEXT_ID) other than a\n" +
     "  dashed UUID is looked up by exact name on every list_contexts page, and\n" +
     "  its id is written; a dashed UUID or no context sends no request.\n\n" +
@@ -3271,12 +3389,15 @@ const claude: Command = {
       "setup claude --profile default        # OAuth via kagura-mcp (recommended)",
       "setup claude --profile default --scope user   # one entry for every project",
       "setup claude --profile default --guardrails off --tool-profile core",
+      "setup claude --profile default --add-tools explore --context CTX_UUID",
       "setup claude --api-key kagura_xxx --mcp-url http://localhost:8080/mcp/w/{workspace_id}",
       "setup claude -y --api-key kagura_xxx --context-id my-project",
       "setup claude --no-commands      # plugin users: its /kagura-memory:* instead",
       "setup claude --no-auto-context  # always show full context list",
     ),
-  spec: { flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ...PYTHON_ONLY_FLAGS] },
+  spec: {
+    flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ADD_TOOLS, DEFAULT_CONTEXT, ...PYTHON_ONLY_FLAGS],
+  },
   run: (deps, args) => runClaude(deps as CliDeps, args),
 };
 
@@ -3332,12 +3453,13 @@ const codex: Command = {
       NAME,
       HARNESS_CONTEXT_ID,
       CODEX_GUARDRAILS,
+      HARNESS_TOOL_PROFILE,
+      HARNESS_ADD_TOOLS,
       agentsMd(
         "Also write the context's tool guardrail export block into PATH (default ~/.codex/AGENTS.md, " +
           "or AGENTS.override.md when it exists). Rarely needed: the digest already arrives in the MCP " +
           "instructions. Only the marked block changes.",
       ),
-      TOOL_PROFILE,
       ...HARNESS_TAIL,
       apiKeyEnv(
         "The variable Codex reads the API key from (bearer_token_env_var; default KAGURA_API_KEY, " +
@@ -3406,6 +3528,8 @@ const hermes: Command = {
       NAME,
       HARNESS_CONTEXT_ID,
       guardrailsNotWritten("Hermes"),
+      HARNESS_TOOL_PROFILE,
+      HARNESS_ADD_TOOLS,
       agentsMd(
         "Write the context's tool guardrail export block into PATH (default: the context file Hermes loads " +
           "from here: the nearest .hermes.md or HERMES.md up to the git root, else this directory's AGENTS " +
@@ -3467,6 +3591,8 @@ const openclaw: Command = {
       NAME,
       HARNESS_CONTEXT_ID,
       guardrailsNotWritten("OpenClaw"),
+      HARNESS_TOOL_PROFILE,
+      HARNESS_ADD_TOOLS,
       agentsMd(
         "Write the context's tool guardrail export block into PATH (default AGENTS.md in the workspace " +
           "OpenClaw loads every session: $OPENCLAW_WORKSPACE_DIR, else workspace/ in $OPENCLAW_STATE_DIR " +

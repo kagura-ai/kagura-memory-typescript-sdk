@@ -60,6 +60,29 @@ selects an alternate credentials file; `--login-timeout` controls the deadline.
 Proxy options are explicit: API-key environment variables and project-local
 `.kagura.json` are not used. Endpoint query options can be included in `--server`.
 
+`--guardrails off|CONTEXT_ID` (memory-cloud v0.74.0+), `--tool-profile NAME`
+(v0.73.0+), `--add-tools NAME[,NAME…]` (v0.129.0+, may repeat) and
+`--context CONTEXT_ID` (v0.114.0+) set `?guardrails=` / `?profile=` /
+`?add_tools=` / `?context=` on the upstream URL at run time, replacing any
+earlier value, as the Python CLI's `kagura-mcp` does; the profile's stored URL
+is not changed. Since memory-cloud 0.93.0 a bare endpoint lists the `core` tool
+profile (21 tools on 0.141.0) and `--tool-profile full` every tool; `recall`'s
+`explore_hints` need `--add-tools explore` (or `full`). A profile is a view,
+not an authorization boundary: `tools/call` reaches unlisted tools too. A
+`?tools=` allowlist already in `--server` wins over `--tool-profile` and
+`--add-tools`, with a warning on stderr. `--context` makes that context the
+default for tools called without `context_id`; an explicit one wins. Older
+servers ignore parameters they do not know. An invalid value stops the proxy
+(exit 2).
+
+`--session-id NAME` (default: `$KAGURA_MCP_SESSION_ID`; memory-cloud v0.114.0+)
+sends `Kagura-Session-Id: NAME` on every upstream request, so the server records
+the writes under that session for `changes_since`. It takes 1-128 letters,
+digits, `.`, `_` or `-` (the server drops any other value): an invalid flag
+stops the proxy, an invalid variable is ignored with a warning. The proxy never
+invents a session id; a tool call's `params._meta["ai.kagura/sessionId"]` is
+forwarded untouched and wins for that call.
+
 The bridge forwards Cloud tools and schemas without a local registry. It handles
 JSON and POST SSE responses, including progress and server requests, refreshes
 once after HTTP 401, and reinitializes once after a session HTTP 404. It does not

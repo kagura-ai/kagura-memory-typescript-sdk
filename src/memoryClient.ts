@@ -27,6 +27,7 @@ import type {
   GuardrailSet,
   ToolTrigger,
 } from "./models.js";
+import { normalizeAddTools } from "./http.js";
 import { normalizeUuid } from "./pyCompat.js";
 import { KaguraRestClient } from "./restBase.js";
 import {
@@ -177,11 +178,21 @@ export interface GetGuardrailDigestOptions {
   /**
    * `target: "instructions"` only: the MCP URL's `?profile=` value
    * (`full` | `core`), so the truncation note names the tool that URL
-   * lists. An empty string is sent as is (the server ignores it).
+   * lists. Without it (and without `tools`), memory-cloud 0.93.0+ previews
+   * the `core` view a bare MCP URL lists (memory-cloud#1849). An empty
+   * string is sent as is (the server ignores it).
    */
   profile?: string;
   /** `target: "instructions"` only: the MCP URL's `?tools=` allowlist. */
   tools?: string;
+  /**
+   * `target: "instructions"` only: the MCP URL's `?add_tools=` names
+   * (memory-cloud v0.129.0+, memory-cloud#2354), validated and joined as
+   * the server reads them: each item may be comma-separated, names are
+   * trimmed, blank ones dropped and duplicates removed. Sent as `add_tools`
+   * only when it names a tool; an older server ignores it.
+   */
+  addTools?: readonly string[];
 }
 
 /**
@@ -254,21 +265,28 @@ export class MemoryClient extends KaguraRestClient {
    * because the export block's begin marker embeds the version, so an
    * unchanged set is detected by comparing text.
    *
-   * `profile` and `tools` are sent whenever they are given, whatever the
-   * target, as Python sends them; the server applies them to
-   * `"instructions"` only.
+   * `profile` and `tools` are sent whenever they are given, and
+   * `addTools` whenever it names a tool, whatever the target, as Python
+   * sends them; the server applies them to `"instructions"` only.
+   *
+   * @throws TypeError `addTools` is not an array of strings (a string
+   *   would be read a character at a time).
+   * @throws Error `context_id` is not a UUID, or `addTools` names more than
+   *   100 tools or one starting with `-`, before any request.
    */
   async getGuardrailDigest(
     contextId: string,
     options: GetGuardrailDigestOptions = {},
   ): Promise<GuardrailDigest> {
     const ctx = normalizeUuid(contextId, "context_id");
+    const added = options.addTools !== undefined ? normalizeAddTools(options.addTools) : "";
     const target = options.target ?? "export";
     const params: Record<string, unknown> = { context_id: ctx, target };
     // `request` drops undefined and null but keeps "": an empty value is
     // still sent, as Python's `is not None` checks send it.
     if (options.profile !== undefined) params.profile = options.profile;
     if (options.tools !== undefined) params.tools = options.tools;
+    if (added) params.add_tools = added;
     const resp = await this.request("GET", "/api/v1/memory/guardrails/digest", { params });
     return {
       context_id: ctx,

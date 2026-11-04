@@ -1826,11 +1826,27 @@ export class KaguraClient {
    * for a non-idempotent `tools/call`. (As deployed, server v0.75.0
    * re-adopts an unknown session id instead, so against it this never
    * fires.)
+   *
+   * A `result` that is not an object reads as `{}`; {@link jsonRpcResult}
+   * returns it as sent.
    */
   private async makeJsonRpcRequest(
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    const result = await this.jsonRpcResult(method, params);
+    return typeof result === "object" && result !== null
+      ? (result as Record<string, unknown>)
+      : {};
+  }
+
+  /**
+   * {@link makeJsonRpcRequest}'s request, its `result` as sent — Python's
+   * `data.get("result", {})`: `{}` when the reply has none, else the value
+   * itself, a `null` or a list included, for a caller that reads it as
+   * Python's model does.
+   */
+  private async jsonRpcResult(method: string, params: Record<string, unknown>): Promise<unknown> {
     const sessionId = await this.initializeSession();
 
     const body = {
@@ -1894,9 +1910,8 @@ export class KaguraClient {
       throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
     }
 
-    const result = data.result;
-    return typeof result === "object" && result !== null
-      ? (result as Record<string, unknown>)
+    return typeof data === "object" && data !== null && Object.prototype.hasOwnProperty.call(data, "result")
+      ? data.result
       : {};
   }
 
@@ -3314,12 +3329,38 @@ export class KaguraClient {
 
   /**
    * Call tools/list to get available MCP tool definitions (names,
-   * descriptions, parameter schemas).
+   * descriptions, parameter schemas): the view the MCP URL's query selects
+   * (`core` for a bare URL on memory-cloud 0.93.0+).
+   *
+   * The result is read as the Python SDK's `ToolListResponse` reads it:
+   * `tools` a list of objects, each passed through unread, and a result
+   * without `tools` lists none.
+   *
+   * @throws KaguraResponseError The result is not a `tools/list` result —
+   *   not an object (`"result": null`), or `tools` not a list of objects
+   *   (operation `KaguraClient.get_tool_definitions`, Python's).
    */
   async getToolDefinitions(): Promise<Record<string, unknown>[]> {
-    const result = await this.makeJsonRpcRequest("tools/list", {});
-    const tools = result.tools;
-    return Array.isArray(tools) ? (tools as Record<string, unknown>[]) : [];
+    const result = await this.jsonRpcResult("tools/list", {});
+    const r = new ResponseReader("KaguraClient.get_tool_definitions", "ToolListResponse");
+    const listing = r.object(result);
+    const tools =
+      listing === null
+        ? []
+        : r.list(
+            listing,
+            "tools",
+            (value, at) => {
+              if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+                return value as Record<string, unknown>;
+              }
+              r.issue(at, "Input should be a valid dictionary");
+              return {};
+            },
+            { default: [] },
+          );
+    r.check();
+    return tools;
   }
 
   /** Neural graph traversal from a seed memory. */
