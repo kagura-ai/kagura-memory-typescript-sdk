@@ -1,6 +1,11 @@
 # SDK ↔ memory-cloud Compatibility
 
-## Unreleased: focused v0.16.0 scope
+## 0.16.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to
+**0.143.0** (parity target: the Python SDK and CLI 0.44.0, checked up to
+0.142.0). No new server surface is introduced. Node.js >=20.19.0 remains
+supported.
 
 This release fixes existing authentication, error handling, response validation,
 CLI behavior and Windows checkout reliability. Python parity remains 0.44.0;
@@ -12,9 +17,9 @@ deferred to v0.17.0. In particular, `sleep rollback --help` uses the corrected
 Python text but retains the existing formatter's wrapping and column spacing;
 its functional output, prompts and partial rollback dumps are checked exactly.
 
-## Unreleased: quota classification (#113)
+### Quota classification (#113)
 
-The unreleased quota classifier matches Python SDK 0.44.0's `_http.gate_error`.
+The quota classifier matches Python SDK 0.44.0's `_http.gate_error`.
 The REST status hooks keep their own mappings, so the HTTP status and entry
 point also determine the exception class.
 
@@ -29,7 +34,8 @@ point also determine the exception class.
 All paths retain the server's `code`, `details`, `help`, and `correlationId`.
 The Python reference is the
 [`v0.44.0` source](https://github.com/kagura-ai/kagura-memory-python-sdk/tree/v0.44.0/src/kagura_memory).
-## Unreleased: credential concurrency and auth token (#112)
+
+### Credential concurrency and auth token (#112)
 
 The credentials JSON format is unchanged, but concurrent writers must use
 the same **portable lock-v1 protocol**. This SDK now exclusively creates

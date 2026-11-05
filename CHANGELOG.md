@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-05
+
+Reliability fixes for the existing Python SDK/CLI 0.44.0 parity surface.
+Node.js >=20.19.0 and the memory-cloud 0.75.0 floor remain unchanged.
+CLI-wide help formatting, Node 22/Vitest 5 migration and context-access APIs
+remain deferred to v0.17.0.
+
 ### Added
 
 - The MCP proxy gives Python-compatible re-login guidance for HTTP 403
@@ -3398,7 +3405,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.13.0...v0.14.0
