@@ -169,6 +169,8 @@ export interface FromMcpUrlOptions {
  * off `resp.request`; fetch's `Response` has no such back-pointer).
  */
 export interface RestResponse {
+  /** True for routes authenticated by an existing web session. */
+  session?: boolean;
   status: number;
   headers: Headers;
   text: string;
@@ -234,6 +236,7 @@ export interface FromResolvedAuthOptions {
 
 /** Request payload context threaded to the 403 hook (subclass hints only). */
 export interface RequestContext {
+  typedPermissionErrors?: boolean;
   requestJson: Record<string, unknown> | undefined;
   requestParams: Record<string, unknown> | undefined;
 }
@@ -320,7 +323,13 @@ export class KaguraRestClient {
   readonly timeoutMs: number;
 
   /** Supplies the Authorization header for every request (static or OAuth). */
-  protected readonly auth: AuthProvider;
+  private readonly bearer: AuthProvider | null;
+  protected get auth(): AuthProvider {
+    if (this.bearer === null) {
+      throw new KaguraAuthError("This operation requires a bearer credential. Use a workspace-owner API key.");
+    }
+    return this.bearer;
+  }
   /** Non-null exactly when constructed in OAuth mode (flavors the 401 hint). */
   protected readonly oauth: AuthProvider | null;
   /** Which resolution branch produced the credentials (403 hint flavoring). */
@@ -335,8 +344,8 @@ export class KaguraRestClient {
    * @throws Error if neither `apiKey` nor `oauth` is given, or the base
    *   URL is plain HTTP on a non-loopback host.
    */
-  constructor(options: KaguraRestClientOptions = {}) {
-    if (options.apiKey === undefined && options.oauth === undefined) {
+  constructor(options: KaguraRestClientOptions = {}, mode: "bearer" | "session" = "bearer") {
+    if (mode === "bearer" && options.apiKey === undefined && options.oauth === undefined) {
       const name = new.target.name;
       throw new Error(
         `${name} requires apiKey, or use ${name}.fromMcpUrl(...) to resolve ` +
@@ -350,16 +359,19 @@ export class KaguraRestClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
 
-    if (options.oauth !== undefined) {
+    if (mode === "session") {
+      this.bearer = null;
+      this.oauth = null;
+    } else if (options.oauth !== undefined) {
       // OAuth path: the provider injects a fresh access_token per request
       // and coordinates refresh via the shared credentials state.
-      this.auth = options.oauth;
+      this.bearer = options.oauth;
       this.oauth = options.oauth;
     } else {
       // Static path: bake the bearer header once, in a closure — the key
       // is never stored as an instance field.
       const header = `Bearer ${options.apiKey}`;
-      this.auth = { getAuthHeader: async () => header };
+      this.bearer = { getAuthHeader: async () => header };
       this.oauth = null;
     }
     this.authSource = options.authSource ?? null;
@@ -473,6 +485,8 @@ export class KaguraRestClient {
       json?: Record<string, unknown>;
       params?: Record<string, unknown>;
       extraHeaders?: Record<string, string>;
+      session?: boolean;
+      typedPermissionErrors?: boolean;
     } = {},
   ): Promise<RestResponse> {
     let url = `${this.baseUrl}${path}`;
@@ -490,10 +504,11 @@ export class KaguraRestClient {
     }
 
     const headers: Record<string, string> = {
-      authorization: await this.auth.getAuthHeader(),
+      ...(opts.session ? {} : { authorization: await this.auth.getAuthHeader() }),
       "user-agent": `kagura-memory-sdk/${SDK_VERSION}`,
     };
     const init: RequestInit = {
+      ...(opts.session ? { credentials: "include", redirect: "error" } as const : {}),
       method,
       headers,
       signal: AbortSignal.timeout(this.timeoutMs),
@@ -514,6 +529,7 @@ export class KaguraRestClient {
     }
 
     const envelope: RestResponse = {
+      ...(opts.session ? { session: true } : {}),
       status: response.status,
       headers: response.headers,
       text: await this.safeText(response),
@@ -530,6 +546,7 @@ export class KaguraRestClient {
         {
           requestJson: opts.json,
           requestParams: opts.params,
+          ...(opts.typedPermissionErrors ? { typedPermissionErrors: true } : {}),
         },
         fields,
       );

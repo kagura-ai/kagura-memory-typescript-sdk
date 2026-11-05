@@ -15,6 +15,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  KaguraContextNotInAccessListError,
+  KaguraPermissionError,
+  KaguraResponseError,
   KaguraAuthError,
   KaguraConnectionError,
   KaguraError,
@@ -78,6 +81,88 @@ function makeClient(server: FakeRest): WorkspaceClient {
     fetch: server.fetch,
   });
 }
+
+describe("memory-cloud 0.144 member context access", () => {
+  it.each([null, [], [WS]])("preserves the explicit access list on add and set: %j", async ids => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    const row = { user_id: "a/b", role: "viewer", allowed_context_ids: ids };
+    server.body = JSON.stringify(row);
+    expect(await client.addMember(WS, "a/b", { role: "viewer", allowedContextIds: ids })).toMatchObject(row);
+    expect(JSON.parse(server.requests[0]!.body!)).toEqual(row);
+    server.body = JSON.stringify({ status: "ok", user_id: "a/b", allowed_context_ids: ids });
+    expect((await client.setMemberContextAccess(WS, "a/b", ids)).allowed_context_ids).toEqual(ids);
+    expect(server.requests[1]).toMatchObject({ method: "PUT", url: `https://x.test/api/v1/workspaces/${WS}/members/a%2Fb/context-access` });
+    expect(JSON.parse(server.requests[1]!.body!)).toEqual({ allowed_context_ids: ids });
+  });
+
+  it("keeps [] after a role change and reads null when older servers omit the field", async () => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    const row = { user_id: "u", role: "viewer" };
+    server.body = JSON.stringify({ ...row, allowed_context_ids: [] });
+    expect((await client.updateMemberRole(WS, "u", "viewer")).allowed_context_ids).toEqual([]);
+    server.body = JSON.stringify(row);
+    expect((await client.updateMemberRole(WS, "u", "viewer")).allowed_context_ids).toBeNull();
+  });
+
+  it("reads assignable private contexts with the owner key and rejects malformed rows", async () => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    const context = { id: WS, name: "test", is_private: true, is_own_private: true };
+    const row = { user_id: "a/b", role: "member", allowed_context_ids: [], contexts: [context] };
+    server.body = JSON.stringify(row);
+    expect(await client.getMemberContextAccess(WS, "a/b")).toMatchObject(row);
+    expect(server.requests[0]).toMatchObject({ method: "GET", url: `https://x.test/api/v1/workspaces/${WS}/members/a%2Fb/context-access`, headers: { authorization: "Bearer kagura_test" } });
+    server.body = JSON.stringify({ ...row, contexts: [{}] });
+    await expect(client.getMemberContextAccess(WS, "a/b")).rejects.toBeInstanceOf(KaguraResponseError);
+    server.body = JSON.stringify({ ...row, allowed_context_ids: "oops" });
+    await expect(client.addMember(WS, "u")).rejects.toBeInstanceOf(KaguraResponseError);
+  });
+
+  it("preserves workspace confinement, required role and the deployment refusal", async () => {
+    const server = new FakeRest();
+    const client = makeClient(server);
+    server.status = 404;
+    await expect(client.getMemberContextAccess(WS, "u")).rejects.toBeInstanceOf(KaguraNotFoundError);
+    server.status = 403;
+    server.body = JSON.stringify({ error: "AUTH-003", message: "Insufficient permissions", details: { required_role: "owner" } });
+    const denial = await caught(client.setMemberContextAccess(WS, "u", []));
+    expect(denial).toBeInstanceOf(KaguraPermissionError);
+    expect(denial).toMatchObject({ requiredRole: "owner", code: "AUTH-003" });
+    server.body = envelope("AUTH-003", "Owner-API-key member management is disabled on this deployment.");
+    const disabled = await caught(client.getMemberContextAccess(WS, "u"));
+    expect(disabled).toBeInstanceOf(KaguraPermissionError);
+    expect(disabled).toMatchObject({ code: "AUTH-003", requiredRole: null, message: expect.stringMatching(/disabled on this deployment/) });
+  });
+
+  it("uses session auth and extends only on explicit request after the typed 409", async () => {
+    const server = new FakeRest();
+    const client = new WorkspaceClient({ baseUrl: "https://x.test", session: true, fetch: (url, init) => {
+      expect(init?.credentials).toBe("include");
+      expect(init?.redirect).toBe("error");
+      expect(new Headers(init?.headers).has("authorization")).toBe(false);
+      return server.fetch(url, init);
+    } });
+    await expect(client.getMemberContextAccess(WS, "u")).rejects.toBeInstanceOf(KaguraAuthError);
+    expect(server.requests).toHaveLength(0);
+    const details = { reason: "context_not_in_access_list", context_id: WS, user_id: "u" };
+    server.status = 409;
+    server.body = JSON.stringify({ error: "RES-002", message: "Context outside list", details });
+    const error = await caught(client.addContextMember(WS, "u", "editor"));
+    expect(error).toBeInstanceOf(KaguraContextNotInAccessListError);
+    expect(error).toMatchObject({ code: "RES-002", details });
+    expect(server.requests).toHaveLength(1);
+    expect(JSON.parse(server.requests[0]!.body!)).toEqual({ user_id: "u", role: "editor" });
+    await expect(client.addContextMember(WS, "u", "editor", { extendAccessList: false })).rejects.toBeInstanceOf(KaguraContextNotInAccessListError);
+    expect(JSON.parse(server.requests[1]!.body!)).toEqual({ user_id: "u", role: "editor", extend_access_list: false });
+    server.status = 201;
+    server.body = JSON.stringify({ user_id: "u", role: "editor", access_list_extended: true });
+    expect((await client.addContextMember(WS, "u", "editor", { extendAccessList: true })).access_list_extended).toBe(true);
+    expect(server.requests[2]).toMatchObject({ method: "POST", url: `https://x.test/api/v1/contexts/${WS}/members` });
+    expect(JSON.parse(server.requests[2]!.body!)).toEqual({ user_id: "u", role: "editor", extend_access_list: true });
+  });
+});
 
 /** memory-cloud canonical error envelope (v0.42.0). */
 function envelope(code: string, message: string): string {

@@ -1823,7 +1823,7 @@ export interface IngestResult {
  * The list endpoint populates the display/audit fields (`user_name`,
  * `user_email`, `last_login_at`, `allowed_context_ids`,
  * `credentials_status`); add/set-role responses carry the minimal
- * `user_id`/`role`/`joined_at` shape and leave the rest `null`.
+ * `user_id`/`role`/`joined_at` shape plus the stored access list on v0.144.0+.
  * `credentials_status` stays an untyped mapping — its inner shape is
  * server-owned display metadata (key counts / visibility booleans) that
  * the SDK forwards without interpreting.

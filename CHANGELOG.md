@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-05
+
+### Added
+
+- Workspace member context-access APIs for memory-cloud v0.144.0, including
+  explicit empty grants and a typed context-access conflict (#121).
+
 ### Changed
 
 - Require Node.js >=22.12.0 for the SDK, CLI and MCPB bundle. Builds target Node 22 and the test suite runs on Vitest 5 (#115).
@@ -3415,7 +3422,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.0...v0.14.1

@@ -6,6 +6,16 @@
 
 The SDK, CLI and MCPB require Node.js >=22.12.0. CI tests the exact floor and Node 22/24, including strict installation of the packaged SDK.
 
+### Member context access (#121)
+
+The owner-key workspace member add, context-access GET/PUT and session-based
+context member add follow the [memory-cloud v0.144.0 routes](https://github.com/kagura-ai/memory-cloud/tree/v0.144.0/backend/src/api/routes).
+New request fields are omitted unless supplied. A deployment can disable owner-key
+management; a key bound to another workspace receives the server's uniform 404.
+Python SDK/CLI v0.44.0 does not expose these APIs. The Python port is tracked in
+[python-sdk#326](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/326).
+The TypeScript SDK exposes these calls as library methods.
+
 ### CLI presentation parity (#111)
 
 The common help renderer follows Python SDK 0.44.0 with Click 8.3.3 at an

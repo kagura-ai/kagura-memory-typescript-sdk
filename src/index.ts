@@ -67,6 +67,7 @@ export {
   KaguraResponseError,
   KaguraServiceUnavailableError,
   KaguraVersionConflictError,
+  KaguraContextNotInAccessListError,
   KaguraCryptoError,
   KaguraKeyCustodyError,
   KaguraSecretError,
@@ -129,6 +130,12 @@ export {
   WorkspaceClient,
 } from "./workspaceClient.js";
 export type {
+  WorkspaceSessionOptions,
+  WorkspaceMemberResult,
+  AddMemberOptions,
+  MemberContextAccess,
+  MemberContextAccessUpdate,
+  ContextMember,
   CreateInvitationOptions,
   ListInvitationsOptions,
 } from "./workspaceClient.js";
