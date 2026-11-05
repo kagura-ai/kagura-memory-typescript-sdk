@@ -1,0 +1,122 @@
+[
+  {
+    "kind": "table",
+    "rows": [
+      [
+        "-y, --yes",
+        "Skip confirmation prompt."
+      ],
+      [
+        "--help",
+        "Show this message and exit."
+      ]
+    ],
+    "expected": "  -y, --yes  Skip confirmation prompt.\n  --help     Show this message and exit."
+  },
+  {
+    "kind": "table",
+    "rows": [
+      [
+        "--max-chars INTEGER RANGE",
+        "Response budget in characters (memory-cloud v0.115.0+).  [default: 20000; 10000<=x<=100000]"
+      ],
+      [
+        "--actions-limit INTEGER RANGE",
+        "Limit the action page to the requested number of items.  [1<=x<=200]"
+      ],
+      [
+        "--help",
+        "Show this message and exit."
+      ]
+    ],
+    "expected": "  --max-chars INTEGER RANGE      Response budget in characters (memory-cloud\n                                 v0.115.0+).  [default: 20000; 10000<=x<=100000]\n  --actions-limit INTEGER RANGE  Limit the action page to the requested number\n                                 of items.  [1<=x<=200]\n  --help                         Show this message and exit."
+  },
+  {
+    "kind": "table",
+    "rows": [
+      [
+        "--an-option-with-a-very-long-name INTEGER RANGE",
+        "A deliberately long option name, whose description starts on the next line."
+      ],
+      [
+        "--short",
+        ""
+      ]
+    ],
+    "expected": "  --an-option-with-a-very-long-name INTEGER RANGE\n                                  A deliberately long option name, whose\n                                  description starts on the next line.\n  --short"
+  },
+  {
+    "kind": "table",
+    "rows": [
+      [
+        "cmd",
+        "Words with memory-cloud, non-interactive, --actions-cursor, before--after, and foo-bar-baz to test hyphenation. Words with memory-cloud, non-interactive, --actions-cursor, before--after, and foo-bar-baz to test hyphenation. Words with memory-cloud, non-interactive, --actions-cursor, before--after, and foo-bar-baz to test hyphenation. "
+      ]
+    ],
+    "expected": "  cmd  Words with memory-cloud, non-interactive, --actions-cursor, before--\n       after, and foo-bar-baz to test hyphenation. Words with memory-cloud, non-\n       interactive, --actions-cursor, before--after, and foo-bar-baz to test\n       hyphenation. Words with memory-cloud, non-interactive, --actions-cursor,\n       before--after, and foo-bar-baz to test hyphenation."
+  },
+  {
+    "kind": "table",
+    "rows": [
+      [
+        "unicode",
+        "日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. "
+      ]
+    ],
+    "expected": "  unicode  日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and\n           mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛.\n           日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and\n           mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛.\n           日本語の説明と数字 １２３ and mathematical digits 𝟙𝟚𝟛. 日本語の説明と数字 １２３ and\n           mathematical digits 𝟙𝟚𝟛."
+  },
+  {
+    "kind": "usage",
+    "path": "kagura-memory sleep rollback",
+    "args": "[OPTIONS] CONTEXT_ID REPORT_ID",
+    "expected": "Usage: kagura-memory sleep rollback [OPTIONS] CONTEXT_ID REPORT_ID"
+  },
+  {
+    "kind": "usage",
+    "path": "kagura-memory resource unusually-long-command",
+    "args": "[OPTIONS] FIRST_ARGUMENT SECOND_ARGUMENT THIRD_ARGUMENT",
+    "expected": "Usage: kagura-memory resource unusually-long-command [OPTIONS] FIRST_ARGUMENT\n                                                     SECOND_ARGUMENT\n                                                     THIRD_ARGUMENT"
+  },
+  {
+    "kind": "usage",
+    "path": "kagura-memory long-name-long-name-long-name-long-name-long-name-long-name-",
+    "args": "[OPTIONS] ARGUMENT",
+    "expected": "Usage: kagura-memory long-name-long-name-long-name-long-name-long-name-long-name- \n           [OPTIONS] ARGUMENT"
+  },
+  {
+    "kind": "usage",
+    "path": "kagura-memory",
+    "args": "",
+    "expected": ""
+  },
+  {
+    "kind": "wrap",
+    "text": "Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. Simple words. ",
+    "width": 35,
+    "expected": "Simple words. Simple words. Simple\nwords. Simple words. Simple words.\nSimple words. Simple words. Simple\nwords. Simple words. Simple words.\nSimple words. Simple words. Simple\nwords. Simple words. Simple words.\nSimple words. Simple words. Simple\nwords. Simple words. Simple words."
+  },
+  {
+    "kind": "wrap",
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "width": 35,
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "kind": "wrap",
+    "text": "memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud memory-cloud ",
+    "width": 35,
+    "expected": "memory-cloud memory-cloud memory-\ncloud memory-cloud memory-cloud\nmemory-cloud memory-cloud memory-\ncloud memory-cloud memory-cloud\nmemory-cloud memory-cloud memory-\ncloud memory-cloud"
+  },
+  {
+    "kind": "wrap",
+    "text": "foo-bar-baz non-2xx A--B --long-option foo-bar-baz non-2xx A--B --long-option foo-bar-baz non-2xx A--B --long-option foo-bar-baz non-2xx A--B --long-option foo-bar-baz non-2xx A--B --long-option foo-bar-baz non-2xx A--B --long-option ",
+    "width": 35,
+    "expected": "foo-bar-baz non-2xx A--B --long-\noption foo-bar-baz non-2xx A--B\n--long-option foo-bar-baz non-2xx A\n--B --long-option foo-bar-baz\nnon-2xx A--B --long-option foo-bar-\nbaz non-2xx A--B --long-option foo-\nbar-baz non-2xx A--B --long-option"
+  },
+  {
+    "kind": "wrap",
+    "text": "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十",
+    "width": 35,
+    "expected": "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五\n六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十\n一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五\n六七八九十一二三四五六七八九十"
+  }
+]

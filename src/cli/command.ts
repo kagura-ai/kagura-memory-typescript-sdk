@@ -8,6 +8,7 @@
 import { CliUsageError, missingParam, parseChoice, type ChoiceOptions } from "./parse.js";
 import type { FlagSpec, ParseSpec, ParsedArgs } from "./parseArgs.js";
 import type { ClientCommandContext } from "./runClientCommand.js";
+import { formatParagraphs, formatTable, formatUsage, HELP_WIDTH } from "./clickHelp.js";
 
 export interface CommandDeps extends ClientCommandContext {
   /** Ask a yes/no question; resolves true to proceed. */
@@ -118,8 +119,6 @@ export function examples(...lines: string[]): string {
   return ["  Examples:", ...lines.map((l) => `    ${l.startsWith(" ") ? l : `kagura-memory ${l}`}`)].join("\n");
 }
 
-const INDENT = "  ";
-
 /** `-c, --context-id TEXT` — how click lays out an option's forms. */
 function renderFlag(flag: FlagSpec): string {
   // A short-only option must not advertise a long form the parser will
@@ -128,31 +127,52 @@ function renderFlag(flag: FlagSpec): string {
     flag.shortOnly === true
       ? `-${flag.short}`
       : flag.short === undefined
-        ? `    --${flag.name}`
+        ? `--${flag.name}`
         : `-${flag.short}, --${flag.name}`;
   if (flag.type !== "value" && flag.type !== "multiple" && flag.type !== "optional") return forms;
   // Click shows an optional value's metavar as declared, brackets and all
   // (`--agents-md [PATH]`), and `TEXT` when none is.
-  return `${forms} ${flag.metavar ?? "TEXT"}`;
+  const metavar = flag.range ? `${flag.range.integer ? "INTEGER" : "FLOAT"} RANGE` : flag.metavar ?? "TEXT";
+  return `${forms} ${metavar}`;
 }
 
 /** Render `--help` for one command from its own declaration. */
 export function renderHelp(path: string, command: Command): string {
-  const lines = [`Usage: ${path} [OPTIONS]${command.args ? ` ${command.args}` : ""}`, ""];
-  if (command.summary) lines.push(`  ${command.summary}`, "");
-  if (command.description) lines.push(command.description, "");
-
-  const rendered = command.spec.flags.filter((f) => f.hidden !== true).map((f) => [renderFlag(f), f] as const);
-  const width = Math.max(24, ...rendered.map(([text]) => text.length + 2));
-
-  lines.push("Options:");
-  for (const [text, flag] of rendered) {
-    const suffix = flag.defaultLabel === undefined ? "" : `  [default: ${flag.defaultLabel}]`;
-    const help = `${flag.help ?? ""}${suffix}`;
-    lines.push(`${INDENT}${text.padEnd(width)}${help}`.trimEnd());
-  }
-  lines.push(`${INDENT}${"--help".padEnd(width)}Show this message and exit.`);
+  const lines = [formatUsage(path, `[OPTIONS]${command.args ? ` ${command.args}` : ""}`), ""];
+  if (command.summary) lines.push(formatParagraphs(command.summary), "");
+  if (command.description) lines.push(formatParagraphs(command.description), "");
+  lines.push("Options:", renderOptions(command.spec.flags));
   return lines.join("\n");
+}
+
+function renderOptions(flags: readonly FlagSpec[]): string {
+  const rows: [string, string][] = flags.filter(f => f.hidden !== true).map(flag => {
+    const annotations = [
+      ...(flag.defaultLabel === undefined ? [] : [`default: ${flag.defaultLabel}`]),
+      ...(flag.range === undefined ? [] : [flag.range.rangeLabel]),
+      ...(flag.required === true ? ["required"] : []),
+    ];
+    const suffix = annotations.length === 0 ? "" : `  [${annotations.join("; ")}]`;
+    return [renderFlag(flag), `${flag.help ?? ""}${suffix}`];
+  });
+  rows.push(["--help", "Show this message and exit."]);
+  return formatTable(rows);
+}
+
+/** Click's default short help: first sentence, shortened at word boundaries. */
+function shortHelp(text: string, limit: number): string {
+  const words = text.split("\n\n")[0]!.trim().replace(/^\x08\s*/, "").split(/\s+/);
+  let used = 0;
+  for (let i = 0; i < words.length; i++) {
+    used += [...words[i]!].length + (i > 0 ? 1 : 0);
+    if (used > limit || (used === limit && i < words.length - 1 && !words[i]!.endsWith("."))) {
+      let end = i;
+      while (end > 0 && [...words.slice(0, end).join(" ")].length + 3 > limit) end--;
+      return words.slice(0, end).join(" ") + "...";
+    }
+    if (words[i]!.endsWith(".")) return words.slice(0, i + 1).join(" ");
+  }
+  return words.join(" ");
 }
 
 /**
@@ -164,14 +184,13 @@ export function renderGroupHelp(
   summary: string,
   entries: Record<string, Command | CommandGroup>,
   description?: string,
+  flags: readonly FlagSpec[] = [],
 ): string {
   const names = Object.keys(entries).sort();
-  const width = Math.max(10, ...names.map((n) => n.length + 2));
-  const lines = [`Usage: ${path} [OPTIONS] COMMAND [ARGS]...`, "", `  ${summary}`, ""];
-  if (description) lines.push(description, "");
-  lines.push("Commands:");
-  for (const name of names) {
-    lines.push(`${INDENT}${name.padEnd(width)}${entries[name]!.summary}`);
-  }
+  const limit = HELP_WIDTH - 6 - Math.max(0, ...names.map(n => [...n].length));
+  const lines = [formatUsage(path, "[OPTIONS] COMMAND [ARGS]..."), "", formatParagraphs(summary), ""];
+  if (description) lines.push(formatParagraphs(description), "");
+  lines.push("Options:", renderOptions(flags), "", "Commands:");
+  lines.push(formatTable(names.map(name => [name, shortHelp(entries[name]!.summary, limit)])));
   return lines.join("\n");
 }

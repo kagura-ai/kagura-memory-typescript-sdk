@@ -1,3 +1,5 @@
+import { pythonHelp } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `kagura-memory resource import` against the Python CLI's
  * `resource_import`: detection by extension, its readers' errors (all
@@ -157,7 +159,7 @@ describe("resource import: reading and batching", () => {
       event_metadata: {},
     });
     expect(JSON.parse(h.out.join("\n"))).toEqual({ created: 150, failed: 0, total: 150 });
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     // Built from the credential the chain resolved with the loaded config.
     expect(h.clients).toEqual([AUTH]);
   });
@@ -194,7 +196,7 @@ describe("resource import: reading and batching", () => {
     const file = write("rows.csv", "a\n1\n");
     expect(await runCli([...IMPORT, "-f", file, "-V", "4", "-v"], h.deps)).toBe(0);
     expect(h.ingest.batches[0]!.events[0]).toMatchObject({ version: 4 });
-    expect(h.err[0]).toBe("→ Importing events 1 event(s)");
+    expect(diagnosticBodies(h.err)[0]).toBe("→ Importing events 1 event(s)");
   });
 
   describe("--id-column", () => {
@@ -220,7 +222,7 @@ describe("resource import: reading and batching", () => {
       const h = harness();
       const file = write("r.csv", "name,price\nWidget,9.99\n");
       expect(await runCli([...IMPORT, "-f", file, "--id-column", "nope"], h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: Row 1: column 'nope' not found. Keys: ['name', 'price']"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: Row 1: column 'nope' not found. Keys: ['name', 'price']"]);
       expect(h.ingest.batches).toEqual([]);
     });
 
@@ -228,7 +230,7 @@ describe("resource import: reading and batching", () => {
       const h = harness();
       const file = write("r.csv", "name\nWidget,9.99\n");
       expect(await runCli([...IMPORT, "-f", file, "--id-column", "sku"], h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: Row 1: column 'sku' not found. Keys: ['name', None]"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: Row 1: column 'sku' not found. Keys: ['name', None]"]);
     });
 
     it("keeps apart two ids past 2^53, which a JS number would round to one doc_id", async () => {
@@ -257,14 +259,14 @@ describe("resource import: reading and batching", () => {
     ])("lists the keys of %s in the order read, as Python's dict does", async (name, text, keys) => {
       const h = harness();
       expect(await runCli([...IMPORT, "-f", write(name, text), "--id-column", "id"], h.deps)).toBe(1);
-      expect(h.err).toEqual([`Error: Row 1: column 'id' not found. Keys: ${keys}`]);
+      expect(diagnosticBodies(h.err)).toEqual([`Error: Row 1: column 'id' not found. Keys: ${keys}`]);
     });
 
     it("refuses an empty doc_id before sending anything, where Python's model raises a traceback", async () => {
       const h = harness();
       const file = write("r.csv", "sku,qty\nA-1,1\n,2\n");
       expect(await runCli([...IMPORT, "-f", file, "--id-column", "sku"], h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: Row 2: doc_id from column 'sku' must be 1-255 characters, got 0."]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: Row 2: doc_id from column 'sku' must be 1-255 characters, got 0."]);
       expect(h.ingest.batches).toEqual([]);
     });
   });
@@ -281,7 +283,7 @@ describe("resource import: reading and batching", () => {
   it("refuses a CSV row with more cells than the header, in the Python CLI's words", async () => {
     const h = harness();
     expect(await runCli([...IMPORT, "-f", write("r.csv", "a,b\n1,2\n1,2,3\n")], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Row 2: more fields than the header has columns."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Row 2: more fields than the header has columns."]);
     expect(h.ingest.batches).toEqual([]);
   });
 
@@ -290,7 +292,7 @@ describe("resource import: reading and batching", () => {
     const h = harness();
     const file = write("long.csv", `id,name\n${"x".repeat(256)},a\n`);
     expect(await runCli([...IMPORT, "-f", file, "--id-column", "id", "--progress", "json"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Row 1: doc_id from column 'id' must be 1-255 characters, got 256."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Row 1: doc_id from column 'id' must be 1-255 characters, got 256."]);
     expect(h.ingest.batches).toEqual([]);
   });
 
@@ -299,7 +301,7 @@ describe("resource import: reading and batching", () => {
     const h = harness();
     const file = write("extra.csv", "id,name\n1,a\n2,b,EXTRA\n");
     expect(await runCli([...IMPORT, "-f", file, "--progress", "json"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Row 2: more fields than the header has columns."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Row 2: more fields than the header has columns."]);
     expect(h.ingest.batches).toEqual([]);
   });
 });
@@ -317,7 +319,7 @@ describe("resource import: errors in Python's words", () => {
   ])("--format %s refuses %j (exit 1)", async (format, stdin, message) => {
     const h = harness({ stdin });
     expect(await runCli([...IMPORT, "--format", format], h.deps)).toBe(1);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(h.ingest.batches).toEqual([]);
   });
 
@@ -330,28 +332,28 @@ describe("resource import: errors in Python's words", () => {
   it("cannot detect the format of stdin, and does not read it", async () => {
     const h = harness({ stdin: "some data" });
     expect(await runCli(IMPORT, h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Cannot detect format. Use --format csv|json|jsonl"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Cannot detect format. Use --format csv|json|jsonl"]);
     expect(h.stdinReads).toBe(0);
   });
 
   it.each(["data.CSV", "data.txt", "data"])("cannot detect the format of %s", async (name) => {
     const h = harness();
     expect(await runCli([...IMPORT, "-f", write(name, "a\n1\n")], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Cannot detect format. Use --format csv|json|jsonl"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Cannot detect format. Use --format csv|json|jsonl"]);
   });
 
   it("names a file that cannot be opened while converting --file (exit 2)", async () => {
     const h = harness();
     const missing = path.join(dir, "missing.csv");
     expect(await runCli([...IMPORT, "-f", missing], h.deps)).toBe(2);
-    expect(h.err).toEqual([`Error: Invalid value for '--file' / '-f': '${missing}': No such file or directory`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for '--file' / '-f': '${missing}': No such file or directory`]);
   });
 
   it("reports the file before a missing required option, as click converts given options first", async () => {
     const h = harness();
     const missing = path.join(dir, "missing.csv");
     expect(await runCli(["resource", "import", "-f", missing], h.deps)).toBe(2);
-    expect(h.err[0]).toMatch(/^Error: Invalid value for '--file' \/ '-f': /);
+    expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: Invalid value for '--file' \/ '-f': /);
   });
 
   it("refuses bytes that are not UTF-8 (exit 1)", async () => {
@@ -359,7 +361,7 @@ describe("resource import: errors in Python's words", () => {
     const file = path.join(dir, "bad.csv");
     fs.writeFileSync(file, Buffer.from([0x61, 0x0a, 0xff]));
     expect(await runCli([...IMPORT, "-f", file], h.deps)).toBe(1);
-    expect(h.err[0]).toMatch(/^Error: Failed to read input: /);
+    expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: Failed to read input: /);
   });
 
   it.each<[string[], string]>([
@@ -371,7 +373,7 @@ describe("resource import: errors in Python's words", () => {
   ])("refuses %j (exit 2)", async (flags, message) => {
     const h = harness({ stdin: "a\n1" });
     expect(await runCli([...IMPORT, ...flags], h.deps)).toBe(2);
-    expect(h.err[0]).toBe(message);
+    expect(diagnosticBodies(h.err)[0]).toBe(message);
     expect(h.stdinReads).toBe(0);
   });
 
@@ -382,7 +384,7 @@ describe("resource import: errors in Python's words", () => {
       const h = harness({ stdin: "a\n1" });
       expect(await runCli([...IMPORT, "--format", "csv", "-V", raw], h.deps)).toBe(2);
       const digits = BigInt(raw.replace(/_/g, "")).toString();
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         `Error: Invalid value for '--version' / '-V': ${digits} is too large for this CLI to send ` +
           "exactly (at most 9007199254740991).",
       ]);
@@ -400,7 +402,7 @@ describe("resource import: errors in Python's words", () => {
     const eagain = Object.assign(new Error("EAGAIN: resource temporarily unavailable, read"), { code: "EAGAIN" });
     const h = harness({ stdin: eagain });
     expect(await runCli([...IMPORT, "--format", "jsonl"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Failed to read input: EAGAIN: resource temporarily unavailable, read"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Failed to read input: EAGAIN: resource temporarily unavailable, read"]);
     expect(h.ingest.batches).toEqual([]);
   });
 
@@ -410,7 +412,7 @@ describe("resource import: errors in Python's words", () => {
   ])("names a missing required option: %j", async (argv, message) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(message);
+    expect(diagnosticBodies(h.err)[0]).toBe(message);
   });
 });
 
@@ -458,7 +460,7 @@ describe("resource import: -v and --progress", () => {
     const h = harness({ stdin: jsonl(2), auth: new KaguraAuthError("No credentials found.") });
     expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
     expect(events(h.err)).toEqual([]);
-    expect(h.err).toEqual(["Error: No credentials found."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: No credentials found."]);
     expect(h.ingest.batches).toEqual([]);
   });
 
@@ -469,7 +471,7 @@ describe("resource import: -v and --progress", () => {
     }) as unknown as CliDeps["makeResourceClient"];
     expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
     expect(events(h.err)).toEqual([]);
-    expect(h.err).toEqual(["Error: boom"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: boom"]);
     expect(h.ingest.batches).toEqual([]);
   });
 
@@ -501,7 +503,7 @@ describe("resource import: -v and --progress", () => {
     ])("refuses %j, naming the value", async (text, shown) => {
       const h = harness();
       expect(await runCli([...IMPORT, "-f", write("inf.jsonl", text)], h.deps)).toBe(1);
-      expect(h.err).toEqual([`Error: Out of range float values are not JSON compliant: ${shown}`]);
+      expect(diagnosticBodies(h.err)).toEqual([`Error: Out of range float values are not JSON compliant: ${shown}`]);
       expect(h.ingest.batches).toEqual([]);
     });
 
@@ -520,7 +522,7 @@ describe("resource import: -v and --progress", () => {
   it("emits nothing when .kagura.json cannot be loaded", async () => {
     const h = harness({ stdin: jsonl(2), config: new Error("Invalid JSON or encoding in .kagura.json") });
     expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Invalid JSON or encoding in .kagura.json"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Invalid JSON or encoding in .kagura.json"]);
   });
 
   it("names an error that has no message by its class", async () => {
@@ -538,7 +540,7 @@ describe("resource import: -v and --progress", () => {
   it("-v prints Rich's plain lines and leaves stdout alone", async () => {
     const h = harness({ stdin: jsonl(250) });
     expect(await runCli([...IMPORT, "--format", "jsonl", "-v"], h.deps)).toBe(0);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "→ Importing events 250 event(s)",
       "→ Ingesting batch 1/3 (100 event(s))",
       "→ Ingesting batch 2/3 (100 event(s))",
@@ -560,41 +562,21 @@ describe("resource import: -v and --progress", () => {
     for (const flags of [[], ["-v", "--progress", "none"]]) {
       const h = harness({ stdin: jsonl(3) });
       expect(await runCli([...IMPORT, "--format", "jsonl", ...flags], h.deps)).toBe(0);
-      expect(h.err).toEqual([]);
+      expect(diagnosticBodies(h.err)).toEqual([]);
     }
   });
 
   it("emits nothing for input it refuses before the import starts", async () => {
     const h = harness({ stdin: "" });
     expect(await runCli([...IMPORT, "--format", "jsonl", "--progress", "json"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: No data found in input"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: No data found in input"]);
   });
 });
 
 describe("resource import --help", () => {
   it("lists Python's options, help texts and examples, -v and --progress last", async () => {
     const h = harness();
-    expect(await runCli(["resource", "import", "--help"], h.deps)).toBe(0);
-    const text = h.out.join("\n");
-    const lines = text.split("\n");
-    const options = lines.slice(lines.indexOf("Options:") + 1).map((l) => l.trim());
-    expect(options.map((l) => l.split(/\s{2,}/)[0])).toEqual([
-      "-r, --resource-id TEXT",
-      "-k, --api-key TEXT",
-      "-f, --file FILENAME",
-      "--format [auto|csv|json|jsonl]",
-      "--id-column TEXT",
-      "-V, --version INTEGER",
-      "-v, --verbose",
-      "--progress [rich|json|none]",
-      "--help",
-    ]);
-    // Python shows no default for these, and no help for --file / --format.
-    expect(options[2]).toBe("-f, --file FILENAME");
-    expect(options[3]).toBe("--format [auto|csv|json|jsonl]");
-    expect(text).toContain("Column name to use as doc_id (default: row number)");
-    expect(text).toContain("Version (>=1)");
-    expect(text).toContain("Auto-detects format from file extension, or specify --format.");
-    expect(text).toContain("cat items.json | kagura-memory resource import -r products -k TOKEN --format json");
+    expect(await runCli(["resource","import","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("resource import"));
   });
 });

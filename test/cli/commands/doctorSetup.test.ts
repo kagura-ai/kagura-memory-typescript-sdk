@@ -1,3 +1,5 @@
+import { diagnosticBodies } from "../diagnostics.js";
+import { optionLines } from "../helpAssertions.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1582,7 +1584,7 @@ describe("kagura-memory setup claude", () => {
     ])("from --mcp-url %j", async (url, shown) => {
       const h = harness({}, { onPath: { claude: "/usr/bin/claude" } });
       expect(await runCli(claude("--mcp-url", url, "--scope", "user"), h.deps)).toBe(1);
-      expect(h.err).toEqual([refused(shown)]);
+      expect(diagnosticBodies(h.err)).toEqual([refused(shown)]);
       expect(h.out).toEqual([]);
       expect(h.runs).toEqual([]);
       expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
@@ -1593,7 +1595,7 @@ describe("kagura-memory setup claude", () => {
       fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ mcp_url: "http://evil.example/mcp" }));
       const h = harness({});
       expect(await runCli(claude(), h.deps)).toBe(1);
-      expect(h.err).toEqual([refused("http://evil.example/mcp")]);
+      expect(diagnosticBodies(h.err)).toEqual([refused("http://evil.example/mcp")]);
       expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
       expect(readJson(path.join(sandbox, ".kagura.json"))).toEqual({ mcp_url: "http://evil.example/mcp" });
     });
@@ -1603,7 +1605,7 @@ describe("kagura-memory setup claude", () => {
       process.env.KAGURA_MCP_URL = "http://evil.example/mcp";
       const h = harness({});
       expect(await runCli(["setup", "claude", "--project-dir", sandbox], h.deps)).toBe(1);
-      expect(h.err).toEqual([refused("http://evil.example/mcp")]);
+      expect(diagnosticBodies(h.err)).toEqual([refused("http://evil.example/mcp")]);
       expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
       expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
     });
@@ -1614,7 +1616,7 @@ describe("kagura-memory setup claude", () => {
       fs.writeFileSync(path.join(sandbox, ".kagura.json"), JSON.stringify({ mcp_url: "http://evil.example/mcp" }));
       const h = harness({});
       expect(await runCli(claude("--mcp-url="), h.deps)).toBe(1);
-      expect(h.err).toEqual([refused("http://evil.example/mcp")]);
+      expect(diagnosticBodies(h.err)).toEqual([refused("http://evil.example/mcp")]);
       expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
       expect(readJson(path.join(sandbox, ".kagura.json"))).toEqual({ mcp_url: "http://evil.example/mcp" });
     });
@@ -1770,8 +1772,8 @@ describe("kagura-memory setup claude", () => {
     // Nothing follows the reason: V8 on every supported Node (20.19+) words
     // an "Unexpected token" error with no position, and the last case is
     // not a parse error at all.
-    expect(h.err).toEqual([`Error: refusing to rewrite ${path.join(sandbox, file)}: ${reason}`]);
-    expect(h.err[0]).not.toContain("FILECANARY");
+    expect(diagnosticBodies(h.err)).toEqual([`Error: refusing to rewrite ${path.join(sandbox, file)}: ${reason}`]);
+    expect(diagnosticBodies(h.err)[0]).not.toContain("FILECANARY");
   });
 
   it("rejects --profile with --api-key", async () => {
@@ -1853,7 +1855,7 @@ describe("kagura-memory setup claude", () => {
       expect(h.server.requests.every((r) => r.url === B.mcp_url && r.headers.authorization === `Bearer ${B.api_key}`)).toBe(
         true,
       );
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "  Warning: no context named 'ctx-b' is visible to this credential; using it as a raw context id.",
       ]);
     });
@@ -1950,7 +1952,7 @@ describe("kagura-memory setup claude", () => {
   it("documents the entry forms, the server floors and the inert flags in --help", async () => {
     const h = harness({});
     expect(await runCli(["setup", "claude", "--help"], h.deps)).toBe(0);
-    const text = h.out.join("\n");
+    const text = h.out.join("\n") + "\n" + optionLines(h.out.join("\n")).join("\n");
     // The user-scope entry's variable, and no word of a key on argv.
     expect(text).toContain("${KAGURA_MCP_API_KEY}");
     expect(text).not.toMatch(/argument list/);
@@ -2023,7 +2025,7 @@ describe("setup claude --guardrails and --tool-profile", () => {
       // would otherwise look like it worked.
       const h = harness({});
       expect(await runCli(claude(`--guardrails=${value}`), h.deps)).toBe(2);
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         `Error: Invalid value for '--guardrails': guardrails must be 'off' or a context UUID, got '${value}'`,
       );
       expect(fs.existsSync(path.join(sandbox, ".mcp.json"))).toBe(false);
@@ -2033,7 +2035,7 @@ describe("setup claude --guardrails and --tool-profile", () => {
   it.each(["", "  "])("rejects --tool-profile %j with exit 2, in Python 0.44.0's words", async (value) => {
     const h = harness({});
     expect(await runCli(claude(`--tool-profile=${value}`), h.deps)).toBe(2);
-    expect(h.err).toContain("Error: Invalid value for '--tool-profile': tool_profile must not be empty");
+    expect(diagnosticBodies(h.err)).toContain("Error: Invalid value for '--tool-profile': tool_profile must not be empty");
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 
@@ -2129,7 +2131,7 @@ describe("setup claude --add-tools and --context (#83)", () => {
   ])("refuses %j with exit 2, writing nothing", async (extra, message) => {
     const h = harness({});
     expect(await runCli(claude(...extra), h.deps)).toBe(2);
-    expect(h.err).toContain(message);
+    expect(diagnosticBodies(h.err)).toContain(message);
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
     expect(fs.existsSync(mcpJson())).toBe(false);
   });
@@ -2386,10 +2388,10 @@ describe("setup claude scopes", () => {
     expect(mcpRuns(h).map((r) => r[2])).toEqual(["remove", "add-json", "add-json"]);
     expect(JSON.parse(mcpRuns(h)[2]![6]!)).toEqual(oldEntry);
     const err = h.err.join("\n");
-    expect(err).toMatch(/add-json.*failed \(exit 1\)/);
-    expect(err).toContain("The previous user-scope 'kagura-memory' entry was put back.");
-    expect(err).not.toContain("could not be restored");
-    expect(err).not.toContain(KEY);
+    expect(diagnosticBodies(err)).toMatch(/add-json.*failed \(exit 1\)/);
+    expect(diagnosticBodies(err)).toContain("The previous user-scope 'kagura-memory' entry was put back.");
+    expect(diagnosticBodies(err)).not.toContain("could not be restored");
+    expect(diagnosticBodies(err)).not.toContain(KEY);
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
 
@@ -2413,11 +2415,11 @@ describe("setup claude scopes", () => {
     ]);
     const err = h.err.join("\n");
     // The first error is kept; the restore's is named in the reason.
-    expect(err).toMatch(/^Error: `claude mcp add-json .*` failed \(exit 1\):\n {2}new entry rejected\n/m);
-    expect(err).toContain("The previous user-scope kagura-memory entry was removed and could not be restored (");
-    expect(err).toContain("Invalid configuration");
-    expect(err).toContain("); the command above re-adds it.");
-    expect(err).not.toContain(KEY);
+    expect(diagnosticBodies(err)).toMatch(/^Error: `claude mcp add-json .*` failed \(exit 1\):\n {2}new entry rejected\n/m);
+    expect(diagnosticBodies(err)).toContain("The previous user-scope kagura-memory entry was removed and could not be restored (");
+    expect(diagnosticBodies(err)).toContain("Invalid configuration");
+    expect(diagnosticBodies(err)).toContain("); the command above re-adds it.");
+    expect(diagnosticBodies(err)).not.toContain(KEY);
   });
 
   it("never puts back an entry that holds a key: it prints the re-add command, key masked", async () => {
@@ -2444,12 +2446,12 @@ describe("setup claude scopes", () => {
         `'{"type":"http","url":"https://old","headers":{"Authorization":"Bearer <your-api-key>"}}'`,
     ]);
     const err = h.err.join("\n");
-    expect(err).toContain(
+    expect(diagnosticBodies(err)).toContain(
       "could not be restored (the entry holds an API key, which setup never passes on a command line); " +
         "the command above re-adds it.",
     );
-    expect(err).not.toContain(OLD_KEY);
-    expect(err).not.toContain(KEY);
+    expect(diagnosticBodies(err)).not.toContain(OLD_KEY);
+    expect(diagnosticBodies(err)).not.toContain(KEY);
   });
 
   it("--scope user without claude on PATH prints the command to run, then fails as Python does", async () => {
@@ -2463,13 +2465,13 @@ describe("setup claude scopes", () => {
       ...ENV_NOTE_LINES,
     ]);
     const err = h.err.join("\n");
-    expect(err).toContain(
+    expect(diagnosticBodies(err)).toContain(
       "Error: The Claude Code CLI (`claude`) was not found on PATH (a Windows .cmd shim is not run: " +
         "it needs a shell). A user-scope entry lives in ~/.claude.json, which Claude Code owns, so " +
         "setup writes it only through `claude mcp add-json`. Nothing was written.",
     );
-    expect(err).not.toMatch(/in this shell/);
-    expect(err).not.toContain(KEY);
+    expect(diagnosticBodies(err)).not.toMatch(/in this shell/);
+    expect(diagnosticBodies(err)).not.toContain(KEY);
     expect(h.runs).toEqual([]);
     expect(fs.existsSync(path.join(sandbox, ".kagura.json"))).toBe(false);
   });
@@ -2509,12 +2511,12 @@ describe("setup claude scopes", () => {
     );
     expect(await runCli(claude("--scope", "user", "--mcp-url", "https://x.test/mcp"), h.deps)).toBe(1);
     const err = h.err.join("\n");
-    expect(err).toMatch(/add-json.*failed \(exit 1\)/);
+    expect(diagnosticBodies(err)).toMatch(/add-json.*failed \(exit 1\)/);
     // The entry it echoes names the variable; the key it could only have
     // found elsewhere is still cut out.
-    expect(err).toContain(`Bearer ${REF}`);
-    expect(err).toContain("(<redacted>)");
-    expect(err).not.toContain(KEY);
+    expect(diagnosticBodies(err)).toContain(`Bearer ${REF}`);
+    expect(diagnosticBodies(err)).toContain("(<redacted>)");
+    expect(diagnosticBodies(err)).not.toContain(KEY);
   });
 
   it.each([
@@ -2592,7 +2594,7 @@ describe("setup claude scopes", () => {
     process.chdir(sandbox);
     const h = harness({});
     expect(await runCli(claude(), h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "  Warning: Claude Code uses the kagura-memory entry from the strongest scope,",
       "  so in this project a project-scope entry would be hidden by:",
       "    local scope (~/.claude.json) — remove it with:",
@@ -2620,14 +2622,14 @@ describe("setup claude scopes", () => {
     process.chdir(sandbox);
     const elsewhere = harness({}, onClaude);
     expect(await runCli(args, elsewhere.deps)).toBe(1);
-    expect(elsewhere.err).toContain(`      ${cd}claude mcp remove --scope local kagura-memory`);
-    expect(elsewhere.err).toContain(`      ${cd}claude mcp remove --scope project kagura-memory`);
+    expect(diagnosticBodies(elsewhere.err)).toContain(`      ${cd}claude mcp remove --scope local kagura-memory`);
+    expect(diagnosticBodies(elsewhere.err)).toContain(`      ${cd}claude mcp remove --scope project kagura-memory`);
 
     process.chdir(project);
     const inProject = harness({}, onClaude);
     expect(await runCli(args, inProject.deps)).toBe(1);
-    expect(inProject.err).toContain("      claude mcp remove --scope local kagura-memory");
-    expect(inProject.err).toContain("      claude mcp remove --scope project kagura-memory");
+    expect(diagnosticBodies(inProject.err)).toContain("      claude mcp remove --scope local kagura-memory");
+    expect(diagnosticBodies(inProject.err)).toContain("      claude mcp remove --scope project kagura-memory");
   });
 
   describe("local scope, keyed as Claude Code keys it", () => {
@@ -2712,8 +2714,8 @@ describe("setup claude scopes", () => {
       const h = harness({}, onClaude);
       expect(await runCli(claudeIn(sub, "--scope", "user"), h.deps)).toBe(1);
       const realRepo = fs.realpathSync(repo);
-      expect(h.err).toContain(`    project scope (${path.join(realRepo, ".mcp.json")}) — remove it with:`);
-      expect(h.err).toContain(`      cd '${realRepo}' && claude mcp remove --scope project kagura-memory`);
+      expect(diagnosticBodies(h.err)).toContain(`    project scope (${path.join(realRepo, ".mcp.json")}) — remove it with:`);
+      expect(diagnosticBodies(h.err)).toContain(`      cd '${realRepo}' && claude mcp remove --scope project kagura-memory`);
       expect(mcpRuns(h)).toEqual([]);
       expect(fs.readFileSync(mcpJson, "utf-8")).toBe(before);
     });
@@ -2759,10 +2761,10 @@ describe("setup claude scopes", () => {
     const h = harness({}, onClaude);
     expect(await runCli(claude("--scope", "user"), h.deps)).toBe(1);
     const err = h.err.join("\n");
-    expect(err).toContain("    local scope (~/.claude.json) — remove it with:");
-    expect(err).toContain("    project scope (.mcp.json) — remove it with:");
-    expect(err).toContain("      claude mcp remove --scope project kagura-memory");
-    expect(err).toContain("Error: Nothing was written: the local-scope kagura-memory entry would hide the user-scope one.");
+    expect(diagnosticBodies(err)).toContain("    local scope (~/.claude.json) — remove it with:");
+    expect(diagnosticBodies(err)).toContain("    project scope (.mcp.json) — remove it with:");
+    expect(diagnosticBodies(err)).toContain("      claude mcp remove --scope project kagura-memory");
+    expect(diagnosticBodies(err)).toContain("Error: Nothing was written: the local-scope kagura-memory entry would hide the user-scope one.");
     expect(h.runs).toEqual([]);
   });
 
@@ -2827,7 +2829,7 @@ describe("setup claude scopes", () => {
         JSON.stringify({ projects: { [realSandbox()]: { mcpServers: { "kagura-memory": {} } } } }),
       );
       expect(await runCli(claude(), shadowed.deps)).toBe(1);
-      expect(shadowed.err).toContain(`    local scope (${label()}) — remove it with:`);
+      expect(diagnosticBodies(shadowed.err)).toContain(`    local scope (${label()}) — remove it with:`);
     });
 
     it.each(cases)("in doctor's report, $CLAUDE_CONFIG_DIR %s", async (_where, dir, label) => {

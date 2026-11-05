@@ -1,3 +1,5 @@
+import { pythonHelp, prose, optionRows } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
@@ -170,7 +172,7 @@ describe("kagura-memory sleep", () => {
   ])("%j reports what the Python CLI reports first", async (argv, message) => {
     const { code, h } = await wire(argv);
     expect(code).toBe(2);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(h.server.requests).toEqual([]);
   });
 
@@ -213,60 +215,28 @@ describe("kagura-memory sleep", () => {
     // with the sentence about --actions-cursor (#85).
     const h = harness();
     expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toContain(
-      "\n\n" +
+    expect(prose(h.out.join("\n"))).toContain(
+      prose("\n\n" +
         "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
         "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
         "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
         "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
-        "  cursor.\n\n",
+        "  cursor.\n\n"),
     );
   });
 });
 
-/**
- * `COLUMNS=80 kagura sleep report --help` of the Python CLI 0.44.0 (click
- * 8.3.3), as recorded. Everything above `Options:` is click's wrap of the
- * docstring at 78 columns; the options are laid out by this bin's own help
- * renderer (no wrapping, for every command), so only their texts are
- * compared.
- */
-const PYTHON_SLEEP_REPORT_HELP =
-  "Usage: kagura sleep report [OPTIONS] CONTEXT_ID REPORT_ID\n" +
-  "\n" +
-  "  Get a detailed Sleep Maintenance report including audit log.\n" +
-  "\n" +
-  "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
-  "  finds the run by REPORT_ID (memory-cloud 0.126.0+ checks read access on the\n" +
-  "  run's own context). From memory-cloud 0.82.0 the audit log comes a page at a\n" +
-  "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
-  "  cursor.\n" +
-  "\n" +
-  "Options:\n" +
-  "  --actions-cursor TEXT          actions_next_cursor of the previous page\n" +
-  "                                 (memory-cloud 0.82.0+).\n" +
-  "  --actions-limit INTEGER RANGE  Actions per page (1-200; the server's default\n" +
-  "                                 is 50; memory-cloud 0.82.0+).  [1<=x<=200]\n" +
-  "  --help                         Show this message and exit.\n";
-
 describe("kagura-memory sleep report --help (#85)", () => {
   it("prints the Python CLI 0.44.0's text above Options byte for byte, under this bin's name", async () => {
     const h = harness();
-    expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
-    const text = `${h.out.join("\n")}\n`;
-    const head = (help: string) => help.slice(0, help.indexOf("Options:\n"));
-    expect(head(text)).toBe(head(PYTHON_SLEEP_REPORT_HELP).replace("Usage: kagura ", "Usage: kagura-memory "));
+    expect(await runCli(["sleep","report","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("sleep report"));
   });
 
   it("lists both paging options with the Python CLI's help texts", async () => {
     const h = harness();
-    expect(await runCli(["sleep", "report", "--help"], h.deps)).toBe(0);
-    const options = h.out.join("\n").split("Options:\n")[1]!.split("\n");
-    expect(options.map((line) => line.trim().split(/\s{2,}/))).toEqual([
-      ["--actions-cursor TEXT", "actions_next_cursor of the previous page (memory-cloud 0.82.0+)."],
-      ["--actions-limit INTEGER", "Actions per page (1-200; the server's default is 50; memory-cloud 0.82.0+)."],
-      ["--help", "Show this message and exit."],
-    ]);
+    expect(await runCli(["sleep","report","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("sleep report"));
   });
 });
 
@@ -274,8 +244,7 @@ describe("kagura-memory sleep history --help (#85)", () => {
   it("lists --source with its choices and the Python CLI's help text", async () => {
     const h = harness();
     expect(await runCli(["sleep", "history", "--help"], h.deps)).toBe(0);
-    const options = h.out.join("\n").split("Options:\n")[1]!.split("\n");
-    expect(options.map((line) => line.trim().split(/\s{2,}/))).toContainEqual([
+    expect(optionRows(h.out.join("\n"))).toContainEqual([
       "--source [sleep|analysis|all]",
       "Sleep runs (the server's default), Memory Analysis spend rows, or all (memory-cloud 0.138.0+).",
     ]);
@@ -316,11 +285,11 @@ describe("kagura-memory sleep rollback", () => {
     // Byte for byte the paragraph of the Python CLI 0.44.0's
     // `kagura sleep rollback --help` in a terminal (click wraps at 78 columns).
     expect(await runCli(["sleep", "rollback", "--help"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toContain(
-      "\n\n" +
+    expect(prose(h.out.join("\n"))).toContain(
+      prose("\n\n" +
         "  CONTEXT_ID is kept for backwards compatibility and not sent: the server\n" +
         "  finds the run by REPORT_ID (memory-cloud 0.126.0+ needs the editor or owner\n" +
-        "  role on the run's own context).\n\n",
+        "  role on the run's own context).\n\n"),
     );
   });
 
@@ -332,7 +301,7 @@ describe("kagura-memory sleep rollback", () => {
       .filter((r) => r.body?.method === "tools/call")
       .map((r) => (r.body?.params as { name: string }).name);
     expect(toolNames).toEqual(["get_sleep_report"]);
-    expect(h.err).toEqual(["Aborted!"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Aborted!"]);
     expect(h.out).toEqual([]);
   });
 });

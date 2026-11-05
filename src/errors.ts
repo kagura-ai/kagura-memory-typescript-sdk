@@ -364,6 +364,9 @@ export class KaguraLLMError extends KaguraError {}
 /** Context not found or invalid. */
 export class KaguraContextError extends KaguraError {}
 
+/** Adding this context role requires a change to the member's workspace access list. */
+export class KaguraContextNotInAccessListError extends KaguraContextError {}
+
 /**
  * A quota or cap was reached.
  *

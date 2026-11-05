@@ -16,16 +16,16 @@
  */
 
 import { SOURCE_LABEL } from "./auth/types.js";
-import { KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseError } from "./errors.js";
+import { KaguraAuthError, KaguraContextNotInAccessListError, KaguraPermissionError, KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseError } from "./errors.js";
 import { responseRetryAfter, sanitizeServerDetail } from "./http.js";
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "./models.js";
 import { pyTypeName } from "./python.js";
 import { responseShapeError } from "./responseShape.js";
-import { MEMBER_API_KEY, WORKSPACE_INVITATION, readModel, type Model } from "./pyModels.js";
+import { WORKSPACE_MEMBER_ACCESS_FIELDS, CONTEXT_MEMBER, MEMBER_CONTEXT_ACCESS, MEMBER_CONTEXT_ACCESS_UPDATE, MEMBER_API_KEY, WORKSPACE_INVITATION, readModel, type Model } from "./pyModels.js";
 import { pathSegment } from "./pathSegment.js";
 import { normalizeUuid } from "./pyCompat.js";
 import { KaguraRestClient, requireInt, requirePublicId } from "./restBase.js";
-import type { RequestContext, RestResponse } from "./restBase.js";
+import type { KaguraRestClientOptions, RequestContext, RestResponse } from "./restBase.js";
 
 export const VALID_ASSIGNABLE_ROLES = ["member", "admin", "viewer"] as const;
 // "owner" is excluded: the server 422s programmatic role=owner on member
@@ -83,6 +83,56 @@ export function readMemberKey(raw: unknown, operation: string): MemberAPIKey {
   return readWorkspaceRow(raw, MEMBER_API_KEY, operation) as unknown as MemberAPIKey;
 }
 
+/** The add and role-change routes always expose the access list, including on older servers. */
+export type WorkspaceMemberResult = WorkspaceMember & { allowed_context_ids: string[] | null };
+
+/** Use an existing web session. Node callers supply a fetch with their session cookie/CSRF handling. */
+export interface WorkspaceSessionOptions extends Pick<KaguraRestClientOptions, "timeoutMs" | "fetch"> {
+  baseUrl: string;
+  session: true;
+  apiKey?: never;
+  oauth?: never;
+}
+
+export interface AddMemberOptions {
+  role?: string;
+  allowedContextIds?: readonly string[] | null;
+}
+
+export interface MemberContextAccessUpdate {
+  status: "ok";
+  user_id: string;
+  allowed_context_ids: string[] | null;
+}
+
+export interface MemberContextAccess {
+  user_id: string;
+  role: string;
+  allowed_context_ids: string[] | null;
+  contexts: {
+    id: string;
+    name: string;
+    display_name: string | null;
+    summary: string | null;
+    is_private: boolean;
+    is_own_private: boolean;
+  }[];
+}
+
+export interface ContextMember {
+  user_id: string;
+  role: string;
+  added_at: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  is_workspace_admin: boolean;
+  access_list_extended: boolean;
+}
+
+function contextIds(ids: readonly string[] | null): string[] | null {
+  return ids === null ? null : ids.map(id => normalizeUuid(id, "allowedContextIds"));
+}
+
 /** Options for {@link WorkspaceClient.createInvitation}. */
 export interface CreateInvitationOptions {
   /** `member` | `admin` | `viewer` (default: `"member"`). */
@@ -131,9 +181,18 @@ export interface ListInvitationsOptions {
  *   its counts
  */
 export class WorkspaceClient extends KaguraRestClient {
+  constructor(options: KaguraRestClientOptions | WorkspaceSessionOptions = {}) {
+    super(options, "session" in options && options.session ? "session" : "bearer");
+  }
+
   // -------------------------------------------------------------------
   // Members
   // -------------------------------------------------------------------
+
+  private readMember(raw: unknown, operation: string): WorkspaceMemberResult {
+    const fields = readModel(raw, WORKSPACE_MEMBER_ACCESS_FIELDS, operation);
+    return { ...(raw as WorkspaceMember), allowed_context_ids: fields.allowed_context_ids as string[] | null };
+  }
 
   /**
    * List workspace members (owner key required).
@@ -156,15 +215,58 @@ export class WorkspaceClient extends KaguraRestClient {
    * user_id copied from a trusted source. Duplicate members are rejected
    * with 422.
    */
-  async addMember(workspaceId: string, userId: string, role = "member"): Promise<WorkspaceMember> {
+  async addMember(
+    workspaceId: string,
+    userId: string,
+    roleOrOptions: string | AddMemberOptions = "member",
+  ): Promise<WorkspaceMemberResult> {
+    const options = typeof roleOrOptions === "string" ? { role: roleOrOptions } : roleOrOptions;
+    const role = options.role ?? "member";
     const ws = normalizeWorkspaceId(workspaceId);
     this.validateRole(role);
     // Checked as the member's path will be, though the id goes in the body.
     userIdSegment(userId);
     const resp = await this.request("POST", `/api/v1/workspaces/${ws}/members`, {
-      json: { user_id: userId, role },
+      json: {
+        user_id: userId, role,
+        ...(options.allowedContextIds === undefined ? {} : { allowed_context_ids: contextIds(options.allowedContextIds) }),
+      },
     });
-    return this.json(resp) as unknown as WorkspaceMember;
+    return this.readMember(this.json(resp), "WorkspaceClient.add_member");
+  }
+
+  /** Read the access list and assignable contexts (memory-cloud v0.144.0+). */
+  async getMemberContextAccess(workspaceId: string, userId: string): Promise<MemberContextAccess> {
+    const path = memberPath(normalizeWorkspaceId(workspaceId), userId);
+    const resp = await this.request("GET", path + "/context-access", { typedPermissionErrors: true });
+    return readModel(this.json(resp), MEMBER_CONTEXT_ACCESS, "WorkspaceClient.get_member_context_access") as unknown as MemberContextAccess;
+  }
+
+  /** Replace the list. null restores role defaults. [] grants members/viewers no shared contexts. */
+  async setMemberContextAccess(workspaceId: string, userId: string, ids: readonly string[] | null): Promise<MemberContextAccessUpdate> {
+    const path = memberPath(normalizeWorkspaceId(workspaceId), userId);
+    const resp = await this.request("PUT", path + "/context-access", {
+      typedPermissionErrors: true,
+      json: { allowed_context_ids: contextIds(ids) },
+    });
+    return readModel(this.json(resp), MEMBER_CONTEXT_ACCESS_UPDATE, "WorkspaceClient.set_member_context_access") as unknown as MemberContextAccessUpdate;
+  }
+
+  /** Requires a signed-in web session. On Node, provide a fetch that carries the session cookie. */
+  async addContextMember(
+    contextId: string, userId: string, role: "owner" | "editor" | "viewer",
+    options: { extendAccessList?: boolean } = {},
+  ): Promise<ContextMember> {
+    const id = normalizeUuid(contextId, "contextId");
+    userIdSegment(userId);
+    const resp = await this.request("POST", `/api/v1/contexts/${id}/members`, {
+      session: true,
+      json: {
+        user_id: userId, role,
+        ...(options.extendAccessList === undefined ? {} : { extend_access_list: options.extendAccessList }),
+      },
+    });
+    return readModel(this.json(resp), CONTEXT_MEMBER, "WorkspaceClient.add_context_member") as unknown as ContextMember;
   }
 
   /** Change a member's role (member/admin/viewer only). */
@@ -172,11 +274,11 @@ export class WorkspaceClient extends KaguraRestClient {
     workspaceId: string,
     userId: string,
     role: string,
-  ): Promise<WorkspaceMember> {
+  ): Promise<WorkspaceMemberResult> {
     const ws = normalizeWorkspaceId(workspaceId);
     this.validateRole(role);
     const resp = await this.request("PUT", memberPath(ws, userId), { json: { role } });
-    return this.json(resp) as unknown as WorkspaceMember;
+    return this.readMember(this.json(resp), "WorkspaceClient.update_member_role");
   }
 
   /** Remove a member from the workspace (server returns 204). */
@@ -467,13 +569,36 @@ export class WorkspaceClient extends KaguraRestClient {
 
   // ---- KaguraRestClient hooks -----------------------------------------
 
-  protected override error403(response: RestResponse, _context: RequestContext): KaguraError {
+  protected override error401(response: RestResponse): KaguraError {
+    if (response.session === true) {
+      return new KaguraAuthError("A signed-in session is required to add a context member.");
+    }
+    return super.error401(response);
+  }
+
+  protected override genericError(response: RestResponse): KaguraError {
+    const body = this.errorBody(response);
+    if (response.session && response.status === 409 && body.envelope?.code === "RES-002" &&
+        body.envelope.details.reason === "context_not_in_access_list") {
+      return new KaguraContextNotInAccessListError(sanitizeServerDetail(body.detail) ?? "Context is outside the member's access list");
+    }
+    return super.genericError(response);
+  }
+
+  protected override error403(response: RestResponse, context: RequestContext): KaguraError {
     // A plan or quota refusal is not an ownership problem: type it rather
     // than pass it through as a connection error.
-    return (
-      this.gateRefusal(response) ??
-      new KaguraConnectionError(this.format403(this.errorBody(response).detail))
-    );
+    const gated = this.gateRefusal(response);
+    if (gated !== null) return gated;
+    const body = this.errorBody(response);
+    const requiredRole = body.fields?.[1].required_role;
+    if (context.typedPermissionErrors || response.session) {
+      return new KaguraPermissionError(
+        sanitizeServerDetail(body.detail) ?? "Insufficient permissions",
+        typeof requiredRole === "string" ? requiredRole : null,
+      );
+    }
+    return new KaguraConnectionError(this.format403(body.detail));
   }
 
   protected override error429(response: RestResponse): KaguraError {

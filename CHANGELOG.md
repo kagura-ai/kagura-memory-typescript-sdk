@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-05
+
+### Added
+
+- Workspace member context-access APIs for memory-cloud v0.144.0, including
+  explicit empty grants and a typed context-access conflict (#121).
+
+### Changed
+
+- Require Node.js >=22.12.0 for the SDK, CLI and MCPB bundle. Builds target Node 22 and the test suite runs on Vitest 5 (#115).
+- CLI help now uses Click's 80-column layout, wrapped option descriptions,
+  range metavars/annotations and required markers. Usage errors print Usage,
+  the `--help` hint and the error without dumping command help; missing file
+  paths follow the same rule. Parser errors that Click raises without context
+  still print only the error. Remaining command-surface help differences from
+  Python 0.44.0 are listed in `docs/cli-help-differences.md` (#111).
+
 ## [0.16.0] - 2026-11-05
 
 Reliability fixes for the existing Python SDK/CLI 0.44.0 parity surface.
@@ -3405,7 +3422,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.0...v0.14.1

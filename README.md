@@ -29,13 +29,13 @@ package also includes `kagura-memory-mcp`, a transparent stdio/HTTP proxy.
 npm install kagura-memory
 ```
 
-Requires Node.js >= 20.19.0 (Node 18 support ended with 0.14.x). Zero
+Requires Node.js >= 22.12.0 (this runtime migration drops Node 20). Zero
 runtime dependencies — the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
 
 Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`) and is checked
-against memory-cloud up to **v0.143.0**; the Python SDK 0.44.0, its
+against memory-cloud up to **v0.144.0**; the Python SDK 0.44.0, its
 parity target, is checked up to v0.142.0 (v0.143.0 changes nothing a
 client sees), and its own `MIN_SERVER_VERSION` stays at an advisory
 0.17.1. `checkServerVersion()` warns, and never throws, on an older
@@ -1309,7 +1309,7 @@ released, since it waits on the user. Python 0.44.0 and older TypeScript
 clients use incompatible locks: do not run them concurrently against the same
 credentials file. An existing legacy `.lock` is refused, never deleted by this
 SDK. Lock-v1 is never broken by age. See the
-[migration and crash-recovery instructions](docs/compatibility.md#unreleased-credential-concurrency-and-auth-token-112)
+[migration and crash-recovery instructions](docs/compatibility.md#credential-concurrency-and-auth-token-112)
 and [Python counterpart](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/327).
 Logout records revocation so a queued refresh cannot recreate credentials;
 `deleteCredentialsFile()` must now be awaited. This is client-side and works
@@ -1898,6 +1898,31 @@ them, and `warn: () => {}` silences them.
 Agent Registry and binding methods are covered in
 [Agent control plane](#agent-control-plane-memory-cloud-v0490) below.
 
+### Workspace member context access (memory-cloud v0.144.0+)
+
+Use a workspace owner's API key with `WorkspaceClient`. A workspace-bound key
+can manage only its own workspace. The server rejects OAuth on these routes.
+
+```ts
+await client.addMember(workspaceId, userId, { role: "viewer", allowedContextIds: [] });
+const { contexts } = await client.getMemberContextAccess(workspaceId, userId);
+await client.setMemberContextAccess(workspaceId, userId, [contextId]);
+```
+
+Omitting the list on add uses the server default. Passing `null` to the setter
+restores role defaults, and `[]` grants a member or viewer no shared contexts.
+Owners and admins retain access to shared contexts. Creators and their linked
+accounts retain access to their own private contexts regardless of this list. Each assignable context
+includes `is_own_private`. The existing positional role argument still works.
+
+For context roles, create a session client with
+`new WorkspaceClient({ baseUrl, session: true, fetch: sessionFetch })`.
+On Node the supplied fetch must carry the signed-in user's session and CSRF
+credentials. Call `addContextMember(contextId, userId, "editor")` on that client. A context outside the member's list raises
+`KaguraContextNotInAccessListError` with `details.reason` equal to
+`context_not_in_access_list`. A workspace owner or admin may explicitly retry
+with `extendAccessList: true`. The response reports `access_list_extended`.
+
 ### Permission model (memory-cloud v0.126.0+)
 
 The server decides who reaches which context, the same way on every MCP
@@ -2198,7 +2223,7 @@ one of those without the package and you get a `KaguraCryptoError` naming
 the install command, not a module-resolution stack trace.
 
 > **Node version.** `age-encryption`'s `@noble/*` dependencies declare
-> `engines.node: ">= 20.19.0"`, the same floor as this SDK, so the install
+> `engines.node: ">= 20.19.0"`, below this SDK's 22.12.0 floor, so the install
 > is clean on every supported Node, `engine-strict=true` included.
 > Encryption and keygen take their randomness from the `globalThis.crypto`
 > WebCrypto global, which Node has provided since 19; the SDK no longer
@@ -2243,7 +2268,7 @@ CLI as `kagura-memory`: 23 of the 24 top-level commands of the Python CLI
 differ.
 
 The parity target is the Python SDK and CLI **0.44.0**, checked against
-memory-cloud up to **v0.143.0**.
+memory-cloud up to **v0.144.0**.
 
 **SDK ↔ memory-cloud compatibility.**
 [`docs/compatibility.md`](docs/compatibility.md) records, for each release

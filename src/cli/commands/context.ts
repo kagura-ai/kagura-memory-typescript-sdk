@@ -55,6 +55,7 @@ const NAME_CONTAINS: FlagSpec = {
 };
 
 const LIMIT: FlagSpec = {
+  range: { min: 1, max: LIST_CONTEXTS_MAX_LIMIT, rangeLabel: `1<=x<=${LIST_CONTEXTS_MAX_LIMIT}`, integer: true, },
   name: "limit",
   type: "value",
   metavar: "INTEGER",
@@ -129,12 +130,7 @@ const list: Command = {
   },
   run: async (deps, args) => {
     // click converts the options before it looks for extra arguments.
-    const limit = optionalRanged(args, LIMIT, {
-      min: 1,
-      max: LIST_CONTEXTS_MAX_LIMIT,
-      rangeLabel: `1<=x<=${LIST_CONTEXTS_MAX_LIMIT}`,
-      integer: true,
-    });
+    const limit = optionalRanged(args, LIMIT);
     rejectExtraArgs(args);
     // The filter as the server reads it, by the rule `listContexts` applies:
     // stripped the Python way, and a blank one (`--name-contains=`
@@ -276,13 +272,18 @@ const update: Command = {
 };
 
 const SEMANTIC: FlagSpec = {
+  range: { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" },
   name: "semantic",
   type: "value",
   metavar: "FLOAT",
   help: "Semantic weight (0.0-1.0)",
 };
-const BM25: FlagSpec = { name: "bm25", type: "value", metavar: "FLOAT", help: "BM25 weight (0.0-1.0)" };
+const BM25: FlagSpec = {
+  name: "bm25", type: "value", metavar: "FLOAT", help: "BM25 weight (0.0-1.0)",
+  range: { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" },
+};
 const FETCH_FACTOR: FlagSpec = {
+  range: { min: 1, max: 10, rangeLabel: "1<=x<=10", integer: true, },
   name: "fetch-factor",
   type: "value",
   metavar: "INTEGER",
@@ -346,14 +347,9 @@ const searchConfig: Command = {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
     rejectExtraArgs(args, 1);
 
-    const semanticWeight = optionalRanged(args, SEMANTIC, { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" });
-    const bm25Weight = optionalRanged(args, BM25, { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" });
-    const fetchFactor = optionalRanged(args, FETCH_FACTOR, {
-      min: 1,
-      max: 10,
-      rangeLabel: "1<=x<=10",
-      integer: true,
-    });
+    const semanticWeight = optionalRanged(args, SEMANTIC);
+    const bm25Weight = optionalRanged(args, BM25);
+    const fetchFactor = optionalRanged(args, FETCH_FACTOR);
     const useRerank = pairedFlag(args.flags.has("rerank"), args.flags.has("no-rerank"), [
       "--rerank",
       "--no-rerank",

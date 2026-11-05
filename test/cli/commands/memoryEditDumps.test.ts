@@ -1,3 +1,6 @@
+import { diagnosticBody } from "../diagnostics.js";
+import { optionLines, prose } from "../helpAssertions.js";
+
 /**
  * `remember`, `update-memory` and `context search-config` with the
  * arguments of memory-cloud v0.78.0–v0.140.0 (#87), against the Python CLI
@@ -663,7 +666,8 @@ async function run(c: Pick<Case, "argv" | "replies" | "info">) {
 
 /** The Python stderr as this bin words it: the command is `kagura-memory`. */
 function asThisBin(stderr: string): string {
-  return stderr.replaceAll("`kagura reference`", "`kagura-memory reference`");
+  return stderr.replaceAll("`kagura reference`", "`kagura-memory reference`")
+    .replace(/^(Usage: |Try ')kagura(?= )/gm, "$1kagura-memory");
 }
 
 async function expectPython(c: Case) {
@@ -677,9 +681,10 @@ async function expectPython(c: Case) {
     const pyError = c.stderr.split("\n").find((line) => line.startsWith("Error: "))!;
     const jsonError = /^Error: Invalid JSON for --[\w-]+: /.exec(pyError);
     if (jsonError !== null) {
-      expect(err[0]?.startsWith(jsonError[0])).toBe(true);
+      expect(diagnosticBody(err[0]!).startsWith(jsonError[0])).toBe(true);
+      expect(err[0]).toMatch(/^Usage: kagura-memory /);
     } else {
-      expect(err[0]).toBe(pyError);
+      expect(terminalText(err)).toBe(asThisBin(c.stderr));
     }
   } else {
     expect(terminalText(err)).toBe(asThisBin(c.stderr));
@@ -723,7 +728,7 @@ describe("remember / update-memory / context search-config, as the Python CLI 0.
     ]) {
       const { code, err, server } = await run({ argv: ["context", "search-config", "ctx", ...pair] });
       expect(code).toBe(2);
-      expect(err[0]).toBe(`Error: ${pair[0]} and ${pair[1]} are mutually exclusive; pick one.`);
+      expect(diagnosticBody(err[0]!)).toBe(`Error: ${pair[0]} and ${pair[1]} are mutually exclusive; pick one.`);
       expect(server.requests).toEqual([]);
     }
   });
@@ -756,10 +761,10 @@ describe("remember / update-memory / context search-config, as the Python CLI 0.
 /**
  * The `--help` of the three commands, recorded from the Python CLI 0.44.0
  * (`kagura <command> --help`, COLUMNS=80): each description, whitespace
- * folded (click wraps it at 80 columns; this bin keeps Python's breaks), and
+ * folded for these wording assertions, and
  * the help of each option #87 adds or rewords. This bin lays the options out
- * in its own columns, one line each, without click's range suffix
- * (`[x>=1]`).
+ * with Click's wrapping and range suffix. Full layouts are independently
+ * checked by helpAudit111.test.ts.
  */
 const PYTHON_DESCRIPTIONS: ReadonlyArray<readonly [string[], string]> = [
   [["remember"], "Store a memory directly (without AI analysis). Coordinates in --details must be JSON numbers, not strings: the server rejects string-typed lat/lon with a 422 by design. Updating a memory replaces details wholesale; `kagura update-memory --merge-details` revises location while keeping the other keys (or re-send them yourself)."],
@@ -795,8 +800,8 @@ describe("--help, as the Python CLI 0.44.0", () => {
     "%s describes itself in Python's words",
     async (_, command, text) => {
       const lines = await help(command);
-      const description = lines.slice(0, lines.indexOf("Options:")).join(" ").split(/\s+/).join(" ");
-      expect(description).toContain(text.replaceAll("kagura ", "kagura-memory "));
+      const description = prose(lines.slice(0, lines.indexOf("Options:")).join("\n"));
+      expect(description).toContain(text.replaceAll("kagura ", "kagura-memory ").replaceAll("- ", "-"));
     },
   );
 
@@ -804,10 +809,10 @@ describe("--help, as the Python CLI 0.44.0", () => {
     "%s",
     async (_, command, flag, text) => {
       const lines = await help(command);
-      const options = lines.slice(lines.indexOf("Options:"));
+      const options = optionLines(lines.join("\n"));
       const line = options.find((l) => new RegExp(`^\\s+(?:-\\w, )?${flag}(?: |$)`).test(l));
       expect(line, flag).toBeDefined();
-      expect(line!.trimEnd().endsWith(`  ${text}`)).toBe(true);
+      expect(line).toContain(`  ${text}`);
     },
   );
 });

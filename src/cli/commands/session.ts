@@ -42,6 +42,7 @@ const CURSOR: FlagSpec = { name: "cursor", type: "value", help: "next_cursor of 
 
 /** `--max-chars` of `changes` / `list`: `click.IntRange(10000, 100000)`. */
 const MAX_CHARS: FlagSpec = {
+  range: { min: MAX_CHARS_MIN, max: MAX_CHARS_MAX, rangeLabel: `${MAX_CHARS_MIN}<=x<=${MAX_CHARS_MAX}`, integer: true },
   name: "max-chars",
   type: "value",
   metavar: "INTEGER",
@@ -50,11 +51,6 @@ const MAX_CHARS: FlagSpec = {
 
 /** `bootstrap`'s own floor (server `BOOTSTRAP_INDEX_MIN_CHARS`, v0.115.0+). */
 const BOOTSTRAP_MIN_CHARS = 2_000;
-
-/** A `click.IntRange(min, max)` option, or `undefined` when it was not given. */
-function rangedInt(args: ParsedArgs, flag: FlagSpec, min: number, max: number): number | undefined {
-  return optionalRanged(args, flag, { min, max, rangeLabel: `${min}<=x<=${max}`, integer: true });
-}
 
 /** A `click.Choice` option, or `undefined` when it was not given. */
 function choice<T extends string>(args: ParsedArgs, flag: FlagSpec, choices: readonly T[]): T | undefined {
@@ -93,6 +89,7 @@ const FORMAT: FlagSpec = {
     "Default: index below --max-chars 10000, else full",
 };
 const BOOTSTRAP_MAX_CHARS: FlagSpec = {
+  range: { min: BOOTSTRAP_MIN_CHARS, max: MAX_CHARS_MAX, rangeLabel: `${BOOTSTRAP_MIN_CHARS}<=x<=${MAX_CHARS_MAX}`, integer: true },
   name: "max-chars",
   type: "value",
   metavar: "INTEGER",
@@ -114,7 +111,7 @@ const bootstrap: Command = {
   spec: { flags: [CONTEXT_ID, SINCE, INCLUDE, FORMAT, BOOTSTRAP_MAX_CHARS] },
   run: async (deps, args) => {
     const format = choice(args, FORMAT, BOOTSTRAP_FORMATS);
-    const maxChars = rangedInt(args, BOOTSTRAP_MAX_CHARS, BOOTSTRAP_MIN_CHARS, MAX_CHARS_MAX);
+    const maxChars = optionalRanged(args, BOOTSTRAP_MAX_CHARS);
     rejectExtraArgs(args);
     const since = args.values.since;
     // The client checks the lane names, as in Python.
@@ -140,7 +137,8 @@ const bootstrap: Command = {
   },
 };
 
-const CHANGES_LIMIT: FlagSpec = { name: "limit", type: "value", metavar: "INTEGER", help: "Changes per page (default 50)" };
+const CHANGES_LIMIT: FlagSpec = {
+  range: { min: 1, max: 100, rangeLabel: `${1}<=x<=${100}`, integer: true }, name: "limit", type: "value", metavar: "INTEGER", help: "Changes per page (default 50)" };
 
 const changes: Command = {
   summary: "List what changed in a context since SINCE, oldest first (server v0.93.0+).",
@@ -178,8 +176,8 @@ const changes: Command = {
   },
   run: async (deps, args) => {
     // click checks a given option before it reports a SINCE not given.
-    const limit = rangedInt(args, CHANGES_LIMIT, 1, 100);
-    const maxChars = rangedInt(args, MAX_CHARS, MAX_CHARS_MIN, MAX_CHARS_MAX);
+    const limit = optionalRanged(args, CHANGES_LIMIT);
+    const maxChars = optionalRanged(args, MAX_CHARS);
     const since = requireArg(args, 0, "SINCE");
     rejectExtraArgs(args, 1);
     const { until, cursor } = args.values;
@@ -218,7 +216,8 @@ const ORDER_BY: FlagSpec = {
 };
 const DIRECTION: FlagSpec = { name: "direction", type: "value", metavar: "[asc|desc]", help: "Default desc" };
 
-const LIST_LIMIT: FlagSpec = { name: "limit", type: "value", metavar: "INTEGER", help: "Memories per page (default 50)" };
+const LIST_LIMIT: FlagSpec = {
+  range: { min: 1, max: 100, rangeLabel: `${1}<=x<=${100}`, integer: true }, name: "limit", type: "value", metavar: "INTEGER", help: "Memories per page (default 50)" };
 
 const list: Command = {
   summary: "List every memory of a context that matches exact filters (server v0.93.0+).",
@@ -249,8 +248,8 @@ const list: Command = {
   run: async (deps, args) => {
     const orderBy = choice(args, ORDER_BY, ORDER_BYS);
     const direction = choice(args, DIRECTION, DIRECTIONS);
-    const limit = rangedInt(args, LIST_LIMIT, 1, 100);
-    const maxChars = rangedInt(args, MAX_CHARS, MAX_CHARS_MIN, MAX_CHARS_MAX);
+    const limit = optionalRanged(args, LIST_LIMIT);
+    const maxChars = optionalRanged(args, MAX_CHARS);
     rejectExtraArgs(args);
     const filters = parseJsonObject(args.values.filters, "--filters", "'{\"type\": \"task\"}'");
     const { cursor } = args.values;

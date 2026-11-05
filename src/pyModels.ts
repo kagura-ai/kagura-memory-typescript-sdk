@@ -319,6 +319,47 @@ export function readModel(raw: unknown, model: Model, operation: string): Record
 // The Python SDK's models (models.py), fields in declaration order
 // ---------------------------------------------------------------------------
 
+export const WORKSPACE_MEMBER_ACCESS_FIELDS: Model = {
+  name: "WorkspaceMember",
+  fields: [optional("allowed_context_ids", nullable(listOf("str")))],
+};
+
+const ACCESS_CONTEXT: Model = {
+  name: "MemberContextAccessContext",
+  fields: [
+    required("id", "str"), required("name", "str"),
+    optional("display_name", nullable("str")), optional("summary", nullable("str")),
+    required("is_private", "bool"), optional("is_own_private", "bool", false),
+  ],
+};
+
+export const MEMBER_CONTEXT_ACCESS: Model = {
+  name: "MemberContextAccessResponse",
+  fields: [
+    required("user_id", "str"), required("role", "str"),
+    optional("allowed_context_ids", nullable(listOf("str"))),
+    required("contexts", listOf({ model: ACCESS_CONTEXT })),
+  ],
+};
+
+export const MEMBER_CONTEXT_ACCESS_UPDATE: Model = {
+  name: "MemberContextAccessUpdate",
+  fields: [
+    required("status", { literal: ["ok"] }), required("user_id", "str"),
+    required("allowed_context_ids", nullable(listOf("str"))),
+  ],
+};
+
+export const CONTEXT_MEMBER: Model = {
+  name: "ContextMemberResponse",
+  fields: [
+    required("user_id", "str"), required("role", "str"),
+    optional("user_name", nullable("str")), optional("user_email", nullable("str")),
+    optional("added_at", nullable("str")), optional("is_workspace_admin", "bool", false),
+    optional("access_list_extended", "bool", false),
+  ],
+};
+
 export const WORKSPACE_INVITATION: Model = {
   name: "WorkspaceInvitation",
   fields: [

@@ -1,3 +1,5 @@
+import { pythonHelp } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `kagura-memory guardrails load|digest` — the Python CLI's `guardrails`
  * group (tests/test_guardrails.py, "CLI: kagura guardrails load /
@@ -188,62 +190,20 @@ afterEach(() => {
 describe("guardrails group", () => {
   it("lists load and digest with Python's summaries", async () => {
     const h = harness();
-    expect(await runCli(["guardrails", "--help"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toBe(
-      [
-        "Usage: kagura-memory guardrails [OPTIONS] COMMAND [ARGS]...",
-        "",
-        "  Inspect a context's tool guardrails (server v0.74.0+).",
-        "",
-        "Commands:",
-        "  digest    Render the tool guardrails for clients without tool hooks.",
-        "  load      Load the full guardrail set (pinned + tool-triggered lanes) as JSON.",
-      ].join("\n"),
-    );
+    expect(await runCli(["guardrails","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("guardrails"));
   });
 
   it("documents load: one example per line, with this bin's name", async () => {
     const h = harness();
-    expect(await runCli(["guardrails", "load", "--help"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toBe(
-      [
-        "Usage: kagura-memory guardrails load [OPTIONS] [CONTEXT_ID]",
-        "",
-        "  Load the full guardrail set (pinned + tool-triggered lanes) as JSON.",
-        "",
-        "  CONTEXT_ID defaults to context_id in .kagura.json. Check pinned_truncated /",
-        "  tool_triggered_truncated before trusting the set as complete.",
-        "",
-        "  Examples:",
-        "    kagura-memory guardrails load",
-        "    kagura-memory guardrails load CTX_UUID --cap 200",
-        "",
-        "Options:",
-        "      --cap INTEGER       Max tool-triggered memories (1-1000, server default 50)",
-        "  --help                  Show this message and exit.",
-      ].join("\n"),
-    );
+    expect(await runCli(["guardrails","load","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("guardrails load"));
   });
 
   it("documents digest's options as click does", async () => {
     const h = harness();
-    expect(await runCli(["guardrails", "digest", "--help"], h.deps)).toBe(0);
-    const text = h.out.join("\n");
-    expect(text).toMatch(/^Usage: kagura-memory guardrails digest \[OPTIONS\] \[CONTEXT_ID\]$/m);
-    expect(text).toContain(
-      "--target [export|instructions]  export: the AGENTS.md block; instructions: " +
-        "the MCP server instructions preview  [default: export]",
-    );
-    expect(text).toContain(
-      "--out FILE                      Write the export block into FILE (e.g. AGENTS.md) " +
-        "instead of printing it",
-    );
-    expect(text).toContain("--profile TEXT                  With --target instructions: the MCP URL's");
-    expect(text).toContain("--tools TEXT                    With --target instructions: the MCP URL's");
-    expect(text).toContain(
-      "    kagura-memory guardrails digest CTX_UUID --target instructions --profile core",
-    );
-    expect(text).toContain("(git update-index\n  --skip-worktree AGENTS.md)");
+    expect(await runCli(["guardrails","digest","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("guardrails digest"));
   });
 });
 
@@ -289,7 +249,7 @@ describe("guardrails load", () => {
         context_summary_omitted: false,
       }),
     ]);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
   });
 
   it("sends an OAuth profile's token to the profile's own server when there is no .kagura.json", async () => {
@@ -352,7 +312,7 @@ describe("guardrails load", () => {
     };
     expect(await runCli(["guardrails", "load", "dev"], h.deps)).toBe(1);
     expect(h.mcp.toolCallArgs()).toEqual({ context_id: "dev" });
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: load_guardrails failed (validation_error): Invalid context_id format: 'dev'.",
     ]);
   });
@@ -365,7 +325,7 @@ describe("guardrails load", () => {
       message: "Context not found or you don't have access to it.",
     };
     expect(await runCli(["guardrails", "load", CTX], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: load_guardrails: Context not found or you don't have access to it.",
     ]);
     expect(h.out).toEqual([]);
@@ -383,7 +343,7 @@ describe("guardrails load", () => {
       required_plan_display: "Pro",
     };
     expect(await runCli(["guardrails", "load", CTX], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: load_guardrails failed (quota_exceeded): Daily limit reached.\n" +
         "  Resets at: 2026-09-26T00:00:00+00:00\n" +
         "  Required plan: Pro (pro)",
@@ -397,7 +357,7 @@ describe("guardrails load", () => {
     h.mcp.toolResults.load_guardrails = payload;
     expect(await runCli(["guardrails", "load", CTX], h.deps)).toBe(1);
     expect(h.out).toEqual([]);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: load_guardrails: unexpected server response for GuardrailSet " +
         `(pinned_truncated: Field required). ${UPGRADE}`,
     ]);
@@ -406,7 +366,7 @@ describe("guardrails load", () => {
   it("needs a context", async () => {
     const h = harness({ api_key: "k" });
     expect(await runCli(["guardrails", "load"], h.deps)).toBe(1);
-    expect(h.err).toEqual([`Error: ${NO_CONTEXT_MESSAGE}`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: ${NO_CONTEXT_MESSAGE}`]);
     expect(toolCalls(h)).toBe(0);
   });
 
@@ -421,7 +381,7 @@ describe("guardrails load", () => {
   ])("refuses %j with exit 2", async (argv, message) => {
     const h = harness();
     expect(await runCli(["guardrails", "load", ...argv], h.deps)).toBe(2);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(toolCalls(h)).toBe(0);
   });
 
@@ -614,7 +574,7 @@ describe("guardrails digest", () => {
     expect(await runCli(["guardrails", "digest", CTX], h.deps)).toBe(0);
     // The block ends in a newline already; the echo adds none.
     expect(h.out).toEqual([EXPORT_BLOCK.slice(0, -1)]);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     const url = new URL(h.rest.requests[0]!.url);
     expect(url.pathname).toBe("/api/v1/memory/guardrails/digest");
     expect([...url.searchParams.entries()]).toEqual([
@@ -663,7 +623,7 @@ describe("guardrails digest", () => {
   it("refuses --add-tools without --target instructions, in Python 0.44.0's words", async () => {
     const h = harness();
     expect(await runCli(["guardrails", "digest", CTX, "--add-tools", "explore"], h.deps)).toBe(2);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: --profile / --tools / --add-tools shape the instructions preview; add --target instructions",
     ]);
     expect(h.rest.requests).toEqual([]);
@@ -683,7 +643,7 @@ describe("guardrails digest", () => {
     const h = harness();
     const argv = [CTX, "--target", "instructions", ...values.flatMap((v) => [`--add-tools=${v}`])];
     expect(await runCli(["guardrails", "digest", ...argv], h.deps)).toBe(2);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -692,13 +652,13 @@ describe("guardrails digest", () => {
     serveDigest(h, "");
     expect(await runCli(["guardrails", "digest", CTX], h.deps)).toBe(0);
     expect(h.out).toEqual([]);
-    expect(h.err).toEqual([`No tool guardrails in context ${CTX}.`]);
+    expect(diagnosticBodies(h.err)).toEqual([`No tool guardrails in context ${CTX}.`]);
   });
 
   it.each([["--profile"], ["--tools"]])("refuses %s without --target instructions", async (flag) => {
     const h = harness();
     expect(await runCli(["guardrails", "digest", CTX, flag, "core"], h.deps)).toBe(2);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: --profile / --tools / --add-tools shape the instructions preview; add --target instructions",
     ]);
     expect(h.rest.requests).toEqual([]);
@@ -709,7 +669,7 @@ describe("guardrails digest", () => {
     expect(
       await runCli(["guardrails", "digest", CTX, "--target", "instructions", "--out", "AGENTS.md"], h.deps),
     ).toBe(2);
-    expect(h.err).toEqual(["Error: --out writes the export block; drop --target instructions"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: --out writes the export block; drop --target instructions"]);
     expect(h.rest.requests).toEqual([]);
     expect(fs.existsSync("AGENTS.md")).toBe(false);
   });
@@ -717,7 +677,7 @@ describe("guardrails digest", () => {
   it("checks --out before --profile: the default target fails the tool-view rule", async () => {
     const h = harness();
     expect(await runCli(["guardrails", "digest", "--out", "X.md", "--profile", "core"], h.deps)).toBe(2);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: --profile / --tools / --add-tools shape the instructions preview; add --target instructions",
     ]);
   });
@@ -750,7 +710,7 @@ describe("guardrails digest", () => {
     fs.mkdirSync("adir");
     const h = harness();
     expect(await runCli(["guardrails", "digest", ...argv], h.deps)).toBe(2);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -762,7 +722,7 @@ describe("guardrails digest", () => {
     const h = harness();
     serveDigest(h, EXPORT_BLOCK);
     expect(await runCli(["guardrails", "digest", CTX, "--out", "a/./ "], h.deps)).toBe(0);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     expect(h.out).toEqual([
       `{"path": ${JSON.stringify(path.join("a", " "))}, "status": "written", "tool_triggered_version": "${VERSION}"}`,
     ]);
@@ -776,7 +736,7 @@ describe("guardrails digest", () => {
       fs.chmodSync("noread.md", 0o200);
       const h = harness();
       expect(await runCli(["guardrails", "digest", "--out", "noread.md"], h.deps)).toBe(2);
-      expect(h.err).toEqual(["Error: Invalid value for '--out': File 'noread.md' is not readable."]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: Invalid value for '--out': File 'noread.md' is not readable."]);
       expect(h.rest.requests).toEqual([]);
     },
   );
@@ -784,7 +744,7 @@ describe("guardrails digest", () => {
   it("needs a context, before any credential is resolved", async () => {
     const h = harness({ api_key: "k" });
     expect(await runCli(["guardrails", "digest"], h.deps)).toBe(1);
-    expect(h.err).toEqual([`Error: ${NO_CONTEXT_MESSAGE}`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: ${NO_CONTEXT_MESSAGE}`]);
     expect(h.authConfigs).toEqual([]);
     expect(h.rest.requests).toEqual([]);
   });
@@ -794,7 +754,7 @@ describe("guardrails digest", () => {
       throw new KaguraAuthError("No credentials found.\n  Run: kagura-memory auth login");
     });
     expect(await runCli(["guardrails", "digest", CTX], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: No credentials found.\n  Run: kagura-memory auth login"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: No credentials found.\n  Run: kagura-memory auth login"]);
     expect(h.memoryAuths).toEqual([]);
   });
 
@@ -804,7 +764,7 @@ describe("guardrails digest", () => {
   ])("refuses the context %j in the Python SDK's words", async (context, message) => {
     const h = harness();
     expect(await runCli(["guardrails", "digest", context], h.deps)).toBe(1);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -831,7 +791,7 @@ describe("guardrails digest", () => {
     h.rest.body = typeof body === "string" ? body : JSON.stringify(body);
     h.rest.responseHeaders = typeof body === "string" ? { "content-type": "text/plain" } : {};
     expect(await runCli(["guardrails", "digest", CTX], h.deps)).toBe(1);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
     expect(h.out).toEqual([]);
   });
 
@@ -844,7 +804,7 @@ describe("guardrails digest", () => {
       details: { gate: "plan", required_plan: "pro", required_plan_display: "Pro" },
     });
     expect(await runCli(["guardrails", "digest", CTX], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Guardrails need the Pro plan.\n  Required plan: Pro (pro)"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Guardrails need the Pro plan.\n  Required plan: Pro (pro)"]);
   });
 });
 
@@ -974,17 +934,17 @@ describe("guardrails digest --out", () => {
     expect(result.code).toBe(1);
     // Node's TextDecoder text (the same on Node 18, 20 and 22), and
     // nothing of the file.
-    expect(result.err).toEqual([
+    expect(diagnosticBodies(result.err)).toEqual([
       "Error: bad.md: The encoded data was not valid for encoding utf-8; left unchanged",
     ]);
-    expect(result.err[0]).not.toContain("SECRET");
+    expect(diagnosticBodies(result.err)[0]).not.toContain("SECRET");
     expect(fs.readFileSync("bad.md")).toEqual(bytes);
   });
 
   it("never creates a missing parent directory", async () => {
     const result = await digestOut(path.join("missing", "dir", "AGENTS.md"), EXPORT_BLOCK);
     expect(result.code).toBe(1);
-    expect(result.err[0]).toMatch(/^Error: .*ENOENT/);
+    expect(diagnosticBodies(result.err)[0]).toMatch(/^Error: .*ENOENT/);
     expect(fs.existsSync("missing")).toBe(false);
   });
 

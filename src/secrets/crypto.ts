@@ -103,7 +103,7 @@ async function loadAge(): Promise<AgeModule> {
     throw new KaguraCryptoError(
       "The secret store needs the WebCrypto global (globalThis.crypto), which " +
         `this runtime (Node.js ${process.version}) does not provide. ` +
-        "kagura-memory requires Node.js >= 20.19.0.\n" +
+        "kagura-memory requires Node.js >= 22.12.0.\n" +
         "  Upgrade Node.js, or stay on kagura-memory 0.14.x on Node 18.",
     );
   }

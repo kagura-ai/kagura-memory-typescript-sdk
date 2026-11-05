@@ -340,17 +340,15 @@ const rotate: Command = {
 };
 
 const exec: Command = {
-  summary: "Run COMMAND with secrets injected into its environment.",
-  args: "-- COMMAND [ARGS]...",
+  summary: "Run COMMAND with secrets injected into its environment (no disk, no scrollback).",
+  args: "COMMAND...",
   description:
-    "  Secrets are decrypted locally and passed to the child through its\n" +
-    "  environment only — they never touch disk and never appear in argv.\n" +
-    "  The child's exit code becomes this command's exit code.",
+    "Example:  kagura-memory secret exec --as DATABASE_URL=db-prod -- ./server",
   passthrough: true,
   spec: {
     flags: [
-      { name: "as", type: "multiple", metavar: "ENV=NAME", help: "ENV_NAME=secret_name (repeatable)" },
-      PROFILE,
+        { name: "as", type: "multiple", required: true, help: "ENV_NAME=secret_name (repeatable)." },
+        { name: "profile", type: "value", help: "Your key profile (default: default)." },
     ],
   },
   run: async (deps, args) => {

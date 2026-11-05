@@ -1,3 +1,5 @@
+import { diagnosticBodies } from "../diagnostics.js";
+import { optionLines, prose } from "../helpAssertions.js";
 /**
  * `kagura-memory files …` against the Python CLI's `files` group: the
  * workspace/credential pairing of `_run_files_command` (#115), the
@@ -199,7 +201,7 @@ describe("files upload", () => {
   it("refuses --importance nan (exit 2), sending nothing", async () => {
     const h = harness();
     expect(await runCli(["files", "upload", file, "--remember", "--importance", "nan"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Invalid value for '--importance': nan is not in the range 0.0<=x<=1.0."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Invalid value for '--importance': nan is not in the range 0.0<=x<=1.0."]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -207,7 +209,7 @@ describe("files upload", () => {
     const h = harness();
     expect(await runCli(["files", "upload", file], h.deps)).toBe(0);
     expect(JSON.parse(h.out.join("\n"))).toMatchObject({ id: FILE_ID, status: "uploaded" });
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     expect(h.rest.requests[0]!.body).toMatchObject({ workspace_id: WS, filename: "hello.txt" });
     // The client is built from the one credential resolved, with the
     // .kagura.json workspace as its 403 hint.
@@ -288,7 +290,7 @@ describe("files upload", () => {
   it("-v prints Rich's plain lines", async () => {
     const h = harness();
     expect(await runCli(["files", "upload", file, "-v"], h.deps)).toBe(0);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "→ Reserving upload hello.txt (18 bytes)",
       "→ Uploading to object store",
       "→ Confirming upload",
@@ -299,7 +301,7 @@ describe("files upload", () => {
   it("-vv adds nothing: the upload emits no detail or debug events", async () => {
     const h = harness();
     await runCli(["files", "upload", file, "-vv"], h.deps);
-    expect(h.err).toHaveLength(4);
+    expect(diagnosticBodies(h.err)).toHaveLength(4);
   });
 
   it("-v shows the failure, then the error", async () => {
@@ -315,7 +317,7 @@ describe("files upload", () => {
     async (flags) => {
       const h = harness();
       expect(await runCli(["files", "upload", file, ...flags], h.deps)).toBe(0);
-      expect(h.err).toEqual([]);
+      expect(diagnosticBodies(h.err)).toEqual([]);
     },
   );
 
@@ -331,7 +333,7 @@ describe("files upload", () => {
     ])("%j", async (argv, first) => {
       const h = harness();
       expect(await runCli(argv, h.deps)).toBe(2);
-      expect(h.err[0]).toBe(first);
+      expect(diagnosticBodies(h.err)[0]).toBe(first);
       expect(h.rest.requests).toEqual([]);
     });
 
@@ -339,17 +341,17 @@ describe("files upload", () => {
       const h = harness();
       expect(await runCli(["files", "upload", dir], h.deps)).toBe(2);
       // By its repr, as click prints it: a Windows temp dir's backslashes doubled.
-      expect(h.err).toEqual([`Error: Invalid value for 'PATH': File ${quote(dir)} is a directory.`]);
+      expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for 'PATH': File ${quote(dir)} is a directory.`]);
     });
 
     it("refuses extra arguments after checking the path", async () => {
       const h = harness();
       expect(await runCli(["files", "upload", file, "extra"], h.deps)).toBe(2);
-      expect(h.err).toEqual(["Error: Got unexpected extra argument (extra)"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: Got unexpected extra argument (extra)"]);
       // The order itself: a missing PATH is reported before the extra argument.
       const missing = harness();
       expect(await runCli(["files", "upload", "nope.txt", "extra"], missing.deps)).toBe(2);
-      expect(missing.err).toEqual(["Error: Invalid value for 'PATH': File 'nope.txt' does not exist."]);
+      expect(diagnosticBodies(missing.err)).toEqual(["Error: Invalid value for 'PATH': File 'nope.txt' does not exist."]);
     });
 
     it.each([[["--summary", "x"]], [["--tags", "a"]], [["--tags="]]])(
@@ -357,7 +359,7 @@ describe("files upload", () => {
       async (flags) => {
         const h = harness();
         expect(await runCli(["files", "upload", file, ...flags], h.deps)).toBe(2);
-        expect(h.err).toEqual(["Error: --summary and --tags require --remember."]);
+        expect(diagnosticBodies(h.err)).toEqual(["Error: --summary and --tags require --remember."]);
         expect(h.rest.requests).toEqual([]);
       },
     );
@@ -374,7 +376,7 @@ describe("files upload", () => {
     it("refuses an env key without --context-id, never borrowing the config's workspace", async () => {
       const h = harness({ auth: ENV_KEY, config: { context_id: OTHER_WS } });
       expect(await runCli(["files", "upload", file], h.deps)).toBe(1);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: api_key from KAGURA_API_KEY env has no associated workspace; pass --context-id " +
           "(mixing api_key and OAuth profile's workspace is not allowed — see issue #115).",
       ]);
@@ -390,13 +392,13 @@ describe("files upload", () => {
     it("says so when .kagura.json has a key but no workspace", async () => {
       const h = harness({ config: { api_key: "k", context_id: "auto" } });
       expect(await runCli(["files", "upload", file], h.deps)).toBe(1);
-      expect(h.err[0]).toMatch(/^Error: \.kagura\.json has api_key but context_id is missing or "auto"\./);
+      expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: \.kagura\.json has api_key but context_id is missing or "auto"\./);
     });
 
     it("reports a credential that does not resolve", async () => {
       const h = harness({ auth: new KaguraAuthError("No credentials found.") });
       expect(await runCli(["files", "upload", file], h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: No credentials found."]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: No credentials found."]);
     });
 
     it("reports a client that cannot be built", async () => {
@@ -405,7 +407,7 @@ describe("files upload", () => {
         throw new Error("boom from factory");
       };
       expect(await runCli(["files", "upload", file], h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: boom from factory"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: boom from factory"]);
     });
   });
 
@@ -415,7 +417,7 @@ describe("files upload", () => {
     it("reads as absent, naming --context-id", async () => {
       const h = harness({ config: { api_key: "cfg-key", context_id: 123 } as unknown as KaguraConfig });
       expect(await runCli(["files", "list"], h.deps)).toBe(1);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         'Error: .kagura.json has api_key but context_id is missing or "auto". Set context_id to the ' +
           "workspace UUID bound to this api_key, or pass --context-id. (Falling back to the OAuth " +
           "profile would mix credential sources — see issue #115.)",
@@ -555,7 +557,7 @@ describe("files upload", () => {
         })) as unknown as CliDeps["makeClient"],
       });
       expect(await runCli(["files", "upload", file, "--remember"], h.deps)).toBe(1);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         `Error: File uploaded (file_id=${FILE_ID}), but creating the linked memory failed: ` +
           // Python's f-string adds its period after the message's own.
           "remember failed (quota_exceeded): Daily memory limit reached.. The file_object is stored; " +
@@ -569,7 +571,7 @@ describe("files upload", () => {
       const h = harness();
       h.mcp.toolResults.remember = { ok: true };
       expect(await runCli(["files", "upload", file, "--remember"], h.deps)).toBe(1);
-      expect(h.err[0]).toContain(
+      expect(diagnosticBodies(h.err)[0]).toContain(
         `File uploaded (file_id=${FILE_ID}), but creating the linked memory failed: ` +
           "memory write reported an error: {'ok': True}.",
       );
@@ -583,27 +585,26 @@ describe("files upload", () => {
         }) as unknown as CliDeps["makeClient"],
       });
       expect(await runCli(["files", "upload", file, "--remember"], h.deps)).toBe(1);
-      expect(h.err[0]).toMatch(/^Error: File uploaded \(file_id=.*\), but creating the linked memory failed: No credentials found\./);
+      expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: File uploaded \(file_id=.*\), but creating the linked memory failed: No credentials found\./);
     });
   });
 
   it("lists -v and --progress last in --help, with Python's help texts", async () => {
     const h = harness();
     expect(await runCli(["files", "upload", "--help"], h.deps)).toBe(0);
-    const lines = h.out.join("\n").split("\n");
-    const options = lines.slice(lines.indexOf("Options:") + 1);
+    const options = optionLines(h.out.join("\n"));
     expect(options.slice(-3).map((l) => l.trim().split(/\s{2,}/)[0])).toEqual([
       "-v, --verbose",
       "--progress [rich|json|none]",
       "--help",
     ]);
-    const text = h.out.join("\n");
+    const text = prose(h.out.join("\n"));
     expect(text).toContain("Increase verbosity (repeatable: -v, -vv, -vvv).");
     expect(text).toContain(
       "Progress output format. Default: rich if -v given, none otherwise. Use json for AI agents / scripts.",
     );
     expect(text).toContain("Also create a summary memory linked to the uploaded file_object (no LLM).");
-    expect(text).toContain("Importance 0.0-1.0 for the --remember memory.  [default: 0.5]");
+    expect(text).toContain("Importance 0.0-1.0 for the --remember memory. [default: 0.5; 0.0<=x<=1.0]");
     expect(text).toContain("kagura-memory files upload ./report.pdf --context-id ctx-uuid");
   });
 });
@@ -627,7 +628,7 @@ describe("files delete / download-url / list", () => {
   it("download-url needs a workspace the credential's source can supply", async () => {
     const h = harness({ config: { api_key: "k" } });
     expect(await runCli(["files", "download-url", FILE_ID], h.deps)).toBe(1);
-    expect(h.err[0]).toMatch(/context_id is missing or "auto".*--context-id/);
+    expect(diagnosticBodies(h.err)[0]).toMatch(/context_id is missing or "auto".*--context-id/);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -642,13 +643,13 @@ describe("files delete / download-url / list", () => {
   it("list range-checks --limit locally", async () => {
     const h = harness();
     expect(await runCli(["files", "list", "--limit", "501"], h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: Invalid value for '--limit' / '-l': 501 is not in the range 1<=x<=500.");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: Invalid value for '--limit' / '-l': 501 is not in the range 1<=x<=500.");
   });
 
   it.each([["delete"], ["download-url"]])("%s names its missing argument", async (command) => {
     const h = harness();
     expect(await runCli(["files", command], h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: Missing argument 'FILE_ID'.");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: Missing argument 'FILE_ID'.");
   });
 
   // #66: Python puts FILE_ID in the path as typed, so `download-url ..`
@@ -662,7 +663,7 @@ describe("files delete / download-url / list", () => {
   ])("%s refuses a FILE_ID of %j in click's words (exit 2), sending nothing", async (command, id) => {
     const h = harness();
     expect(await runCli(["files", command, id, "-c", WS], h.deps)).toBe(2);
-    expect(h.err).toEqual([`Error: Invalid value for 'FILE_ID': '${id}' is not a valid file id.`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for 'FILE_ID': '${id}' is not a valid file id.`]);
     expect(h.rest.requests).toEqual([]);
   });
 

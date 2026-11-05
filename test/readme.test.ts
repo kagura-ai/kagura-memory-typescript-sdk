@@ -242,10 +242,10 @@ function versionTriple(version: string): [number, number, number] {
 }
 
 describe("README parity target", () => {
-  it("names the Python CLI 0.44.0 and memory-cloud v0.143.0 (#93)", () => {
+  it("names the Python CLI 0.44.0 and memory-cloud v0.144.0 (#93)", () => {
     const flat = fold(readme);
     const { python, server } = readmeParity();
-    expect({ python, server }).toEqual({ python: "0.44.0", server: "0.143.0" });
+    expect({ python, server }).toEqual({ python: "0.44.0", server: "0.144.0" });
     // The Command line intro and the Installation paragraph say the same.
     expect(flat).toContain(`parity target is the Python CLI **${python}**`);
     expect(flat).toContain(`is checked against memory-cloud up to **v${server}**`);

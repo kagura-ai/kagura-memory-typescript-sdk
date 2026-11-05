@@ -55,6 +55,13 @@ describe("requireOption and requireArg", () => {
 });
 
 describe("help rendering", () => {
+  it("omits the raw paragraph marker from group short help", () => {
+    const help = renderGroupHelp("kagura-memory g", "Group.", {
+      a: { summary: "\b\nA. More details.", spec: { flags: [] }, run: async () => 0 },
+    });
+    expect(help).toContain("  a  A.");
+    expect(help).not.toContain("\b");
+  });
   it("shows an optional value's metavar, and TEXT when none is declared, as click does", () => {
     const command: Command = {
       summary: "Probe.",
@@ -67,14 +74,14 @@ describe("help rendering", () => {
       run: async () => 0,
     };
     const help = renderHelp("kagura-memory probe", command);
-    expect(help).toContain("      --agents-md [PATH]  Export.");
-    expect(help).toContain("      --plain TEXT        No metavar.");
+    expect(help).toContain("  --agents-md [PATH]  Export.");
+    expect(help).toContain("  --plain TEXT        No metavar.");
   });
 
   it("leaves a group without a description as it was", () => {
     const help = renderGroupHelp("kagura-memory g", "Group.", {
       a: { summary: "A.", spec: { flags: [] }, run: async () => 0 },
     });
-    expect(help).toBe("Usage: kagura-memory g [OPTIONS] COMMAND [ARGS]...\n\n  Group.\n\nCommands:\n  a         A.");
+    expect(help).toBe("Usage: kagura-memory g [OPTIONS] COMMAND [ARGS]...\n\n  Group.\n\nOptions:\n  --help  Show this message and exit.\n\nCommands:\n  a  A.");
   });
 });

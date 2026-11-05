@@ -30,11 +30,8 @@ describe("sleep rollback, byte for byte Python 0.44.0 (#110)", () => {
       },
     } as unknown as CliDeps;
     expect(await runCli(c.argv, deps)).toBe(c.code);
-    // Generic help wrapping/column padding is tracked in #111; compare
-    // the exact text here while retaining the unmodified Python recording.
     const stdout = out.map(line => `${line}\n`).join("");
-    if (c.name === "help") expect(stdout.replace(/\s+/g, " ")).toBe(c.stdout.replace(/\s+/g, " "));
-    else expect(stdout).toBe(c.stdout);
+    expect(stdout).toBe(c.stdout);
     expect(err.map(line => `${line}\n`).join("")).toBe(c.stderr);
     expect(prompts).toEqual(c.prompts);
     expect(server.requests.filter(r => r.body?.method === "tools/call").map(r => {
