@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getSharedState,
+  CredentialsFileError,
   loadCredentialsFile,
   resetStateCache,
 } from "../../src/auth/credentials.js";
@@ -75,6 +76,28 @@ class FakeOAuthServer {
 }
 
 describe("login (#9)", () => {
+  it.each(["malformed", "directory"])("refuses %s credentials before device authorization (#112)", async kind => {
+    if (kind === "directory") fs.mkdirSync(credentialsPath);
+    else fs.writeFileSync(credentialsPath, "{broken-json");
+    const server = new FakeOAuthServer();
+    const onUserCode = vi.fn();
+    await expect(login({ mcpUrl: "https://x.test/mcp", credentialsPath, fetch: server.fetch, onUserCode }))
+      .rejects.toBeInstanceOf(CredentialsFileError);
+    expect(server.urls).toEqual([]);
+    expect(onUserCode).not.toHaveBeenCalled();
+    if (kind === "directory") expect(fs.statSync(credentialsPath).isDirectory()).toBe(true);
+    else expect(fs.readFileSync(credentialsPath, "utf8")).toBe("{broken-json");
+  });
+
+  it("still rechecks the credentials file after the device flow (#112)", async () => {
+    const server = new FakeOAuthServer();
+    await expect(login({
+      mcpUrl: "https://x.test/mcp", credentialsPath, fetch: server.fetch, sleep: async () => {},
+      onUserCode: () => { fs.writeFileSync(credentialsPath, "{changed-during-login"); },
+    })).rejects.toBeInstanceOf(CredentialsFileError);
+    expect(fs.readFileSync(credentialsPath, "utf8")).toBe("{changed-during-login");
+  });
+
   it("runs authorize → poll → save and returns the stored credentials", async () => {
     const server = new FakeOAuthServer();
     const seen: DeviceAuthorizationResponse[] = [];

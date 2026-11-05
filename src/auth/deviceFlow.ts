@@ -499,6 +499,9 @@ export interface RefreshAccessTokenOptions extends OAuthHttpOptions {
   scope?: string | null;
 }
 
+/** Deadline covering refresh headers and body, including custom fetches. */
+export const REFRESH_REQUEST_TIMEOUT_MS = 30_000;
+
 /**
  * POST `{server}/api/v1/oauth/token/` with `grant_type=refresh_token`.
  *
@@ -525,17 +528,34 @@ export async function refreshAccessToken(
     form.set("scope", options.scope);
   }
 
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error("OAuth refresh timed out after 30 seconds");
+      controller.abort(error);
+      reject(error);
+    }, REFRESH_REQUEST_TIMEOUT_MS);
+  });
   let response: Response;
   let text: string;
   try {
-    response = await doFetch(url, {
-      method: "POST",
-      headers: { "User-Agent": userAgent() },
-      body: form,
-    });
-    text = await response.text();
+    ({ response, text } = await Promise.race([
+      (async () => {
+        const response = await doFetch(url, {
+          method: "POST",
+          headers: { "User-Agent": userAgent() },
+          body: form,
+          signal: controller.signal,
+        });
+        return { response, text: await response.text() };
+      })(),
+      deadline,
+    ]));
   } catch (e) {
     throw new KaguraConnectionError(`Could not reach ${url}: ${excMessage(e)}`, { cause: e });
+  } finally {
+    clearTimeout(timer!);
   }
 
   if (response.status === 200) {

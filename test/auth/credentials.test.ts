@@ -337,15 +337,15 @@ describe("profile file operations", () => {
     expect("alice" in loadCredentialsFile(p).profiles).toBe(true);
   });
 
-  it("deleteCredentialsFile removes the file and is idempotent", () => {
+  it("deleteCredentialsFile removes the file and is idempotent", async () => {
     const p = path.join(dir, "creds.json");
     const cf = emptyCredentialsFile();
     setProfile(cf, "default", sampleCreds());
     saveCredentialsFile(cf, p);
 
-    deleteCredentialsFile(p);
+    await deleteCredentialsFile(p);
     expect(fs.existsSync(p)).toBe(false);
-    deleteCredentialsFile(p); // second call must not throw
+    await deleteCredentialsFile(p); // second call must not throw
   });
 
   it("setDefaultProfile switches to an existing profile", async () => {

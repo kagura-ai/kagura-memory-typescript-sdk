@@ -453,9 +453,8 @@ describe("two processes refreshing one profile (#92)", () => {
     expect(cf.profiles.default?.accessToken).toBe("atok-2");
   });
 
-  // The one deliberate difference from Python's refresh_profile_locked: the
-  // file is loaded again before the save, since a Python process's OS lock
-  // does not exclude this package's lock file and may write meanwhile.
+  // Defensive re-read for an unexpected external edit. Supported concurrent
+  // writers must honor lock-v1; this is not cross-SDK lock interoperability.
   it("keeps a profile written during the round-trip by a writer that does not see this lock", async () => {
     seed({ default: creds() });
     const fetch = (async () => {
@@ -481,7 +480,7 @@ describe("two processes refreshing one profile (#92)", () => {
       credentialsPath,
       fetch: endpoint.fetch,
     });
-    expect(fs.existsSync(`${credentialsPath}.lock`)).toBe(false);
+    expect(fs.existsSync(`${credentialsPath}.lock-v1`)).toBe(false);
     expect(onDisk()?.accessToken).toBe("atok-2");
   });
 });

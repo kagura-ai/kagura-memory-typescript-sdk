@@ -8,7 +8,8 @@
  *    (de)serialization. The on-disk format at `~/.kagura/credentials.json`
  *    is SHARED with the Python CLI — keys stay snake_case on disk
  *    (`default_profile`, `profiles`, `access_token`, ...), timestamps are
- *    Z-suffixed UTC ISO-8601.
+ *    Z-suffixed UTC ISO-8601. Sharing the format does not make old clients'
+ *    locking compatible; concurrent writers must use the lock-v1 protocol.
  * 2. Atomic, mode-0600 read/write of the credentials file with a mode-0700
  *    parent directory (permissions are best-effort where the platform,
  *    e.g. Windows/NTFS, does not honor POSIX bits).
@@ -544,7 +545,7 @@ export function saveCredentialsFile(cf: CredentialsFile, credentialsPath?: strin
  *
  * The read-modify-write is wrapped in the cross-process lock from
  * `filelock.ts` so concurrent writers in *different* processes cannot lose
- * an update. The lock is on a sibling `credentials.json.lock`, not the
+ * an update. The lock is on a sibling `credentials.json.lock-v1`, not the
  * file itself, so it never races the atomic rename in
  * `saveCredentialsFile`.
  *
@@ -559,6 +560,34 @@ export async function updateProfile(
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
     const cf = loadForUpdate(p);
+    setProfile(cf, profileName, creds);
+    saveCredentialsFile(cf, p);
+  });
+}
+
+/** @internal A consent result lost a race to logout or another profile update. */
+export class ConsentProfileChangedError extends CredentialsFileError {}
+
+/**
+ * @internal Save a refresh-derived grant only while its original profile is
+ * still current. Explicit login uses updateProfile and may recreate a profile.
+ */
+export async function saveConsentProfile(
+  profileName: string,
+  creds: OAuthCredentials,
+  previous: Pick<OAuthCredentials, "accessToken" | "refreshToken"> | null,
+  credentialsPath?: string,
+): Promise<void> {
+  const p = resolvePath(credentialsPath);
+  await withFileLock(p, () => {
+    const cf = loadForUpdate(p);
+    const current = getProfile(cf, profileName);
+    if (current === null || previous === null || current.accessToken !== previous.accessToken || current.refreshToken !== previous.refreshToken) {
+      throw new ConsentProfileChangedError(
+        `Profile '${profileName}' changed or was logged out while waiting for consent. ` +
+        "The new grant was not saved; run: kagura-memory auth login",
+      );
+    }
     setProfile(cf, profileName, creds);
     saveCredentialsFile(cf, p);
   });
@@ -609,6 +638,7 @@ export async function deleteProfile(
   const p = resolvePath(credentialsPath);
   await withFileLock(p, () => {
     const cf = loadForUpdate(p);
+    recordRevocation(p, profileName);
     if (!hasProfile(cf, profileName)) {
       return;
     }
@@ -620,10 +650,47 @@ export async function deleteProfile(
 /**
  * Remove the entire credentials file (`kagura auth logout --all`).
  *
- * Missing file is treated as success — logout is idempotent.
+ * Missing file is treated as success — logout is idempotent. Await completion:
+ * deletion is serialized with refresh and records revocation first (#112).
  */
-export function deleteCredentialsFile(credentialsPath?: string): void {
-  fs.rmSync(resolvePath(credentialsPath), { force: true });
+export async function deleteCredentialsFile(credentialsPath?: string): Promise<void> {
+  const p = resolvePath(credentialsPath);
+  await withFileLock(p, () => {
+    // Persist before deleting: a refresh waiting with a cached fallback must
+    // distinguish logout from a profile that has never been saved.
+    recordRevocation(p, null);
+    fs.rmSync(p, { force: true });
+  });
+}
+
+interface Revocations { version: 1; all: boolean; profiles: string[] }
+
+/** Retained across logins: an existing disk profile wins; a missing one may not resurrect. */
+function readRevocations(p: string): Revocations {
+  try {
+    const value: unknown = JSON.parse(fs.readFileSync(`${p}.revocations-v1`, "utf8"));
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid revocation record");
+    const record = value as Record<string, unknown>;
+    if (record.version !== 1 || typeof record.all !== "boolean" || !Array.isArray(record.profiles) ||
+        !record.profiles.every(name => typeof name === "string")) throw new Error("invalid revocation record");
+    return { version: 1, all: record.all, profiles: record.profiles as string[] };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return { version: 1, all: false, profiles: [] };
+    const reason = error instanceof SyntaxError ? "it is not valid JSON" : excMessage(error);
+    // JSON.parse errors can quote file contents, including accidentally pasted
+    // tokens. Do not retain that original error in the logged cause chain.
+    throw new CredentialsFileError(`Cannot read ${p}.revocations-v1: ${reason}`, {
+      cause: error instanceof SyntaxError ? new Error(reason) : error,
+    });
+  }
+}
+
+/** Caller holds the same credential lock as every writer and refresher. */
+function recordRevocation(p: string, profile: string | null): void {
+  const record = readRevocations(p);
+  if (profile === null) { record.all = true; record.profiles = []; }
+  else if (!record.all && !record.profiles.includes(profile)) record.profiles.push(profile);
+  atomicWriteJson(`${p}.revocations-v1`, record, CREDENTIALS_FILE_MODE);
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1022,8 @@ export interface RefreshResult {
 
 /** @internal Options of {@link refreshProfileLocked}. */
 export interface RefreshProfileLockedOptions {
+  /** Internal consent guard: capture the actual disk generation under lock. */
+  onReadProfile?: (profile: OAuthCredentials | null, refreshBase: OAuthCredentials) => void;
   /**
    * Governs the "already rotated?" check. `null` (skew path) → skip when
    * the on-disk token is outside `REFRESH_SKEW_SEC` of expiry. A token
@@ -1029,6 +1098,16 @@ export async function refreshProfileLocked(
     // rewritten with this one profile, and the refresh would use up the
     // refresh token for a profile that then cannot be saved.
     const onFile = getProfile(loadForUpdate(p), profileName);
+    if (onFile === null) {
+      const revoked = readRevocations(p);
+      if (revoked.all || revoked.profiles.includes(profileName)) {
+        throw new KaguraAuthExpiredError(
+          `Profile '${profileName}' was logged out; cached credentials cannot recreate it.\n` +
+            "  Run: kagura-memory auth login",
+          options.fallback.expiresAt,
+        );
+      }
+    }
     // The file behind the caller (its unsaved refresh): refresh from its copy.
     const disk = onFile !== null && !isBehind(onFile, options) ? onFile : null;
     if (
@@ -1038,12 +1117,14 @@ export async function refreshProfileLocked(
     ) {
       return { credentials: disk, refreshed: false };
     }
+    options.onReadProfile?.(onFile, disk ?? options.fallback);
     const refreshed = await networkRefresh(disk ?? options.fallback, options.scope, options.fetch);
     try {
       // We already hold the cross-process lock; write directly rather than
       // via updateProfile (which would re-acquire it and deadlock). Loaded
-      // again, unlike Python's single load: a Python process does not see
-      // this lock, so a profile it saved during the round-trip is kept.
+      // again defensively so an unexpected external edit is not overwritten.
+      // All supported concurrent writers must honor lock-v1; this second read
+      // cannot make old Python advisory locks interoperable.
       const cf = readCredentialsFile(p) ?? emptyCredentialsFile();
       setProfile(cf, profileName, refreshed);
       saveCredentialsFile(cf, p);
@@ -1075,6 +1156,7 @@ export async function refreshProfileLocked(
 export async function refreshSharedState(
   state: SharedCredentialsState,
   options: {
+    onReadProfile?: (profile: OAuthCredentials | null, refreshBase: OAuthCredentials) => void;
     expectedStaleToken: string | null;
     scope?: string;
     fetch?: typeof globalThis.fetch;
@@ -1087,6 +1169,7 @@ export async function refreshSharedState(
       usedRefreshToken: state.usedRefreshToken ?? null,
       usedAccessToken: state.usedAccessToken ?? null,
       credentialsPath: state.path,
+      ...(options.onReadProfile ? { onReadProfile: options.onReadProfile } : {}),
       ...(options.scope !== undefined ? { scope: options.scope } : {}),
       ...(options.fetch ? { fetch: options.fetch } : {}),
     });
@@ -1132,7 +1215,7 @@ async function networkRefresh(
     throw new KaguraAuthExpiredError(
       "This profile was stored without a refresh token, so it cannot be " +
         "refreshed — log in again to get one.\n" +
-        "  Run: kagura auth login (or `npx kagura-memory auth login`)",
+        "  Run: kagura auth login",
       base.expiresAt,
     );
   }

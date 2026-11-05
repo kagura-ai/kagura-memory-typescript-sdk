@@ -1348,11 +1348,12 @@ export function throwForKaguraStatus(
   body: string | ErrorBody,
   fallbackMessage?: string,
 ): never {
-  if (status === 401) {
-    throw new KaguraAuthError("Authentication failed. Check your API key.");
-  }
   const read = typeof body === "string" ? new ErrorBody(body) : body;
   const fields = read.fields;
+  if (status === 401) {
+    const err = new KaguraAuthError("Authentication failed. Check your API key.");
+    throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
+  }
   if (status === 403) {
     const scopeError = insufficientScopeFrom(headers, fields);
     if (scopeError !== null) {

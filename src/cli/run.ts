@@ -24,6 +24,7 @@ import {
   deleteProfile,
   hasProfile,
   isExpired,
+  REFRESH_SKEW_SEC,
   loadCredentialsFile,
   profileNamed,
   setDefaultProfile,
@@ -716,7 +717,7 @@ async function cmdLogout(deps: CliDeps, args: ReturnType<typeof parseArgs>): Pro
   if (all) {
     // Python revokes each and says nothing of a failure here.
     for (const creds of Object.values(cf.profiles)) await revokeProfile(deps, creds);
-    deleteCredentialsFile(deps.credentialsPath);
+    await deleteCredentialsFile(deps.credentialsPath);
     deps.write("All profiles removed.");
     noteApiKeyEnv(deps);
     return 0;
@@ -796,9 +797,9 @@ function cmdList(deps: CliDeps, args: ReturnType<typeof parseArgs>): number {
 /**
  * `kagura auth token` — the raw access token on stdout, for CI.
  *
- * Refreshes first when the stored token has expired, so a script does not
+ * Refreshes first within five minutes of expiry, so a script does not
  * have to distinguish "no token" from "stale token". The value is printed
- * bare, with no trailing decoration, so `$(… auth token)` is exact. The
+ * bare on stdout, with an expiry warning on stderr, so `$(… auth token)` is exact. The
  * refresh is the one every client and `kagura-memory-mcp` share: when one
  * of them already refreshed the profile, its token is printed and nothing
  * is sent. A refresh that could not be saved exits 1 without the token.
@@ -809,25 +810,28 @@ async function cmdToken(deps: CliDeps, args: ReturnType<typeof parseArgs>): Prom
   // after this read.
   const cf = loadCredentialsFile(deps.credentialsPath);
   const name = args.values.profile ?? cf.defaultProfile;
-  const creds = profileNamed(cf, name);
+  let creds = profileNamed(cf, name);
   if (creds === undefined) {
     // Exit 1, as Python's ClickException.
     throw new CliError(`No profile named '${name}'.\n  Run: kagura-memory auth login`);
   }
-  if (!isExpired(creds)) {
-    deps.write(creds.accessToken);
-    return 0;
+  if (isExpired(creds, REFRESH_SKEW_SEC)) {
+    const options: RefreshOptions = { onlyIfExpiring: true };
+    if (args.values.profile !== undefined) options.profile = args.values.profile;
+    if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
+    if (deps.fetch !== undefined) options.fetch = deps.fetch;
+    creds = (await deps.refresh(options)).credentials;
   }
-  if (!creds.refreshToken) {
-    deps.writeError(`Profile '${name}' has expired and cannot refresh.\n  Run: kagura-memory auth login`);
-    return 1;
-  }
-  const options: RefreshOptions = {};
-  if (args.values.profile !== undefined) options.profile = args.values.profile;
-  if (deps.credentialsPath !== undefined) options.credentialsPath = deps.credentialsPath;
-  if (deps.fetch !== undefined) options.fetch = deps.fetch;
-  const { credentials } = await deps.refresh(options);
-  deps.write(credentials.accessToken);
+  deps.write(creds.accessToken);
+  const seconds = Math.floor(Math.max(0, (creds.expiresAt.getTime() - Date.now()) / 1000));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remaining = days ? `${days}d ${hours}h ${minutes}m` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+  deps.writeError(
+    `⚠ This token expires at ${pythonIsoUtc(creds.expiresAt)} (in ${remaining}).\n` +
+      "  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.",
+  );
   return 0;
 }
 
@@ -918,7 +922,8 @@ const AUTH_GROUP: CommandGroup = {
     token: {
       summary: "Emit the raw access_token to stdout (for CI / scripts).",
       description:
-        "  An expired token is refreshed first. That refresh is shared with\n" +
+        "  The token is refreshed when it is within 5 minutes of expiry. A warning\n" +
+        "  with the absolute expiry time is written to stderr. That refresh is shared with\n" +
         "  kagura-memory-mcp and every client: all of them refresh under one lock on\n" +
         "  credentials.json and re-read it first, so when one of them already\n" +
         "  refreshed the profile, its token is printed and no second refresh runs.",

@@ -1,5 +1,66 @@
 # SDK ↔ memory-cloud Compatibility
 
+## Unreleased: credential concurrency and auth token (#112)
+
+The credentials JSON format is unchanged, but concurrent writers must use
+the same **portable lock-v1 protocol**. This SDK now exclusively creates
+`credentials.json.lock-v1` (0600), holds it across read/refresh/save, and
+removes only its own lock. It polls every 50 ms for at most 90 seconds using
+a monotonic deadline. A lock is **never** broken because of its age: a paused
+process can resume after any interval. A 30-second refresh deadline covers
+both headers and body and aborts the transport; even a custom fetch that
+ignores abort cannot keep the caller waiting indefinitely.
+
+Python SDK **0.44.0** instead keeps an OS advisory lock on the persistent
+`credentials.json.lock` inode. Older TypeScript clients use an incompatible
+exclusive-create protocol on that same name. Neither may concurrently share
+a credentials file with lock-v1 clients. This SDK detects an existing legacy
+`.lock` and refuses writes rather than unlinking it; that check cannot prevent
+an old client from starting later. The corresponding Python implementation,
+cross-language tests, and eventual shared-support version are tracked in
+[python-sdk#327](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/327).
+No released Python shared-support floor is claimed yet.
+
+**Migration and crash recovery:**
+
+1. Stop every CLI, proxy, application and SDK process using this credentials
+   file, including background clients. Upgrade all writers or give incompatible
+   clients separate credential files. Do not restart old and new writers on
+   the same file.
+2. Once all users of the file are stopped, manually retire the legacy `.lock`
+   marker (for example, move it aside). This SDK never removes it automatically.
+   Python's marker persists even after a normal exit, so its presence alone
+   does not prove a process is live.
+3. A crashed lock-v1 owner leaves `.lock-v1` behind. Waiters time out and name
+   that file. After confirming **all** clients are stopped, remove that
+   abandoned lock and restart compatible clients. Neither mtime nor a guessed
+   PID lifetime is sufficient reason to remove a lock while clients run.
+4. Retain `credentials.json.revocations-v1`: it is logout history, not a lock.
+   Deleting it can let a cached credential recreate a removed profile.
+
+Logout writes an atomic 0600 revocation sidecar before deleting a profile or
+the whole file. It contains only `{version: 1, all: boolean, profiles: string[]}`,
+not tokens. A missing disk profile with a matching or all-profile revocation
+cannot be refreshed from cached credentials. Existing disk profiles, explicit
+login, and recovery from an unsaved refresh while the disk profile still
+exists remain supported. An unreadable revocation record fails closed before
+refreshing a missing profile. Both refresh-first and logout-first orderings
+are tested. Scope-widening refresh waits for consent outside the lock, then
+compares the original token pair under lock before saving; logout or another
+profile replacement wins, and the obsolete grant is not cached as an unsaved
+refresh. Explicit login can still recreate the profile.
+**`deleteCredentialsFile()` is now asynchronous: use
+`await deleteCredentialsFile(path)` and handle its failure.**
+
+`auth token` now refreshes at the five-minute boundary and writes its absolute
+expiry and human-readable remaining time to stderr, with only the token on
+stdout. Fresh, near-expiry, expired and refresh-token-less outputs are recorded
+from Python 0.44.0/Click 8.3.3 at a fixed clock in `test/cli/authToken112.json`.
+Login pre-reads credentials before authorization and rechecks under lock on
+save; no lock is held during user consent. A generic 401 preserves OAuth,
+REST and JSON-RPC server error fields using the shared single-decode reader.
+These changes introduce no server version requirement.
+
 Which memory-cloud server each release of the `kagura-memory` npm package
 needs, and the newest one it was checked against: one section per release,
 newest first. Each surface newer than the SDK-wide floor carries its own
