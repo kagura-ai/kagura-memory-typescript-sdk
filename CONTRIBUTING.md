@@ -4,7 +4,7 @@ Thanks for your interest in improving the Kagura Memory TypeScript SDK!
 
 ## Development setup
 
-Requires Node.js >= 20.19.0.
+Requires Node.js >= 22.12.0.
 
 ```bash
 npm install

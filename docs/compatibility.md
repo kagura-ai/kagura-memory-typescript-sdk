@@ -1,6 +1,12 @@
 # SDK ↔ memory-cloud Compatibility
 
-## Unreleased: CLI presentation parity (#111)
+## 0.17.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+The SDK, CLI and MCPB require Node.js >=22.12.0. CI tests the exact floor and Node 22/24, including strict installation of the packaged SDK.
+
+### CLI presentation parity (#111)
 
 The common help renderer follows Python SDK 0.44.0 with Click 8.3.3 at an
 explicit width of 80 columns: wrapped option descriptions, a maximum

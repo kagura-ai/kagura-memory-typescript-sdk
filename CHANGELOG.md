@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Require Node.js >=22.12.0 for the SDK, CLI and MCPB bundle. Builds target Node 22 and the test suite runs on Vitest 5 (#115).
 - CLI help now uses Click's 80-column layout, wrapped option descriptions,
   range metavars/annotations and required markers. Usage errors print Usage,
   the `--help` hint and the error without dumping command help; missing file

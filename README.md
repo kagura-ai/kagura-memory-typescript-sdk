@@ -29,7 +29,7 @@ package also includes `kagura-memory-mcp`, a transparent stdio/HTTP proxy.
 npm install kagura-memory
 ```
 
-Requires Node.js >= 20.19.0 (Node 18 support ended with 0.14.x). Zero
+Requires Node.js >= 22.12.0 (this runtime migration drops Node 20). Zero
 runtime dependencies — the one optional peer dependency, for
 [zero-knowledge secrets](#the-crypto-package-is-opt-in), is never installed
 unless you ask for it.
@@ -2198,7 +2198,7 @@ one of those without the package and you get a `KaguraCryptoError` naming
 the install command, not a module-resolution stack trace.
 
 > **Node version.** `age-encryption`'s `@noble/*` dependencies declare
-> `engines.node: ">= 20.19.0"`, the same floor as this SDK, so the install
+> `engines.node: ">= 20.19.0"`, below this SDK's 22.12.0 floor, so the install
 > is clean on every supported Node, `engine-strict=true` included.
 > Encryption and keygen take their randomness from the `globalThis.crypto`
 > WebCrypto global, which Node has provided since 19; the SDK no longer
