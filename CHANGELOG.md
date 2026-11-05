@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- CLI help now uses Click's 80-column layout, wrapped option descriptions,
+  range metavars/annotations and required markers. Usage errors print Usage,
+  the `--help` hint and the error without dumping command help; missing file
+  paths follow the same rule. Parser errors that Click raises without context
+  still print only the error. Remaining command-surface help differences from
+  Python 0.44.0 are listed in `docs/cli-help-differences.md` (#111).
+
 ## [0.16.0] - 2026-11-05
 
 Reliability fixes for the existing Python SDK/CLI 0.44.0 parity surface.

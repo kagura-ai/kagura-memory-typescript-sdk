@@ -188,6 +188,7 @@ export const EDGE_GROUP: CommandGroup = {
 };
 
 const SLEEP_LIMIT: FlagSpec = {
+  range: { min: 1, max: 50, rangeLabel: "1<=x<=50", integer: true },
   name: "limit",
   type: "value",
   metavar: "INTEGER",
@@ -221,7 +222,7 @@ const sleepHistory: Command = {
     const limit =
       raw === undefined
         ? 10
-        : parseRanged(SLEEP_LIMIT, raw, { min: 1, max: 50, rangeLabel: "1<=x<=50", integer: true });
+        : parseRanged(SLEEP_LIMIT, raw);
     const rawSource = args.values.source;
     const source = rawSource === undefined ? undefined : parseChoice(SLEEP_SOURCE, rawSource, SLEEP_SOURCES);
     rejectExtraArgs(args, 1);
@@ -248,6 +249,7 @@ const ACTIONS_CURSOR: FlagSpec = {
 };
 
 const ACTIONS_LIMIT: FlagSpec = {
+  range: { min: 1, max: 200, rangeLabel: "1<=x<=200", integer: true },
   name: "actions-limit",
   type: "value",
   metavar: "INTEGER",
@@ -282,8 +284,7 @@ const sleepReport: Command = {
   description:
     contextIdNotSent("checks read access on the\n  run's own context).") +
     " From memory-cloud 0.82.0 the audit log comes a page at a\n" +
-    "  time: while actions_has_more is true, pass actions_next_cursor as --actions-\n" +
-    "  cursor.",
+    "  time: while actions_has_more is true, pass actions_next_cursor as --actions-cursor.",
   spec: { flags: [ACTIONS_CURSOR, ACTIONS_LIMIT] },
   run: async (deps, args) => {
     const contextId = requireArg(args, 0, "CONTEXT_ID");
@@ -293,7 +294,7 @@ const sleepReport: Command = {
     const actionsLimit =
       rawLimit === undefined
         ? undefined
-        : parseRanged(ACTIONS_LIMIT, rawLimit, { min: 1, max: 200, rangeLabel: "1<=x<=200", integer: true });
+        : parseRanged(ACTIONS_LIMIT, rawLimit);
     rejectExtraArgs(args, 2);
     return runClientCommand(
       deps,

@@ -1,3 +1,5 @@
+import { pythonHelp } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `kagura-memory workspace …` and `kagura-memory auth create-key|list-keys|
  * revoke-key` — ports of the Python CLI's commands. The cases follow
@@ -133,7 +135,7 @@ describe("workspace member list", () => {
         "ユーザー                         viewer   ü@x.com                        2026-06-01",
       ].join("\n"),
     ]);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     const req = lastRequest(h);
     expect(req.method).toBe("GET");
     expect(req.url).toBe(`https://test.com/api/v1/workspaces/${WS}/members`);
@@ -220,7 +222,7 @@ describe("workspace member list", () => {
     const h = harness();
     reply(h, [{ user_id: "google_1", role: "owner" }, { user_id: "google_2" }]);
     expect(await runCli(["workspace", "member", "list"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `Error: WorkspaceClient.list_members: unexpected server response for WorkspaceMember (role: Field required). ${UPGRADE}`,
     ]);
     expect(h.out).toEqual([]);
@@ -230,7 +232,7 @@ describe("workspace member list", () => {
     const a = harness();
     reply(a, ["google_1"]);
     expect(await runCli(["workspace", "member", "list", "--json"], a.deps)).toBe(1);
-    expect(a.err).toEqual([
+    expect(diagnosticBodies(a.err)).toEqual([
       "Error: WorkspaceClient.list_members: unexpected server response for WorkspaceMember " +
         `(Input should be a valid dictionary or instance of WorkspaceMember). ${UPGRADE}`,
     ]);
@@ -238,7 +240,7 @@ describe("workspace member list", () => {
     const b = harness();
     reply(b, [{ user_id: "google_1", role: "owner", user_email: 12345 }]);
     expect(await runCli(["workspace", "member", "list"], b.deps)).toBe(1);
-    expect(b.err).toEqual([
+    expect(diagnosticBodies(b.err)).toEqual([
       "Error: WorkspaceClient.list_members: unexpected server response for WorkspaceMember " +
         `(user_email: Input should be a valid string). ${UPGRADE}`,
     ]);
@@ -264,7 +266,7 @@ describe("workspace member list", () => {
     const h = harness();
     reply(h, [{ user_id: "google_1", role: "member", ...fields }]);
     expect(await runCli(["workspace", "member", "list", "--json"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `Error: WorkspaceClient.list_members: unexpected server response for WorkspaceMember (${problems}). ${UPGRADE}`,
     ]);
     expect(h.out).toEqual([]);
@@ -288,7 +290,7 @@ describe("workspace member list", () => {
     const h = harness();
     reply(h, { members: [] });
     expect(await runCli(["workspace", "member", "list"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.list_members: unexpected server response " +
         `(GET /api/v1/workspaces/${WS}/members: expected a JSON array, got dict). ${UPGRADE}`,
     ]);
@@ -318,7 +320,7 @@ describe("workspace member list", () => {
   it("refuses extra arguments (exit 2)", async () => {
     const h = harness();
     expect(await runCli(["workspace", "member", "list", "b", "c"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Got unexpected extra arguments (b c)"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Got unexpected extra arguments (b c)"]);
     expect(h.calls).toEqual([]);
   });
 });
@@ -340,7 +342,7 @@ describe("workspace member add / set-role", () => {
     async (role) => {
       const h = harness();
       expect(await runCli(["workspace", "member", "add", "google_3", "--role", role], h.deps)).toBe(2);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         `Error: Invalid value for '--role': '${role}' is not one of 'member', 'admin', 'viewer'.`,
       ]);
       expect(h.calls).toEqual([]);
@@ -350,13 +352,13 @@ describe("workspace member add / set-role", () => {
   it("names the choices when --role is missing", async () => {
     const h = harness();
     expect(await runCli(["workspace", "member", "add", "google_3"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Missing option '--role'. Choose from:\n\tmember,\n\tadmin,\n\tviewer"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Missing option '--role'. Choose from:\n\tmember,\n\tadmin,\n\tviewer"]);
   });
 
   it("requires USER_ID", async () => {
     const h = harness();
     expect(await runCli(["workspace", "member", "set-role", "--role", "admin"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Missing argument 'USER_ID'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Missing argument 'USER_ID'."]);
   });
 
   it("changes a role with PUT on the percent-encoded member path", async () => {
@@ -374,7 +376,7 @@ describe("workspace member add / set-role", () => {
     const h = harness();
     reply(h, { user_id: "google_2" });
     expect(await runCli(["workspace", "member", "set-role", "google_2", "--role", "admin"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `Error: WorkspaceClient.update_member_role: unexpected server response for WorkspaceMember (role: Field required). ${UPGRADE}`,
     ]);
   });
@@ -386,7 +388,7 @@ describe("workspace member remove", () => {
     expect(await runCli(["workspace", "member", "remove", "google_2"], h.deps)).toBe(1);
     expect(h.questions).toEqual([`Remove google_2 from workspace ${WS}?`]);
     // The bin's convention for a declined prompt.
-    expect(h.err).toEqual(["Error: Aborted!"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Aborted!"]);
     expect(h.rest.requests).toEqual([]);
     expect(h.calls).not.toContain("makeWorkspaceClient");
   });
@@ -418,7 +420,7 @@ describe("workspace member remove", () => {
   it("refuses a workspace that is no UUID before asking", async () => {
     const h = harness({ confirm: true });
     expect(await runCli(["workspace", "member", "remove", "google_2", "-w", "AUTO"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: workspace_id must be a UUID, got 'AUTO'"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: workspace_id must be a UUID, got 'AUTO'"]);
     expect(h.questions).toEqual([]);
     expect(h.rest.requests).toEqual([]);
   });
@@ -447,7 +449,7 @@ describe("workspace member remove", () => {
   it("checks a .kagura.json context_id the same way", async () => {
     const h = harness({ config: { api_key: "k", context_id: "not-a-uuid" } });
     expect(await runCli(["workspace", "member", "remove", "google_2"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: workspace_id must be a UUID, got 'not-a-uuid'"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: workspace_id must be a UUID, got 'not-a-uuid'"]);
     expect(h.questions).toEqual([]);
   });
 });
@@ -462,7 +464,7 @@ describe("the workspace a command targets", () => {
     async (value) => {
       const h = harness();
       expect(await runCli(["workspace", "member", "remove", "google_2", "--yes", "--workspace", value], h.deps)).toBe(1);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: --workspace was provided but empty (or 'auto') — refusing to fall back to the " +
           "credential source's workspace. Pass the target workspace UUID.",
       ]);
@@ -474,7 +476,7 @@ describe("the workspace a command targets", () => {
   it("refuses an env key without --workspace, naming --workspace, not --context-id", async () => {
     const h = harness({ auth: ENV_KEY, config: { context_id: WS } });
     expect(await runCli(["workspace", "member", "list"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: api_key from KAGURA_API_KEY env has no associated workspace; pass --workspace " +
         "(mixing api_key and OAuth profile's workspace is not allowed — see issue #115).",
     ]);
@@ -485,7 +487,7 @@ describe("the workspace a command targets", () => {
   it("refuses an OAuth profile with no workspace bound", async () => {
     const h = harness({ auth: { ...OAUTH, workspaceId: null } as ResolvedAuth });
     expect(await runCli(["auth", "list-keys", "-u", "google_2"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: OAuth profile has no workspace bound. Re-run `kagura-memory auth login` or pass --workspace <uuid>.",
     ]);
   });
@@ -493,7 +495,7 @@ describe("the workspace a command targets", () => {
   it('refuses a .kagura.json key whose context_id is "auto"', async () => {
     const h = harness({ config: { api_key: "k", context_id: "auto" } });
     expect(await runCli(["workspace", "invite", "list"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       'Error: .kagura.json has api_key but context_id is missing or "auto". Set context_id to the ' +
         "workspace UUID bound to this api_key, or pass --workspace. (Falling back to the OAuth " +
         "profile would mix credential sources — see issue #115.)",
@@ -503,7 +505,7 @@ describe("the workspace a command targets", () => {
   it("reports no credential with the resolver's message", async () => {
     const h = harness({ auth: new KaguraAuthError("No credentials found.\n  Run: kagura auth login") });
     expect(await runCli(["workspace", "member", "list", "-w", WS], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: No credentials found.\n  Run: kagura auth login"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: No credentials found.\n  Run: kagura auth login"]);
   });
 
   // Recorded from the Python CLI 0.42.0 (click 8.3.3, pydantic 2.13.4):
@@ -523,7 +525,7 @@ describe("the workspace a command targets", () => {
     ]) {
       const h = harness({ config: { api_key: "k", context_id: value } as unknown as KaguraConfig });
       expect(await runCli(argv, h.deps), argv.join(" ")).toBe(1);
-      expect(h.err).toEqual([NO_WORKSPACE]);
+      expect(diagnosticBodies(h.err)).toEqual([NO_WORKSPACE]);
       expect(h.rest.requests).toEqual([]);
     }
   });
@@ -545,7 +547,7 @@ describe("a refusal from the server", () => {
     const h = harness();
     reply(h, refusal("Insufficient permissions"), 403);
     expect(await runCli(["workspace", "member", "list"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Access denied (HTTP 403): workspace member/invitation/credential management requires " +
         "the workspace OWNER's API key when called programmatically (OAuth tokens are not accepted). " +
         "credential source: .kagura.json (workspace=11111111…) — is this key the workspace owner's?",
@@ -556,7 +558,7 @@ describe("a refusal from the server", () => {
     const h = harness({ auth: ENV_KEY });
     reply(h, refusal("Insufficient permissions"), 403);
     expect(await runCli(["workspace", "member", "list", "-w", WS], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Access denied (HTTP 403): workspace member/invitation/credential management requires " +
         "the workspace OWNER's API key when called programmatically (OAuth tokens are not accepted). " +
         "credential source: KAGURA_API_KEY env — is this key the workspace owner's?",
@@ -570,7 +572,7 @@ describe("a refusal from the server", () => {
     const h = harness();
     reply(h, refusal(message), 403);
     expect(await runCli(["auth", "create-key", "-u", "google_2", "-n", "ci", "--expires-days", "90"], h.deps)).toBe(1);
-    expect(h.err).toEqual([`Error: ${message}`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: ${message}`]);
     expect(h.out).toEqual([]);
   });
 
@@ -584,7 +586,7 @@ describe("a refusal from the server", () => {
     const h = harness({ auth: OAUTH });
     reply(h, refusal(message), 403);
     expect(await runCli(["auth", "create-key", "-u", "google_2", "-n", "ci", "--expires-days", "90"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Access denied (HTTP 403): workspace member/invitation/credential management requires " +
         "the workspace OWNER's API key when called programmatically (OAuth tokens are not accepted). " +
         "credential source: OAuth profile (~/.kagura/credentials.json) (workspace=aaaaaaaa…) — is this " +
@@ -604,7 +606,7 @@ describe("a refusal from the server", () => {
       403,
     );
     expect(await runCli(["workspace", "invite", "create", "a@b.com", "--role", "admin"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Feature 'team_invitations' not available on M plan. Upgrade to L plan to access this feature.\n" +
         "  Required plan: L (pro)",
     ]);
@@ -614,7 +616,7 @@ describe("a refusal from the server", () => {
     const h = harness({ confirm: true });
     reply(h, { error: "RES-001", message: "Invitation not found not found", details: {} }, 404);
     expect(await runCli(["workspace", "invite", "revoke", "7"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Invitation not found not found"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Invitation not found not found"]);
   });
 });
 
@@ -642,7 +644,7 @@ describe("workspace invite create", () => {
         h.deps,
       ),
     ).toBe(0);
-    expect(h.err).toEqual(["⚠ The invitation URL below is shown once — treat it as a join credential."]);
+    expect(diagnosticBodies(h.err)).toEqual(["⚠ The invitation URL below is shown once — treat it as a join credential."]);
     expect(h.out).toEqual([
       "Invitation 7 → new@x.com (role=member, expires=2026-07-10)\nhttps://memory.kagura-ai.com/invite/tok",
     ]);
@@ -683,7 +685,7 @@ describe("workspace invite create", () => {
       const h = harness();
       expect(await runCli(["workspace", "invite", "create", "new@x.com", ...extra], h.deps)).toBe(2);
       const role = extra[1] ?? "member";
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         `Error: --role ${role} requires at least one --context/-c <uuid> (the invitee's context grant).`,
       ]);
       expect(h.err.join("\n")).not.toContain("allowed");
@@ -696,7 +698,7 @@ describe("workspace invite create", () => {
     expect(
       await runCli(["workspace", "invite", "create", "a@b.com", "-c", CTX, "--expires-days", days], h.deps),
     ).toBe(2);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `Error: Invalid value for '--expires-days': '${days}' is not one of '7', '30', '90', '365'.`,
     ]);
   });
@@ -712,7 +714,7 @@ describe("workspace invite create", () => {
   ])("refuses %j before anything is read (exit 2)", async (flags, shown) => {
     const h = harness();
     expect(await runCli(["workspace", "invite", "create", "a@b.com", ...flags], h.deps)).toBe(2);
-    expect(h.err).toEqual([`Error: Invalid value for '--context' / '-c': ${shown} is not a valid context UUID.`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for '--context' / '-c': ${shown} is not a valid context UUID.`]);
     expect(h.calls).toEqual([]);
     expect(h.rest.requests).toEqual([]);
   });
@@ -721,7 +723,7 @@ describe("workspace invite create", () => {
     const h = harness();
     reply(h, { email: "a@b.com", role: "admin", invitation_url: "https://u/secret-join" });
     expect(await runCli(["workspace", "invite", "create", "a@b.com", "--role", "admin"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `Error: WorkspaceClient.create_invitation: unexpected server response for WorkspaceInvitation (id: Field required). ${UPGRADE}`,
     ]);
     expect(h.out).toEqual([]);
@@ -767,7 +769,7 @@ describe("workspace invite list", () => {
     const h = harness();
     reply(h, [{ id: 1, role: "member", allowed_context_ids: value }]);
     expect(await runCli(["workspace", "invite", "list", "--json"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `Error: WorkspaceClient.list_invitations: unexpected server response for WorkspaceInvitation (${problem}). ${UPGRADE}`,
     ]);
   });
@@ -876,14 +878,14 @@ describe("workspace invite revoke", () => {
   it.each(["7.0", "0x10", "a/b"])("refuses INVITATION_ID %j in click's words (exit 2)", async (raw) => {
     const h = harness();
     expect(await runCli(["workspace", "invite", "revoke", raw], h.deps)).toBe(2);
-    expect(h.err).toEqual([`Error: Invalid value for 'INVITATION_ID': '${raw}' is not a valid integer or id.`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for 'INVITATION_ID': '${raw}' is not a valid integer or id.`]);
     expect(h.calls).toEqual([]);
   });
 
   it("requires INVITATION_ID", async () => {
     const h = harness();
     expect(await runCli(["workspace", "invite", "revoke"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Missing argument 'INVITATION_ID'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Missing argument 'INVITATION_ID'."]);
   });
 });
 
@@ -911,7 +913,7 @@ describe("auth create-key", () => {
     expect(
       await runCli(["auth", "create-key", "--user", "google_2", "--name", "ci-bot", "--expires-days", "90"], h.deps),
     ).toBe(0);
-    expect(h.err).toEqual(["⚠ Save this key now — it cannot be shown again."]);
+    expect(diagnosticBodies(h.err)).toEqual(["⚠ Save this key now — it cannot be shown again."]);
     expect(h.out).toEqual([
       `Key 42 'ci-bot' for google_2 (prefix=kagura_abcdef123, expires=2026-10-01)\n${PLAINTEXT}`,
     ]);
@@ -933,7 +935,7 @@ describe("auth create-key", () => {
     const h = harness();
     reply(h, { plaintext_key: "kagura_salvaged" }, 201);
     expect(await runCli(["auth", "create-key", "-u", "google_2", "-n", "ci", "--expires-days", "30"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.mint_member_key: server returned an unexpected mint response shape, " +
         "but the key WAS created. Save the plaintext now: kagura_salvaged",
     ]);
@@ -944,7 +946,7 @@ describe("auth create-key", () => {
     const h = harness();
     reply(h, { unexpected: true }, 201);
     expect(await runCli(["auth", "create-key", "-u", "google_2", "-n", "ci", "--expires-days", "30"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.mint_member_key: server returned an unexpected mint response shape; " +
         "the key may have been created without displaying its plaintext — check `kagura auth list-keys` " +
         "and revoke/re-mint if present.",
@@ -958,7 +960,7 @@ describe("auth create-key", () => {
     const h = harness();
     reply(h, { id: "42", name: "n", key_prefix: "p", plaintext_key: "kp" }, 201);
     expect(await runCli(["auth", "create-key", "-u", "u", "-n", "n", "--expires-days", "30"], h.deps)).toBe(0);
-    expect(h.err).toEqual(["⚠ Save this key now — it cannot be shown again."]);
+    expect(diagnosticBodies(h.err)).toEqual(["⚠ Save this key now — it cannot be shown again."]);
     expect(h.out).toEqual(["Key 42 'n' for u (prefix=p, expires=never)\nkp"]);
   });
 
@@ -966,7 +968,7 @@ describe("auth create-key", () => {
     const h = harness();
     reply(h, { id: 42, name: "n", key_prefix: "p", plaintext_key: 5 }, 201);
     expect(await runCli(["auth", "create-key", "-u", "u", "-n", "n", "--expires-days", "30"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.mint_member_key: server returned an unexpected mint response shape; " +
         "the key may have been created without displaying its plaintext — check `kagura auth list-keys` " +
         "and revoke/re-mint if present.",
@@ -987,7 +989,7 @@ describe("auth create-key", () => {
   ])("refuses %j in click's words (exit 2), before any credential", async (argv, line) => {
     const h = harness();
     expect(await runCli(["auth", "create-key", ...argv], h.deps)).toBe(2);
-    expect(h.err).toEqual([line]);
+    expect(diagnosticBodies(h.err)).toEqual([line]);
     expect(h.calls).toEqual([]);
   });
 
@@ -997,7 +999,7 @@ describe("auth create-key", () => {
     // error here; this bin reports the first declared problem.
     const h = harness();
     expect(await runCli(["auth", "create-key", "--expires-days", "4000"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Missing option '--user' / '-u'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Missing option '--user' / '-u'."]);
   });
 
   it("takes 1_000 days, as Python's int() does", async () => {
@@ -1012,7 +1014,7 @@ describe("auth create-key", () => {
     for (const name of ["create-key", "list-keys", "revoke-key"]) {
       const h = harness();
       expect(await runCli([name, "--help"], h.deps)).toBe(2);
-      expect(h.err[0]).toBe(`Error: No such command '${name}'.`);
+      expect(diagnosticBodies(h.err)[0]).toBe(`Error: No such command '${name}'.`);
     }
   });
 });
@@ -1091,7 +1093,7 @@ describe("auth list-keys", () => {
     const h = harness();
     reply(h, { api_keys: null, target_user_role: "member" });
     expect(await runCli(["auth", "list-keys", "-u", "google_2"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.list_member_keys: unexpected server response " +
         `(GET /api/v1/workspaces/${WS}/members/google_2/credentials: expected an object carrying a ` +
         `'api_keys' array). ${UPGRADE}`,
@@ -1105,7 +1107,7 @@ describe("auth list-keys", () => {
     reply(h, { api_keys: null });
     expect(await runCli(["auth", "list-keys", "-u", "a@b"], h.deps)).toBe(1);
     expect(lastRequest(h).url).toBe(`https://test.com/kagura/api/v1/workspaces/${WS}/members/a%40b/credentials`);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.list_member_keys: unexpected server response " +
         `(GET /kagura/api/v1/workspaces/${WS}/members/a@b/credentials: expected an object carrying a ` +
         `'api_keys' array). ${UPGRADE}`,
@@ -1116,7 +1118,7 @@ describe("auth list-keys", () => {
     const h = harness();
     reply(h, { api_keys: [{ id: 1, name: "k", key_prefix: "p", plaintext_key: 99 }] });
     expect(await runCli(["auth", "list-keys", "-u", "google_2", "--json"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: WorkspaceClient.list_member_keys: unexpected server response for MemberAPIKey " +
         `(plaintext_key: Input should be a valid string). ${UPGRADE}`,
     ]);
@@ -1125,7 +1127,7 @@ describe("auth list-keys", () => {
   it("requires --user", async () => {
     const h = harness();
     expect(await runCli(["auth", "list-keys"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Missing option '--user' / '-u'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Missing option '--user' / '-u'."]);
   });
 });
 
@@ -1134,7 +1136,7 @@ describe("auth revoke-key", () => {
     const h = harness({ confirm: false });
     expect(await runCli(["auth", "revoke-key", "42", "--user", "google_2"], h.deps)).toBe(1);
     expect(h.questions).toEqual([`Revoke key 42 of google_2 in workspace ${WS}?`]);
-    expect(h.err).toEqual(["Error: Aborted!"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Aborted!"]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -1158,7 +1160,7 @@ describe("auth revoke-key", () => {
   ])("refuses %j in click's words (exit 2)", async (argv, line) => {
     const h = harness();
     expect(await runCli(["auth", "revoke-key", ...argv], h.deps)).toBe(2);
-    expect(h.err).toEqual([line]);
+    expect(diagnosticBodies(h.err)).toEqual([line]);
     expect(h.calls).toEqual([]);
   });
 
@@ -1195,7 +1197,7 @@ describe("auth revoke-key", () => {
   it("refuses --invite as every auth subcommand but login does", async () => {
     const h = harness();
     expect(await runCli(["auth", "revoke-key", "42", "-u", "u", "--invite", "-Zsecret"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["--invite applies only to 'auth login'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: --invite applies only to 'auth login'."]);
     expect(h.calls).toEqual([]);
   });
 });
@@ -1228,7 +1230,7 @@ describe("a user id of ., .. or nothing", () => {
   ])("refuses %j in click's words (exit 2), sending nothing", async (argv, line) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err).toEqual([line]);
+    expect(diagnosticBodies(h.err)).toEqual([line]);
     expect(h.calls).toEqual([]);
     expect(h.questions).toEqual([]);
     expect(h.rest.requests).toEqual([]);
@@ -1259,7 +1261,7 @@ describe("help", () => {
     const root = harness();
     expect(await runCli(["--help"], root.deps)).toBe(0);
     expect(root.out.join("\n")).toMatch(
-      /^ {2}workspace +Workspace administration \(owner API key required, server v0\.42\.0\+\)\.$/m,
+      /^ {2}workspace +Workspace administration \(owner API key required, server\.\.\.$/m,
     );
 
     const h = harness();
@@ -1276,10 +1278,7 @@ describe("help", () => {
     const h = harness();
     expect(await runCli(["workspace", group, "--help"], h.deps)).toBe(0);
     const text = h.out.join("\n");
-    expect(text).toContain(
-      "  Requires the workspace OWNER's static API key — OAuth tokens are\n" +
-        "  rejected by the server on this surface.",
-    );
+    expect(text).toBe(pythonHelp(`workspace ${group}`));
     const listed = text.split("Commands:\n")[1]!.split("\n").map((l) => l.trim().split(/\s+/)[0]);
     expect(listed).toEqual(commands);
   });
@@ -1288,24 +1287,16 @@ describe("help", () => {
     const h = harness();
     expect(await runCli(["auth", "--help"], h.deps)).toBe(0);
     const text = h.out.join("\n");
-    expect(text).toMatch(/^ {2}create-key +Mint an API key for another workspace member \(owner API key required\)\.$/m);
+    expect(text.split("\n").find(line => line.startsWith("  create-key ")))
+      .toBe(pythonHelp("auth").split("\n").find(line => line.startsWith("  create-key ")));
     expect(text).toMatch(/^ {2}list-keys +List a member's API keys — metadata only, never the plaintext\.$/m);
     expect(text).toMatch(/^ {2}revoke-key +Revoke a member's API key by its id \(see `list-keys`\)\.$/m);
   });
 
   it("renders a command's options and one example per line, naming this bin", async () => {
     const h = harness();
-    expect(await runCli(["workspace", "invite", "create", "--help"], h.deps)).toBe(0);
-    const text = h.out.join("\n");
-    expect(text).toMatch(/^Usage: kagura-memory workspace invite create \[OPTIONS\] EMAIL$/m);
-    expect(text).toMatch(/^ {6}--role \[member\|admin\|viewer\] +Role granted on accept .*\[default: member\]$/m);
-    expect(text).toMatch(/^ {2}-c, --context TEXT +Context UUID the invitee may access/m);
-    expect(text).toMatch(/^ {6}--expires-days \[7\|30\|90\|365\] +Expiry preset/m);
-    expect(text).toMatch(/^ {2}-w, --workspace TEXT +Workspace UUID \(default: the credential source's workspace\)$/m);
-    expect(text).toContain(
-      "  Example:\n    kagura-memory workspace invite create new@example.com --role member -c <context-uuid>",
-    );
-    expect(text).not.toContain("--invite");
+    expect(await runCli(["workspace","invite","create","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("workspace invite create"));
   });
 });
 

@@ -73,6 +73,7 @@ import type { ExecOptions, ExecResult } from "./exec.js";
 import { checkInviteSupport, type InviteSupport } from "./invite.js";
 import { cliErrorMessage, formatJsonAscii } from "./output.js";
 import { CliError, CliUsageError, missingParam } from "./parse.js";
+import { formatUsage } from "./clickHelp.js";
 import { parseArgs, type FlagSpec, type ParseSpec, type ParsedArgs } from "./parseArgs.js";
 
 /**
@@ -1024,36 +1025,46 @@ function noSuchOption(name: string, spec: ParseSpec): string {
  * `--invite -Z…` token, and `--name -bad` would read as two mistakes: a
  * missing value and then `No such option: -b`.
  */
-function reportBadOptions(deps: CliDeps, parsed: Pick<ParsedArgs, "problems">, spec: ParseSpec): void {
+function badOptionsMessage(parsed: Pick<ParsedArgs, "problems">, spec: ParseSpec): string {
   const [problem] = parsed.problems;
-  if (problem === undefined) return;
+  if (problem === undefined) return "";
   const { kind, name } = problem;
-  deps.writeError(
+  return (
     kind === "unknown"
-      ? `Error: ${noSuchOption(name, spec)}`
+      ? noSuchOption(name, spec)
       : kind === "noValue"
-        ? `Error: Option '${name}' does not take a value.`
-        : `Error: Option '${name}' requires an argument.`,
+        ? `Option '${name}' does not take a value.`
+        : `Option '${name}' requires an argument.`
   );
 }
 
+function usageError(path: string, args: string, message: string): string {
+  return `${formatUsage(path, args)}\nTry '${path} --help' for help.\n\nError: ${message}`;
+}
+
+// Click's BadOptionUsage is raised without a Context during parsing;
+// NoSuchOption carries one and therefore prints Usage and the help hint.
+function optionError(parsed: Pick<ParsedArgs, "problems">, spec: ParseSpec, path: string, args: string): string {
+  const message = badOptionsMessage(parsed, spec);
+  return parsed.problems[0]?.kind === "unknown" ? usageError(path, args, message) : `Error: ${message}`;
+}
+
 /** The options the root takes, beside `--help`; `--version` is answered before a command is looked up. */
-const ROOT_SPEC: ParseSpec = { flags: [{ name: "version", type: "switch" }] };
+const ROOT_SPEC: ParseSpec = { flags: [{ name: "version", type: "switch", help: "Show the version and exit." }] };
 /** A group takes no option but `--help`. */
 const GROUP_SPEC: ParseSpec = { flags: [] };
 
 /**
  * Options given to the root or a group, where a command name was due:
- * click's error for the first bad one, then the help (exit 2), else the
+ * click's first error with its context when available (exit 2), else the
  * help for `--help` / `-h` (exit 0). Click parses a group's options up to
  * its subcommand before its eager `--help` acts, so `--help --bogus` is
  * the error, not the help.
  */
-function groupOption(deps: CliDeps, argv: string[], spec: ParseSpec, help: string): { help: string; code: number } {
+function groupOption(argv: string[], spec: ParseSpec, help: string, path: string): { help: string; code: number } {
   const parsed = parseArgs(argv, spec, { stopAtPositional: true });
   if (parsed.problems.length > 0) {
-    reportBadOptions(deps, parsed, spec);
-    return { help, code: 2 };
+    return { help: optionError(parsed, spec, path, "[OPTIONS] COMMAND [ARGS]..."), code: 2 };
   }
   return { help, code: parsed.flags.has("help") ? 0 : 2 };
 }
@@ -1065,11 +1076,11 @@ function groupOption(deps: CliDeps, argv: string[], spec: ParseSpec, help: strin
  * own flag spec to know which tokens are values — so it reads only leading
  * non-flag tokens and walks the registry with them.
  */
-function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code: number } {
+function resolve(argv: string[]): Resolved | { help: string; code: number } {
   const head = argv[0];
   // No command: a bare invocation is a mistake.
   if (head === undefined) return { help: renderRootHelp(), code: 2 };
-  if (head.startsWith("-")) return groupOption(deps, argv, ROOT_SPEC, renderRootHelp());
+  if (head.startsWith("-")) return groupOption(argv, ROOT_SPEC, renderRootHelp(), "kagura-memory");
   if (head === "help") {
     return { help: renderRootHelp(), code: 0 };
   }
@@ -1078,8 +1089,7 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
     ? AUTH_GROUP.commands[head]
     : ROOT_COMMANDS[head];
   if (found === undefined) {
-    deps.writeError(`Error: No such command '${head}'.`);
-    return { help: renderRootHelp(), code: 2 };
+    return { help: usageError("kagura-memory", "[OPTIONS] COMMAND [ARGS]...", `No such command '${head}'.`), code: 2 };
   }
   let entry: Command | CommandGroup = found;
 
@@ -1093,12 +1103,11 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
     const groupHelp = renderGroupHelp(groupPath, entry.summary, entry.commands, entry.description);
     if (next === undefined) return { help: groupHelp, code: 2 };
     if (next.startsWith("-")) {
-      return groupOption(deps, argv.slice(index), GROUP_SPEC, groupHelp);
+      return groupOption(argv.slice(index), GROUP_SPEC, groupHelp, groupPath);
     }
     const child: Command | CommandGroup | undefined = entry.commands[next];
     if (child === undefined) {
-      deps.writeError(`Error: No such command '${next}'.`);
-      return { help: groupHelp, code: 2 };
+      return { help: usageError(groupPath, "[OPTIONS] COMMAND [ARGS]...", `No such command '${next}'.`), code: 2 };
     }
     entry = child;
     path.push(next);
@@ -1109,7 +1118,7 @@ function resolve(argv: string[], deps: CliDeps): Resolved | { help: string; code
 }
 
 function renderRootHelp(): string {
-  return `${renderGroupHelp("kagura-memory", ROOT_SUMMARY, ROOT_COMMANDS)}\n${ROOT_EPILOG}`;
+  return `${renderGroupHelp("kagura-memory", ROOT_SUMMARY, ROOT_COMMANDS, undefined, ROOT_SPEC.flags)}\n${ROOT_EPILOG}`;
 }
 
 /**
@@ -1127,7 +1136,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     return 0;
   }
 
-  const resolved = resolve(argv, deps);
+  const resolved = resolve(argv);
   if ("help" in resolved) {
     if (resolved.code === 0) deps.write(resolved.help);
     else deps.writeError(resolved.help);
@@ -1135,6 +1144,8 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   }
 
   const { command, path, rest } = resolved;
+  const reportUsageError = (message: string) =>
+    deps.writeError(usageError(path, `[OPTIONS]${command.args ? ` ${command.args}` : ""}`, message));
   const parsed = parseArgs(
     rest,
     command.spec,
@@ -1147,15 +1158,14 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
   // Click parses the whole argv before its eager `--help` acts, so an
   // option error anywhere wins over `--help`, before it or after it: one
-  // error, then the help, exit 2. Except an unknown option of a
+  // error, with Usage/Try when it has context, exit 2. Except an unknown option of a
   // passthrough command: click's `ignore_unknown_options` keeps it as an
   // argument instead of raising, so `secret exec --help --bogus` is the
   // help. A missing value or a value given to a switch still wins there.
   const blocking =
     command.passthrough === true ? parsed.problems.filter((p) => p.kind !== "unknown") : parsed.problems;
   if (blocking.length > 0) {
-    reportBadOptions(deps, { problems: blocking }, command.spec);
-    deps.writeError(renderHelp(path, command));
+    deps.writeError(optionError({ problems: blocking }, command.spec, path, `[OPTIONS]${command.args ? ` ${command.args}` : ""}`));
     return 2;
   }
 
@@ -1165,7 +1175,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     (flag) => flag.refusal !== undefined && parsed.values[flag.name] !== undefined,
   );
   if (refused?.refusal !== undefined) {
-    deps.writeError(refused.refusal);
+    reportUsageError(refused.refusal);
     return 2;
   }
 
@@ -1177,8 +1187,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   // Without `--help`, a passthrough command's unknown option before the
   // child's name is still refused: Python would run it as the COMMAND.
   if (parsed.problems.length > 0) {
-    reportBadOptions(deps, parsed, command.spec);
-    deps.writeError(renderHelp(path, command));
+    reportUsageError(badOptionsMessage(parsed, command.spec));
     return 2;
   }
 
@@ -1198,10 +1207,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     .map((flag) => `--${flag.name}`);
 
   if (empty.length > 0) {
-    for (const flag of empty) {
-      deps.writeError(`Option ${flag} needs a non-empty value.`);
-    }
-    deps.writeError(renderHelp(path, command));
+    reportUsageError(`Option ${empty[0]} needs a non-empty value.`);
     return 2;
   }
 
@@ -1226,7 +1232,8 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     // with "Error: "; the exit code is what tells a script which it was.
     // A quota or plan refusal gains Python's `Resets at:` / `Required
     // plan:` lines, whichever command it came from.
-    deps.writeError(`Error: ${cliErrorMessage(e)}`);
+    if (e instanceof CliUsageError) reportUsageError(cliErrorMessage(e));
+    else deps.writeError(`Error: ${cliErrorMessage(e)}`);
     return e instanceof CliUsageError ? 2 : 1;
   }
 }

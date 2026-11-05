@@ -1,3 +1,5 @@
+import { optionLines, prose } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
@@ -99,7 +101,7 @@ describe("kagura-memory remember", () => {
   it("rejects an unknown --source-type with exit 2", async () => {
     const { code, h } = await wire(["remember", "-s", "S", "--content", "C", "--source-type", "ftp"]);
     expect(code).toBe(2);
-    expect(h.err[0]).toBe(
+    expect(diagnosticBodies(h.err)[0]).toBe(
       "Error: Invalid value for '--source-type': 'ftp' is not one of 'file', 'url', 'vault', 'api', 'manual'.",
     );
   });
@@ -171,7 +173,7 @@ describe("kagura-memory recall", () => {
   it("describes --trusted-only in the Python CLI's words", async () => {
     const h = harness();
     expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
-    const line = h.out.join("\n").split("\n").find((l) => l.trimStart().startsWith("--trusted-only"));
+    const line = optionLines(h.out.join("\n")).find((l) => l.trimStart().startsWith("--trusted-only"));
     expect(line).toContain(
       "Exclude external / connector-ingested memories (filters.trust_tier=trusted; " +
         "server v0.24.0+). Use it for reads fed back to an agent, like the SessionStart hook.",
@@ -226,7 +228,7 @@ describe("kagura-memory recall", () => {
     expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
     const help = h.out.join("\n");
     const line = (flag: string) =>
-      help.split("\n").find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
+      optionLines(help).find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
     expect(line("--rerank")).toContain(
       "Request reranking for this call (default: follow the context's search config)",
     );
@@ -256,7 +258,7 @@ describe("kagura-memory recall", () => {
     for (const argv of [["recall", "q", "-k", "abc"], ["recall", "q", "-kabc"]]) {
       const { code, h } = await wire(argv);
       expect(code).toBe(2);
-      expect(h.err[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
+      expect(diagnosticBodies(h.err)[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
     }
   });
 
@@ -276,7 +278,7 @@ describe("kagura-memory recall", () => {
       resets_at: "2026-09-24T00:00:00Z",
     };
     expect(await runCli(["remember", "-s", "S", "--content", "C"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: remember failed (quota_exceeded): Daily memory limit reached (100/day).\n" +
         "  Resets at: 2026-09-24T00:00:00+00:00\n" +
         "  Required plan: M (basic)",
@@ -346,7 +348,7 @@ describe("kagura-memory forget", () => {
     // click coerces `type=int` before the body's ClickException can run.
     const { code, h } = await wire(["forget", "-k", "abc"]);
     expect(code).toBe(2);
-    expect(h.err[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: Invalid value for '-k': 'abc' is not a valid integer.");
     expect(h.err.join("\n")).not.toContain("Either --memory-id or --query is required");
     expect(h.server.requests).toHaveLength(0);
   });

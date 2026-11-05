@@ -1,3 +1,4 @@
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `setup codex | hermes | openclaw`.
  *
@@ -287,7 +288,7 @@ describe("setup codex", () => {
   it.each(["my-key", "kagura_api_key", "1KEY", ""])("refuses --api-key-env %j with exit 2", async (value) => {
     const h = harness(codex);
     expect(await runCli(setup("codex", `--api-key-env=${value}`), h.deps)).toBe(2);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Invalid value for '--api-key-env': use an upper-case variable name, e.g. KAGURA_API_KEY",
     );
     expect(h.runs).toEqual([]);
@@ -296,7 +297,7 @@ describe("setup codex", () => {
   it("refuses a plain-HTTP --mcp-url that is not localhost, with exit 2", async () => {
     const h = harness(codex);
     expect(await runCli(setup("codex", "--mcp-url", "http://example.com/mcp"), h.deps)).toBe(2);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Invalid value for '--mcp-url': MCP URL must use HTTPS for security " +
         "(got: http://example.com/mcp). HTTP is only allowed for localhost development.",
     );
@@ -360,7 +361,7 @@ describe("setup codex", () => {
       expect(await runCli(["setup", name, "--dry-run"], h.deps)).toBe(1);
       // No position: V8 on every supported Node (20.19+) words an "Unexpected
       // token" error without one.
-      expect(h.err).toEqual(["Error: Invalid JSON or encoding in .kagura.json (expected UTF-8)"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: Invalid JSON or encoding in .kagura.json (expected UTF-8)"]);
       expect(h.err.join("\n")).not.toContain("kagura_");
     });
   });
@@ -414,9 +415,9 @@ describe("setup codex", () => {
       const h = harness(codex);
       expect(await runCli(["setup", "codex", "--profile", "work"], h.deps)).toBe(1);
       const err = h.err.join("\n");
-      expect(err).toContain("kagura-mcp");
-      expect(err).toContain("`pip install kagura-memory && kagura setup codex --profile work`");
-      expect(err).toContain("--url-form");
+      expect(diagnosticBodies(err)).toContain("kagura-mcp");
+      expect(diagnosticBodies(err)).toContain("`pip install kagura-memory && kagura setup codex --profile work`");
+      expect(diagnosticBodies(err)).toContain("--url-form");
       expect(h.runs).toEqual([]);
     });
 
@@ -425,7 +426,7 @@ describe("setup codex", () => {
       // Python's harness setups take no --api-key at all (exit 2 too).
       const h = harness(codex);
       expect(await runCli(setup("codex", "--url-form", "--profile", "work", "--api-key", KEY), h.deps)).toBe(2);
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         "Error: --profile (OAuth) and --api-key (static token) are mutually exclusive; pick one.",
       );
       expect(h.err.join("\n")).not.toContain(KEY);
@@ -446,7 +447,7 @@ describe("setup codex", () => {
     it("with --url-form, cannot turn a context name into a UUID either (exit 2)", async () => {
       const h = harness(codex);
       expect(await runCli(setup("codex", "--url-form", "--profile", "work", "-c", "proj"), h.deps)).toBe(2);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: --profile is not used here, so --context-id must be a context UUID: setup cannot " +
           "list contexts.",
       ]);
@@ -501,11 +502,11 @@ describe("setup codex", () => {
     const err = h.err.join("\n");
     // True on Windows too, where an npm-installed codex is a .cmd shim
     // that `which` passes over.
-    expect(err).toContain(
+    expect(diagnosticBodies(err)).toContain(
       `Setup does not edit ~/.codex/config.toml itself (${NOT_ON_PATH("codex")}).\n` +
         "Add this kagura-memory entry to it:",
     );
-    expect(err).toContain("bearer_token_env_var");
+    expect(diagnosticBodies(err)).toContain("bearer_token_env_var");
     expect(report(h).applied_with).toBeNull();
     expect(notes(h)).toEqual([
       `Setup does not edit ~/.codex/config.toml itself (${NOT_ON_PATH("codex")}). ` +
@@ -668,7 +669,7 @@ describe("setup codex", () => {
     it("rejects an empty --tool-profile", async () => {
       const h = harness(codex);
       expect(await runCli(setup("codex", "--tool-profile="), h.deps)).toBe(2);
-      expect(h.err).toContain("Error: Invalid value for '--tool-profile': tool_profile must not be empty");
+      expect(diagnosticBodies(h.err)).toContain("Error: Invalid value for '--tool-profile': tool_profile must not be empty");
       expect(h.runs).toEqual([]);
     });
 
@@ -690,14 +691,14 @@ describe("setup codex", () => {
     it("stops with exit 1, in Python's words, and runs nothing without --force", async () => {
       const h = harness(codex);
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
-      expect(h.err).toContain(`Error: Nothing was written: ${STOP}.`);
+      expect(diagnosticBodies(h.err)).toContain(`Error: Nothing was written: ${STOP}.`);
       expect(h.runs).toEqual([]);
     });
 
     it("stops without codex on PATH too: Python reads config.toml itself", async () => {
       const h = harness({});
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
-      expect(h.err).toContain(`Error: Nothing was written: ${STOP}.`);
+      expect(diagnosticBodies(h.err)).toContain(`Error: Nothing was written: ${STOP}.`);
     });
 
     it("is replaced with --force, by one `codex mcp add`, which overwrites", async () => {
@@ -747,13 +748,13 @@ describe("setup codex", () => {
         exec: () => ({ code: 2, stdout: "", stderr: "invalid server name\n" }),
       });
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
-      expect(h.err).toContain("Error: `codex mcp add` failed: invalid server name");
+      expect(diagnosticBodies(h.err)).toContain("Error: `codex mcp add` failed: invalid server name");
     });
 
     it("names the exit code when it says nothing", async () => {
       const h = harness({ onPath: codex.onPath!, exec: () => ({ code: 2, stdout: "", stderr: "" }) });
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
-      expect(h.err).toContain("Error: `codex mcp add` failed: exit code 2");
+      expect(diagnosticBodies(h.err)).toContain("Error: `codex mcp add` failed: exit code 2");
     });
 
     it.each([137, 1, 0])("says when it timed out, even with exit code %i", async (code) => {
@@ -764,7 +765,7 @@ describe("setup codex", () => {
         exec: () => ({ code, stdout: "", stderr: "got-term", timedOut: true }),
       });
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
-      expect(h.err).toContain("Error: `codex mcp add` failed: timed out after 120s");
+      expect(diagnosticBodies(h.err)).toContain("Error: `codex mcp add` failed: timed out after 120s");
       expect(h.out).toEqual([]);
     });
 
@@ -776,7 +777,7 @@ describe("setup codex", () => {
         exec: () => ({ code: 1, stdout: "", stderr: `bad token ${KEY}` }),
       });
       expect(await runCli(setup("codex"), h.deps)).toBe(1);
-      expect(h.err).toContain("Error: `codex mcp add` failed: bad token <redacted>");
+      expect(diagnosticBodies(h.err)).toContain("Error: `codex mcp add` failed: bad token <redacted>");
     });
   });
 
@@ -803,11 +804,11 @@ describe("setup hermes", () => {
     const h = harness(hermes);
     expect(await runCli(setup("hermes"), h.deps)).toBe(0);
     const err = h.err.join("\n");
-    expect(err).toContain(
+    expect(diagnosticBodies(err)).toContain(
       "Setup does not edit ~/.hermes/config.yaml itself (`hermes mcp add` is interactive and this port " +
         "never prompts).\nAdd this kagura-memory entry to it:",
     );
-    expect(err).toContain(
+    expect(diagnosticBodies(err)).toContain(
       [
         "mcp_servers:",
         "  kagura-memory:",
@@ -877,7 +878,7 @@ describe("setup hermes", () => {
 
     const refused = harness({});
     expect(await runCli(setup("hermes", "--api-key-env", "MY_KEY"), refused.deps)).toBe(2);
-    expect(refused.err).toContain(
+    expect(diagnosticBodies(refused.err)).toContain(
       "Error: Hermes Agent names the variable itself (MCP_KAGURA_MEMORY_API_KEY); drop --api-key-env.",
     );
   });
@@ -968,7 +969,7 @@ describe("setup hermes", () => {
       const h = harness({});
       expect(await runCli(setup("hermes"), h.deps)).toBe(0);
       expect(h.err.join("\n")).toContain("Add this kagura-memory entry to its mcp_servers: mapping:");
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         [
           "  kagura-memory:",
           `    url: "${MCP_URL}"`,
@@ -1016,7 +1017,7 @@ describe("setup hermes", () => {
     it("stops setup without --force when hermes is on PATH, as `hermes mcp list` would show it", async () => {
       const h = harness(hermes);
       expect(await runCli(setup("hermes"), h.deps)).toBe(1);
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         "Error: Nothing was written: a kagura-memory entry already exists in ~/.hermes/config.yaml; " +
           "re-run with --force to replace it.",
       );
@@ -1050,7 +1051,7 @@ describe("setup hermes", () => {
     it("--guardrails off exits 2 in Python's words", async () => {
       const h = harness({});
       expect(await runCli(setup("hermes", "--guardrails", "off"), h.deps)).toBe(2);
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         "Error: Hermes Agent does not read MCP instructions: its guardrails come only from the guardrails " +
           "block of get_context_info, which --guardrails off removes.",
       );
@@ -1241,9 +1242,9 @@ describe("setup openclaw", () => {
     const h = harness({});
     expect(await runCli(setup("openclaw"), h.deps)).toBe(0);
     const err = h.err.join("\n");
-    expect(err).toContain(`Setup does not edit ~/.openclaw/openclaw.json itself (${NOT_ON_PATH("openclaw")}).`);
-    expect(err).toContain('"transport": "streamable-http"');
-    expect(err).toContain('"Authorization": "Bearer ${KAGURA_API_KEY}"');
+    expect(diagnosticBodies(err)).toContain(`Setup does not edit ~/.openclaw/openclaw.json itself (${NOT_ON_PATH("openclaw")}).`);
+    expect(diagnosticBodies(err)).toContain('"transport": "streamable-http"');
+    expect(diagnosticBodies(err)).toContain('"Authorization": "Bearer ${KAGURA_API_KEY}"');
     expect(fs.existsSync(stateDir())).toBe(false);
     expect(notes(h)).toContain("Check it with: openclaw mcp doctor kagura-memory --probe");
   });
@@ -1272,7 +1273,7 @@ describe("setup openclaw", () => {
     it("--guardrails off exits 2 and runs nothing", async () => {
       const h = harness(openclaw);
       expect(await runCli(setup("openclaw", "--guardrails", "off"), h.deps)).toBe(2);
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         "Error: OpenClaw does not read MCP instructions: its guardrails come only from the guardrails " +
           "block of get_context_info, which --guardrails off removes.",
       );
@@ -1320,7 +1321,7 @@ describe("setup openclaw", () => {
     it("stops setup without --force when openclaw is on PATH", async () => {
       const h = harness(openclaw);
       expect(await runCli(setup("openclaw"), h.deps)).toBe(1);
-      expect(h.err).toContain(
+      expect(diagnosticBodies(h.err)).toContain(
         "Error: Nothing was written: a kagura-memory entry already exists in ~/.openclaw/openclaw.json; " +
           "re-run with --force to replace it.",
       );
@@ -1369,7 +1370,7 @@ describe("setup openclaw", () => {
       exec: () => ({ code: 1, stdout: "", stderr: 'MCP server "kagura-memory" already exists' }),
     });
     expect(await runCli(setup("openclaw"), h.deps)).toBe(1);
-    expect(h.err).toContain('Error: `openclaw mcp add` failed: MCP server "kagura-memory" already exists');
+    expect(diagnosticBodies(h.err)).toContain('Error: `openclaw mcp add` failed: MCP server "kagura-memory" already exists');
   });
 });
 
@@ -1440,7 +1441,7 @@ describe("a failing harness CLI's output", () => {
       exec: () => ({ code: 1, stdout: "", stderr: "kagura_short_and_longer kagura_short" }),
     });
     expect(await runCli(setup("codex"), h.deps)).toBe(1);
-    expect(h.err).toContain("Error: `codex mcp add` failed: <redacted> <redacted>");
+    expect(diagnosticBodies(h.err)).toContain("Error: `codex mcp add` failed: <redacted> <redacted>");
   });
 });
 
@@ -1468,7 +1469,7 @@ describe("--name", () => {
   ])("setup %s --name=%s exits 2 and runs nothing", async (harnessName, name) => {
     const h = harness(everywhere);
     expect(await runCli(setup(harnessName, `--name=${name}`), h.deps)).toBe(2);
-    expect(h.err).toContain(MESSAGE);
+    expect(diagnosticBodies(h.err)).toContain(MESSAGE);
     expect(h.runs).toEqual([]);
   });
 
@@ -1526,7 +1527,7 @@ describe("the MCP URL (python-sdk#279)", () => {
       ]) {
         const h = harness(everywhere);
         expect(await runCli(["setup", name, `--mcp-url=${url}`], h.deps), url).toBe(2);
-        expect(h.err, url).toEqual([MCP_URL_SHAPE]);
+        expect(diagnosticBodies(h.err), url).toEqual([MCP_URL_SHAPE]);
         expect(h.runs).toEqual([]);
       }
     },
@@ -1568,7 +1569,7 @@ describe("the MCP URL (python-sdk#279)", () => {
     for (const url of ["HTTP://example.com/mcp", " http://example.com/mcp", "hTtP://example.com/mcp"]) {
       const h = harness(everywhere);
       expect(await runCli(["setup", name, "--mcp-url", url], h.deps), url).toBe(2);
-      expect(h.err, url).toEqual([
+      expect(diagnosticBodies(h.err), url).toEqual([
         `Error: Invalid value for '--mcp-url': MCP URL must use HTTPS for security (got: ${url.trim()}). ` +
           "HTTP is only allowed for localhost development.",
       ]);
@@ -1580,7 +1581,7 @@ describe("the MCP URL (python-sdk#279)", () => {
     // A fallback only this port has, so no usage error.
     const h = harness(everywhere, { mcp_url: "memory.kagura-ai.com/mcp" });
     expect(await runCli(["setup", "codex"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: the configured mcp_url is refused: use an https:// URL, e.g. " +
         "https://memory.kagura-ai.com/mcp/w/<workspace-id>. Pass --mcp-url for another.",
     ]);
@@ -1759,7 +1760,7 @@ describe.skipIf(process.platform === "win32")("a .. in a harness's home variable
     process.env.CODEX_HOME = path.join(home, "link") + "/../codex";
     const h = harness({ onPath: { codex: "/usr/bin/codex" } });
     expect(await runCli(setup("codex"), h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Nothing was written: a kagura-memory entry already exists in ~/link/../codex/config.toml; " +
         "re-run with --force to replace it.",
     ]);
@@ -1813,7 +1814,7 @@ describe("--agents-md", () => {
       for (const extra of [["-y"], []]) {
         const h = harness({});
         expect(await runCli(setup(name, "--agents-md", ...extra), h.deps)).toBe(2);
-        expect(h.err).toEqual([
+        expect(diagnosticBodies(h.err)).toEqual([
           "Error: --agents-md needs --context-id with -y or without a terminal: setup cannot ask which context.",
         ]);
         expect(h.resolved).toBe(0);
@@ -1834,7 +1835,7 @@ describe("--agents-md", () => {
         for (const value of ["proj", ` ${CONTEXT}`, `${CONTEXT}\n`, ""]) {
           const h = harness({ onPath: { [name]: `/usr/bin/${name}` } });
           expect(await runCli(setup(name, `--context-id=${value}`), h.deps), value).toBe(2);
-          expect(h.err).toEqual([
+          expect(diagnosticBodies(h.err)).toEqual([
             "Error: Without --profile, --context-id must be a context UUID: setup cannot list contexts.",
           ]);
           expect(h.runs).toEqual([]);
@@ -1846,7 +1847,7 @@ describe("--agents-md", () => {
       process.chdir(sandbox);
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md= "), h.deps)).toBe(2);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: Invalid value for '--agents-md': the path is blank; name a file, or give --agents-md alone " +
           "for the default one",
       ]);
@@ -1865,7 +1866,7 @@ describe("--agents-md", () => {
       process.chdir(sandbox);
       const h = harness(codex);
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", "  ", "-y"), h.deps)).toBe(2);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: Invalid value for '--agents-md': the path is blank; name a file, or give --agents-md alone " +
           "for the default one",
       ]);
@@ -2137,7 +2138,7 @@ describe("--agents-md", () => {
         },
       });
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md", path.join(sandbox, "A.md")), h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: The AGENTS.md export has no credential: No credentials found.\n  Run: kagura auth login"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: The AGENTS.md export has no credential: No credentials found.\n  Run: kagura auth login"]);
       expect(h.runs).toEqual([]);
       expect(h.rest.requests).toEqual([]);
       expect(h.out).toEqual([]);
@@ -2163,7 +2164,7 @@ describe("--agents-md", () => {
       // Python says to pass --profile, which is inert here; KAGURA_PROFILE
       // would change nothing either while KAGURA_API_KEY, which outranks
       // it, is set.
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: Nothing was written: the AGENTS.md export would use the KAGURA_API_KEY env credential,\n" +
           "  which is for https://memory.kagura-ai.com, but --mcp-url is on https://kagura.example.com.\n" +
           "  Set KAGURA_MCP_URL to that server for KAGURA_API_KEY, or unset\n" +
@@ -2181,7 +2182,7 @@ describe("--agents-md", () => {
       });
       const args = ["setup", "codex", "--mcp-url", "https://kagura.example.com/mcp", "-c", CONTEXT, "--agents-md"];
       expect(await runCli(args, h.deps)).toBe(1);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: Nothing was written: the AGENTS.md export would use the .kagura.json credential,\n" +
           "  which is for https://memory.kagura-ai.com, but --mcp-url is on https://kagura.example.com.\n" +
           "  Set KAGURA_PROFILE to a login on that server, or KAGURA_MCP_URL to it for\n" +
@@ -2221,7 +2222,7 @@ describe("--agents-md", () => {
       const h = harness({ ...codex, auth: { ...EXPORT_AUTH, mcpUrl: " https://y.test/ " } });
       const args = ["setup", "codex", "--mcp-url", "https://x.test/", "-c", CONTEXT, "--agents-md"];
       expect(await runCli(args, h.deps)).toBe(1);
-      expect(h.err[0]).toContain("  which is for https://y.test, but --mcp-url is on https://x.test.\n");
+      expect(diagnosticBodies(h.err)[0]).toContain("  which is for https://y.test, but --mcp-url is on https://x.test.\n");
       expect(h.runs).toEqual([]);
     });
 
@@ -2234,7 +2235,7 @@ describe("--agents-md", () => {
       } as ResolvedAuth;
       const h = harness({ ...codex, auth: oauth }, { mcp_url: "https://kagura.example.com/mcp" });
       expect(await runCli(["setup", "codex", "-c", CONTEXT, "--agents-md"], h.deps)).toBe(1);
-      expect(h.err[0]).toBe(
+      expect(diagnosticBodies(h.err)[0]).toBe(
         "Error: Nothing was written: the AGENTS.md export would use the OAuth profile " +
           "(~/.kagura/credentials.json) credential,\n  which is for https://memory.kagura-ai.com, but the MCP " +
           "URL is on https://kagura.example.com.\n  Set KAGURA_PROFILE to a login on that server, or " +
@@ -2258,7 +2259,7 @@ describe("--agents-md", () => {
         },
       });
       expect(await runCli(setup("codex", "-c", CONTEXT, "--agents-md"), h.deps)).toBe(1);
-      expect(h.err).toEqual([
+      expect(diagnosticBodies(h.err)).toEqual([
         "Error: Nothing was written: a kagura-memory entry already exists in ~/.codex/config.toml; re-run " +
           "with --force to replace it.",
       ]);
@@ -2840,7 +2841,7 @@ describe("the tool view on every harness (#83)", () => {
     for (const name of ["codex", "hermes", "openclaw"]) {
       const h = harness({ onPath: { codex: "/usr/bin/codex", openclaw: "/usr/bin/openclaw" } });
       expect(await runCli(setup(name, ...extra), h.deps)).toBe(2);
-      expect(h.err).toContain(message);
+      expect(diagnosticBodies(h.err)).toContain(message);
       expect(h.runs).toEqual([]);
     }
   });

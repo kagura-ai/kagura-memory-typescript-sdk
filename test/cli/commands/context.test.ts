@@ -1,3 +1,5 @@
+import { optionLines, prose } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 import { describe, expect, it } from "vitest";
 
 import { contextsFooter, nextPageFooter } from "../../../src/cli/commands/context.js";
@@ -146,7 +148,7 @@ describe("kagura-memory context search-config", () => {
   ])("refuses %s %s (exit 2)", async (flag, value, message) => {
     const { code, h } = await wire(["context", "search-config", "ctx-1", flag, value]);
     expect(code).toBe(2);
-    expect(h.err).toEqual([message]);
+    expect(diagnosticBodies(h.err)).toEqual([message]);
   });
 
   it("refuses an empty update with exit 1", async () => {
@@ -269,7 +271,7 @@ describe("kagura-memory context list", () => {
     expect(await runCli(["context", "list", "--help"], h.deps)).toBe(0);
     const help = h.out.join("\n");
     const line = (flag: string) =>
-      help.split("\n").find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
+      optionLines(help).find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
     expect(line("--name-contains")).toContain(
       "Only contexts whose name or display name contains this text (case-insensitive, max 100 chars)",
     );
@@ -286,9 +288,9 @@ describe("kagura-memory context list", () => {
   it("describes --limit, --cursor and the paging in the Python CLI 0.44.0's words (#89)", async () => {
     const h = harness();
     expect(await runCli(["context", "list", "--help"], h.deps)).toBe(0);
-    const help = h.out.join("\n").replace(/\s+/g, " ");
+    const help = prose(h.out.join("\n"));
     expect(help).toContain(
-      "--limit INTEGER Contexts per page, 1-200 (server default 100; with --details and no " +
+      "--limit INTEGER RANGE Contexts per page, 1-200 (server default 100; with --details and no " +
         "--name-contains at most 20, the default there; memory-cloud 0.82.0+).",
     );
     expect(help).toContain(
@@ -308,10 +310,10 @@ describe("kagura-memory context list", () => {
     // refuses an extra argument, then runs the command's own checks.
     const a = await wire(["context", "list", "extra", "--limit", "0"]);
     expect(a.code).toBe(2);
-    expect(a.h.err).toEqual(["Error: Invalid value for '--limit': 0 is not in the range 1<=x<=200."]);
+    expect(diagnosticBodies(a.h.err)).toEqual(["Error: Invalid value for '--limit': 0 is not in the range 1<=x<=200."]);
     const b = await wire(["context", "list", "extra", "--details", "--limit", "21"]);
     expect(b.code).toBe(2);
-    expect(b.h.err).toEqual(["Error: Got unexpected extra argument (extra)"]);
+    expect(diagnosticBodies(b.h.err)).toEqual(["Error: Got unexpected extra argument (extra)"]);
     expect([...a.h.server.requests, ...b.h.server.requests]).toHaveLength(0);
   });
 
@@ -380,8 +382,8 @@ describe("the context list paging footer (#89)", () => {
     };
     expect(await runCli(["context", "list", "--cursor", "abc"], h.deps)).toBe(1);
     expect(h.out).toEqual([]);
-    expect(h.err).toHaveLength(1);
-    expect(h.err[0]).toMatch(/^Error: /);
+    expect(diagnosticBodies(h.err)).toHaveLength(1);
+    expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: /);
   });
 });
 
@@ -428,7 +430,7 @@ describe("kagura-memory contexts (alias)", () => {
     expect(await runCli(["contexts"], h.deps)).toBe(0);
     expect(h.server.toolCallArgs(0)).toEqual({});
     expect(JSON.parse(h.out.join("\n"))).toMatchObject({ has_more: true, next_cursor: "100" });
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       'has_more: true; next_cursor: "100". For the next page, run kagura-memory context list --cursor "100".',
     ]);
   });
@@ -438,7 +440,7 @@ describe("kagura-memory contexts (alias)", () => {
     // says the alias prints one page, with `kagura ` written `kagura-memory `.
     const h = harness();
     expect(await runCli(["contexts", "--help"], h.deps)).toBe(0);
-    const help = h.out.join("\n").replace(/\s+/g, " ");
+    const help = prose(h.out.join("\n"));
     expect(help).toContain(
       "List available contexts (short form of 'context list', without its options).",
     );

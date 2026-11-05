@@ -1,3 +1,4 @@
+import { optionLines, prose } from "../helpAssertions.js";
 /**
  * `kagura-memory recall --verbosity / --full / --max-chars` and the one
  * retry after an `invalid_argument` refusal (#82; the Python CLI 0.43.0,
@@ -85,7 +86,7 @@ function stream(lines: string[]): string {
  * has no `Usage:` / `Try` preamble).
  */
 function pythonStderr(c: PythonCase): string {
-  return c.code === 2 ? stream([c.stderr.trimEnd().split("\n").at(-1)!]) : c.stderr;
+  return c.stderr.replace(/^(Usage: |Try ')kagura(?= )/gm, "$1kagura-memory");
 }
 
 /** Server replies, shaped like memory-cloud v0.143.0's recall (see the file header). */
@@ -440,26 +441,26 @@ describe("kagura-memory recall --verbosity / --full / --max-chars", () => {
     const h = harness();
     expect(await runCli(["recall", "--help"], h.deps)).toBe(0);
     const help = h.out.join("\n");
-    const line = (flag: string) => help.split("\n").find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
-    expect(line("--verbosity")).toContain(
-      "--verbosity [compact|full]  Result detail (server v0.108.0+). compact, the server default: " +
-        "160-character summaries without tags; full: uncut summaries, tags, context_summary and scope.",
+    const line = (flag: string) => optionLines(help).find((l) => l.trimStart().startsWith(`${flag} `)) ?? "";
+    expect(prose(line("--verbosity"))).toContain(
+      prose("--verbosity [compact|full]  Result detail (server v0.108.0+). compact, the server default: " +
+        "160-character summaries without tags; full: uncut summaries, tags, context_summary and scope."),
     );
-    expect(line("--full")).toContain(
-      "How many top results carry content, up to 1,500 characters each " +
-        "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only).",
+    expect(prose(line("--full"))).toContain(
+      prose("How many top results carry content, up to 1,500 characters each " +
+        "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only)."),
     );
-    expect(line("--max-chars")).toContain(
-      "Response budget in characters, 10000-100000 (server v0.82.0+; default 20000).",
+    expect(prose(line("--max-chars"))).toContain(
+      prose("Response budget in characters, 10000-100000 (server v0.82.0+; default 20000)."),
     );
     // The Python CLI's docstring paragraph, as click wraps it.
-    expect(help).toContain(
-      "  The reply is printed as JSON, with each hit's content (when the server sends\n" +
+    expect(prose(help)).toContain(
+      prose("  The reply is printed as JSON, with each hit's content (when the server sends\n" +
         "  it) right after its summary. --verbosity, --full and --max-chars are sent\n" +
         "  only when given. A server from v0.82.0 that predates one of them refuses it\n" +
         "  (invalid_argument); the command then retries once without the ones the\n" +
         "  server lists as refused (all three it sent when the reply does not list\n" +
-        "  them) and says so on stderr.",
+        "  them) and says so on stderr."),
     );
   });
 });
