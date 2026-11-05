@@ -16,7 +16,7 @@
 
 import { baseUrlFromMcp, validateHttpsUrl } from "../http.js";
 import type { OAuthCredentials } from "./credentials.js";
-import { setDefaultProfile, updateProfile } from "./credentials.js";
+import { loadForUpdate, setDefaultProfile, updateProfile } from "./credentials.js";
 import { authorizeDevice, pollForToken, DEFAULT_CLIENT_ID } from "./deviceFlow.js";
 import type { DeviceAuthorizationResponse } from "./deviceFlow.js";
 import { DEFAULT_MCP_URL } from "./resolve.js";
@@ -124,6 +124,11 @@ export async function login(options: LoginOptions = {}): Promise<OAuthCredential
   const server = baseUrlFromMcp(mcpUrl);
   const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
   const profile = options.profile ?? "default";
+
+  // Fail before the browser/device flow if saving would overwrite unreadable
+  // credentials. updateProfile rechecks under the lock after the flow; no lock
+  // is held while a person is approving access.
+  loadForUpdate(options.credentialsPath);
 
   const authorization = await authorizeDevice(server, {
     clientId,

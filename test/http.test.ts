@@ -3,12 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   KaguraAuthError,
   KaguraConnectionError,
+  KaguraError,
+  KaguraQuotaError,
   KaguraRateLimitError,
   KaguraServiceUnavailableError,
 } from "../src/errors.js";
 import {
   baseUrlFromMcp,
   ErrorBody,
+  gateError,
+  MCP_GATE_CODES,
+  REST_GATE_CODES,
   extractDetail,
   mcpSessionExpired,
   mcpSessionHeader,
@@ -21,6 +26,38 @@ import {
   throwForKaguraStatus,
   validateHttpsUrl,
 } from "../src/http.js";
+
+describe("Python 0.44.0 quota classification", () => {
+  it.each([
+    [REST_GATE_CODES, "QUOTA-001"],
+    [MCP_GATE_CODES, "quota_exceeded"],
+  ] as const)("keeps ambiguous quota codes generic without a tier or retry window (%j, %s)", (codes, code) => {
+    const details = { help: "Reduce the payload size.", correlation_id: "request-113" };
+    const error = gateError(details, code, codes, "Payload too large.");
+    expect(error?.constructor).toBe(KaguraError);
+    expect(error).toMatchObject({ code, details, help: details.help, correlationId: "request-113" });
+  });
+
+  it.each([
+    [{}, null, false],
+    [{ quota_type: "unknown" }, null, false],
+    [{ quota_type: 1 }, null, false],
+    [{ quota_type: "storage_bytes" }, null, true],
+    [{ gate: "quota" }, null, true],
+    [{}, 0, true],
+    [{ retry_after_seconds: 5 }, null, true],
+    [{ retry_after_seconds: "5" }, null, false],
+    [{ retry_after_seconds: true }, null, false],
+    [{ retry_after_seconds: 1.5 }, null, false],
+  ] as const)("classifies QUOTA-001 with %j and retry %s", (details, retry, quota) => {
+    const error = gateError(details, "QUOTA-001", REST_GATE_CODES, "Refused.", retry);
+    expect(error?.constructor).toBe(quota ? KaguraQuotaError : KaguraError);
+  });
+
+  it.each(["QUOTA-002", "CONNECTOR-001"])("keeps the single-cap code %s a quota without descriptor fields", (code) => {
+    expect(gateError({}, code, REST_GATE_CODES, "Refused.")).toBeInstanceOf(KaguraQuotaError);
+  });
+});
 
 /** `run()`'s result, and how often JSON.parse read `text` while it ran. */
 function parsesOf<T>(text: string, run: () => T): { result: T; parses: number } {
@@ -350,11 +387,22 @@ describe("throwForKaguraStatus", () => {
     expect(parsesOf(text, () => thrown(() => throwForKaguraStatus(status, headers, text))).parses).toBe(1);
   });
 
-  it("never decodes a 401's body", () => {
-    const text = '{"detail":"no"}';
+  it.each([
+    { error: "invalid_token", help: "Log in again", reason: "expired" },
+    { error: "invalid_token", details: { help: "Log in again", reason: "expired" } },
+    { error: { code: -32001, data: { error: "invalid_token", help: "Log in again", reason: "expired" } } },
+  ])("annotates a 401 from the body and decodes it once (#112): %j", body => {
+    const text = JSON.stringify(body);
     const { result, parses } = parsesOf(text, () => thrown(() => throwForKaguraStatus(401, new Headers(), new ErrorBody(text))));
     expect(result).toBeInstanceOf(KaguraAuthError);
-    expect(parses).toBe(0);
+    expect(result).toMatchObject({ code: "invalid_token", help: "Log in again", details: { reason: "expired" } });
+    expect(parses).toBe(1);
+  });
+
+  it.each(["not JSON", "", "null", "[]"])("keeps malformed 401 bodies typed: %s", text => {
+    const e = thrown(() => throwForKaguraStatus(401, new Headers(), text));
+    expect(e).toBeInstanceOf(KaguraAuthError);
+    expect((e as KaguraAuthError).code).toBeUndefined();
   });
 
   it("keeps a 503 typed when it reads the ErrorBody", () => {
@@ -366,6 +414,12 @@ describe("throwForKaguraStatus", () => {
 });
 
 describe("ErrorBody (python-sdk#311)", () => {
+  it("keeps OAuth fields independent from later envelope and field reads", () => {
+    const body = new ErrorBody(JSON.stringify({ error: "E-1", details: { reason: "original" } }));
+    (body.oauth.fields.details as Record<string, unknown>).reason = "changed";
+    expect(body.fields?.[1]).toEqual({ reason: "original" });
+    expect(body.envelope?.details).toEqual({ reason: "original" });
+  });
   it.each([
     JSON.stringify({ error: "QUOTA-001", message: "Over: 3/3.", details: { gate: "quota", nested: { a: [1] }, retry_after: 9 } }),
     JSON.stringify({ detail: [{ loc: ["body", "name"], msg: "field required" }] }),
@@ -392,7 +446,8 @@ describe("ErrorBody (python-sdk#311)", () => {
       const body = new ErrorBody(text);
       void body.text;
       expect(parses()).toBe(0);
-      void [body.detail, body.envelope, body.fields, body.detail, body.envelope, body.fields];
+      void [body.detail, body.envelope, body.fields, body.oauth, body.methodNotFound];
+      expect(mcpSessionExpired(404, body, "session")).toBe(true);
       expect(responseRetryAfter(new Headers(), body)).toBe(3);
       expect(parses()).toBe(1);
     } finally {

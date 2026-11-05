@@ -26,13 +26,9 @@ import {
 } from "../errors.js";
 import {
   annotateServerError,
-  detailOf,
+  ErrorBody,
   extractDetail,
-  oauthBodyFields,
-  parseJsonBody,
   retryAfterSeconds,
-  serverErrorFields,
-  serverErrorFieldsOf,
   validateHttpsUrl,
 } from "../http.js";
 import type { ServerErrorFields } from "../http.js";
@@ -150,20 +146,6 @@ function safeJsonObject(
   return body as Record<string, unknown>;
 }
 
-/** Parse a response body as a JSON object, or `{}` if unparseable. */
-function safeJson(bodyText: string): Record<string, unknown> {
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return {};
-  }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return {};
-  }
-  return body as Record<string, unknown>;
-}
-
 /**
  * Explain a 429 from `device/authorize`, with the wait from `Retry-After`.
  *
@@ -220,7 +202,7 @@ const RFC6749_ERRORS: readonly string[] = [
  */
 function oauthRefusal(
   status: number,
-  body: unknown,
+  description: string,
   fields: ServerErrorFields | null,
   clientId: string,
 ): KaguraAuthError | null {
@@ -232,7 +214,6 @@ function oauthRefusal(
     return null;
   }
   let message = `Device authorization failed (HTTP ${status} ${error})`;
-  const description = detailOf(body);
   if (description) {
     message += `: ${description}`;
   }
@@ -244,12 +225,12 @@ function oauthRefusal(
 }
 
 /**
- * `err` with the code and fields of `bodyText` when it names an error code
+ * `err` with the code and fields of `body` when it names an error code
  * (a JSON-RPC `data.error`, a REST envelope), else as it is: an OAuth
  * endpoint's answer with no OAuth `error` field.
  */
-function withBodyFields<E extends KaguraAuthError>(err: E, bodyText: string): E {
-  const fields = serverErrorFields(bodyText);
+function withBodyFields<E extends KaguraAuthError>(err: E, body: ErrorBody): E {
+  const fields = body.fields;
   return fields === null ? err : annotateServerError(err, fields[0], fields[1]);
 }
 
@@ -326,13 +307,13 @@ export async function authorizeDevice(
     throw new KaguraAuthError(deviceRateLimitedMessage(response.headers, text));
   }
   if (!response.ok) {
-    const refused = parseJsonBody(text);
-    const fields = serverErrorFieldsOf(refused);
-    const refusal = oauthRefusal(response.status, refused, fields, clientId);
+    const refused = new ErrorBody(text);
+    const fields = refused.fields;
+    const refusal = oauthRefusal(response.status, refused.detail, fields, clientId);
     if (refusal !== null) {
       throw refusal;
     }
-    const detail = detailOf(refused) || text;
+    const detail = refused.detail || text;
     const err = new KaguraAuthError(
       `Device authorization failed (HTTP ${response.status}): ${detail}\n` +
         `  Verify the server URL and that '${clientId}' is registered.`,
@@ -453,8 +434,8 @@ export async function pollForToken(
     }
 
     // RFC 8628 §3.5 — errors come as HTTP 4xx with JSON `error` field.
-    const body = safeJson(text);
-    const error = stringOr(body.error, "");
+    const body = new ErrorBody(text);
+    const { error, description, fields } = body.oauth;
 
     if (error === "authorization_pending") {
       wait = currentInterval;
@@ -492,23 +473,22 @@ export async function pollForToken(
     // Unknown error — surface the HTTP status + raw response so the
     // operator can debug non-OAuth failures (HTML 5xx, proxy errors,
     // non-JSON bodies that make `error` come back empty).
-    const description = stringOr(body.error_description, "");
     if (error || description) {
       // The OAuth `error` (when there is one) as `code`, the rest in
       // `details`, as authorizeDevice and refreshAccessToken keep them.
       throw annotateServerError(
         new KaguraAuthError(`Token endpoint returned unexpected error '${error}': ${description}`),
         error || undefined,
-        oauthBodyFields(body),
+        fields,
       );
     }
-    const detail = extractDetail(text) || text.slice(0, 200);
+    const detail = body.detail || text.slice(0, 200);
     throw withBodyFields(
       new KaguraAuthError(
         `Token endpoint returned HTTP ${response.status} with no OAuth error code. ` +
           `Body: ${detail}`,
       ),
-      text,
+      body,
     );
   }
 }
@@ -518,6 +498,9 @@ export interface RefreshAccessTokenOptions extends OAuthHttpOptions {
   refreshToken: string;
   scope?: string | null;
 }
+
+/** Deadline covering refresh headers and body, including custom fetches. */
+export const REFRESH_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * POST `{server}/api/v1/oauth/token/` with `grant_type=refresh_token`.
@@ -545,28 +528,44 @@ export async function refreshAccessToken(
     form.set("scope", options.scope);
   }
 
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error("OAuth refresh timed out after 30 seconds");
+      controller.abort(error);
+      reject(error);
+    }, REFRESH_REQUEST_TIMEOUT_MS);
+  });
   let response: Response;
   let text: string;
   try {
-    response = await doFetch(url, {
-      method: "POST",
-      headers: { "User-Agent": userAgent() },
-      body: form,
-    });
-    text = await response.text();
+    ({ response, text } = await Promise.race([
+      (async () => {
+        const response = await doFetch(url, {
+          method: "POST",
+          headers: { "User-Agent": userAgent() },
+          body: form,
+          signal: controller.signal,
+        });
+        return { response, text: await response.text() };
+      })(),
+      deadline,
+    ]));
   } catch (e) {
     throw new KaguraConnectionError(`Could not reach ${url}: ${excMessage(e)}`, { cause: e });
+  } finally {
+    clearTimeout(timer!);
   }
 
   if (response.status === 200) {
     return tokenResponseFromBody(text, response.status);
   }
 
-  const body = safeJson(text);
-  const error = stringOr(body.error, "");
+  const body = new ErrorBody(text);
+  const { error, description, fields } = body.oauth;
   // The OAuth `error` becomes the error's `code` (`refresh` branches on
   // `invalid_scope`); `error_description` and the rest go to `details`.
-  const fields = oauthBodyFields(body);
 
   if (error === "invalid_grant") {
     throw annotateServerError(
@@ -580,7 +579,6 @@ export async function refreshAccessToken(
     );
   }
 
-  const description = stringOr(body.error_description, "");
   if (error) {
     throw annotateServerError(
       new KaguraAuthError(`Refresh failed: ${error}${description ? ` — ${description}` : ""}`),
@@ -589,10 +587,10 @@ export async function refreshAccessToken(
     );
   }
   // Non-OAuth failure (HTML 5xx, network proxy returning text/plain, etc.).
-  const detail = extractDetail(text) || text.slice(0, 200);
+  const detail = body.detail || text.slice(0, 200);
   throw withBodyFields(
     new KaguraAuthError(`Refresh failed: HTTP ${response.status} with no OAuth error code. Body: ${detail}`),
-    text,
+    body,
   );
 }
 

@@ -14,6 +14,14 @@ import { iterPages, type ListContextsOptions } from "../../client.js";
 import type { ContextListItem, ListContextsResponse } from "../../models.js";
 import { isCanonicalUuid, pyStrip, uuidOrNone } from "../../pyCompat.js";
 import { pyRepr, pyTruthy } from "../../python.js";
+import { CliError } from "../parse.js";
+
+/** Python setup_claude._validate_context_id, applied after name resolution. */
+export function validateContextId(value: string): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(value)) {
+    throw new CliError(`Invalid context_id: ${pyRepr(value)} — must be alphanumeric, hyphens, or underscores only`);
+  }
+}
 
 /**
  * The longest `name_contains` `list_contexts` takes (memory-cloud
@@ -33,8 +41,8 @@ export type ListContexts = (options: ListContextsOptions) => Promise<ListContext
  * - Unknown (`unknown`): `value` names no context the credential can see.
  *   It is not a UUID, and either every page was searched for the name or
  *   it is longer than any context name.
- * - Neither: `value` is used as given. It is a UUID (the dashed form is not
- *   looked up by name; another spelling matched no name), or blank.
+ * - Neither: `value` is used as given. It is a UUID that matched no row
+ *   (the dashed form stops after the first page), or blank.
  *
  * `value` is the value looked up, trimmed: what is compared, sent and used.
  */
@@ -87,24 +95,12 @@ export async function findContextByName(name: string, listContexts: ListContexts
  * Resolve `chosen`, a context id or an exact name — Python's
  * `_lookup_context`.
  *
- * `chosen` is trimmed first, as the server reads `name_contains`. A blank
- * value or a UUID in the dashed form is used as given and sends no request;
- * so does a value longer than any context name, which is unknown. Any
- * other value, a dashless 32-hex string included (a valid context name),
- * is looked up as a name: `firstPage()` is the plain first page, and a row
- * there with that id or name wins; when that page is not the whole list
- * (`has_more`, memory-cloud 0.82.0+), every page is searched with
- * {@link findContextByName}.
- *
- * The Python CLI reads the first page in its connection check, before it
- * looks at the value; this port reads it only for a value it looks up, so
- * a dashed UUID or no value keeps `setup claude` off the network. The
- * outcome is the same for a blank value or one longer than any context
- * name, which no row can match, and for a dashed UUID that is a row's id,
- * returned as given either way. It differs for a dashed UUID that is a
- * context's NAME (the server's `^[a-z0-9_-]+$` allows a lowercase one):
- * Python takes that row from its first page and writes the row's id; this
- * port uses the value as the id it is spelled as.
+ * `chosen` is trimmed first. Blank or overlong values need no lookup.
+ * Otherwise `firstPage()` is read and its first row with that ID or exact
+ * name wins, including a UUID-shaped name. A canonical UUID not found
+ * there is used as an ID without fetching more pages, as in Python.
+ * Other values (including dashless UUIDs) search every matching page with
+ * {@link findContextByName} when the first page says `has_more`.
  *
  * @throws whatever `firstPage` or `listContexts` throws, and
  *   KaguraResponseError from {@link findContextByName}.
@@ -115,15 +111,15 @@ export async function lookupContext(
   listContexts: ListContexts,
 ): Promise<ContextLookup> {
   const value = pyStrip(chosen);
-  if (!value || isCanonicalUuid(value)) return { value, context: null, unknown: false };
+  if (!value) return { value, context: null, unknown: false };
   // Python's len() counts code points.
   if ([...value].length > CONTEXT_NAME_MAX_CHARS) return { value, context: null, unknown: true };
   const first = await firstPage();
-  // Python's `value in (ctx["id"], ctx.get("name"))`, kept for parity. A
-  // dashed UUID returned above, so the id half matches only an id the
-  // server spells otherwise.
+  // Python checks the first page's IDs and names before interpreting a
+  // dashed UUID as an ID. A context can itself have a UUID-shaped name.
   const row = rowsOf(first).find((ctx) => ctx.id === value || ctx.name === value);
   if (row !== undefined) return { value, context: row, unknown: false };
+  if (isCanonicalUuid(value)) return { value, context: null, unknown: false };
   if ((first as { has_more?: unknown }).has_more === true) {
     const named = await findContextByName(value, listContexts);
     if (named !== null) return { value, context: named, unknown: false };

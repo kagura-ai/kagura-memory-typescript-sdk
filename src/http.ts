@@ -598,19 +598,13 @@ const JSONRPC_METHOD_NOT_FOUND = -32601;
  */
 export function mcpSessionExpired(
   status: number,
-  bodyText: string,
+  body: string | ErrorBody,
   sessionId: string | null,
 ): boolean {
   if (!sessionId || status !== 404) {
     return false;
   }
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return true;
-  }
-  return jsonRpcError(body)?.code !== JSONRPC_METHOD_NOT_FOUND;
+  return !(body instanceof ErrorBody ? body : new ErrorBody(body)).methodNotFound;
 }
 
 /**
@@ -681,6 +675,27 @@ export const REST_GATE_CODES: GateCodes = {
   quota: ["QUOTA-001", "QUOTA-002", "CONNECTOR-001"],
 };
 
+/** Python 0.44.0's tier quotas; QUOTA-001 also covers non-tier payload limits. */
+const TIER_QUOTA_TYPES = new Set([
+  "contexts",
+  "members",
+  "workspace_limit_reached",
+  "memories_per_day",
+  "memory_analysis",
+  "sleep_enabled_contexts",
+  "storage_bytes",
+  "agents",
+  "resource_tokens",
+  "connectors",
+  "content_chunk_contexts",
+  "llm_selector_contexts",
+  "embedding_spend_daily",
+  "embedding_spend_monthly",
+  "api_mcp_daily",
+  "api_rest_daily",
+  "api_public_daily",
+]);
+
 function stringField(block: Record<string, unknown>, key: string): string | null {
   const value = block[key];
   return typeof value === "string" ? value : null;
@@ -745,7 +760,7 @@ const CAPACITY_GATE = "capacity";
 const CAPACITY_CODES: readonly string[] = ["capacity_locked", "CAPACITY-001"];
 
 /**
- * Which refusal `block` is: `"capacity"`, `"plan"`, `"quota"`, or `null`
+ * Which refusal `block` is: `"capacity"`, `"plan"`, `"quota"`, `"generic"`, or `null`
  * for none of them.
  *
  * `block` holds the gate fields: the MCP envelope itself, or a REST
@@ -757,13 +772,15 @@ const CAPACITY_CODES: readonly string[] = ["capacity_locked", "CAPACITY-001"];
  * `allowlist` and `deployment` are the other two reasons a feature is
  * unavailable, so they count as `"plan"` — the kind an older server's bare
  * `FEAT-001` already gets. With no gate, `code` decides against the
- * surface's `codes`.
+ * surface's `codes`. Ambiguous quota codes also need a known tier quota
+ * type or a retry window; otherwise they describe a generic refusal.
  */
 function gateKind(
   block: Record<string, unknown>,
   code: string | null,
   codes: GateCodes,
-): "capacity" | "plan" | "quota" | null {
+  retryAfter: number | null = null,
+): "capacity" | "plan" | "quota" | "generic" | null {
   const gate = stringField(block, "gate");
   if (gate === CAPACITY_GATE || (code !== null && CAPACITY_CODES.includes(code))) {
     return "capacity";
@@ -775,6 +792,13 @@ function gateKind(
     return "plan";
   }
   if (code !== null && codes.quota.includes(code)) {
+    if (
+      (code === "QUOTA-001" || code === "quota_exceeded") &&
+      !TIER_QUOTA_TYPES.has(stringField(block, "quota_type") ?? "") &&
+      retryAfter === null
+    ) {
+      return "generic";
+    }
     return "quota";
   }
   if (code !== null && codes.plan.includes(code)) {
@@ -913,7 +937,8 @@ export function oauthBodyFields(body: Record<string, unknown>): Record<string, u
  * default `block` itself, as the server sent it, before the daily cap's
  * canonical names are filled in. The MCP caller passes the envelope
  * without its frame ({@link mcpEnvelopeFields}); a REST `details` block is
- * kept whole.
+ * kept whole. An ambiguous quota code without quota descriptors returns
+ * a plain {@link KaguraError}, matching Python's non-tier payload limits.
  */
 export function gateError(
   block: Record<string, unknown>,
@@ -926,11 +951,18 @@ export function gateError(
   if (code === MCP_DAILY_CAP_CODE) {
     block = withMcpDailyCapFields(block);
   }
-  const kind = gateKind(block, code, codes);
+  const bodyRetry = numberField(block, "retry_after_seconds");
+  if (retryAfter === null && bodyRetry !== null && Number.isInteger(bodyRetry)) {
+    retryAfter = bodyRetry;
+  }
+  const kind = gateKind(block, code, codes, retryAfter);
   if (kind === null) {
     return null;
   }
   const server = code === null ? { details } : { code, details };
+  if (kind === "generic") {
+    return new KaguraError(message, server);
+  }
   if (kind === "capacity") {
     return new KaguraCapacityLockedError(message, { ...capacityOptions(block), ...server });
   }
@@ -1220,6 +1252,23 @@ function envelopeOf(body: unknown): ErrorEnvelope | null {
   };
 }
 
+// Error bodies are JSON trees. Copy them iteratively so extra OAuth metadata
+// cannot turn a known refusal into structuredClone's recursion RangeError.
+function copyJsonFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  const pending: Array<[object, object]> = [[fields, copy]];
+  while (pending.length > 0) {
+    const [source, target] = pending.pop()!;
+    for (const [key, value] of Object.entries(source)) {
+      const nested = typeof value === "object" && value !== null;
+      const copied = nested ? (Array.isArray(value) ? [] : {}) : value;
+      Object.defineProperty(target, key, { value: copied, writable: true, enumerable: true, configurable: true });
+      if (nested) pending.push([value, copied as object]);
+    }
+  }
+  return copy;
+}
+
 /**
  * A non-2xx response's body, decoded at most once and read each way the
  * error mapping needs it — Python's `ErrorBody` (python-sdk#311).
@@ -1246,6 +1295,7 @@ export class ErrorBody {
   private detailText: string | undefined;
   private envelopeBlock: ErrorEnvelope | null | undefined;
   private errorFields: ServerErrorFields | null | undefined;
+  private oauthFields: { error: string; description: string; fields: Record<string, unknown> } | undefined;
 
   constructor(text: string) {
     this.text = text;
@@ -1259,6 +1309,22 @@ export class ErrorBody {
   private get decoded(): unknown {
     this.decodedBody ??= { value: parseJsonBody(this.text) };
     return this.decodedBody.value;
+  }
+
+  /** The stateless JSON-RPC refusal that must not trigger session renewal. */
+  get methodNotFound(): boolean {
+    return jsonRpcError(this.decoded)?.code === JSONRPC_METHOD_NOT_FOUND;
+  }
+
+  /** Top-level OAuth error fields, without another decode of the response. */
+  get oauth(): { error: string; description: string; fields: Record<string, unknown> } {
+    if (this.oauthFields !== undefined) return this.oauthFields;
+    const body = isRecord(this.decoded) ? this.decoded : {};
+    return this.oauthFields = {
+      error: typeof body.error === "string" ? body.error : "",
+      description: typeof body.error_description === "string" ? body.error_description : "",
+      fields: copyJsonFields(oauthBodyFields(body)),
+    };
   }
 
   /** {@link extractDetail} of the body: the server's message, or `""`. */
@@ -1275,7 +1341,7 @@ export class ErrorBody {
   get envelope(): ErrorEnvelope | null {
     if (this.envelopeBlock === undefined) {
       const envelope = envelopeOf(this.decoded);
-      this.envelopeBlock = envelope === null ? null : { code: envelope.code, details: structuredClone(envelope.details) };
+      this.envelopeBlock = envelope === null ? null : { code: envelope.code, details: copyJsonFields(envelope.details) };
     }
     return this.envelopeBlock;
   }
@@ -1287,7 +1353,7 @@ export class ErrorBody {
   get fields(): ServerErrorFields | null {
     if (this.errorFields === undefined) {
       const fields = serverErrorFieldsOf(this.decoded);
-      this.errorFields = fields === null ? null : [fields[0], structuredClone(fields[1])];
+      this.errorFields = fields === null ? null : [fields[0], copyJsonFields(fields[1])];
     }
     return this.errorFields;
   }
@@ -1320,11 +1386,12 @@ export function throwForKaguraStatus(
   body: string | ErrorBody,
   fallbackMessage?: string,
 ): never {
-  if (status === 401) {
-    throw new KaguraAuthError("Authentication failed. Check your API key.");
-  }
   const read = typeof body === "string" ? new ErrorBody(body) : body;
   const fields = read.fields;
+  if (status === 401) {
+    const err = new KaguraAuthError("Authentication failed. Check your API key.");
+    throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
+  }
   if (status === 403) {
     const scopeError = insufficientScopeFrom(headers, fields);
     if (scopeError !== null) {
@@ -1338,7 +1405,8 @@ export function throwForKaguraStatus(
     err = new KaguraRateLimitError(
       `Rate limit exceeded (HTTP 429): ${detail || `HTTP ${status}`}`,
       envelopeRetryAfter(headers, envelope),
-      envelope !== null && gateKind(envelope.details, envelope.code, REST_GATE_CODES) === "quota"
+      envelope !== null &&
+        gateKind(envelope.details, envelope.code, REST_GATE_CODES, envelopeRetryAfter(headers, envelope)) === "quota"
         ? gateOptions(envelope.details)
         : {},
     );

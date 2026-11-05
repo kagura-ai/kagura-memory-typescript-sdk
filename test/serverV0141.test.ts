@@ -15,6 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { sleepReport } from "./sleepFixtures.js";
 
 import { KaguraPartialRollbackError, KaguraResponseError } from "../src/errors.js";
 import type {
@@ -415,7 +416,7 @@ describe("rollbackSleepRun requeue counts (v0.112.0+)", () => {
 // ===========================================================================
 
 describe("getSleepReport paging (v0.82.0+)", () => {
-  const report = { report_id: "r-9", status: "completed", source: "analysis" };
+  const report = { ...sleepReport("r-9"), source: "analysis" };
 
   it.each([
     [{}, { report_id: "r-9" }],
@@ -495,7 +496,7 @@ describe("every new argument is one memory-cloud v0.143.0 declares", () => {
     server.declaredArguments = DECLARED;
     server.toolResults.get_sleep_report = {
       status: "success",
-      report: { report_id: "r-9", status: "completed" },
+      report: sleepReport("r-9"),
       actions: [],
       action_count: 0,
     };

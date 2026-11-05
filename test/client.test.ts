@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { sleepReport } from "./sleepFixtures.js";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -600,7 +601,7 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
     expect(quota.retryAfter).toBe(3600);
   });
 
-  it("maps a pre-v0.75 quota_exceeded envelope by its code", async () => {
+  it("keeps a legacy unknown quota type generic like Python 0.44.0", async () => {
     // v0.68-v0.74: no gate, no canonical `current` — only the legacy counts.
     const server = new FakeServer();
     server.toolResults.remember = {
@@ -614,13 +615,21 @@ describe("typed plan / quota / rollback / permission errors (#40)", () => {
       c.remember({ contextId: "c", summary: "s", content: "x" }),
     );
 
-    expect(err).toBeInstanceOf(KaguraQuotaError);
-    const quota = err as KaguraQuotaError;
-    expect(quota.gate).toBeNull();
-    expect(quota.quotaType).toBe("memory_limit");
-    expect(quota.limit).toBe(1000);
-    expect(quota.current).toBeNull();
-    expect(quota.retryAfter).toBeNull();
+    expect((err as Error).constructor).toBe(KaguraError);
+    expect(err).toMatchObject({
+      code: "quota_exceeded",
+      details: { quota_type: "memory_limit", limit: 1000 },
+    });
+  });
+
+  it.each([1.5, "5", true])("keeps quota_exceeded generic for an invalid retry window %j", async (retry) => {
+    const server = new FakeServer();
+    server.toolResults.remember = {
+      status: "error", error: "quota_exceeded", message: "Refused.", retry_after_seconds: retry,
+    };
+    const err = await failure(server, (c) => c.remember({ contextId: "c", summary: "s", content: "x" }));
+    expect((err as Error).constructor).toBe(KaguraError);
+    expect(err).toMatchObject({ code: "quota_exceeded", details: { retry_after_seconds: retry } });
   });
 
   it("reads used_today as current when an older server sends no current", async () => {
@@ -2474,12 +2483,20 @@ describe("REST endpoints", () => {
 });
 
 describe("sleep maintenance", () => {
+  it("refuses malformed successful reports and rollback results at the SDK boundary", async () => {
+    const server = new FakeServer();
+    server.toolResults.get_sleep_report = { status: "success", report: { report_id: "r1" } };
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1" };
+    const client = makeClient(server);
+    await expect(client.getSleepReport({ reportId: "r1" })).rejects.toBeInstanceOf(KaguraResponseError);
+    await expect(client.rollbackSleepRun({ reportId: "r1" })).rejects.toBeInstanceOf(KaguraResponseError);
+  });
   it("getSleepReport flattens the report envelope", async () => {
     const server = new FakeServer();
     server.toolResults.get_sleep_report = {
       status: "success",
-      report: { report_id: "r1", context_id: "c1", run_status: "completed" },
-      actions: [{ action: "merge" }],
+      report: { ...sleepReport("r1"), context_id: "c1" },
+      actions: [{ id: "a1", phase: "dedup", action_type: "merge" }],
       action_count: 1,
     };
     const client = makeClient(server);
@@ -2548,7 +2565,7 @@ describe("sleep maintenance", () => {
     const server = strictSleepServer();
     server.toolResults.get_sleep_report = {
       status: "success",
-      report: { report_id: "r1", context_id: "c-of-the-report", status: "completed" },
+      report: { ...sleepReport("r1"), context_id: "c-of-the-report" },
       actions: [],
       action_count: 0,
     };
@@ -2575,8 +2592,8 @@ describe("sleep maintenance", () => {
 
   it("getSleepReport and rollbackSleepRun take no contextId at all", async () => {
     const server = strictSleepServer();
-    server.toolResults.get_sleep_report = { status: "success", report: { report_id: "r1" }, actions: [] };
-    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1" };
+    server.toolResults.get_sleep_report = { status: "success", report: sleepReport("r1"), actions: [], action_count: 0 };
+    server.toolResults.rollback_sleep_run = { status: "rolled_back", report_id: "r1", rollback_summary: {} };
     const client = makeClient(server);
     await client.getSleepReport({ reportId: "r1" });
     await client.rollbackSleepRun({ reportId: "r1" });

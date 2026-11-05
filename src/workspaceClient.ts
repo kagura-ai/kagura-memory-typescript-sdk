@@ -20,14 +20,8 @@ import { KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseErr
 import { responseRetryAfter, sanitizeServerDetail } from "./http.js";
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "./models.js";
 import { pyTypeName } from "./python.js";
-import {
-  ResponseReader,
-  laxBool,
-  laxIntOrStr,
-  laxStr,
-  nullable,
-  responseShapeError,
-} from "./responseShape.js";
+import { responseShapeError } from "./responseShape.js";
+import { MEMBER_API_KEY, WORKSPACE_INVITATION, readModel, type Model } from "./pyModels.js";
 import { pathSegment } from "./pathSegment.js";
 import { normalizeUuid } from "./pyCompat.js";
 import { KaguraRestClient, requireInt, requirePublicId } from "./restBase.js";
@@ -77,51 +71,16 @@ function memberPath(workspaceId: string, userId: string): string {
   return `/api/v1/workspaces/${workspaceId}/members/${userIdSegment(userId)}`;
 }
 
-/**
- * A timestamp field as the server wrote it, `null` when it sent none —
- * pydantic's round trip leaves every form the server writes unchanged.
- */
-function passThrough(obj: Record<string, unknown>, key: string): string | null {
-  const value = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
-  return value === undefined ? null : (value as string | null);
+/** Read one Python model while preserving the SDK's number/string ID API. */
+function readWorkspaceRow(raw: unknown, model: Model, operation: string): Record<string, unknown> {
+  const row = readModel(raw, model, operation);
+  if (typeof row.id === "bigint") row.id = Number(row.id);
+  return row;
 }
 
-/**
- * Read a key row as the Python SDK's `MemberAPIKey` model reads it: its
- * fields in its order, defaults filled, unknown keys dropped, the scalars
- * coerced as pydantic's lax mode does (`"false"` is `false`, a numeric
- * `plaintext_key` is refused). The `id` is its `int | str`: an `akey_…`
- * id (memory-cloud v0.89.0+) or any other string stays the string, `"42"`
- * included, and an integer stays an integer. A row that fails throws
- * `KaguraResponseError` in Python's words, naming fields, never values.
- *
- * @internal Shared with the CLI; not part of the package's API.
- */
+/** @internal Shared validation for the mint and list key responses. */
 export function readMemberKey(raw: unknown, operation: string): MemberAPIKey {
-  const r = new ResponseReader(operation, "MemberAPIKey");
-  const obj = r.object(raw);
-  if (obj === null) r.check();
-  const row = obj ?? {};
-  const key: MemberAPIKey = {
-    id: r.field(row, "id", laxIntOrStr),
-    name: r.field(row, "name", laxStr),
-    key_prefix: r.field(row, "key_prefix", laxStr),
-    plaintext_key: r.field(row, "plaintext_key", nullable(laxStr), { default: null }),
-    is_visible: r.field(row, "is_visible", laxBool, { default: false }),
-    visibility_expires_at: passThrough(row, "visibility_expires_at"),
-    created_at: passThrough(row, "created_at"),
-    last_used_at: passThrough(row, "last_used_at"),
-    revoked_at: passThrough(row, "revoked_at"),
-    expires_at: passThrough(row, "expires_at"),
-    bound_context_id: r.field(row, "bound_context_id", nullable(laxStr), { default: null }),
-    // memory-cloud v0.118.0+ (#2188) and v0.129.0+ (#2299).
-    default_context_id: r.field(row, "default_context_id", nullable(laxStr), { default: null }),
-    default_context_name: r.field(row, "default_context_name", nullable(laxStr), { default: null }),
-    agent_id: r.field(row, "agent_id", nullable(laxStr), { default: null }),
-    connector_id: r.field(row, "connector_id", nullable(laxStr), { default: null }),
-  };
-  r.check();
-  return key;
+  return readWorkspaceRow(raw, MEMBER_API_KEY, operation) as unknown as MemberAPIKey;
 }
 
 /** Options for {@link WorkspaceClient.createInvitation}. */
@@ -280,7 +239,7 @@ export class WorkspaceClient extends KaguraRestClient {
     const resp = await this.request("POST", `/api/v1/workspaces/${ws}/invitations`, {
       json: body,
     });
-    return this.json(resp) as unknown as WorkspaceInvitation;
+    return readWorkspaceRow(this.json(resp), WORKSPACE_INVITATION, "WorkspaceClient.create_invitation") as unknown as WorkspaceInvitation;
   }
 
   /**
@@ -297,7 +256,9 @@ export class WorkspaceClient extends KaguraRestClient {
       `/api/v1/workspaces/${ws}/invitations`,
       options.includeAccepted ? { params: { include_accepted: "true" } } : {},
     );
-    return this.expectRows(resp, "list_invitations") as unknown as WorkspaceInvitation[];
+    return this.expectRows(resp, "list_invitations").map((row) =>
+      readWorkspaceRow(row, WORKSPACE_INVITATION, "WorkspaceClient.list_invitations") as unknown as WorkspaceInvitation,
+    );
   }
 
   /**
@@ -407,7 +368,7 @@ export class WorkspaceClient extends KaguraRestClient {
         `${resp.method} ${resp.path}: expected an object carrying a 'api_keys' array`,
       );
     }
-    return rows as unknown as MemberAPIKey[];
+    return rows.map((row) => readMemberKey(row, "WorkspaceClient.list_member_keys"));
   }
 
   /**

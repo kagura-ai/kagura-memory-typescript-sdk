@@ -21,15 +21,15 @@ import {
 import {
   annotateServerError,
   baseUrlFromMcp,
-  bodyRetryAfter,
   detailOf,
+  bodyRetryAfter,
+  ErrorBody,
   gateError,
   isRecord,
   MCP_GATE_CODES,
   mcpEnvelopeFields,
   mcpSessionExpired,
   mcpSessionHeader,
-  parseJsonBody,
   SDK_VERSION,
   serverErrorFieldsOf,
   throwForKaguraStatus,
@@ -80,14 +80,18 @@ import type {
   UpdateMemoryResult,
   UsageInfo,
 } from "./models.js";
-import { JsonNestingError, parseJsonLossless } from "./losslessJson.js";
+import { JsonNestingError, mergeJsonObjects, parseJsonLossless } from "./losslessJson.js";
 import { pathSegment } from "./pathSegment.js";
+import { retainModelDump } from "./modelDumpView.js";
 import { RECALL_FULL_MAX, validateIntRange, validateMaxChars } from "./responseBudget.js";
 import {
   DUPLICATES_RESPONSE,
   EMBEDDING_MODELS_RESPONSE,
   EMBEDDING_STATUS,
   MEMORY_STATS_RESPONSE,
+  ROLLBACK_RESULT,
+  ROLLBACK_SUMMARY,
+  SLEEP_REPORT_DETAIL,
   readModel,
   SERVER_INFO,
   type Model,
@@ -1303,19 +1307,6 @@ function readMeasurementResult(data: unknown): MeasurementResult {
   return result!;
 }
 
-const ROLLBACK_COUNTS = [
-  "edges_deleted",
-  "merges_reversed",
-  "merges_unreversible",
-  "importance_restored",
-  "promotions_reversed",
-  "importance_kept",
-  "promotions_kept",
-  "archives_restored",
-  "chunks_requeued",
-  "points_requeued",
-] as const;
-
 /**
  * A partial rollback's `rollback_summary` checked as the Python SDK's
  * `RollbackSummary` model checks it, and returned as it arrived.
@@ -1323,21 +1314,7 @@ const ROLLBACK_COUNTS = [
  * @throws KaguraResponseError in the Python SDK's words.
  */
 function readRollbackSummary(raw: unknown, operation: string): RollbackSummary {
-  const r = new ResponseReader(operation, "RollbackSummary");
-  const obj = r.object(raw);
-  if (obj !== null) {
-    for (const key of ROLLBACK_COUNTS) r.field(obj, key, laxInt, { default: 0 });
-    r.list(
-      obj,
-      "errors",
-      (item, at) => {
-        const checked = laxStr(item);
-        if (!checked.ok) r.refuse(at, checked);
-      },
-      { default: [] },
-    );
-  }
-  r.check();
+  readModel(raw, ROLLBACK_SUMMARY, operation);
   return raw as RollbackSummary;
 }
 
@@ -2464,7 +2441,8 @@ export class KaguraClient {
 
     let response = await this.post(this.mcpUrl, body, mcpSessionHeader(sessionId));
     let text = await this.safeText(response);
-    if (mcpSessionExpired(response.status, text, sessionId)) {
+    let errorBody = new ErrorBody(text);
+    if (mcpSessionExpired(response.status, errorBody, sessionId)) {
       // Forget the session only while it is still the stale one: a
       // concurrent call may already have re-opened it, and that one stays.
       if (this.sessionId === sessionId) {
@@ -2473,19 +2451,19 @@ export class KaguraClient {
       const retrySessionId = await this.initializeSession();
       response = await this.post(this.mcpUrl, body, mcpSessionHeader(retrySessionId));
       text = await this.safeText(response);
-      if (mcpSessionExpired(response.status, text, retrySessionId)) {
-        const expired = parseJsonBody(text);
-        const detail = detailOf(expired);
+      errorBody = new ErrorBody(text);
+      if (mcpSessionExpired(response.status, errorBody, retrySessionId)) {
+        const detail = errorBody.detail;
         const err = new KaguraConnectionError(
           "MCP session expired; the client re-initialized once and the retry still got " +
             (detail ? `HTTP 404: ${detail}` : "HTTP 404"),
         );
-        const fields = serverErrorFieldsOf(expired);
+        const fields = errorBody.fields;
         throw fields === null ? err : annotateServerError(err, fields[0], fields[1]);
       }
     }
     if (!response.ok) {
-      throwForKaguraStatus(response.status, response.headers, text);
+      throwForKaguraStatus(response.status, response.headers, errorBody);
     }
 
     let parsed: unknown;
@@ -2576,10 +2554,10 @@ export class KaguraClient {
 
     const text = await this.safeText(response);
     if (!response.ok) {
+      const errorBody = new ErrorBody(text);
       if (mcpTool !== undefined) {
         const { operation, notFoundCode } = mcpTool;
-        const body = parseJsonBody(text);
-        const detail = detailOf(body);
+        const detail = errorBody.detail;
         let mapped: KaguraError | null = null;
         if (response.status === 404) {
           mapped = new KaguraNotFoundError(`${operation}: ${detail || "Not found"}`, {
@@ -2593,11 +2571,11 @@ export class KaguraClient {
         if (mapped !== null) {
           // `code` stays the MCP tool's; the REST body's fields are what
           // the server sent with it (Python's `_rest_get_json`).
-          const fields = serverErrorFieldsOf(body);
+          const fields = errorBody.fields;
           throw fields === null ? mapped : annotateServerError(mapped, fields[0], fields[1]);
         }
       }
-      throwForKaguraStatus(response.status, response.headers, text);
+      throwForKaguraStatus(response.status, response.headers, errorBody);
     }
     // Read as Python's `response.json()` reads it (#69), so a body it
     // refuses reads in its words; its RecursionError is no ValueError, so
@@ -2652,7 +2630,8 @@ export class KaguraClient {
       const text = typeof first?.text === "string" ? first.text : "{}";
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text);
+        parsed = toolName === "get_sleep_report" || toolName === "rollback_sleep_run"
+          ? parseJsonLossless(text) : JSON.parse(text);
       } catch (e) {
         throw new KaguraConnectionError(`Invalid response format: ${excMessage(e)}`, {
           cause: e,
@@ -2809,7 +2788,7 @@ export class KaguraClient {
       code ?? null,
       MCP_GATE_CODES,
       failure,
-      bodyRetryAfter(result, "retry_after_seconds"),
+      null,
       mcpEnvelopeFields(result),
     );
     if (gated !== null) {
@@ -4302,8 +4281,8 @@ export class KaguraClient {
         context_id: options.contextId,
         memory_ids: checkedMemoryIds(options.memoryIds, label("memoryIds")),
       });
-      readModel(result, FORGET_BATCH_RESULT, "forget");
-      return result as unknown as ForgetBatchResult;
+      const read = readModel(result, FORGET_BATCH_RESULT, "forget");
+      return retainModelDump(result, FORGET_BATCH_RESULT, read) as unknown as ForgetBatchResult;
     }
     if (!options.memoryId && !options.query) {
       throw new Error("Provide either memoryId or query");
@@ -4985,10 +4964,13 @@ export class KaguraClient {
     // so SleepReportDetail reads naturally without an extra `.report.`,
     // with the envelope's action page and paging keys where it sent them.
     const report = KaguraClient.expectEnvelope(result, "report", "get_sleep_report");
-    const envelope = SLEEP_REPORT_ENVELOPE_KEYS.filter((key) =>
-      Object.prototype.hasOwnProperty.call(result, key),
-    ).map((key) => [key, result[key]] as const);
-    return { ...report, ...Object.fromEntries(envelope) } as unknown as SleepReportDetail;
+    const envelope = mergeJsonObjects(result);
+    for (const key of Object.keys(envelope)) {
+      if (!(SLEEP_REPORT_ENVELOPE_KEYS as readonly string[]).includes(key)) delete envelope[key];
+    }
+    const detail = mergeJsonObjects(report, envelope);
+    readModel(detail, SLEEP_REPORT_DETAIL, "get_sleep_report");
+    return detail as unknown as SleepReportDetail;
   }
 
   /**
@@ -5038,6 +5020,7 @@ export class KaguraClient {
     const result = await this.callToolChecked("rollback_sleep_run", {
       report_id: options.reportId,
     });
+    readModel(result, ROLLBACK_RESULT, "rollback_sleep_run");
     return result as unknown as RollbackResult;
   }
 
@@ -5120,13 +5103,13 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("bootstrap", args);
     const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
-    const reply = withReadablePlanHeadroom(result, "bootstrap", read);
+    let reply = withReadablePlanHeadroom(result, "bootstrap", read);
     // Fail-open, as Python's model reads the block: unreadable is null.
     // Absent (`?guardrails=off`) stays absent.
     if (read.guardrails === null && isSet(result.guardrails)) {
-      return { ...reply, guardrails: null } as unknown as BootstrapResponse;
+      reply = { ...reply, guardrails: null };
     }
-    return reply as unknown as BootstrapResponse;
+    return retainModelDump(reply, BOOTSTRAP_RESPONSE, read) as unknown as BootstrapResponse;
   }
 
   /**
@@ -5183,8 +5166,8 @@ export class KaguraClient {
       args.max_chars = validateMaxChars(options.maxChars);
     }
     const result = await this.callToolChecked("changes_since", args);
-    readModel(result, CHANGES_SINCE_RESPONSE, "changes_since");
-    return result as unknown as ChangesSinceResponse;
+    const read = readModel(result, CHANGES_SINCE_RESPONSE, "changes_since");
+    return retainModelDump(result, CHANGES_SINCE_RESPONSE, read) as unknown as ChangesSinceResponse;
   }
 
   /**
@@ -5238,8 +5221,8 @@ export class KaguraClient {
       args.max_chars = validateMaxChars(options.maxChars);
     }
     const result = await this.callToolChecked("list", args);
-    readModel(result, LIST_MATCHING_RESPONSE, "list");
-    return result as unknown as ListMatchingResponse;
+    const read = readModel(result, LIST_MATCHING_RESPONSE, "list");
+    return retainModelDump(result, LIST_MATCHING_RESPONSE, read) as unknown as ListMatchingResponse;
   }
 
   /**

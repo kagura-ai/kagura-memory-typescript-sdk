@@ -5,12 +5,16 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  deleteCredentialsFile,
+  deleteProfile,
+  updateProfile,
   loadCredentialsFile,
   resetStateCache,
   saveCredentialsFile,
 } from "../../src/auth/credentials.js";
 import { login } from "../../src/auth/login.js";
 import { refresh } from "../../src/auth/refresh.js";
+import { acquireFileLock } from "../../src/auth/filelock.js";
 import { KaguraAuthError, KaguraAuthExpiredError } from "../../src/errors.js";
 
 let dir: string;
@@ -178,6 +182,45 @@ describe("refresh (#16)", () => {
     },
   );
 
+  it("uses the disk generation read after waiting for a peer refresh as the consent guard", async () => {
+    await seedProfile();
+    const lock = await acquireFileLock(credentialsPath);
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [
+      { status: 400, body: { error: "insufficient_scope" } },
+      { status: 200, body: tokenBody({ access_token: "at-wide", refresh_token: "rt-wide" }) },
+    ];
+    const pending = refresh({ credentialsPath, scope: "memory:read memory:write profile:read", fetch: server.fetch, onUserCode: () => {} });
+    try {
+      const cf = loadCredentialsFile(credentialsPath);
+      cf.profiles.default = { ...cf.profiles.default!, accessToken: "at-peer", refreshToken: "rt-peer", server: "https://peer.test", mcpUrl: "https://peer.test/mcp", clientId: "peer-client" };
+      saveCredentialsFile(cf, credentialsPath);
+    } finally { lock.release(); }
+    expect((await pending).accessToken).toBe("at-wide");
+    expect(new URLSearchParams(server.bodies[0]).get("refresh_token")).toBe("rt-peer");
+    expect(server.urls[1]).toBe("https://peer.test/api/v1/oauth/device/authorize");
+    expect(loadCredentialsFile(credentialsPath).profiles.default?.mcpUrl).toBe("https://peer.test/mcp");
+  });
+
+  it.each(["all", "profile", "relogin"])("does not save consent after %s logout during the device flow (#112)", async kind => {
+    await seedProfile();
+    const original = loadCredentialsFile(credentialsPath).profiles.default!;
+    const server = new FakeOAuthServer();
+    server.tokenResponses = [
+      { status: 400, body: { error: "insufficient_scope" } },
+      { status: 200, body: tokenBody({ access_token: "at-wide", refresh_token: "rt-wide" }) },
+    ];
+    await expect(refresh({
+      credentialsPath, scope: "memory:read memory:write profile:read", fetch: server.fetch,
+      onUserCode: async () => {
+        if (kind === "profile") await deleteProfile("default", credentialsPath);
+        else await deleteCredentialsFile(credentialsPath);
+        if (kind === "relogin") await updateProfile("default", { ...original, accessToken: "at-login", refreshToken: "rt-login" }, credentialsPath);
+      },
+    })).rejects.toBeInstanceOf(KaguraAuthError);
+    expect(loadCredentialsFile(credentialsPath).profiles.default?.accessToken).toBe(kind === "relogin" ? "at-login" : undefined);
+  });
+
   it("runs the widening device flow with the credentials lock released (#92)", async () => {
     await seedProfile();
 
@@ -197,12 +240,12 @@ describe("refresh (#16)", () => {
         // The device flow waits on a person for minutes; holding the lock
         // that long would stall every other process's refresh (Python
         // 0.44.0 runs it outside the lock too).
-        lockHeldWhileWaitingOnUser.push(fs.existsSync(`${credentialsPath}.lock`));
+        lockHeldWhileWaitingOnUser.push(fs.existsSync(`${credentialsPath}.lock-v1`));
       },
     });
 
     expect(lockHeldWhileWaitingOnUser).toEqual([false]);
-    expect(fs.existsSync(`${credentialsPath}.lock`)).toBe(false);
+    expect(fs.existsSync(`${credentialsPath}.lock-v1`)).toBe(false);
     expect(loadCredentialsFile(credentialsPath).profiles.default!.accessToken).toBe("at-wide");
   });
 

@@ -15,18 +15,21 @@ import { KaguraAuthError } from "../errors.js";
 import type { OAuthCredentials, RefreshResult } from "./credentials.js";
 import {
   CredentialsFileError,
+  ConsentProfileChangedError,
   RefreshNotSavedError,
   keepUnsaved,
   loadCredentialsFile,
   refreshSharedState,
   saveFailureReason,
   sharedStateFrom,
-  updateProfile,
+  saveConsentProfile,
 } from "./credentials.js";
 import { authorizeDevice, pollForToken } from "./deviceFlow.js";
 import type { DeviceAuthorizationResponse } from "./deviceFlow.js";
 
 export interface RefreshOptions {
+  /** Refresh only inside the five-minute expiry window (used by auth token). */
+  onlyIfExpiring?: boolean;
   /** Profile to refresh (default: the file's default profile). */
   profile?: string;
   /** Credentials file path (default `~/.kagura/credentials.json`). */
@@ -146,10 +149,16 @@ export async function refreshProfile(options: RefreshOptions = {}): Promise<Prof
   // Forced path, as on a 401: refresh unless the file no longer holds the
   // token read here (another process rotated it while this one waited).
   const staleToken = state.credentials.accessToken;
+  let previous: Pick<OAuthCredentials, "accessToken" | "refreshToken"> | null = null;
+  let refreshBase = state.credentials;
   try {
     const result = await state.mutex.runExclusive(() =>
       refreshSharedState(state, {
-        expectedStaleToken: staleToken,
+        onReadProfile: (profile, selected) => {
+          previous = profile === null ? null : { accessToken: profile.accessToken, refreshToken: profile.refreshToken };
+          refreshBase = selected;
+        },
+        expectedStaleToken: options.onlyIfExpiring === true ? null : staleToken,
         ...(options.scope !== undefined ? { scope: options.scope } : {}),
         ...httpOptions,
       }),
@@ -163,14 +172,17 @@ export async function refreshProfile(options: RefreshOptions = {}): Promise<Prof
       throw e;
     }
     // Runs outside the lock — the refresh released it on the way out, and
-    // updateProfile below re-acquires it, so there is no deadlock. The
+    // saveConsentProfile below re-acquires it, so there is no deadlock. The
     // device flow waits on the user for minutes: holding the lock that
     // long would stall every other process's refresh.
-    const before = state.credentials;
+    const before = refreshBase;
     const next = await consentToWiderScope(before, options.scope, options, httpOptions);
     try {
-      await updateProfile(target, next, options.credentialsPath);
+      await saveConsentProfile(target, next, previous, options.credentialsPath);
     } catch (saveError) {
+      // Logout/replacement is deliberate: do not adopt this obsolete grant
+      // into the in-process cache as if it were merely a failed disk write.
+      if (saveError instanceof ConsentProfileChangedError) throw saveError;
       // As a refresh that could not be saved: the consented grant exists
       // only here, so this process keeps it, and the profile on file (the
       // one this process already marked, or the one it held) stays behind.

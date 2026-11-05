@@ -319,6 +319,43 @@ export function readModel(raw: unknown, model: Model, operation: string): Record
 // The Python SDK's models (models.py), fields in declaration order
 // ---------------------------------------------------------------------------
 
+export const WORKSPACE_INVITATION: Model = {
+  name: "WorkspaceInvitation",
+  fields: [
+    required("id", "intOrStr"),
+    optional("email", nullable("str")),
+    required("role", "str"),
+    optional("token", nullable("str")),
+    optional("invitation_url", nullable("str")),
+    optional("is_accepted", "bool", false),
+    optional("is_expired", "bool", false),
+    optional("created_at", nullable("datetime")),
+    optional("expires_at", nullable("datetime")),
+    optional("allowed_context_ids", nullable(listOf("str"))),
+  ],
+};
+
+export const MEMBER_API_KEY: Model = {
+  name: "MemberAPIKey",
+  fields: [
+    required("id", "intOrStr"),
+    required("name", "str"),
+    required("key_prefix", "str"),
+    optional("plaintext_key", nullable("str")),
+    optional("is_visible", "bool", false),
+    optional("visibility_expires_at", nullable("datetime")),
+    optional("created_at", nullable("datetime")),
+    optional("last_used_at", nullable("datetime")),
+    optional("revoked_at", nullable("datetime")),
+    optional("expires_at", nullable("datetime")),
+    optional("bound_context_id", nullable("str")),
+    optional("default_context_id", nullable("str")),
+    optional("default_context_name", nullable("str")),
+    optional("agent_id", nullable("str")),
+    optional("connector_id", nullable("str")),
+  ],
+};
+
 export const RESOURCE_SETUP_RESPONSE: Model = {
   name: "ResourceSetupResponse",
   fields: [
@@ -725,6 +762,28 @@ export const SLEEP_REPORT_DETAIL: Model = {
     optional("actions_has_more", "bool", false),
     optional("actions_next_cursor", nullable("str")),
     optional("note", nullable("str")),
+  ],
+};
+
+/** Counters for both successful and partial Sleep rollbacks. */
+export const ROLLBACK_SUMMARY: Model = {
+  name: "RollbackSummary",
+  fields: [
+    ...[
+      "edges_deleted", "merges_reversed", "merges_unreversible", "importance_restored",
+      "promotions_reversed", "importance_kept", "promotions_kept", "archives_restored",
+      "chunks_requeued", "points_requeued",
+    ].map((key) => optional(key, "int", 0)),
+    optional("errors", listOf("str"), []),
+  ],
+};
+
+export const ROLLBACK_RESULT: Model = {
+  name: "RollbackResult",
+  fields: [
+    required("report_id", "str"),
+    required("status", "str"),
+    required("rollback_summary", { model: ROLLBACK_SUMMARY }),
   ],
 };
 

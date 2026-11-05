@@ -60,6 +60,54 @@ function failingFetch(message = "connect ECONNREFUSED"): typeof fetch {
 
 const noSleep = async (_ms: number): Promise<void> => {};
 
+describe("decode each OAuth error response once (#118)", () => {
+  it.each(["authorize", "poll", "refresh"])("%s preserves deeply nested error fields", async (method) => {
+    const metadata = "[".repeat(5000) + "0" + "]".repeat(5000);
+    const text = method === "authorize"
+      ? '{"error":"invalid_client","metadata":' + metadata + "}"
+      : '{"error":{"code":-32603,"message":"proxy refused","data":{"error":"HTTP-502","metadata":' + metadata + "}}}";
+    const fetch = sequenceFetch([textResponse(400, text)]);
+    const operation = method === "authorize" ? authorizeDevice(SERVER, { fetch }) : method === "refresh"
+      ? refreshAccessToken(SERVER, { fetch, clientId: "cli", refreshToken: "refresh" })
+      : pollForToken(SERVER, { fetch, clientId: "cli", deviceCode: "device", interval: 1, expiresAt: new Date(Date.now() + 60_000), sleep: noSleep });
+    const error = await rejection<KaguraAuthError>(operation);
+    expect(error).toBeInstanceOf(KaguraAuthError);
+    expect(error.code).toBe(method === "authorize" ? "invalid_client" : "HTTP-502");
+    let nested = error.details?.metadata;
+    for (let depth = 0; depth < 5000; depth++) nested = (nested as unknown[])[0];
+    expect(nested).toBe(0);
+  });
+  it("keeps invalid_grant typed even with deeply nested extra metadata", async () => {
+    const text = '{"error":"invalid_grant","metadata":' + "[".repeat(5000) + "0" + "]".repeat(5000) + "}";
+    const error = await rejection<KaguraAuthExpiredError>(refreshAccessToken(SERVER, {
+      fetch: sequenceFetch([textResponse(400, text)]), clientId: "cli", refreshToken: "refresh",
+    }));
+    expect(error).toBeInstanceOf(KaguraAuthExpiredError);
+    expect(error.code).toBe("invalid_grant");
+    let nested = error.details?.metadata;
+    for (let depth = 0; depth < 5000; depth++) nested = (nested as unknown[])[0];
+    expect(nested).toBe(0);
+  });
+  it.each(["authorize", "poll", "refresh"])("%s retains the REST fallback message and fields", async (method) => {
+    const text = JSON.stringify({ error: { code: -32603, message: "proxy refused", data: { error: "HTTP-502", retryable: true } } });
+    const fetch = sequenceFetch([textResponse(502, text)]);
+    const spy = vi.spyOn(JSON, "parse");
+    try {
+      const operation = method === "authorize" ? authorizeDevice(SERVER, { fetch }) : method === "refresh"
+        ? refreshAccessToken(SERVER, { fetch, clientId: "cli", refreshToken: "refresh" })
+        : pollForToken(SERVER, { fetch, clientId: "cli", deviceCode: "device", interval: 1, expiresAt: new Date(Date.now() + 60_000), sleep: noSleep });
+      const error = await rejection<KaguraAuthError>(operation);
+      expect(error).toBeInstanceOf(KaguraAuthError);
+      expect(error.message).toContain("proxy refused");
+      expect(error.code).toBe("HTTP-502");
+      expect(error.details).toMatchObject({ retryable: true });
+      expect(spy.mock.calls.filter(([body]) => body === text)).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 /** What `promise` rejects with; fails the test if it resolves instead. */
 async function rejection<E>(promise: Promise<unknown>): Promise<E> {
   return promise.then(
@@ -408,6 +456,34 @@ describe("pollForToken", () => {
 // ---------------------------------------------------------------------------
 
 describe("refreshAccessToken", () => {
+  it.each(["headers", "body"])("bounds a stalled %s even when custom fetch ignores abort (#112)", async phase => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const fetch: typeof globalThis.fetch = async (_url, init) => {
+        signal = init?.signal;
+        if (phase === "headers") return new Promise<Response>(() => {});
+        return new Response(new ReadableStream<Uint8Array>());
+      };
+      const pending = refreshAccessToken(SERVER, { clientId: "cli", refreshToken: "secret", fetch });
+      const rejection = expect(pending).rejects.toThrow(/OAuth refresh timed out after 30 seconds/);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejection;
+      expect(signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("clears the refresh deadline after success (#112)", async () => {
+    vi.useFakeTimers();
+    try {
+      await refreshAccessToken(SERVER, {
+        clientId: "cli", refreshToken: "secret", fetch: sequenceFetch([jsonResponse(200, TOKEN_BODY)]),
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("posts grant_type=refresh_token as a form body without scope", async () => {
     const calls: RecordedCall[] = [];
     const stub = sequenceFetch(

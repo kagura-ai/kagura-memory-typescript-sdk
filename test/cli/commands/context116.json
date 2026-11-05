@@ -1,0 +1,117 @@
+[
+  {
+    "value": "11111111-2222-3333-4444-555555555555",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 0,
+    "stdout": "",
+    "stderr": "",
+    "unknown": false
+  },
+  {
+    "value": "{11111111-2222-3333-4444-555555555555}",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: '{11111111-2222-3333-4444-555555555555}' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": false,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: {11111111-2222-3333-4444-555555555555}\n",
+    "setup_stderr": "Error: Invalid context_id: '{11111111-2222-3333-4444-555555555555}' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "urn:uuid:11111111-2222-3333-4444-555555555555",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: 'urn:uuid:11111111-2222-3333-4444-555555555555' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": false,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: urn:uuid:11111111-2222-3333-4444-555555555555\n",
+    "setup_stderr": "Error: Invalid context_id: 'urn:uuid:11111111-2222-3333-4444-555555555555' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "team.prod",
+    "normalized": null,
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: 'team.prod' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": true,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: team.prod\n",
+    "setup_stderr": "  Warning: no context named 'team.prod' is visible to this credential; using it as a raw context id.\nError: Invalid context_id: 'team.prod' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "team prod",
+    "normalized": null,
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: 'team prod' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": true,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: team prod\n",
+    "setup_stderr": "  Warning: no context named 'team prod' is visible to this credential; using it as a raw context id.\nError: Invalid context_id: 'team prod' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "١١١١١١١١-٢٢٢٢-٣٣٣٣-٤٤٤٤-٥٥٥٥٥٥٥٥٥٥٥٥",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: '١١١١١١١١-٢٢٢٢-٣٣٣٣-٤٤٤٤-٥٥٥٥٥٥٥٥٥٥٥٥' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": false,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: ١١١١١١١١-٢٢٢٢-٣٣٣٣-٤٤٤٤-٥٥٥٥٥٥٥٥٥٥٥٥\n",
+    "setup_stderr": "Error: Invalid context_id: '١١١١١١١١-٢٢٢٢-٣٣٣٣-٤٤٤٤-٥٥٥٥٥٥٥٥٥٥٥٥' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "１１１１１１１１-２２２２-３３３３-４４４４-５５５５５５５５５５５５",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: '１１１１１１１１-２２２２-３３３３-４４４４-５５５５５５５５５５５５' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": false,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: １１１１１１１１-２２２２-３３３３-４４４４-５５５５５５５５５５５５\n",
+    "setup_stderr": "Error: Invalid context_id: '１１１１１１１１-２２２２-３３３３-４４４４-５５５５５５５５５５５５' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "११११११११-२२२२-३३३३-४४४४-५५५५५५५५५५५५",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: '११११११११-२२२२-३३३३-४४४४-५५५५५५५५५५५५' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": false,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: ११११११११-२२२२-३३३३-४४४४-५५५५५५५५५५५५\n",
+    "setup_stderr": "Error: Invalid context_id: '११११११११-२२२२-३३३३-४४४४-५५५५५५५५५५५५' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "𝟏𝟏𝟏𝟏𝟏𝟏𝟏𝟏-𝟐𝟐𝟐𝟐-𝟑𝟑𝟑𝟑-𝟒𝟒𝟒𝟒-𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓",
+    "normalized": "11111111-2222-3333-4444-555555555555",
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: '𝟏𝟏𝟏𝟏𝟏𝟏𝟏𝟏-𝟐𝟐𝟐𝟐-𝟑𝟑𝟑𝟑-𝟒𝟒𝟒𝟒-𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": false,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: 𝟏𝟏𝟏𝟏𝟏𝟏𝟏𝟏-𝟐𝟐𝟐𝟐-𝟑𝟑𝟑𝟑-𝟒𝟒𝟒𝟒-𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓\n",
+    "setup_stderr": "Error: Invalid context_id: '𝟏𝟏𝟏𝟏𝟏𝟏𝟏𝟏-𝟐𝟐𝟐𝟐-𝟑𝟑𝟑𝟑-𝟒𝟒𝟒𝟒-𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓𝟓' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "¹¹¹¹¹¹¹¹-2222-3333-4444-555555555555",
+    "normalized": null,
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: Invalid context_id: '¹¹¹¹¹¹¹¹-2222-3333-4444-555555555555' — must be alphanumeric, hyphens, or underscores only\n",
+    "unknown": true,
+    "setup_stdout": "\nVerifying connection...\n  Connected! (0 contexts available)\n  Using context: ¹¹¹¹¹¹¹¹-2222-3333-4444-555555555555\n",
+    "setup_stderr": "  Warning: no context named '¹¹¹¹¹¹¹¹-2222-3333-4444-555555555555' is visible to this credential; using it as a raw context id.\nError: Invalid context_id: '¹¹¹¹¹¹¹¹-2222-3333-4444-555555555555' — must be alphanumeric, hyphens, or underscores only\n",
+    "setup_code": 1
+  },
+  {
+    "value": "team_dev-1",
+    "normalized": null,
+    "code": 0,
+    "stdout": "",
+    "stderr": "",
+    "unknown": true
+  }
+]
