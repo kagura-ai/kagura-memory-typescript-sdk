@@ -1,3 +1,4 @@
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `update-memory --details / --location / --merge-details` against the
  * Python CLI (python-sdk #247). Each case is an argv, the content[0].text
@@ -86,7 +87,7 @@ async function expectPython(c: Case): Promise<FakeServer> {
     expect(pyError?.startsWith(c.errorPrefix)).toBe(true);
     expect(err[0]?.startsWith(c.errorPrefix)).toBe(true);
   } else if (c.code === 2) {
-    expect(err[0]).toBe(pyError);
+    expect(diagnosticBodies(err)[0]).toBe(pyError);
   } else {
     // The whole stderr: the fallback's `note:` line comes before the error.
     expect(err.length > 0 ? `${err.join("\n")}\n` : "").toBe(c.stderr);
@@ -431,7 +432,7 @@ describe("update-memory --merge-details, as the Python CLI 0.44.0", () => {
     });
     expect(code).toBe(1);
     expect(calls.map(([tool]) => tool)).toEqual(["update_memory", "reference"]);
-    expect(err[0]).toBe(REFUSED_NOTE.trimEnd());
+    expect(diagnosticBodies(err)[0]).toBe(REFUSED_NOTE.trimEnd());
     expect(err[1]).toMatch(/^Error: Invalid response format: /);
   });
 

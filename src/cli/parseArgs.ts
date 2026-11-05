@@ -29,6 +29,13 @@ import { PY_FLOAT, pyFloat } from "../python.js";
  * declared exactly once: a spec entry with no help line, or a help line
  * for a flag that was never registered, is not a state this can reach.
  */
+export interface NumericRange {
+  min: number;
+  max: number;
+  rangeLabel: string;
+  integer?: boolean;
+}
+
 export interface FlagSpec {
   /** Long name, written without the leading `--`. */
   name: string;
@@ -57,6 +64,8 @@ export interface FlagSpec {
   help?: string;
   /** Value placeholder shown in `--help` (default: `TEXT` for value flags). */
   metavar?: string;
+  /** Shared Click range declaration for validation and help. */
+  range?: NumericRange;
   /** Rendered as `[default: …]` in `--help`. */
   defaultLabel?: string;
   /** Reported as missing when absent; see `requireOption`. */

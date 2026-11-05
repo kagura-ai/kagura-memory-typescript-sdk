@@ -57,6 +57,7 @@ export function projectGuardrailSet(data: unknown): GuardrailSet {
 }
 
 const CAP: FlagSpec = {
+  range: { min: 1, max: 1000, rangeLabel: "1<=x<=1000", integer: true },
   name: "cap",
   type: "value",
   metavar: "INTEGER",
@@ -79,7 +80,7 @@ const load: Command = {
     const cap =
       rawCap === undefined
         ? undefined
-        : parseRanged(CAP, rawCap, { min: 1, max: 1000, rangeLabel: "1<=x<=1000", integer: true });
+        : parseRanged(CAP, rawCap);
     rejectExtraArgs(args, 1);
     // The context goes to the tool as given, as Python sends it: the
     // server, not the CLI, refuses one that is not a UUID.

@@ -1,3 +1,4 @@
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `setup codex | hermes | openclaw --url-form --oauth` (python-sdk #282,
  * #284, #287): an entry with no key, which the harness signs in to itself,
@@ -215,7 +216,7 @@ describe.each(["codex", "hermes", "openclaw"] as const)("setup %s --oauth: its f
   ])("%s is a usage error, before any request", async (_case, flags) => {
     const h = oauthHarness({ onPath });
     expect(await runCli(["setup", name, ...flags, "-y"], h.deps)).toBe(2);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: --oauth needs --url-form and --mcp-url: the URL the harness signs in to, e.g. --url-form --oauth " +
         "--mcp-url https://memory.kagura-ai.com/mcp/w/<workspace-id>.",
     );
@@ -226,7 +227,7 @@ describe.each(["codex", "hermes", "openclaw"] as const)("setup %s --oauth: its f
   it("refuses --api-key-env, Hermes included, before any request", async () => {
     const h = oauthHarness({ onPath });
     expect(await runCli(["setup", name, ...OAUTH, "--api-key-env", "KAGURA_API_KEY", "-y"], h.deps)).toBe(2);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: --oauth and --api-key-env exclude each other: an --oauth entry has no key variable, since the " +
         "harness signs in itself.",
     );
@@ -269,7 +270,7 @@ describe.each(["codex", "hermes", "openclaw"] as const)("setup %s --oauth: the s
     expect(
       await runCli(["setup", name, ...OAUTH, "--context-id", CONTEXT, "--agents-md", "--force", "-y"], h.deps),
     ).toBe(1);
-    expect(h.err).toContain(refused(why, TITLE[name]));
+    expect(diagnosticBodies(h.err)).toContain(refused(why, TITLE[name]));
     expect(h.server.requests).toHaveLength(1);
     expect(h.runs).toEqual([]);
     expect(h.attached).toEqual([]);
@@ -404,7 +405,7 @@ describe("setup codex --oauth", () => {
     expect(h.attached).toEqual([]);
     expect(h.runs).toEqual([]);
     const reason = `Setup does not edit ~/.codex/config.toml itself (\`codex mcp add\` starts the sign-in and ${why}).`;
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `${reason}\nAdd this kagura-memory entry to it:`,
       "",
       `[mcp_servers.kagura-memory]\nurl = "${U}"`,
@@ -447,7 +448,7 @@ describe("setup codex --oauth", () => {
   it("a failed add says the entry may be saved already, in Python's layout", async () => {
     const h = oauthHarness({ ...codex, tty: true, attached: () => 1 });
     expect(await runCli(["setup", "codex", ...OAUTH], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: `codex mcp add` failed: exit code 1\n" +
         "  Codex saves the entry before it signs in, so it may be saved already: check with\n" +
         "  `codex mcp get kagura-memory`, then sign in with `codex mcp login kagura-memory`.",
@@ -715,7 +716,7 @@ describe("setup hermes --oauth", () => {
     expect(await runCli(["setup", "hermes", ...OAUTH, ...flags], h.deps)).toBe(0);
     expect(h.attached).toEqual([]);
     const reason = `Setup does not edit ~/.hermes/config.yaml itself (\`hermes mcp add\` is interactive and ${why}).`;
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       `${reason}\nAdd this kagura-memory entry to it:`,
       "",
       `mcp_servers:\n  kagura-memory:\n    url: "${U}"\n    auth: oauth`,
@@ -738,7 +739,7 @@ describe("setup hermes --oauth", () => {
     fake.oauthOk = false;
     const h = withHermes(fake, { auth: ON_SERVER });
     expect(await runCli(["setup", "hermes", ...OAUTH, "--context-id", CONTEXT, "--agents-md"], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Hermes's kagura-memory entry has no auth: oauth, so it cannot sign in to Kagura: Hermes continues without authentication when it cannot set up OAuth. Re-run with --force to replace it; setup skipped the AGENTS.md export.",
     );
     expect(h.events).not.toContain("fetch digest");
@@ -750,7 +751,7 @@ describe("setup hermes --oauth", () => {
     fake.probeOk = false;
     const h = withHermes(fake, { auth: ON_SERVER });
     expect(await runCli(["setup", "hermes", ...OAUTH, "--context-id", CONTEXT, "--agents-md"], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Hermes saved kagura-memory disabled, since its sign-in or connection check did not finish, and it never connects to a disabled entry. Sign in with `hermes mcp login kagura-memory` (add --flow device on memory-cloud 0.78.0+ when the browser cannot reach this host), then turn the entry on with `hermes config set mcp_servers.kagura-memory.enabled true`; setup skipped the AGENTS.md export.",
     );
     expect(h.events).not.toContain("fetch digest");
@@ -761,7 +762,7 @@ describe("setup hermes --oauth", () => {
     fake.saves = false;
     const h = withHermes(fake);
     expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Hermes has no kagura-memory entry: `hermes mcp add` was cancelled or failed\n  there, so nothing was saved.",
     );
   });
@@ -771,7 +772,7 @@ describe("setup hermes --oauth", () => {
     fake.configGetFails = true;
     const h = withHermes(fake);
     expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Setup could not read back Hermes's kagura-memory entry (`hermes config get mcp_servers.kagura-memory` failed), so it cannot tell whether Hermes saved an OAuth entry it can sign in with: check it with that command or `hermes mcp list`.",
     );
   });
@@ -782,7 +783,7 @@ describe("setup hermes --oauth", () => {
     fake.saves = false;
     const h = withHermes(fake);
     expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: `hermes mcp list` shows no new kagura-memory entry: `hermes mcp add` was\n  cancelled or failed there, so nothing was saved.",
     );
   });
@@ -794,7 +795,7 @@ describe("setup hermes --oauth", () => {
     fake.saves = false;
     const h = withHermes(fake);
     expect(await runCli(["setup", "hermes", ...OAUTH, "--force"], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Hermes's kagura-memory entry has no auth: oauth, so it cannot sign in to Kagura: Hermes keeps the existing entry when its overwrite prompt is declined, and continues without authentication when it cannot set up OAuth. Re-run with --force and accept Hermes's overwrite prompt.",
     );
   });
@@ -806,7 +807,7 @@ describe("setup hermes --oauth", () => {
     fake.saves = false;
     const h = withHermes(fake);
     expect(await runCli(["setup", "hermes", ...OAUTH, "--force"], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Hermes's kagura-memory entry is still the existing one (URL with OAuth): Hermes keeps the existing entry when its overwrite prompt is declined, or when the add stops before saving, so nothing was saved. Re-run with --force and accept Hermes's overwrite prompt.",
     );
     expect(h.err.join("\n")).not.toContain(OLD);
@@ -828,7 +829,7 @@ describe("setup hermes --oauth", () => {
     fake.entries["kagura-memory"] = { url: OLD, auth: "oauth" };
     const h = withHermes(fake);
     expect(await runCli(["setup", "hermes", ...OAUTH], h.deps)).toBe(1);
-    expect(h.err).toContain(
+    expect(diagnosticBodies(h.err)).toContain(
       "Error: Hermes's kagura-memory entry (URL with OAuth) is not the one setup asked for, so nothing was saved.",
     );
   });

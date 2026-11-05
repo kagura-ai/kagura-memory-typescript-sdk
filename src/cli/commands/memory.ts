@@ -265,6 +265,7 @@ const VERBOSITY: FlagSpec = {
     "summaries without tags; full: uncut summaries, tags, context_summary and scope.",
 };
 const FULL: FlagSpec = {
+  range: { min: 0, max: RECALL_FULL_MAX, rangeLabel: `0<=x<=${RECALL_FULL_MAX}`, integer: true, },
   name: "full",
   type: "value",
   metavar: "INTEGER",
@@ -273,6 +274,7 @@ const FULL: FlagSpec = {
     "(server v0.114.0+; default: the server's, 3 unless set; 0: summaries only).",
 };
 const MAX_CHARS: FlagSpec = {
+  range: { min: MAX_CHARS_MIN, max: MAX_CHARS_MAX, rangeLabel: `${MAX_CHARS_MIN}<=x<=${MAX_CHARS_MAX}`, integer: true, },
   name: "max-chars",
   type: "value",
   metavar: "INTEGER",
@@ -442,20 +444,10 @@ const recall: Command = {
     const shape: RecallShape = {};
     if (rawVerbosity !== undefined) shape.verbosity = parseChoice(VERBOSITY, rawVerbosity, VERBOSITIES);
     if (rawFull !== undefined) {
-      shape.full = parseRanged(FULL, rawFull, {
-        min: 0,
-        max: RECALL_FULL_MAX,
-        rangeLabel: `0<=x<=${RECALL_FULL_MAX}`,
-        integer: true,
-      });
+      shape.full = parseRanged(FULL, rawFull);
     }
     if (rawMaxChars !== undefined) {
-      shape.maxChars = parseRanged(MAX_CHARS, rawMaxChars, {
-        min: MAX_CHARS_MIN,
-        max: MAX_CHARS_MAX,
-        rangeLabel: `${MAX_CHARS_MIN}<=x<=${MAX_CHARS_MAX}`,
-        integer: true,
-      });
+      shape.maxChars = parseRanged(MAX_CHARS, rawMaxChars);
     }
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
       recallWithShapeFallback(
@@ -715,6 +707,7 @@ const DETAILS_PATCH: FlagSpec = {
 };
 
 const EXPECTED_VERSION: FlagSpec = {
+  range: { min: 1, max: Number.POSITIVE_INFINITY, rangeLabel: "x>=1", integer: true, },
   name: "expected-version",
   type: "value",
   metavar: "INTEGER RANGE",
@@ -841,16 +834,16 @@ const updateMemory: Command = {
     "  --details/--location as a details_patch: the server merges their top-level\n" +
     "  keys over the current details in one call, keeps the keys they do not\n" +
     "  mention, and deletes a key given as null ('\"location\": null' too).\n" +
-    "  --details-patch sends a patch you write yourself. On a server before memory-\n" +
-    "  cloud 0.140.0 either falls back to reading the memory first with reference()\n" +
-    "  and writing the merged object: two calls, not one atomic update (--expected-\n" +
-    "  version still guards the write on 0.113.0+), and the read counts in the\n" +
+    "  --details-patch sends a patch you write yourself. On a server before memory-cloud\n" +
+    "  0.140.0 either falls back to reading the memory first with reference()\n" +
+    "  and writing the merged object: two calls, not one atomic update (--expected-version\n" +
+    "  still guards the write on 0.113.0+), and the read counts in the\n" +
     "  memory's access stats. A server before 0.82.0 ignores the patch instead of\n" +
     "  refusing it; the command confirms that version first, writes the merged\n" +
     "  details in a second call, and exits 1 naming any other new flag that server\n" +
     "  ignored (--add-tag, --remove-tag, --expected-version, --observed-at).\n" +
-    "  Coordinates must be JSON numbers, not strings: the server rejects string-\n" +
-    "  typed lat/lon with a 422 by design.\n\n" +
+    "  Coordinates must be JSON numbers, not strings: the server rejects string-typed\n" +
+    "  lat/lon with a 422 by design.\n\n" +
     "  --add-tag/--remove-tag edit the stored tags without resending them, and\n" +
     "  --expected-version makes the update fail, writing nothing, when another edit\n" +
     "  landed since you read the memory.\n\n" +
@@ -929,12 +922,7 @@ const updateMemory: Command = {
     // body runs, so a bad -i or --expected-version is a usage error (exit 2)
     // even when the checks below would fail.
     const importance = optionalFloat(args, IMPORTANCE);
-    const expectedVersion = optionalRanged(args, EXPECTED_VERSION, {
-      min: 1,
-      max: Number.POSITIVE_INFINITY,
-      rangeLabel: "x>=1",
-      integer: true,
-    });
+    const expectedVersion = optionalRanged(args, EXPECTED_VERSION);
     if (!memoryId && !externalId) {
       throw new CliError("Either --memory-id or --external-id is required");
     }

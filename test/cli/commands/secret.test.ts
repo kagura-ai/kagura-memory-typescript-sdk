@@ -1,3 +1,4 @@
+import { diagnosticBodies } from "../diagnostics.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
@@ -263,7 +264,7 @@ describe("kagura-memory secret exec", () => {
     const h = harness();
     expect(await runCli(["secret", "exec", ...argv], h.deps)).toBe(0);
     expect(h.out.join("\n")).toMatch(/^Usage: kagura-memory secret exec /);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     expect(h.spawned).toEqual([]);
   });
 
@@ -274,7 +275,7 @@ describe("kagura-memory secret exec", () => {
   ])("lets click's own errors win over --help there: %j", async (argv, message) => {
     const h = harness();
     expect(await runCli(["secret", "exec", ...argv], h.deps)).toBe(2);
-    expect(h.err[0]).toBe(message);
+    expect(diagnosticBodies(h.err)[0]).toBe(message);
     expect(h.out).toEqual([]);
   });
 
@@ -283,7 +284,7 @@ describe("kagura-memory secret exec", () => {
     // standing divergence.
     const h = harness();
     expect(await runCli(["secret", "exec", "--as", "X=y", "--bogus"], h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: No such option: --bogus");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: No such option: --bogus");
     expect(h.spawned).toEqual([]);
   });
 

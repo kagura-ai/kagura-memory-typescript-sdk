@@ -266,11 +266,9 @@ describe("context list / contexts output, byte for byte the Python CLI's (#89)",
     expect(await runCli(c.argv, deps)).toBe(c.code);
     expect(out.map((line) => `${line}
 `).join("")).toBe(c.stdout);
-    // A usage error: this bin prints click's `Error:` line without the
-    // `Usage:` / `Try '… --help'` lines before it, as for every command.
     // The `contexts` hint names this bin's `context list`, `kagura-memory`
     // where the Python CLI's names `kagura`.
-    const stderr = (c.code === 2 ? c.stderr.slice(c.stderr.indexOf("Error: ")) : c.stderr).replace(
+    const stderr = c.stderr.replace(/^(Usage: |Try ')(?:kagura|main)(?= )/gm, "$1kagura-memory").replace(
       "run kagura context list",
       "run kagura-memory context list",
     );

@@ -1,3 +1,4 @@
+import { pythonHelp } from "../helpAssertions.js";
 /**
  * The session commands' routing and `--help` (#86); their output is pinned
  * against the Python CLI in `sessionDumps.test.ts`.
@@ -58,10 +59,7 @@ describe("session commands", () => {
 
   it("forget --help shows --ids and -k without a default of its own (Python CLI 0.44.0)", async () => {
     const h = harness();
-    expect(await runCli(["forget", "--help"], h.deps)).toBe(0);
-    const text = h.out.join("\n");
-    expect(text).toMatch(/--ids TEXT\s+Comma-separated memory IDs to delete in one call, 1-50 \(server v0\.117\.0\+\)/);
-    expect(text).toMatch(/-k INTEGER\s+Max memories to delete in query mode \(default 10\)$/m);
-    expect(text).not.toContain("[default: 10]");
+    expect(await runCli(["forget","--help"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(pythonHelp("forget"));
   });
 });

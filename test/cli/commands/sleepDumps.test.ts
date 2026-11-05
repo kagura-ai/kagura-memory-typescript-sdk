@@ -166,9 +166,7 @@ describe("sleep history / report output, byte for byte the Python CLI's (#85)", 
 
     expect(await runCli(c.argv, deps)).toBe(c.code);
     expect(out.map((line) => `${line}\n`).join("")).toBe(c.stdout);
-    // A usage error: this bin prints click's `Error:` line without the
-    // `Usage:` / `Try '… --help'` lines before it, as for every command.
-    const stderr = c.code === 2 ? c.stderr.slice(c.stderr.indexOf("Error: ")) : c.stderr;
+    const stderr = c.stderr.replace(/^(Usage: |Try ')kagura(?= )/gm, "$1kagura-memory");
     expect(err.map((line) => `${line}\n`).join("")).toBe(stderr);
     const calls = server.requests.filter((r) => r.body?.method === "tools/call");
     expect(calls.map((r) => (r.body?.params as { arguments: unknown }).arguments)).toEqual(c.calls);

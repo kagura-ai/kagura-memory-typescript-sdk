@@ -13,7 +13,7 @@ import { readAddToolsFlag } from "../http.js";
 import { JsonDecodeError, parseJsonLossless } from "../losslessJson.js";
 import { pyStrip } from "../pyCompat.js";
 import { PY_INT, pyBigInt, pyFloat, pyFloatRepr, pyInt, pyRepr, pyTypeName } from "../python.js";
-import type { FlagSpec, ParsedArgs } from "./parseArgs.js";
+import type { FlagSpec, NumericRange, ParsedArgs } from "./parseArgs.js";
 
 export { PY_INT, pyFloatRepr, pyRepr };
 
@@ -179,7 +179,7 @@ export function pathIdParam(param: Param, value: string, what: string): string {
 export function parseRanged(
   param: Param,
   raw: string,
-  options: { min: number; max: number; rangeLabel: string; integer?: boolean },
+  options: NumericRange = declaredRange(param),
 ): number {
   const integer = options.integer === true;
   const value = integer ? pyInt(raw) : pyFloat(raw);
@@ -209,10 +209,15 @@ export function parseRanged(
 export function optionalRanged(
   args: ParsedArgs,
   flag: FlagSpec,
-  options: { min: number; max: number; rangeLabel: string; integer?: boolean },
+  options: NumericRange = declaredRange(flag),
 ): number | undefined {
   const raw = args.values[flag.name];
   return raw === undefined ? undefined : parseRanged(flag, raw, options);
+}
+
+function declaredRange(param: Param): NumericRange {
+  if (typeof param !== "string" && param.range !== undefined) return param.range;
+  throw new Error("Ranged options must declare their range");
 }
 
 export interface ChoiceOptions {

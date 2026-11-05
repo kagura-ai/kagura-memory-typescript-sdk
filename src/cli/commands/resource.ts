@@ -154,6 +154,7 @@ async function runAndDump(
 
 const DESCRIPTION: FlagSpec = { name: "description", short: "d", type: "value", help: "Description" };
 const QUOTA: FlagSpec = {
+  range: { min: 1, max: 10000, rangeLabel: "1<=x<=10000", integer: true },
   name: "quota",
   short: "q",
   type: "value",
@@ -340,6 +341,7 @@ const schema: Command = {
 };
 
 const EVENTS_LIMIT: FlagSpec = {
+  range: { min: 1, max: 100, rangeLabel: "1<=x<=100", integer: true },
   name: "limit",
   short: "l",
   type: "value",
@@ -375,7 +377,7 @@ const events: Command = {
     const limit =
       raw === undefined
         ? 50
-        : parseRanged(EVENTS_LIMIT, raw, { min: 1, max: 100, rangeLabel: "1<=x<=100", integer: true });
+        : parseRanged(EVENTS_LIMIT, raw);
     const cursor = args.values.cursor;
     const rawOp = args.values.op;
     const op = rawOp === undefined ? undefined : parseChoice(OP, rawOp, OPS);
@@ -471,7 +473,7 @@ const setup: Command = {
     const quotaEventsPerHour =
       raw === undefined
         ? 1000
-        : parseRanged(QUOTA, raw, { min: 1, max: 10000, rangeLabel: "1<=x<=10000", integer: true });
+        : parseRanged(QUOTA, raw);
     // Once every option has been read, as click reads them before the
     // command runs, and before any config or client work, as in Python:
     // the note is printed even when that work then fails.
@@ -635,7 +637,8 @@ const IMPORT_FORMATS = ["auto", "csv", "json", "jsonl"] as const;
 /** Python declares `--file` and `--format` with no help, and shows no defaults. */
 const IMPORT_FILE: FlagSpec = { name: "file", short: "f", type: "value", metavar: "FILENAME" };
 const FORMAT: FlagSpec = { name: "format", type: "value", metavar: "[auto|csv|json|jsonl]" };
-const IMPORT_VERSION: FlagSpec = { ...VERSION, help: "Version (>=1)" };
+const IMPORT_VERSION: FlagSpec = {
+  range: { min: 1, max: Number.POSITIVE_INFINITY, rangeLabel: "x>=1", integer: true, }, ...VERSION, help: "Version (>=1)" };
 
 const importCmd: Command = {
   summary: "Import data from CSV, JSON, or JSONL file.",
@@ -679,12 +682,7 @@ const importCmd: Command = {
  */
 function parseImportVersion(raw: string | undefined): number {
   if (raw === undefined) return 1;
-  const version = parseRanged(IMPORT_VERSION, raw, {
-    min: 1,
-    max: Number.POSITIVE_INFINITY,
-    rangeLabel: "x>=1",
-    integer: true,
-  });
+  const version = parseRanged(IMPORT_VERSION, raw);
   if (version > Number.MAX_SAFE_INTEGER) {
     const digits = String(pyBigInt(raw));
     throw new CliUsageError(

@@ -1,3 +1,4 @@
+import { diagnosticBodies } from "./diagnostics.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -178,7 +179,7 @@ describe("cli: usage and dispatch", () => {
     const h = harness();
     // Exit 1 with nothing stored, as Python's ClickException.
     expect(await runCli(["auth", "status"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
     expect(h.out).toEqual([]);
   });
 
@@ -210,7 +211,7 @@ describe("cli: usage and dispatch", () => {
     const b = harness();
     expect(await runCli(["login", "--porfile", "x"], b.deps)).toBe(2);
     // Click's too, its close-match suggestion included.
-    expect(b.err[0]).toBe("Error: No such option: --porfile Did you mean --profile?");
+    expect(diagnosticBodies(b.err)[0]).toBe("Error: No such option: --porfile Did you mean --profile?");
   });
 
   // Each line is what the Python CLI (click 8.3.3) prints for the argv:
@@ -233,7 +234,7 @@ describe("cli: usage and dispatch", () => {
   ])("suggests a close option as click does: %j", async (argv, message) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Error: ${message}`);
+    expect(diagnosticBodies(h.err)[0]).toBe(`Error: ${message}`);
     expect(h.out).toEqual([]);
   });
 
@@ -241,7 +242,7 @@ describe("cli: usage and dispatch", () => {
     // `--invite` is declared, hidden, on `auth status` only to refuse it.
     const h = harness();
     expect(await runCli(["auth", "status", "--invit"], h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: No such option: --invit");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: No such option: --invit");
   });
 
   it.each([
@@ -252,10 +253,9 @@ describe("cli: usage and dispatch", () => {
   ])("refuses an option missing its value in click's words: %j", async (argv, flag) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Error: Option '${flag}' requires an argument.`);
-    // One error, then the help, as for the other option errors.
-    expect(h.err[1]).toMatch(/^Usage: kagura-memory /);
-    expect(h.err).toHaveLength(2);
+    expect(diagnosticBodies(h.err)[0]).toBe(`Error: Option '${flag}' requires an argument.`);
+    // Click raises BadOptionUsage without context: no Usage/help prefix.
+    expect(h.err).toEqual([`Error: Option '${flag}' requires an argument.`]);
     expect(h.out).toEqual([]);
   });
 
@@ -265,8 +265,8 @@ describe("cli: usage and dispatch", () => {
     const h = harness();
     const argv = ["setup", "codex", "--url-form", "--mcp-url", "https://127.0.0.1:9/mcp", "--dry-run", "--name", "-bad"];
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: Option '--name' requires an argument.");
-    expect(h.err.filter((line) => line.startsWith("Error:"))).toHaveLength(1);
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: Option '--name' requires an argument.");
+    expect(diagnosticBodies(h.err).filter((line) => line.startsWith("Error:"))).toHaveLength(1);
   });
 
   it.each([
@@ -278,7 +278,7 @@ describe("cli: usage and dispatch", () => {
   ])("lets an option error win over --help, as click parses all of argv first: %j", async (argv, message) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Error: ${message}`);
+    expect(diagnosticBodies(h.err)[0]).toBe(`Error: ${message}`);
     expect(h.out).toEqual([]);
   });
 
@@ -291,7 +291,7 @@ describe("cli: usage and dispatch", () => {
   ])("does the same for the options of a group or the root: %j", async (argv, message) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Error: ${message}`);
+    expect(diagnosticBodies(h.err)[0]).toBe(`Error: ${message}`);
     expect(h.out).toEqual([]);
   });
 
@@ -323,7 +323,7 @@ describe("cli: usage and dispatch", () => {
   ])("reports %j by the option's name alone", async (argv, line) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(line);
+    expect(diagnosticBodies(h.err)[0]).toBe(line);
     expect([...h.out, ...h.err].join("\n")).not.toContain("kg_secret");
   });
 
@@ -332,7 +332,7 @@ describe("cli: usage and dispatch", () => {
     // pasted `--invite -Zkg_secret…` token, one character of it.
     const h = harness();
     expect(await runCli(["recall", "q", "--invite", "-Zkg_secret_key", "--bogus"], h.deps)).toBe(2);
-    expect(h.err.filter((l) => l.startsWith("Error:"))).toEqual(["Error: No such option: --invite"]);
+    expect(diagnosticBodies(h.err).filter((l) => l.startsWith("Error:"))).toEqual(["Error: No such option: --invite"]);
     expect([...h.out, ...h.err].join("\n")).not.toContain("-Z");
   });
 
@@ -347,8 +347,12 @@ describe("cli: usage and dispatch", () => {
     // Click's groups say so too; this printed the help alone before.
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(line);
-    expect(h.err[1]).toMatch(new RegExp(`^${usage.replace(/[[\]]/g, "\\$&")}`));
+    expect(diagnosticBodies(h.err)[0]).toBe(line);
+    if (argv[0] === "--version=1") expect(h.err).toEqual([line]);
+    else {
+      expect(h.err[0]).toMatch(new RegExp(`^${usage.replace(/[[\]]/g, "\\$&")}`));
+      expect(h.err[0]).toContain(" --help' for help.\n\nError: ");
+    }
     expect(h.out).toEqual([]);
     expect(h.err.join("\n")).not.toContain("kg_secret");
   });
@@ -357,12 +361,12 @@ describe("cli: usage and dispatch", () => {
     for (const argv of [["--help"], ["-h"], ["auth", "--help"], ["auth", "-h"]]) {
       const h = harness();
       expect(await runCli(argv, h.deps)).toBe(0);
-      expect(h.err).toEqual([]);
+      expect(diagnosticBodies(h.err)).toEqual([]);
     }
     for (const argv of [[], ["auth"]]) {
       const h = harness();
       expect(await runCli(argv, h.deps)).toBe(2);
-      expect(h.err[0]).toMatch(/^Usage: /);
+      expect(diagnosticBodies(h.err)[0]).toMatch(/^Usage: /);
     }
   });
 
@@ -411,7 +415,7 @@ describe("cli: login", () => {
   it("rejects --read-only together with --scope with exit 1, as Python's ClickException does", async () => {
     const h = harness();
     expect(await runCli(["login", "--read-only", "--scope", "memory:read"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: --read-only and --scope are mutually exclusive; pick one."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: --read-only and --scope are mutually exclusive; pick one."]);
     expect(h.loginCalls).toEqual([]);
   });
 
@@ -760,7 +764,7 @@ describe("cli: login --invite (#44)", () => {
     expect(urls).toEqual([]);
     expect(h.loginCalls).toEqual([]);
     // Click's BadParameter wording, with the Python CLI's reason.
-    expect(h.err).toEqual([`Error: Invalid value for '--invite': ${reason}`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for '--invite': ${reason}`]);
     if (invite !== "") {
       expect([...h.out, ...h.err].join("\n")).not.toContain(invite);
     }
@@ -772,7 +776,7 @@ describe("cli: login --invite (#44)", () => {
     const h = harness();
     const argv = ["login", "--read-only", "--scope", "memory:read", "--invite", "abc123"];
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err).toEqual([`Error: Invalid value for '--invite': ${TOKEN_RULE}`]);
+    expect(diagnosticBodies(h.err)).toEqual([`Error: Invalid value for '--invite': ${TOKEN_RULE}`]);
   });
 
   it("aborts before polling on a link from another server, writing nothing", async () => {
@@ -1050,7 +1054,7 @@ describe("cli: login --invite (#44)", () => {
   ]))("refuses %j in the same words, and before --help", async (argv) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err).toEqual(["--invite applies only to 'auth login'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: --invite applies only to 'auth login'."]);
     expect(h.out).toEqual([]);
   });
 
@@ -1118,7 +1122,7 @@ describe("cli: each auth subcommand takes only the flags it reads", () => {
     const h = harness();
     const argv = ["auth", name, ...(name === "use" ? ["default"] : []), flag, ...(VALUE_FLAGS.has(flag) ? ["x"] : [])];
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err[0]).toBe(`Error: No such option: ${flag}${SUGGESTED[`${name} ${flag}`] ?? ""}`);
+    expect(diagnosticBodies(h.err)[0]).toBe(`Error: No such option: ${flag}${SUGGESTED[`${name} ${flag}`] ?? ""}`);
     expect(h.out).toEqual([]);
     expect(h.loginCalls).toEqual([]);
     expect(h.refreshCalls).toEqual([]);
@@ -1154,7 +1158,7 @@ describe("cli: status", () => {
     async (extra) => {
       const h = harness();
       expect(await runCli(["auth", "status", ...extra], h.deps)).toBe(1);
-      expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
       expect(h.out).toEqual([]);
     },
   );
@@ -1203,13 +1207,13 @@ describe("cli: status", () => {
       seed({ default: creds() });
       const h = harness();
       expect(await runCli(["status", "--profile", name], h.deps)).toBe(1);
-      expect(h.err).toEqual([`No profile named '${name}'.`]);
+      expect(diagnosticBodies(h.err)).toEqual([`No profile named '${name}'.`]);
 
       const token = harness();
       expect(await runCli(["auth", "token", "--profile", name], token.deps)).toBe(1);
       expect(token.out).toEqual([]);
       // Python's ClickException line (#92), "Error: " included.
-      expect(token.err).toEqual([`Error: No profile named '${name}'.\n  Run: kagura-memory auth login`]);
+      expect(diagnosticBodies(token.err)).toEqual([`Error: No profile named '${name}'.\n  Run: kagura-memory auth login`]);
     },
   );
 
@@ -1330,7 +1334,7 @@ describe("cli: list", () => {
   it("exits 1 with no profiles, as Python's ClickException does", async () => {
     const h = harness();
     expect(await runCli(["auth", "list"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: No profiles. Run: kagura-memory auth login"]);
   });
 
   it("--json emits Python's keys, one object per profile in file order, and no token", async () => {
@@ -1390,7 +1394,7 @@ describe("cli: use", () => {
     expect(await runCli(["auth", "use", "work"], h.deps)).toBe(0);
     expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("work");
     expect(h.out).toEqual(["Default profile set to 'work' (workspace 'Work WS')."]);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
   });
 
   it.each([
@@ -1419,7 +1423,7 @@ describe("cli: use", () => {
     seed({ work: creds(), default: creds(), alpha: creds() }, "default");
     const h = harness();
     expect(await runCli(["auth", "use", "nope"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Profile 'nope' not found. Available: alpha, default, work"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Profile 'nope' not found. Available: alpha, default, work"]);
     expect(h.out).toEqual([]);
     expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
   });
@@ -1427,7 +1431,7 @@ describe("cli: use", () => {
   it("says how to log in when there is no profile at all", async () => {
     const h = harness();
     expect(await runCli(["auth", "use", "work"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Profile 'work' not found. Available: (none — run: kagura-memory auth login)",
     ]);
   });
@@ -1436,14 +1440,14 @@ describe("cli: use", () => {
     seed({ default: creds() });
     const h = harness();
     expect(await runCli(["auth", "use", "constructor"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Profile 'constructor' not found. Available: default"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Profile 'constructor' not found. Available: default"]);
     expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
   });
 
   it("requires NAME, in click's words (exit 2)", async () => {
     const h = harness();
     expect(await runCli(["auth", "use"], h.deps)).toBe(2);
-    expect(h.err).toEqual(["Error: Missing argument 'NAME'."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Missing argument 'NAME'."]);
   });
 
   it.each([
@@ -1453,7 +1457,7 @@ describe("cli: use", () => {
     seed({ default: creds(), work: creds() });
     const h = harness();
     expect(await runCli(["auth", "use", ...extra], h.deps)).toBe(2);
-    expect(h.err).toEqual([line]);
+    expect(diagnosticBodies(h.err)).toEqual([line]);
     expect(loadCredentialsFile(credentialsPath).defaultProfile).toBe("default");
   });
 
@@ -1505,7 +1509,7 @@ describe("cli: logout", () => {
     seed({ default: creds(), work: creds() });
     const h = harness();
     expect(await runCli(["logout", "--all", "--profile", "default", ...extra], h.deps)).toBe(2);
-    expect(h.err).toEqual(["--all and --profile are mutually exclusive; pick one."]);
+    expect(diagnosticBodies(h.err)).toEqual(["--all and --profile are mutually exclusive; pick one."]);
     expect(Object.keys(loadCredentialsFile(credentialsPath).profiles)).toEqual(["default", "work"]);
   });
 
@@ -1818,7 +1822,7 @@ describe("cli: the router's plumbing for commands that use it", () => {
     );
     const h = harness();
     expect(await runCli(["probe"], h.deps)).toBe(1);
-    expect(h.err).toEqual([
+    expect(diagnosticBodies(h.err)).toEqual([
       "Error: Daily memory limit reached (100/day).\n" +
         "  Resets at: 2026-09-26T00:00:00.500000+00:00\n" +
         "  Required plan: M (basic)",
@@ -1832,14 +1836,14 @@ describe("cli: the router's plumbing for commands that use it", () => {
     );
     const h = harness();
     expect(await runCli(["probe"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Feature 'resources' not available.\n  Required plan: promax"]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Feature 'resources' not available.\n  Required plan: promax"]);
   });
 
   it("keeps an ordinary error to its message", async () => {
     register("probe", throwing(new KaguraQuotaError("Memory limit reached.")));
     const h = harness();
     expect(await runCli(["probe"], h.deps)).toBe(1);
-    expect(h.err).toEqual(["Error: Memory limit reached."]);
+    expect(diagnosticBodies(h.err)).toEqual(["Error: Memory limit reached."]);
   });
 
   it("hands unknown options to an ignoreUnknownOptions command as arguments", async () => {
@@ -1860,7 +1864,7 @@ describe("cli: the router's plumbing for commands that use it", () => {
     expect(await runCli(["probe", "C", "pnl", "-3.5", "--unit", "USD", "--weight"], h.deps)).toBe(0);
     expect(seen).toEqual(["C", "pnl", "-3.5", "--weight"]);
     expect(unit).toBe("USD");
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
   });
 
   it.each([
@@ -1907,7 +1911,7 @@ describe("cli: the router's plumbing for commands that use it", () => {
     register("probe", { summary: "Probe.", spec: { flags: [] }, run: async () => 0 });
     const h = harness();
     expect(await runCli(["probe", "C", "-3.5"], h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: No such option: -3");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: No such option: -3");
   });
 
   it("shows an optional value's metavar as declared", async () => {
@@ -1937,8 +1941,11 @@ describe("cli: the router's plumbing for commands that use it", () => {
         "",
         "  Requires the workspace OWNER's static API key.",
         "",
+        "Options:",
+        "  --help  Show this message and exit.",
+        "",
         "Commands:",
-        "  list      List members.",
+        "  list  List members.",
       ].join("\n"),
     );
   });

@@ -560,6 +560,7 @@ export const WORKSPACE_GROUP: CommandGroup = {
 // ---------------------------------------------------------------------------
 
 const KEY_EXPIRES_DAYS: FlagSpec = {
+  range: { min: 1, max: 3650, rangeLabel: "1<=x<=3650", integer: true },
   name: "expires-days",
   type: "value",
   metavar: "INTEGER",
@@ -595,12 +596,7 @@ const createKey: Command = {
   run: async (deps, args) => {
     const userId = userIdParam(CREATE_USER, requireOption(args, CREATE_USER));
     const keyName = requireOption(args, KEY_NAME);
-    const expiresDays = parseRanged(KEY_EXPIRES_DAYS, requireOption(args, KEY_EXPIRES_DAYS), {
-      min: 1,
-      max: 3650,
-      rangeLabel: "1<=x<=3650",
-      integer: true,
-    });
+    const expiresDays = parseRanged(KEY_EXPIRES_DAYS, requireOption(args, KEY_EXPIRES_DAYS));
     rejectExtraArgs(args);
     return runWorkspaceCommand(deps, args.values.workspace, async (client, ws) => {
       // The key as the SDK read it, as Python's `MemberAPIKey` does (an

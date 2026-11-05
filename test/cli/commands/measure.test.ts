@@ -1,3 +1,5 @@
+import { pythonHelp } from "../helpAssertions.js";
+import { diagnosticBodies } from "../diagnostics.js";
 /**
  * `kagura-memory measure record|series` against the Python CLI (v0.40.1,
  * click 8.3.3). Each row of the argv tables was captured from `kagura
@@ -82,38 +84,28 @@ afterEach(() => {
 
 describe("kagura-memory measure (group)", () => {
   it("lists both commands under Python's summary", async () => {
-    const { code, out } = await run(["measure", "--help"]);
+    const { code, out } = await run(["measure","--help"]);
     expect(code).toBe(0);
-    expect(out).toBe(
-      [
-        "Usage: kagura-memory measure [OPTIONS] COMMAND [ARGS]...",
-        "",
-        "  Record and read numeric measurement series (never recalled as memories).",
-        "",
-        "Commands:",
-        "  record    Append one numeric observation to METRIC's series in a context.",
-        "  series    Read METRIC's series in a context, bucketed and aggregated.",
-      ].join("\n"),
-    );
+    expect(out).toBe(pythonHelp("measure"));
   });
 
   it("prints the group help on stderr with exit 2 when no command is given", async () => {
     const { code, out, err } = await run(["measure"]);
     expect(code).toBe(2);
     expect(out).toBe("");
-    expect(err).toContain("Usage: kagura-memory measure [OPTIONS] COMMAND [ARGS]...");
+    expect(diagnosticBodies(err)).toContain("Usage: kagura-memory measure [OPTIONS] COMMAND [ARGS]...");
   });
 
   it("refuses an unknown subcommand as click does", async () => {
     const { code, err } = await run(["measure", "bogus"]);
     expect(code).toBe(2);
-    expect(err).toContain("Error: No such command 'bogus'.");
+    expect(diagnosticBodies(err)).toContain("Error: No such command 'bogus'.");
   });
 
   it("is listed in the root help", async () => {
     const { out } = await run(["--help"]);
     expect(out).toContain(
-      "  measure        Record and read numeric measurement series (never recalled as memories).",
+      "  measure        Record and read numeric measurement series (never recalled...",
     );
   });
 
@@ -124,7 +116,7 @@ describe("kagura-memory measure (group)", () => {
     const { code, err, sent } = await run(["measure", ...argv], (h) => {
       h.config = { api_key: "k" };
     });
-    expect(err).toBe("");
+    expect(diagnosticBodies(err)).toBe("");
     expect(code).toBe(0);
     expect(sent).toMatchObject({ context_id: C });
   });
@@ -132,29 +124,9 @@ describe("kagura-memory measure (group)", () => {
 
 describe("kagura-memory measure record", () => {
   it("renders --help from the Python declaration, examples one per line", async () => {
-    const { code, out } = await run(["measure", "record", "--help"]);
+    const { code, out } = await run(["measure","record","--help"]);
     expect(code).toBe(0);
-    expect(out).toBe(
-      [
-        "Usage: kagura-memory measure record [OPTIONS] CONTEXT_ID METRIC VALUE",
-        "",
-        "  Append one numeric observation to METRIC's series in a context.",
-        "",
-        "  Append-only: recording the same point twice stores two rows, and there is no",
-        "  delete. Measurements are never embedded, never returned by recall, and never",
-        "  merged or rewritten by Sleep consolidation; use `kagura-memory remember` for",
-        '  prose such as "hit goal weight".',
-        "",
-        "  Examples:",
-        "    kagura-memory measure record <context-id> weight_kg 71.5 --unit kg",
-        "    kagura-memory measure record <context-id> pnl_usd -120 --at 2026-09-01T00:00:00Z",
-        "",
-        "Options:",
-        "      --unit TEXT         Display unit, e.g. 'kg' (max 32 chars).",
-        "      --at TEXT           ISO 8601 observation time (naive = UTC). Default: now.",
-        "  --help                  Show this message and exit.",
-      ].join("\n"),
-    );
+    expect(out).toBe(pythonHelp("measure record"));
   });
 
   it("sends every argument and prints Python's model, extra fields dropped", async () => {
@@ -247,7 +219,7 @@ describe("kagura-memory measure record", () => {
     });
     expect(sent).toMatchObject({ measured_at: "" });
     expect(code).toBe(1);
-    expect(err).toBe(
+    expect(diagnosticBodies(err)).toBe(
       "Error: record_measurement failed (validation_error): 'measured_at' is not a valid ISO 8601 datetime: ''",
     );
   });
@@ -295,7 +267,7 @@ describe("kagura-memory measure record", () => {
   ])("refuses %j with exit 2 and nothing sent", async (argv, message) => {
     const { code, err, sent } = await run(["measure", "record", ...argv]);
     expect(code).toBe(2);
-    expect(err).toBe(`Error: ${message}`);
+    expect(diagnosticBodies(err)).toBe(`Error: ${message}`);
     expect(sent).toBeUndefined();
   });
 
@@ -304,7 +276,7 @@ describe("kagura-memory measure record", () => {
     async (raw) => {
       const { code, err, sent } = await run(["measure", "record", C, "m", raw]);
       expect(code).toBe(1);
-      expect(err).toBe("Error: value must be finite (NaN and infinity are rejected)");
+      expect(diagnosticBodies(err)).toBe("Error: value must be finite (NaN and infinity are rejected)");
       expect(sent).toBeUndefined();
     },
   );
@@ -325,7 +297,7 @@ describe("kagura-memory measure record", () => {
   ])("refuses %j in the client, exit 1 and nothing sent", async (argv, message) => {
     const { code, err, sent } = await run(["measure", "record", C, ...argv]);
     expect(code).toBe(1);
-    expect(err).toBe(`Error: ${message}`);
+    expect(diagnosticBodies(err)).toBe(`Error: ${message}`);
     expect(sent).toBeUndefined();
   });
 
@@ -364,7 +336,7 @@ describe("kagura-memory measure record", () => {
     });
     expect(code).toBe(1);
     expect(out).toBe("");
-    expect(err).toBe(message);
+    expect(diagnosticBodies(err)).toBe(message);
   });
 
   it("adds the Resets at: line to the daily MCP cap, as Python's CLI does", async () => {
@@ -380,7 +352,7 @@ describe("kagura-memory measure record", () => {
       };
     });
     expect(code).toBe(1);
-    expect(err).toBe(
+    expect(diagnosticBodies(err)).toBe(
       "Error: record_measurement failed (rate_limit_exceeded): Daily MCP call limit reached " +
         "(100/100). Resets at midnight UTC.\n  Resets at: 2026-09-25T00:00:00+00:00",
     );
@@ -414,7 +386,7 @@ describe("kagura-memory measure record", () => {
     });
     expect(code).toBe(1);
     expect(out).toBe("");
-    expect(err).toBe(expected);
+    expect(diagnosticBodies(err)).toBe(expected);
   });
 
   it("adds the server's help and correlation id, as Python's CLI does (#84)", async () => {
@@ -433,7 +405,7 @@ describe("kagura-memory measure record", () => {
       };
     });
     expect(code).toBe(1);
-    expect(err).toBe(
+    expect(diagnosticBodies(err)).toBe(
       "Error: record_measurement failed (record_measurement_error): record_measurement did not " +
         "finish within the server's time limit.\n" +
         "  Help: Check with recall_series before calling it again, so it is not applied twice.\n" +
@@ -457,7 +429,7 @@ describe("kagura-memory measure record", () => {
     });
     expect(code).toBe(1);
     // The help names the page, so no `Clean up or re-subscribe:` line.
-    expect(err).toBe(
+    expect(diagnosticBodies(err)).toBe(
       "Error: record_measurement failed (capacity_locked): This workspace is over the Free " +
         `plan's capacity (250 memories over).\n  Help: Remove 250 memories or re-subscribe at ${url}.`,
     );
@@ -481,7 +453,7 @@ describe("kagura-memory measure record", () => {
     ])("names %j without the value written into it", async (argv, message) => {
       const { code, out, err, sent } = await run(["measure", "record", ...argv]);
       expect(code).toBe(2);
-      expect(err).toBe(`Error: ${message}`);
+      expect(diagnosticBodies(err)).toBe(`Error: ${message}`);
       expect(`${out}\n${err}`).not.toContain("SECRET");
       expect(sent).toBeUndefined();
     });
@@ -498,7 +470,7 @@ describe("kagura-memory measure record", () => {
     it("does not take a dash-led non-number as --unit's value, where click takes -kg", async () => {
       const { code, err, sent } = await run(["measure", "record", C, "m", "5", "--unit", "-kg"]);
       expect(code).toBe(2);
-      expect(err).toContain("Error: Option '--unit' requires an argument.");
+      expect(diagnosticBodies(err)).toContain("Error: Option '--unit' requires an argument.");
       expect(sent).toBeUndefined();
     });
 
@@ -506,7 +478,7 @@ describe("kagura-memory measure record", () => {
       for (const flag of ["--unit", "--at"]) {
         const { code, err, sent } = await run(["measure", "record", C, "m", "5", flag]);
         expect(code).toBe(2);
-        expect(err).toContain(`Error: Option '${flag}' requires an argument.`);
+        expect(diagnosticBodies(err)).toContain(`Error: Option '${flag}' requires an argument.`);
         expect(sent).toBeUndefined();
       }
     });
@@ -515,28 +487,9 @@ describe("kagura-memory measure record", () => {
 
 describe("kagura-memory measure series", () => {
   it("renders --help from the Python declaration", async () => {
-    const { code, out } = await run(["measure", "series", "--help"]);
+    const { code, out } = await run(["measure","series","--help"]);
     expect(code).toBe(0);
-    expect(out).toBe(
-      [
-        "Usage: kagura-memory measure series [OPTIONS] CONTEXT_ID METRIC",
-        "",
-        "  Read METRIC's series in a context, bucketed and aggregated.",
-        "",
-        "  Empty buckets are omitted, and buckets align to UTC boundaries.",
-        "",
-        "  Examples:",
-        "    kagura-memory measure series <context-id> weight_kg --period week",
-        "    kagura-memory measure series <context-id> pnl_usd --agg sum --start 2026-01-01T00:00:00",
-        "",
-        "Options:",
-        "      --period [day|week|month]           Bucket size (server default: day).",
-        "      --agg [avg|min|max|sum|count|last]  Per-bucket aggregate (server default: avg; 'last' = most recent value).",
-        "      --start TEXT                        ISO 8601 window start, inclusive (naive = UTC). Default: end minus 30 days.",
-        "      --end TEXT                          ISO 8601 window end, exclusive (naive = UTC). Default: now. Max window: 365 days.",
-        "  --help                                  Show this message and exit.",
-      ].join("\n"),
-    );
+    expect(out).toBe(pythonHelp("measure series"));
   });
 
   it("sends every option and prints Python's model", async () => {
@@ -642,7 +595,7 @@ describe("kagura-memory measure series", () => {
   ])("refuses %j with exit 2 and nothing sent", async (argv, message) => {
     const { code, err, sent } = await run(["measure", "series", ...argv]);
     expect(code).toBe(2);
-    expect(err).toBe(`Error: ${message}`);
+    expect(diagnosticBodies(err)).toBe(`Error: ${message}`);
     expect(sent).toBeUndefined();
   });
 
@@ -650,20 +603,20 @@ describe("kagura-memory measure series", () => {
     // Click would name --agg here, the first in argv (decision Q5).
     const { code, err } = await run(["measure", "series", "--agg", "median", "--period", "year"]);
     expect(code).toBe(2);
-    expect(err).toBe("Error: Invalid value for '--period': 'year' is not one of 'day', 'week', 'month'.");
+    expect(diagnosticBodies(err)).toBe("Error: Invalid value for '--period': 'year' is not one of 'day', 'week', 'month'.");
   });
 
   it("refuses an unknown option: series takes no negative value", async () => {
     const { code, err, sent } = await run(["measure", "series", C, "-x"]);
     expect(code).toBe(2);
-    expect(err).toContain("Error: No such option: -x");
+    expect(diagnosticBodies(err)).toContain("Error: No such option: -x");
     expect(sent).toBeUndefined();
   });
 
   it("refuses an empty METRIC in the client, exit 1", async () => {
     const { code, err, sent } = await run(["measure", "series", C, ""]);
     expect(code).toBe(1);
-    expect(err).toBe("Error: metric must be a non-empty string, got ''");
+    expect(diagnosticBodies(err)).toBe("Error: metric must be a non-empty string, got ''");
     expect(sent).toBeUndefined();
   });
 
@@ -698,6 +651,6 @@ describe("kagura-memory measure series", () => {
     });
     expect(code).toBe(1);
     expect(out).toBe("");
-    expect(err).toBe(message);
+    expect(diagnosticBodies(err)).toBe(message);
   });
 });

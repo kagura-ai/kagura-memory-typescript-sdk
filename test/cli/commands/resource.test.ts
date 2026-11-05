@@ -1,3 +1,5 @@
+import { diagnosticBodies } from "../diagnostics.js";
+import { optionLines } from "../helpAssertions.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -180,7 +182,7 @@ describe("kagura-memory resource events", () => {
   it("matches --op case-sensitively, as Python's click.Choice declares it", async () => {
     const h = harness();
     expect(await runCli(["resource", "events", "res-1", "--op", "UPSERT"], h.deps)).toBe(2);
-    expect(h.err[0]).toBe("Error: Invalid value for '--op': 'UPSERT' is not one of 'upsert', 'delete'.");
+    expect(diagnosticBodies(h.err)[0]).toBe("Error: Invalid value for '--op': 'UPSERT' is not one of 'upsert', 'delete'.");
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -217,7 +219,7 @@ describe("a resource id in the REST path (#66)", () => {
   ])("refuses %j in click's words (exit 2), sending nothing", async (argv, line) => {
     const h = harness();
     expect(await runCli(argv, h.deps)).toBe(2);
-    expect(h.err).toEqual([line]);
+    expect(diagnosticBodies(h.err)).toEqual([line]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -227,7 +229,7 @@ describe("a resource id in the REST path (#66)", () => {
       throw new Error("stdin must not be read");
     };
     expect(await runCli(["resource", "import", "-r", "..", "-k", "rk", "--format", "json"], h.deps)).toBe(2);
-    expect(h.err).toEqual([RESOURCE("..")]);
+    expect(diagnosticBodies(h.err)).toEqual([RESOURCE("..")]);
     expect(h.rest.requests).toEqual([]);
   });
 
@@ -362,12 +364,12 @@ describe("kagura-memory resource ingest-batch --file", () => {
         const h = harness();
         expect(await runCli(["resource", command, "-r", "p", "-k", "k", "-f", missing], h.deps)).toBe(2);
         // Python's `'<path>': <strerror>`, not Node's `ENOENT: …, open '…'`.
-        expect(h.err[0]).toBe(`Error: Invalid value for '--file' / '-f': '${missing}': No such file or directory`);
+        expect(diagnosticBodies(h.err)[0]).toBe(`Error: Invalid value for '--file' / '-f': '${missing}': No such file or directory`);
         expect(h.rest.requests).toEqual([]);
       }
       const h = harness();
       expect(await runCli(["resource", "ingest-batch", "-r", "p", "-k", "k", "-f", dir], h.deps)).toBe(2);
-      expect(h.err[0]).toBe(`Error: Invalid value for '--file' / '-f': '${dir}': Is a directory`);
+      expect(diagnosticBodies(h.err)[0]).toBe(`Error: Invalid value for '--file' / '-f': '${dir}': Is a directory`);
     });
   });
 
@@ -426,7 +428,7 @@ describe("REST clients are built through the credential chain", () => {
     const h = harness(server.fetch);
     const code = await runCli(["resource", "setup", "-r", "res-1"], h.deps);
 
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     expect(code).toBe(0);
     expect(server.toolCallArgs()).toEqual({
       resource_id: "res-1",
@@ -446,7 +448,7 @@ describe("REST clients are built through the credential chain", () => {
     const code = await runCli(["resource", "setup", "-r", "res-1", "-s", "About res-1"], h.deps);
 
     expect(code).toBe(0);
-    expect(h.err).toEqual([SETUP_SUMMARY_IGNORED_NOTE]);
+    expect(diagnosticBodies(h.err)).toEqual([SETUP_SUMMARY_IGNORED_NOTE]);
     // The note names the command that does set it.
     expect(SETUP_SUMMARY_IGNORED_NOTE).toMatch(/--summary.*ignored.*context update <context_id> --summary/);
     expect(server.toolCallArgs()).not.toHaveProperty("summary");
@@ -459,7 +461,7 @@ describe("kagura-memory resource tokens / schema: Python's lines", () => {
     h.rest.status = 204;
     expect(await runCli(["resource", "tokens", "revoke", "42"], h.deps)).toBe(0);
     expect(h.out).toEqual(["Token revoked."]);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
     expect(h.rest.last().method).toBe("DELETE");
     expect(new URL(h.rest.last().url).pathname).toBe("/api/v1/resource-tokens/42");
   });
@@ -499,7 +501,7 @@ describe("kagura-memory resource tokens / schema: Python's lines", () => {
     h.rest.body = { detail: "Token not found" };
     expect(await runCli(["resource", "tokens", "revoke", "42"], h.deps)).toBe(1);
     expect(h.out).toEqual([]);
-    expect(h.err[0]).toMatch(/^Error: .*Token not found/);
+    expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: .*Token not found/);
   });
 
   it("prints Python's line when no schema is registered, not `null`", async () => {
@@ -508,7 +510,7 @@ describe("kagura-memory resource tokens / schema: Python's lines", () => {
     h.rest.body = { detail: "Not Found" };
     expect(await runCli(["resource", "schema", "-r", "res-1"], h.deps)).toBe(0);
     expect(h.out).toEqual(["No schema registered for this resource."]);
-    expect(h.err).toEqual([]);
+    expect(diagnosticBodies(h.err)).toEqual([]);
   });
 
   it("prints a registered schema as the Python model's dump", async () => {
@@ -549,7 +551,7 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
   it("prints Python's ResourceSetupResponse: six keys in its order, without status or message", async () => {
     const r = await setup(["-r", "res-1"]);
     expect(r.code).toBe(0);
-    expect(r.err).toEqual([]);
+    expect(diagnosticBodies(r.err)).toEqual([]);
     const printed = JSON.parse(r.out.join("\n")) as Record<string, unknown>;
     expect(Object.keys(printed)).toEqual(MODEL_KEYS);
     // The server may leave the warning out; the model's default is null.
@@ -605,7 +607,7 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
   it("says --summary is ignored in Python's words, on stderr only", async () => {
     const r = await setup(["-r", "products", "-s", "catalog"]);
     expect(r.code).toBe(0);
-    expect(r.err).toEqual([
+    expect(diagnosticBodies(r.err)).toEqual([
       "Note: --summary is ignored, since the server's setup_resource has no summary. " +
         "Set it after setup with `kagura-memory context update <context_id> --summary ...` " +
         "(context owner only).",
@@ -620,14 +622,14 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
       throw new Error(".kagura.json is not valid JSON");
     };
     expect(await runCli(["resource", "setup", "-r", "products", "-s", ""], h.deps)).toBe(1);
-    expect(h.err).toEqual([SETUP_SUMMARY_IGNORED_NOTE, "Error: .kagura.json is not valid JSON"]);
+    expect(diagnosticBodies(h.err)).toEqual([SETUP_SUMMARY_IGNORED_NOTE, "Error: .kagura.json is not valid JSON"]);
     expect(h.out).toEqual([]);
   });
 
   it("refuses an out-of-range --quota before the note, as click does", async () => {
     const r = await setup(["-r", "products", "-s", "catalog", "-q", "0"]);
     expect(r.code).toBe(2);
-    expect(r.err).toEqual([
+    expect(diagnosticBodies(r.err)).toEqual([
       "Error: Invalid value for '--quota' / '-q': 0 is not in the range 1<=x<=10000.",
     ]);
     expect(r.server.requests).toEqual([]);
@@ -649,7 +651,7 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
     });
     expect(r.code).toBe(1);
     expect(r.out).toEqual([]);
-    expect(r.err).toEqual([
+    expect(diagnosticBodies(r.err)).toEqual([
       "Error: ResourceClient.setup_resource: unexpected server response for ResourceSetupResponse " +
         "(token: Field required; token_id.int: Input should be a valid integer; " +
         "token_id.str: Input should be a valid string). The server may be newer than this SDK; upgrading kagura-memory may help.",
@@ -659,9 +661,9 @@ describe("kagura-memory resource setup (python-sdk#275)", () => {
   it("documents --name, the help texts and the examples", async () => {
     const h = harness();
     expect(await runCli(["resource", "setup", "--help"], h.deps)).toBe(0);
-    const text = h.out.join("\n");
+    const text = h.out.join("\n") + "\n" + optionLines(h.out.join("\n")).join("\n");
     expect(text).toContain("One-shot resource setup: create context + set resource_id + create token.");
-    expect(text).toMatch(/-r, --resource-id TEXT +Resource identifier$/m);
+    expect(text).toMatch(/-r, --resource-id TEXT +Resource identifier  \[required\]$/m);
     expect(text).toMatch(
       /-n, --name TEXT +Context name \(default: the resource id; lowercase letters, digits, hyphens, underscores; max 100\)\. Needed when a context of that name already exists$/m,
     );

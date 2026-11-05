@@ -59,6 +59,7 @@ async function runFilesCommand(
 }
 
 const IMPORTANCE: FlagSpec = {
+  range: { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" },
   name: "importance",
   type: "value",
   metavar: "FLOAT",
@@ -231,7 +232,7 @@ const upload: Command = {
     const importance =
       rawImportance === undefined
         ? 0.5
-        : parseRanged(IMPORTANCE, rawImportance, { min: 0, max: 1, rangeLabel: "0.0<=x<=1.0" });
+        : parseRanged(IMPORTANCE, rawImportance);
     const progress = parseProgress(args);
 
     const source = requireArg(args, 0, "PATH");
@@ -317,6 +318,7 @@ const upload: Command = {
 
 
 const LIMIT: FlagSpec = {
+  range: { min: 1, max: 500, rangeLabel: "1<=x<=500", integer: true },
   name: "limit",
   short: "l",
   type: "value",
@@ -339,7 +341,7 @@ const list: Command = {
     const limit =
       raw === undefined
         ? 50
-        : parseRanged(LIMIT, raw, { min: 1, max: 500, rangeLabel: "1<=x<=500", integer: true });
+        : parseRanged(LIMIT, raw);
     rejectExtraArgs(args);
     const cursor = args.values.cursor;
     // FilesClient.list has read the page through Python's models; this

@@ -1,5 +1,55 @@
 # SDK ↔ memory-cloud Compatibility
 
+## Unreleased: CLI presentation parity (#111)
+
+The common help renderer follows Python SDK 0.44.0 with Click 8.3.3 at an
+explicit width of 80 columns: wrapped option descriptions, a maximum
+30-character label column, numeric range metavars and annotations, required
+markers, and abbreviated group summaries. Range bounds are declared once for
+both validation and help. Terminal width is fixed; unlike Click's terminal
+auto-detection, resizing the terminal does not change this CLI's output.
+
+All 94 supported command/group/root help pages are recorded and checked.
+50 match Python after replacing the executable name **before** wrapping;
+44 retain existing command descriptions or SDK-specific surfaces. The
+[complete per-command difference list](cli-help-differences.md) names the
+affected options and links the exact outputs. Python's optional root `ingest`
+command is not implemented. Separate positive/negative switch help rows,
+default wording and the Node setup/auth/secret descriptions remain documented
+differences; this release does not claim identical help for those pages.
+
+Usage errors now print `Usage: …`, `Try '… --help' for help.`, a blank line,
+and `Error: …`, without the full help page. This includes `resource import`
+and `resource ingest-batch` file-open failures. As in Click 8.3.3,
+`BadOptionUsage` errors (a missing option value or a value on a switch)
+have no command context and print only `Error: …`. Tests replay full stderr,
+stdout and exit codes with `test/pythonDumpHarness.ts`.
+
+Remaining invocation/error differences are intentional and unchanged:
+
+- This bin is `kagura-memory`, accepts `-h`, root `help`, and the existing bare
+  auth aliases. Python uses `kagura` and normally only `--help`.
+- Auth flags marked `rejectEmpty` reject empty profile/server/scope values.
+  `--invite` on an auth command other than `login` gives an explicit login-only
+  hint and never echoes the token, rather than Python's unknown-option text.
+- Mutually exclusive flag pairs (for example `--rerank --no-rerank`, context
+  lock/unlock, and auth scope/read-only) are rejected where Python may keep the
+  last switch. `secret exec` rejects an unknown flag before the child name
+  unless help was requested; Python treats it as the child command.
+- Native JSON parser diagnostics, local filesystem/OS errors, and SDK-specific
+  setup/auth validation retain JavaScript/Node wording. Missing-file comparison
+  uses the same normalized message; other OS-specific failures can differ.
+  Setup's unsupported Python hooks/process forms are described in its help.
+- Integers that cannot be sent exactly as a JavaScript number and non-finite
+  JSON numbers are refused locally; their messages differ from Python's
+  arbitrary-precision/non-finite handling. Existing command validation order
+  and SDK-specific error hints are not changed by the shared formatter.
+
+The Python fixtures can be regenerated from the repository root with
+`uv run --no-project --isolated --with "kagura-memory[secret]==0.44.0" --with click==8.3.3 python test/cli/recordClick111.py`.
+
+## Release compatibility
+
 Which memory-cloud server each release of the `kagura-memory` npm package
 needs, and the newest one it was checked against: one section per release,
 newest first. Each surface newer than the SDK-wide floor carries its own

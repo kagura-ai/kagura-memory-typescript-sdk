@@ -1,0 +1,213 @@
+[
+  {
+    "argv": [
+      "--bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory [OPTIONS] COMMAND [ARGS]...\nTry 'kagura-memory --help' for help.\n\nError: No such option: --bogus\n"
+  },
+  {
+    "argv": [
+      "auth",
+      "--bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory auth [OPTIONS] COMMAND [ARGS]...\nTry 'kagura-memory auth --help' for help.\n\nError: No such option: --bogus\n"
+  },
+  {
+    "argv": [
+      "resource",
+      "tokens",
+      "--bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory resource tokens [OPTIONS] COMMAND [ARGS]...\nTry 'kagura-memory resource tokens --help' for help.\n\nError: No such option: --bogus\n"
+  },
+  {
+    "argv": [
+      "bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory [OPTIONS] COMMAND [ARGS]...\nTry 'kagura-memory --help' for help.\n\nError: No such command 'bogus'.\n"
+  },
+  {
+    "argv": [
+      "resource",
+      "bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory resource [OPTIONS] COMMAND [ARGS]...\nTry 'kagura-memory resource --help' for help.\n\nError: No such command 'bogus'.\n"
+  },
+  {
+    "argv": [
+      "recall",
+      "q",
+      "--bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory recall [OPTIONS] QUERY\nTry 'kagura-memory recall --help' for help.\n\nError: No such option: --bogus\n"
+  },
+  {
+    "argv": [
+      "recall",
+      "q",
+      "-k"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Error: Option '-k' requires an argument.\n"
+  },
+  {
+    "argv": [
+      "recall",
+      "q",
+      "--help",
+      "--bogus"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory recall [OPTIONS] QUERY\nTry 'kagura-memory recall --help' for help.\n\nError: No such option: --bogus\n"
+  },
+  {
+    "argv": [
+      "sleep",
+      "rollback"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory sleep rollback [OPTIONS] CONTEXT_ID REPORT_ID\nTry 'kagura-memory sleep rollback --help' for help.\n\nError: Missing argument 'CONTEXT_ID'.\n"
+  },
+  {
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory sleep rollback [OPTIONS] CONTEXT_ID REPORT_ID\nTry 'kagura-memory sleep rollback --help' for help.\n\nError: Missing argument 'REPORT_ID'.\n"
+  },
+  {
+    "argv": [
+      "sleep",
+      "rollback",
+      "ctx",
+      "r",
+      "--yes=1"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Error: Option '--yes' does not take a value.\n"
+  },
+  {
+    "argv": [
+      "sleep",
+      "report",
+      "ctx",
+      "r",
+      "--actions-limit",
+      "201"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory sleep report [OPTIONS] CONTEXT_ID REPORT_ID\nTry 'kagura-memory sleep report --help' for help.\n\nError: Invalid value for '--actions-limit': 201 is not in the range 1<=x<=200.\n"
+  },
+  {
+    "argv": [
+      "sleep",
+      "report",
+      "ctx",
+      "r",
+      "--actions-limit",
+      "abc"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory sleep report [OPTIONS] CONTEXT_ID REPORT_ID\nTry 'kagura-memory sleep report --help' for help.\n\nError: Invalid value for '--actions-limit': 'abc' is not a valid integer range.\n"
+  },
+  {
+    "argv": [
+      "bootstrap",
+      "--max-chars",
+      "1"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory bootstrap [OPTIONS]\nTry 'kagura-memory bootstrap --help' for help.\n\nError: Invalid value for '--max-chars': 1 is not in the range 2000<=x<=100000.\n"
+  },
+  {
+    "argv": [
+      "changes"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory changes [OPTIONS] SINCE\nTry 'kagura-memory changes --help' for help.\n\nError: Missing argument 'SINCE'.\n"
+  },
+  {
+    "argv": [
+      "changes",
+      "--limit",
+      "0"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory changes [OPTIONS] SINCE\nTry 'kagura-memory changes --help' for help.\n\nError: Invalid value for '--limit': 0 is not in the range 1<=x<=100.\n"
+  },
+  {
+    "argv": [
+      "list",
+      "--filters",
+      "[]"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory list [OPTIONS]\nTry 'kagura-memory list --help' for help.\n\nError: --filters must be a JSON object, got list. Example: --filters '{\"type\": \"task\"}'\n"
+  },
+  {
+    "argv": [
+      "resource",
+      "import",
+      "-r",
+      "res",
+      "-k",
+      "key",
+      "--file",
+      "__kagura_missing_111__.json"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory resource import [OPTIONS]\nTry 'kagura-memory resource import --help' for help.\n\nError: Invalid value for '--file' / '-f': '__kagura_missing_111__.json': No such file or directory\n"
+  },
+  {
+    "argv": [
+      "resource",
+      "ingest-batch",
+      "-r",
+      "res",
+      "-k",
+      "key",
+      "--file",
+      "__kagura_missing_111__.json"
+    ],
+    "code": 2,
+    "stdout": "",
+    "stderr": "Usage: kagura-memory resource ingest-batch [OPTIONS]\nTry 'kagura-memory resource ingest-batch --help' for help.\n\nError: Invalid value for '--file' / '-f': '__kagura_missing_111__.json': No such file or directory\n"
+  },
+  {
+    "argv": [
+      "secret",
+      "exec",
+      "--help",
+      "--bogus"
+    ],
+    "code": 0,
+    "stdout": "Usage: kagura-memory secret exec [OPTIONS] COMMAND...\n\n  Run COMMAND with secrets injected into its environment (no disk, no\n  scrollback).\n\n  Example:  kagura secret exec --as DATABASE_URL=db-prod -- ./server\n\nOptions:\n  --as TEXT       ENV_NAME=secret_name (repeatable).  [required]\n  --profile TEXT  Your key profile (default: default).\n  --help          Show this message and exit.\n",
+    "stderr": ""
+  }
+]
