@@ -337,7 +337,7 @@ describe("a runtime without the WebCrypto global", () => {
         const message = (err as Error).message;
         expect(message, name).toContain("needs the WebCrypto global (globalThis.crypto)");
         expect(message, name).toContain(`(Node.js ${process.version})`);
-        expect(message, name).toContain("requires Node.js >= 20.19.0");
+        expect(message, name).toContain("requires Node.js >= 22.12.0");
         // A runtime problem, not the missing-package one: different fixes.
         expect(message, name).not.toContain("npm install age-encryption");
       }

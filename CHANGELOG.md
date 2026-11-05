@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** require Node.js >=22.12.0 for the SDK, CLI and MCPB bundle;
+  Node 20 is no longer supported. Vitest moves to stable 5.1, builds target
+  Node 22, and CI covers the exact floor plus Node 22/24. This change belongs
+  to a future feature minor, not the v0.16.0 bug-fix scope or a patch release (#115).
+
 ## [0.15.0] - 2026-11-05
 
 Parity target: the Python SDK and CLI 0.44.0, checked against memory-cloud

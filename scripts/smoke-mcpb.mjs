@@ -209,16 +209,9 @@ function launch(extra = []) {
       cwd: temporary,
       env: {
         ...process.env, PATH: "", NODE_PATH: "", NODE_OPTIONS: "",
-        // Silences the host Node's own process warnings (ExperimentalWarning,
-        // DeprecationWarning): they belong to the runtime Claude Desktop
-        // ships, not to the bundle, and would fail the empty-stderr checks
-        // below. None of 20.19.0, 22, 24 or 26 prints one for this bundle
-        // today. It does no age/X25519 crypto, so Node 20's X25519
-        // ExperimentalWarning cannot reach it either. The variable stays so
-        // a future runtime notice cannot fail these checks.
-        // Application diagnostics and the stdout/stderr hygiene assertions
-        // still apply.
-        NODE_NO_WARNINGS: "1",
+        // Do not suppress runtime warnings: stderr hygiene is checked on
+        // the supported Node 22.12+ runtimes as well as application output.
+        NODE_NO_WARNINGS: "",
       },
       stdio: "pipe",
       windowsHide: true,

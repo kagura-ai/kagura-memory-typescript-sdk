@@ -1,5 +1,21 @@
 # SDK ↔ memory-cloud Compatibility
 
+## Unreleased: Node.js runtime floor (#115)
+
+| Component | Requirement |
+| --- | --- |
+| SDK, CLI and MCPB bundle | Node.js >=22.12.0 once this deferred runtime migration ships; v0.16.x retains Node 20 support |
+| Development test runner | Vitest 5.1; Node `^22.12.0 \|\| ^24.0.0 \|\| >=26.0.0` |
+| CI | Full checks and package smoke on exact 22.12.0, latest 22 and 24; desktop bundles on 22/24 |
+
+This breaking runtime change is deferred beyond the v0.16.0 bug-fix scope
+to a future feature minor.
+The server compatibility floor is unchanged. npm normally warns for an
+incompatible `engines.node`; use `npm install --engine-strict` to reject it.
+CI verifies that the packed SDK is rejected on Node 20 with that setting.
+The lazy optional crypto import still reports an actionable error and retries
+after a failed import; its existing regression test runs under Vitest 5.
+
 Which memory-cloud server each release of the `kagura-memory` npm package
 needs, and the newest one it was checked against: one section per release,
 newest first. Each surface newer than the SDK-wide floor carries its own

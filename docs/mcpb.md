@@ -3,7 +3,7 @@
 This extension connects Claude Desktop to Kagura Memory Cloud. It requires a
 Kagura account with workspace access and a Claude Desktop version that supports
 MCPB extensions on Windows or macOS. Claude Desktop supplies Node.js (the
-manifest declares 20.19.0 or later); Python, npm and a globally installed
+manifest declares 22.12.0 or later); Python, npm and a globally installed
 Kagura CLI are not needed to run the bundle.
 
 ## Install and sign in
@@ -110,7 +110,7 @@ order make repeated builds reproducible. No runtime dependencies are bundled.
 checkout and launches the manifest entrypoint against a local mock OAuth/MCP
 server. It checks first login, profile reuse, tools/list and tools/call, SSE,
 refresh, session recovery, errors and stdout hygiene. CI runs this on Windows and
-macOS, and on Linux against Node 20.19.0, the manifest's runtime floor. It does
+macOS, and on Linux against Node 22.12.0, the manifest's runtime floor. It does
 not sign in to a real account or automate Claude Desktop's UI.
 
 ## Desktop release checklist
