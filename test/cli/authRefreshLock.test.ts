@@ -289,7 +289,7 @@ describe("auth token on the locked path (#92)", () => {
     seed(EXPIRED);
     const fetch = tokenEndpoint();
     const result = await peerRotatesWhileCliWaits(["auth", "token"], fetch);
-    // Python also writes its expiry warning to stderr; this bin does not.
+    // The fixed-time warning is compared byte-for-byte in authToken112.test.ts.
     expect({ code: result.code, stdout: result.stdout }).toEqual(PYTHON.tokenAdopted);
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -303,6 +303,17 @@ describe("auth token on the locked path (#92)", () => {
     const stalePeer = creds({ accessToken: "atok-peer", refreshToken: "rtok-peer", expiresAt: new Date(Date.now() - 1000) });
     const result = await peerRotatesWhileCliWaits(["auth", "token"], fetch, stalePeer);
     expect({ code: result.code, stdout: result.stdout }).toEqual({ code: 0, stdout: "atok-2\n" });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(new URLSearchParams(String(fetch.mock.calls[0]?.[1]?.body)).get("refresh_token")).toBe("rtok-peer");
+  });
+
+  it("also refreshes a peer token that is still valid but inside the five-minute window (#112)", async () => {
+    seed(EXPIRED);
+    const fetch = tokenEndpoint();
+    const peer = creds({ accessToken: "atok-peer", refreshToken: "rtok-peer", expiresAt: new Date(Date.now() + 120_000) });
+    const result = await peerRotatesWhileCliWaits(["auth", "token"], fetch, peer);
+    expect(result.stdout).toBe("atok-2\n");
+    expect(result.code).toBe(0);
     expect(fetch).toHaveBeenCalledOnce();
     expect(new URLSearchParams(String(fetch.mock.calls[0]?.[1]?.body)).get("refresh_token")).toBe("rtok-peer");
   });

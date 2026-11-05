@@ -1,0 +1,107 @@
+[
+  {
+    "seconds": 3600,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-1\n",
+    "stderr": "⚠ This token expires at 2026-11-05T01:00:00+00:00 (in 1h 0m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": []
+  },
+  {
+    "seconds": 301,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-1\n",
+    "stderr": "⚠ This token expires at 2026-11-05T00:05:01+00:00 (in 5m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": []
+  },
+  {
+    "seconds": 300,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-2\n",
+    "stderr": "⚠ This token expires at 2026-11-05T01:00:00+00:00 (in 1h 0m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": [
+      {
+        "target": "default",
+        "expected_stale_token": null
+      }
+    ]
+  },
+  {
+    "seconds": 299,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-2\n",
+    "stderr": "⚠ This token expires at 2026-11-05T01:00:00+00:00 (in 1h 0m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": [
+      {
+        "target": "default",
+        "expected_stale_token": null
+      }
+    ]
+  },
+  {
+    "seconds": -1,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-2\n",
+    "stderr": "⚠ This token expires at 2026-11-05T01:00:00+00:00 (in 1h 0m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": [
+      {
+        "target": "default",
+        "expected_stale_token": null
+      }
+    ]
+  },
+  {
+    "seconds": 3600,
+    "refreshToken": false,
+    "code": 0,
+    "stdout": "atok-1\n",
+    "stderr": "⚠ This token expires at 2026-11-05T01:00:00+00:00 (in 1h 0m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": []
+  },
+  {
+    "seconds": 299,
+    "refreshToken": false,
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: This profile was stored without a refresh token, so it cannot be refreshed — log in again to get one.\n  Run: kagura auth login\n",
+    "refreshCalls": [
+      {
+        "target": "default",
+        "expected_stale_token": null
+      }
+    ]
+  },
+  {
+    "seconds": -1,
+    "refreshToken": false,
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: This profile was stored without a refresh token, so it cannot be refreshed — log in again to get one.\n  Run: kagura auth login\n",
+    "refreshCalls": [
+      {
+        "target": "default",
+        "expected_stale_token": null
+      }
+    ]
+  },
+  {
+    "seconds": 90061,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-1\n",
+    "stderr": "⚠ This token expires at 2026-11-06T01:01:01+00:00 (in 1d 1h 1m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": []
+  },
+  {
+    "seconds": 3600.123,
+    "refreshToken": true,
+    "code": 0,
+    "stdout": "atok-1\n",
+    "stderr": "⚠ This token expires at 2026-11-05T01:00:00.123000+00:00 (in 1h 0m).\n  Don't persist it to files or shell history. For long-lived CI, use a Kagura API key.\n",
+    "refreshCalls": []
+  }
+]

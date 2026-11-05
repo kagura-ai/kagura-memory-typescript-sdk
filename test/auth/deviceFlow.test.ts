@@ -456,6 +456,34 @@ describe("pollForToken", () => {
 // ---------------------------------------------------------------------------
 
 describe("refreshAccessToken", () => {
+  it.each(["headers", "body"])("bounds a stalled %s even when custom fetch ignores abort (#112)", async phase => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const fetch: typeof globalThis.fetch = async (_url, init) => {
+        signal = init?.signal;
+        if (phase === "headers") return new Promise<Response>(() => {});
+        return new Response(new ReadableStream<Uint8Array>());
+      };
+      const pending = refreshAccessToken(SERVER, { clientId: "cli", refreshToken: "secret", fetch });
+      const rejection = expect(pending).rejects.toThrow(/OAuth refresh timed out after 30 seconds/);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejection;
+      expect(signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("clears the refresh deadline after success (#112)", async () => {
+    vi.useFakeTimers();
+    try {
+      await refreshAccessToken(SERVER, {
+        clientId: "cli", refreshToken: "secret", fetch: sequenceFetch([jsonResponse(200, TOKEN_BODY)]),
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("posts grant_type=refresh_token as a form body without scope", async () => {
     const calls: RecordedCall[] = [];
     const stub = sequenceFetch(

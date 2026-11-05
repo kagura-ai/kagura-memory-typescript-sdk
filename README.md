@@ -1299,29 +1299,35 @@ kagura-ai/memory-cloud#1686): of two processes presenting the same one, the
 second gets `invalid_grant`. So every refresh — `KaguraOAuth` in a client or
 in `kagura-memory-mcp`, `refresh()`, and the CLI's `auth refresh` and
 `auth token` — takes the lock on `credentials.json` (a sibling
-`credentials.json.lock`), re-reads the profile, and when another process
+`credentials.json.lock-v1`), re-reads the profile, and when another process
 already rotated it to a token that has not expired, uses that profile and
 sends nothing; otherwise it refreshes from the refresh token on file and
 saves the result before it releases the lock. (Python 0.44.0 also adopts a
 different token that has expired; this SDK refreshes it instead.) The
 device flow a widening `--scope` falls back to runs after the lock is
-released, since it waits on the user. The Python SDK
-locks the same `credentials.json.lock` with an OS lock, which Node does not
-have, so the two SDKs' locks do not exclude each other: between them only
-the re-read applies. This is client-side and works against every server. As
+released, since it waits on the user. Python 0.44.0 and older TypeScript
+clients use incompatible locks: do not run them concurrently against the same
+credentials file. An existing legacy `.lock` is refused, never deleted by this
+SDK. Lock-v1 is never broken by age. See the
+[migration and crash-recovery instructions](docs/compatibility.md#unreleased-credential-concurrency-and-auth-token-112)
+and [Python counterpart](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/327).
+Logout records revocation so a queued refresh cannot recreate credentials;
+`deleteCredentialsFile()` must now be awaited. This is client-side and works
+against every server. As
 in Python SDK 0.44.0 (kagura-ai/kagura-memory-python-sdk#313):
 
 - `auth refresh` says `✓ Profile 'NAME' was already refreshed by another
   process.` when it found the profile rotated under the lock, and `✓
   Refreshed profile 'NAME'.` after a refresh of its own, each followed by
   the `Scope:` and `Expires:` lines; both exit 0. `auth token` prints the
-  token another process refreshed.
+  token another process refreshed. It refreshes within five minutes of expiry
+  and writes an expiry warning to stderr, leaving the token alone on stdout.
 - A `credentials.json` that exists but cannot be read or parsed is refused
   before any refresh request or write, and left as it is: `KaguraAuthError`
   `Cannot update <path>: it is not valid JSON.` (or why else it cannot be
   read), with `Fix the file, or move it aside and run: kagura-memory auth
   login`. This holds for a refresh (checked under the lock), the save at
-  the end of `login()`, `updateProfile`, `setDefaultProfile` and
+  the beginning and end of `login()`, `updateProfile`, `setDefaultProfile` and
   `deleteProfile`; `kagura-memory-mcp` refuses it at startup and before any
   login. "Exists" includes a dangling symlink, and a file in a directory
   this process cannot search. A missing file is still "no profile".

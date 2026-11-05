@@ -387,11 +387,22 @@ describe("throwForKaguraStatus", () => {
     expect(parsesOf(text, () => thrown(() => throwForKaguraStatus(status, headers, text))).parses).toBe(1);
   });
 
-  it("never decodes a 401's body", () => {
-    const text = '{"detail":"no"}';
+  it.each([
+    { error: "invalid_token", help: "Log in again", reason: "expired" },
+    { error: "invalid_token", details: { help: "Log in again", reason: "expired" } },
+    { error: { code: -32001, data: { error: "invalid_token", help: "Log in again", reason: "expired" } } },
+  ])("annotates a 401 from the body and decodes it once (#112): %j", body => {
+    const text = JSON.stringify(body);
     const { result, parses } = parsesOf(text, () => thrown(() => throwForKaguraStatus(401, new Headers(), new ErrorBody(text))));
     expect(result).toBeInstanceOf(KaguraAuthError);
-    expect(parses).toBe(0);
+    expect(result).toMatchObject({ code: "invalid_token", help: "Log in again", details: { reason: "expired" } });
+    expect(parses).toBe(1);
+  });
+
+  it.each(["not JSON", "", "null", "[]"])("keeps malformed 401 bodies typed: %s", text => {
+    const e = thrown(() => throwForKaguraStatus(401, new Headers(), text));
+    expect(e).toBeInstanceOf(KaguraAuthError);
+    expect((e as KaguraAuthError).code).toBeUndefined();
   });
 
   it("keeps a 503 typed when it reads the ErrorBody", () => {

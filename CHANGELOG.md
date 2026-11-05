@@ -36,6 +36,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   UUID-shaped context names on the first page, following Python 0.44.0.
   UUID normalization now accepts Unicode decimal digits, including digits
   outside the BMP, while preserving Python's original length check (#116).
+### Fixed
+
+- Credential deletion now waits for the same lock as refresh and records
+  revocation so a cached fallback cannot recreate a logged-out profile.
+  **API change:** `deleteCredentialsFile()` returns `Promise<void>`; callers
+  must `await` it. The portable `.lock-v1` protocol never breaks an old lock
+  by age and refuses a legacy `.lock` marker. Concurrent credential sharing
+  with Python 0.44.0/older TypeScript clients is unsupported; migration and
+  crash-recovery steps are in `docs/compatibility.md` (#112; python-sdk#327).
+- `auth token` refreshes within five minutes of expiry and prints Python's
+  expiry warning and no-refresh-token error. Login rejects unreadable
+  credentials before device authorization; refresh has a 30-second deadline
+  including response-body reads; generic HTTP 401 errors retain server
+  `code`, `help`, and details (#112).
 
 ## [0.15.0] - 2026-11-05
 
