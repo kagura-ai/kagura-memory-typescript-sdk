@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The MCP proxy gives Python-compatible re-login guidance for HTTP 403
+  `insufficient_scope` and HTTP 401 after the refresh attempt. Forwarded
+  JSON-RPC errors retain their upstream codes and data.
+
 ### Changed
 
 - Match Python SDK 0.44.0's shared quota classifier. `QUOTA-001` and
@@ -13,30 +19,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   window to produce `KaguraQuotaError`. Other refusals with these codes
   produce `KaguraError`, retaining server metadata. REST HTTP 429 and 402
   retain their status-specific mappings, as in Python.
+
 ### Fixed
 
 - Validate member key and invitation rows in `WorkspaceClient` against the
   Python SDK 0.44.0 models. Malformed fields raise `KaguraResponseError`
   with the Python operation name. CLI commands reuse the validated rows,
   including normalized timestamps and model defaults.
-### Added
-
-- The MCP proxy gives Python-compatible re-login guidance for HTTP 403
-  `insufficient_scope` and HTTP 401 after the refresh attempt. Forwarded
-  JSON-RPC errors retain their upstream codes and data.
-### Fixed
 
 - Sleep report and rollback responses now validate against the Python SDK
   0.44.0 models. `sleep rollback` prints model defaults, preserves exact
   counters, matches Python's confirmation and cancellation behavior, and
   prints the partial rollback summary before exiting with an error (#110).
-### Fixed
 
 - Claude setup validates resolved context IDs before writing and resolves
   UUID-shaped context names on the first page, following Python 0.44.0.
   UUID normalization now accepts Unicode decimal digits, including digits
   outside the BMP, while preserving Python's original length check (#116).
-### Fixed
 
 - Credential deletion now waits for the same lock as refresh and records
   revocation so a cached fallback cannot recreate a logged-out profile.

@@ -1,5 +1,19 @@
 # SDK ↔ memory-cloud Compatibility
 
+## Unreleased: focused v0.16.0 scope
+
+This release fixes existing authentication, error handling, response validation,
+CLI behavior and Windows checkout reliability. Python parity remains 0.44.0;
+the server floor remains 0.75.0 and Node.js remains >=20.19.0.
+
+CLI-wide help wrapping/range labels and usage-error formatting (#111), the
+Node 22/Vitest 5 migration (#115), and member context-access APIs (#121) are
+deferred to v0.17.0. In particular, `sleep rollback --help` uses the corrected
+Python text but retains the existing formatter's wrapping and column spacing;
+its functional output, prompts and partial rollback dumps are checked exactly.
+
+## Unreleased: quota classification (#113)
+
 The unreleased quota classifier matches Python SDK 0.44.0's `_http.gate_error`.
 The REST status hooks keep their own mappings, so the HTTP status and entry
 point also determine the exception class.
