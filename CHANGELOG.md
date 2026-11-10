@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-10
+
+One fix that 0.18.0's check of memory-cloud 0.153.0 missed, matching the
+Python SDK 0.46.0.
+
 ### Fixed
 
 - `kagura-memory sleep rollback` dropped `related_indexes_reverted` from the
@@ -3488,7 +3493,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.15.0...v0.16.0
