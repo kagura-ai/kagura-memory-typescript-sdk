@@ -33,6 +33,7 @@ The audit test also checks that no registered command escapes this comparison.
 | `explore` | option text, metavar, default wording, or switch grouping: `-d, --depth INTEGER`, `-w, --min-weight FLOAT`. |
 | `files upload` | Usage/description wording. |
 | `ingest` | Python's optional URL/local-file ingest command is not implemented in this SDK; it is absent from the root list. |
+| `list` | option text, metavar, default wording, or switch grouping: `--order-by [updated_at\|created_at\|importance\|observed_at\|event_start]`, `--order-by [updated_at\|created_at\|importance\|observed_at]`. |
 | `recall` | option text, metavar, default wording, or switch grouping: `-k INTEGER`, `--rerank`, `--no-rerank`, `--rerank / --no-rerank`. |
 | `remember` | option text, metavar, default wording, or switch grouping: `-t, --type TEXT`, `-i, --importance FLOAT`. |
 | `resource events` | Usage/description wording; option text, metavar, default wording, or switch grouping: `-l, --limit INTEGER RANGE`, `--op [upsert\|delete]`, `-V, --version INTEGER`, `--since TEXT`. |

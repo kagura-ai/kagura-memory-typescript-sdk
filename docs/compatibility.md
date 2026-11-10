@@ -1,5 +1,39 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.18.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### Event dates (#137)
+
+`listMatching({ orderBy: "event_start" })` (and `kagura-memory list --order-by
+event_start`), `recall`'s `eventAfter` / `eventBefore` and the `event_after` /
+`event_before` keys of `listMatching`'s `filters` need memory-cloud **0.152.0**
+([memory-cloud#2722](https://github.com/kagura-ai/memory-cloud/issues/2722),
+[#2724](https://github.com/kagura-ai/memory-cloud/issues/2724)). `event_after`
+is inclusive and `event_before` exclusive; a memory matches when its event range
+(`details.event_start` / `event_end`) overlaps the window, and a memory without
+an event date never matches. A datetime `event_after` counts as its UTC day and
+a datetime `event_before` past midnight as the day after it. Memories without
+an event date sort last under `event_start`, in both directions. Both are
+sent only when set. `eventAfter` / `eventBefore` go in `filters`, a free-form
+object, so a server before 0.152.0 ignores them and filters nothing. A
+deployment upgraded from an earlier version gets the Qdrant payload indexes for
+`event_start` / `event_end` only from 0.152.1
+([memory-cloud#2729](https://github.com/kagura-ai/memory-cloud/issues/2729)).
+Python SDK/CLI 0.44.0 and 0.45.x have no event options; `list --order-by` here
+accepts `event_start`, which Python's `--order-by` refuses. The typed response
+fields (`event_start`, `event_end`, `event_weekday`, `observed_weekday`,
+`event_unresolved`) are not modelled; they pass through at runtime.
+
+### CLI help pages
+
+`list --help` no longer matches Python 0.44.0 (its `--order-by` choice and help
+name `event_start`) and is recorded in
+[the exception fixture](../test/cli/typescriptHelp111.json). Of the 94
+supported help pages, 49 now match Python and 45 retain a documented
+difference (the 0.17.0 counts were 50 and 44).
+
 ## 0.17.0
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

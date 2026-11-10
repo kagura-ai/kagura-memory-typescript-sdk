@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `listMatching({ orderBy: "event_start" })` and `kagura-memory list --order-by
+  event_start` order by the date of the event a memory describes, and `recall`
+  takes `eventAfter` / `eventBefore` (merged into `filters.event_after` /
+  `filters.event_before`, refused beside the same key in `filters`), for
+  memory-cloud v0.152.0. Both are sent only when set (#137).
+
 ## [0.17.0] - 2026-11-05
 
 ### Added

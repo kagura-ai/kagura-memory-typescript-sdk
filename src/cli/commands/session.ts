@@ -205,14 +205,14 @@ const changes: Command = {
   },
 };
 
-const ORDER_BYS: readonly ListOrderBy[] = ["updated_at", "created_at", "importance", "observed_at"];
+const ORDER_BYS: readonly ListOrderBy[] = ["updated_at", "created_at", "importance", "observed_at", "event_start"];
 const DIRECTIONS = ["asc", "desc"] as const;
 
 const ORDER_BY: FlagSpec = {
   name: "order-by",
   type: "value",
-  metavar: "[updated_at|created_at|importance|observed_at]",
-  help: "Sort key (default updated_at; observed_at needs server v0.127.0+)",
+  metavar: "[updated_at|created_at|importance|observed_at|event_start]",
+  help: "Sort key (default updated_at; observed_at needs server v0.127.0+, event_start v0.152.0+)",
 };
 const DIRECTION: FlagSpec = { name: "direction", type: "value", metavar: "[asc|desc]", help: "Default desc" };
 
