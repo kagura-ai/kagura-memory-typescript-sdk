@@ -2,7 +2,34 @@
 
 ## 0.18.0
 
-**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### What memory-cloud 0.145.0 – 0.155.0 changed for this SDK
+
+The server source at each tag was compared with this SDK. No REST route was
+removed, and `GET /api/v1/system/info` is unchanged. The changes this SDK acts
+on are covered by contract tests with mocked transports; no call was made
+through this SDK to a live server for this release. The sections below give
+each feature's floor.
+
+| Server | Change | This SDK |
+|---|---|---|
+| 0.145.0 | `GET /api/v1/files` takes `scope` and `context_id` | `FilesClient.list` / `files list` (#138) |
+| 0.145.0 | `quota_usage` on the usage readout, `workspace_id` on REST context replies, `private_workspace_id` on REST remember, `delete_workspaces` on admin user deletion | not called by this SDK |
+| 0.146.0 – 0.147.0 | TOTP, recovery codes, passkeys | browser sign-in only |
+| 0.148.0 | public read-only MCP endpoint and its publishing routes; observation credentials and the observability API | not exposed |
+| 0.149.0 | `observed_weekday` beside `observed_at` on rows and write replies | passes through, untyped |
+| 0.149.0 | the plugin's SessionStart hook names the default context | `setup claude` keeps `context=` in `server_url` (#139) |
+| 0.150.0 | resource management grants | not exposed |
+| 0.151.0 | tool description text | none |
+| 0.152.0 | event dates: `order_by: "event_start"`, `event_after` / `event_before` | `listMatching` / `list --order-by`, `recall` `eventAfter` / `eventBefore` (#137) |
+| 0.152.0 | `event_start`, `event_end`, `event_weekday` on rows; `event_unresolved` on write replies; `details.event_phrase` | pass through, untyped; `details` is sent as given |
+| 0.152.0 | `plan_blocked` on pending invitations, the passkey limit, 403 on usage readouts for a former member | not called by this SDK |
+| 0.152.1 | payload indexes for the event dates on existing collections | none |
+| 0.153.0 | opt-in Sleep related index (`index_related` actions) | `action_type` is read as a free-form string |
+| 0.154.0 | workspace operation history | `WorkspaceClient.listOperationHistory` (#136) |
+| 0.155.0 | `partially_unavailable_fields` on a versioned `reference` | passes through, untyped |
+| 0.155.0 | `workspace_totals.active_users_week`, 7-day usage windows | not called by this SDK |
 
 ### Workspace operation history (#136)
 
