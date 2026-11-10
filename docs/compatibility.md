@@ -19,8 +19,10 @@ unmatched-route 404 in the canonical envelope), which the method raises as
 The route, `GET /api/v1/workspaces/{workspace_id}/operation-history`, accepts a
 web session only. The method refuses a client built with an API key or OAuth
 token before any request; it never sends another credential. The server checks
-owner/admin first (`403 AUTH-101`, also for a workspace that does not exist;
-`KaguraPermissionError`), then the `operation_history` plan feature (Pro and
+owner/admin first: a role too low, no membership and a missing or deleted
+workspace all answer `403 AUTH-101` "Insufficient permissions" with no details
+(`KaguraPermissionError`, `requiredRole` `null`); the route itself never answers
+404. Then it checks the `operation_history` plan feature (Pro and
 Max, or a custom plan that includes it; `403 FEAT-001`,
 `KaguraFeatureNotAvailableError`). The query bounds (`query` 120, `actor` 255,
 `operation` 40, `cursor` 512 characters; `limit` 1–100, default 30; `since` /
@@ -28,9 +30,15 @@ Max, or a custom plan that includes it; `403 FEAT-001`,
 operation, target-type and outcome values are left to the server. One local
 check is stricter than the server: a Unix-time string for `since` / `until`,
 which the server reads as UTC, is refused. The page and event models take every
-field of the v0.154.0 `OperationHistoryPage` / `OperationHistoryItem` (nullable fields required, as
-the server always sends them; `total_capped` defaults to `false`) and keep keys a
-newer server adds.
+field of the v0.154.0 `OperationHistoryPage` / `OperationHistoryItem` (nullable
+fields required, as the server always sends them; `total_capped` defaults to
+`false`), return the page as the model reads it in pydantic's lax mode, and keep
+keys a newer server adds, numbers as plain numbers.
+
+The guard that refuses a non-session client also covers
+`WorkspaceClient.addContextMember` from 0.18.0. That route accepts a web session
+only too, and a client built with an API key or OAuth used to send it with no
+credential at all.
 
 The method is verified by contract tests with mocked transports against the
 v0.154.0 source (`backend/src/api/routes/operation_history.py`,

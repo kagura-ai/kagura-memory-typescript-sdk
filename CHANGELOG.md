@@ -15,6 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an API key or OAuth token throws before any request. Pro and Max workspaces,
   owners and admins (#136).
 
+### Changed
+
+- `WorkspaceClient.addContextMember` throws an `Error` before any request on a
+  client not built with `session: true`. It used to send the request with no
+  credential at all, which the session-only route refused (#136).
+
 ## [0.17.0] - 2026-11-05
 
 ### Added

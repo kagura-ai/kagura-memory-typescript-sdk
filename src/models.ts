@@ -1942,7 +1942,7 @@ export interface MemberAPIKey {
  */
 export interface OperationHistoryEvent {
   id: string;
-  /** ISO 8601 datetime string, as the server sent it. */
+  /** ISO 8601 datetime string, in pydantic's JSON form (`2026-11-09T10:00:00.123456Z`). */
   occurred_at: string;
   context_id: string | null;
   actor_user_id: string | null;

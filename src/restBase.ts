@@ -234,9 +234,14 @@ export interface FromResolvedAuthOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-/** Request payload context threaded to the 403 hook (subclass hints only). */
+/** Request payload context threaded to the 401 and 403 hooks (subclass hints only). */
 export interface RequestContext {
   typedPermissionErrors?: boolean;
+  /**
+   * What a session route's call does, for its 401 message
+   * (`"read workspace operation history"`); set with `session`.
+   */
+  sessionAction?: string;
   requestJson: Record<string, unknown> | undefined;
   requestParams: Record<string, unknown> | undefined;
 }
@@ -337,6 +342,11 @@ export class KaguraRestClient {
   /** Workspace bound to the credential source — display only. */
   protected readonly workspaceIdHint: string | null;
   protected readonly fetchImpl: typeof globalThis.fetch;
+  /**
+   * `true` when constructed in session mode: the client holds no bearer
+   * credential, and its session routes rely on the caller's web session.
+   */
+  protected readonly sessionMode: boolean;
 
   /**
    * Initialize with a static API key or a pre-built OAuth provider.
@@ -359,6 +369,7 @@ export class KaguraRestClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
 
+    this.sessionMode = mode === "session";
     if (mode === "session") {
       this.bearer = null;
       this.oauth = null;
@@ -486,6 +497,8 @@ export class KaguraRestClient {
       params?: Record<string, unknown>;
       extraHeaders?: Record<string, string>;
       session?: boolean;
+      /** What the call does, for a session route's 401 message ({@link RequestContext.sessionAction}). */
+      sessionAction?: string;
       typedPermissionErrors?: boolean;
     } = {},
   ): Promise<RestResponse> {
@@ -547,6 +560,7 @@ export class KaguraRestClient {
           requestJson: opts.json,
           requestParams: opts.params,
           ...(opts.typedPermissionErrors ? { typedPermissionErrors: true } : {}),
+          ...(opts.sessionAction === undefined ? {} : { sessionAction: opts.sessionAction }),
         },
         fields,
       );
@@ -601,7 +615,7 @@ export class KaguraRestClient {
     }
     const status = response.status;
     if (status === 401) {
-      return this.error401(response);
+      return this.error401(response, context);
     }
     if (status === 403) {
       return insufficientScopeFrom(response.headers, fields) ?? this.error403(response, context);
@@ -622,7 +636,7 @@ export class KaguraRestClient {
   // ---- per-status hooks (override where the wire contract differs) ----
 
   /** 401 → auth error with a recovery hint matching the auth mode. */
-  protected error401(response: RestResponse): KaguraError {
+  protected error401(_response: RestResponse, _context?: RequestContext): KaguraError {
     const hint =
       this.oauth !== null
         ? "Re-run `kagura auth login` or inspect ~/.kagura/credentials.json."

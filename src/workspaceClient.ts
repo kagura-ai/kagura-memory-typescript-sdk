@@ -19,7 +19,9 @@ import { SOURCE_LABEL } from "./auth/types.js";
 import { KaguraAuthError, KaguraContextNotInAccessListError, KaguraPermissionError, KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseError } from "./errors.js";
 import { responseRetryAfter, sanitizeServerDetail } from "./http.js";
 import type { MemberAPIKey, OperationHistoryPage, WorkspaceInvitation, WorkspaceMember } from "./models.js";
-import { pydanticDatetime } from "./pydanticDatetime.js";
+import { jsonValue } from "./losslessJson.js";
+import { awareDatetimeMicros } from "./pydanticDatetime.js";
+import { validateIntRange } from "./responseBudget.js";
 import { isSet, pyRepr, pyTypeName } from "./python.js";
 import { responseShapeError } from "./responseShape.js";
 import { WORKSPACE_MEMBER_ACCESS_FIELDS, CONTEXT_MEMBER, MEMBER_CONTEXT_ACCESS, MEMBER_CONTEXT_ACCESS_UPDATE, MEMBER_API_KEY, OPERATION_HISTORY_PAGE, WORKSPACE_INVITATION, readModel, type Model } from "./pyModels.js";
@@ -232,23 +234,6 @@ const HISTORY_CURSOR_MAX = 512;
 const HISTORY_LIMIT_MIN = 1;
 const HISTORY_LIMIT_MAX = 100;
 
-const SESSION_ONLY_HISTORY =
-  "WorkspaceClient.listOperationHistory: the operation-history route accepts a signed-in web session only, " +
-  "not an API key, OAuth or resource token. Build a session client with " +
-  "new WorkspaceClient({ baseUrl, session: true, fetch }), where fetch carries the session cookie.";
-
-/** `value` as a string of at most `max` code points, or an `Error` naming the option. */
-function boundedText(value: unknown, name: string, max: number): string {
-  if (typeof value !== "string") {
-    throw new Error(`${name} must be a string, got ${pyTypeName(value)}`);
-  }
-  const length = [...value].length;
-  if (length > max) {
-    throw new Error(`${name} must be at most ${max} characters, got ${length}`);
-  }
-  return value;
-}
-
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string") {
     throw new Error(`${name} must be a string, got ${pyTypeName(value)}`);
@@ -256,8 +241,15 @@ function requireString(value: unknown, name: string): string {
   return value;
 }
 
-/** pydantic's JSON form of an aware datetime, which {@link pydanticDatetime} writes. */
-const AWARE_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{6}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+/** `value` as a string of at most `max` code points, or an `Error` naming the option. */
+function boundedText(value: unknown, name: string, max: number): string {
+  const text = requireString(value, name);
+  const length = [...text].length;
+  if (length > max) {
+    throw new Error(`${name} must be at most ${max} characters, got ${length}`);
+  }
+  return text;
+}
 
 /** A `since` / `until` value: the text sent, and its instant in microseconds since the epoch. */
 interface HistoryTime {
@@ -268,9 +260,9 @@ interface HistoryTime {
 /**
  * A time filter as the server reads it. A `Date` is its UTC instant. A
  * string is sent as written once the server's own parser (pydantic's
- * `datetime`, {@link pydanticDatetime}) reads it as an ISO 8601 datetime
- * with an offset: a naive datetime, a date alone and a Unix time are
- * refused, as the route refuses a naive value.
+ * `datetime`, {@link awareDatetimeMicros}) reads it as an ISO 8601
+ * datetime with an offset: a naive datetime and a date alone are refused,
+ * as the route refuses a naive value, and so is a Unix time.
  */
 function historyTime(value: unknown, name: string): HistoryTime {
   if (value instanceof Date) {
@@ -281,37 +273,36 @@ function historyTime(value: unknown, name: string): HistoryTime {
     }
     return { text: value.toISOString(), micros: BigInt(time) * 1000n };
   }
-  const read = typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value) ? pydanticDatetime(value) : null;
-  const parts = read?.ok ? AWARE_DATETIME.exec(read.value) : null;
-  if (parts === null || parts === undefined) {
+  const micros = typeof value === "string" ? awareDatetimeMicros(value) : null;
+  if (micros === null) {
     const shown = typeof value === "string" ? pyRepr(value) : pyTypeName(value);
     throw new Error(
       `${name} must be an ISO 8601 datetime with a timezone offset or a Date ` +
         `(2026-11-09T10:00:00Z, 2026-11-09T19:00:00+09:00), got ${shown}`,
     );
   }
-  const [year, month, day, hour, minute, second] = parts.slice(1, 7).map(Number) as [
-    number, number, number, number, number, number,
-  ];
-  const at = new Date(0);
-  at.setUTCFullYear(year, month - 1, day);
-  at.setUTCHours(hour, minute, second, 0);
-  let micros = BigInt(at.getTime()) * 1000n + BigInt(parts[7] ?? 0);
-  if (parts[8] !== "Z") {
-    const offset = (Number(parts[10]) * 60 + Number(parts[11])) * (parts[9] === "-" ? -1 : 1);
-    micros -= BigInt(offset) * 60_000_000n;
-  }
   return { text: value as string, micros };
 }
 
-function historyLimit(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < HISTORY_LIMIT_MIN || value > HISTORY_LIMIT_MAX) {
-    throw new Error(
-      `limit must be an integer between ${HISTORY_LIMIT_MIN} and ${HISTORY_LIMIT_MAX}, got ` +
-        (typeof value === "string" ? pyRepr(value) : String(value)),
-    );
+/**
+ * A read model's own values as plain JSON values: an int field read
+ * exactly (`bigint`) as the nearest `number`, as {@link readWorkspaceRow}
+ * gives it, and an unknown key's number as the number the body wrote,
+ * never the reader's internal literal.
+ */
+function plainRow(row: Record<string, unknown>): Record<string, unknown> {
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value === "bigint") row[key] = Number(value);
+    else row[key] = jsonValue(value);
   }
-  return value;
+  return row;
+}
+
+/** An operation-history page as its model reads it, items included, in plain values. */
+function readHistoryPage(raw: unknown): OperationHistoryPage {
+  const page = plainRow(readModel(raw, OPERATION_HISTORY_PAGE, "WorkspaceClient.list_operation_history"));
+  (page.items as Record<string, unknown>[]).forEach(plainRow);
+  return page as unknown as OperationHistoryPage;
 }
 
 /**
@@ -341,12 +332,24 @@ function historyLimit(value: unknown): number {
  *   its counts
  */
 export class WorkspaceClient extends KaguraRestClient {
-  /** Whether this client was built with `session: true`; it then carries no bearer credential. */
-  private readonly sessionMode: boolean;
-
   constructor(options: KaguraRestClientOptions | WorkspaceSessionOptions = {}) {
     super(options, isSessionOptions(options) ? "session" : "bearer");
-    this.sessionMode = isSessionOptions(options);
+  }
+
+  /**
+   * Refuse a session-only call on a client not built with `session: true`,
+   * before any request: such a client holds an API key or OAuth token,
+   * which these routes refuse, and the call never swaps, adds or drops a
+   * credential to get through.
+   */
+  private requireSession(method: string): void {
+    if (!this.sessionMode) {
+      throw new Error(
+        `WorkspaceClient.${method}: this route accepts a signed-in web session only, ` +
+          "not an API key, OAuth or resource token. Build a session client with " +
+          "new WorkspaceClient({ baseUrl, session: true, fetch }), where fetch carries the session cookie.",
+      );
+    }
   }
 
   // -------------------------------------------------------------------
@@ -416,15 +419,21 @@ export class WorkspaceClient extends KaguraRestClient {
     return readModel(this.json(resp), MEMBER_CONTEXT_ACCESS_UPDATE, "WorkspaceClient.set_member_context_access") as unknown as MemberContextAccessUpdate;
   }
 
-  /** Requires a signed-in web session. On Node, provide a fetch that carries the session cookie. */
+  /**
+   * Requires a signed-in web session. On Node, provide a fetch that carries the session cookie.
+   *
+   * @throws Error when the client was not built with `session: true`, before any request.
+   */
   async addContextMember(
     contextId: string, userId: string, role: "owner" | "editor" | "viewer",
     options: { extendAccessList?: boolean } = {},
   ): Promise<ContextMember> {
+    this.requireSession("addContextMember");
     const id = normalizeUuid(contextId, "contextId");
     userIdSegment(userId);
     const resp = await this.request("POST", `/api/v1/contexts/${id}/members`, {
       session: true,
+      sessionAction: "add a context member",
       json: {
         user_id: userId, role,
         ...(options.extendAccessList === undefined ? {} : { extend_access_list: options.extendAccessList }),
@@ -453,8 +462,8 @@ export class WorkspaceClient extends KaguraRestClient {
    * workspace's plan must include `operation_history` (Pro and Max, or a
    * custom plan that includes the feature). History is recorded from
    * server v0.154.0 on, with no backfill, and is kept for `retention_days`
-   * (90 days plus any add-on). It holds who changed what — ids, operation, outcome, count and changed-field names
-   * — never contents or before/after values; reads and searches are not
+   * (90 days plus any add-on). It holds who changed what — ids, operation,
+   * outcome, count and changed-field names — never contents or before/after values; reads and searches are not
    * recorded, and it is not a full audit ledger. A private context's
    * history is shown only to its creator. A shared credential identifies
    * the credential and its account, not the person who used it.
@@ -468,18 +477,25 @@ export class WorkspaceClient extends KaguraRestClient {
    * a `since` / `until` string that is a Unix time is refused too, where
    * the server reads it as UTC. `cursor` is sent as given.
    *
+   * The page is returned as its model reads it, in pydantic's lax mode:
+   * `"12"` for `total` reads `12`, and `occurred_at` is pydantic's JSON
+   * form of the datetime (`2026-11-09T10:00:00.123456Z`). Unknown keys are
+   * kept on the page and on each event, numbers as plain `number`s.
+   *
    * @throws Error when the client was not built with `session: true`, or an
    *   option is refused, before any request.
    * @throws KaguraAuthError when the session is missing or expired (401).
    * @throws KaguraPermissionError when the caller is not a workspace owner
-   *   or admin, or the workspace does not exist (the server's uniform
-   *   `403 AUTH-101` "Insufficient permissions"), with `requiredRole` when
-   *   the server names one.
+   *   or admin, is no member, or the workspace does not exist or is deleted:
+   *   the server answers all of them with the same `403 AUTH-101`
+   *   "Insufficient permissions" and no details, so `requiredRole` is
+   *   `null`.
    * @throws KaguraFeatureNotAvailableError when the workspace's plan lacks
    *   `operation_history` (403 `FEAT-001`, `feature: "operation_history"`),
    *   or the admin's seat is suspended (`feature: "members"`).
-   * @throws KaguraNotFoundError from a server without the route:
-   *   memory-cloud v0.153.0 answers this path `404 HTTP-404` "Not Found".
+   * @throws KaguraNotFoundError from a server before v0.154.0, which has no
+   *   such route (v0.153.0 answers `404 HTTP-404` "Not Found"); the route
+   *   itself never answers 404.
    * @throws KaguraConnectionError for a 422 the server answers (an unknown
    *   `operation`, a malformed `cursor`), keeping its `code` and `details`,
    *   or a transport failure.
@@ -488,11 +504,10 @@ export class WorkspaceClient extends KaguraRestClient {
    */
   async listOperationHistory(
     workspaceId: string,
-    options: ListOperationHistoryOptions = {},
+    options: ListOperationHistoryOptions | null = {},
   ): Promise<OperationHistoryPage> {
-    if (!this.sessionMode) {
-      throw new Error(SESSION_ONLY_HISTORY);
-    }
+    this.requireSession("listOperationHistory");
+    options ??= {};
     const ws = normalizeWorkspaceId(workspaceId);
     const params: Record<string, string | number> = {};
     if (isSet(options.query)) params.query = boundedText(options.query, "query", HISTORY_QUERY_MAX);
@@ -509,20 +524,17 @@ export class WorkspaceClient extends KaguraRestClient {
     }
     if (since !== null) params.since = since.text;
     if (until !== null) params.until = until.text;
-    if (isSet(options.limit)) params.limit = historyLimit(options.limit);
+    if (isSet(options.limit)) params.limit = validateIntRange("limit", options.limit, HISTORY_LIMIT_MIN, HISTORY_LIMIT_MAX);
     if (isSet(options.cursor)) params.cursor = boundedText(options.cursor, "cursor", HISTORY_CURSOR_MAX);
 
+    // A session request's 403 is typed (KaguraPermissionError) without
+    // `typedPermissionErrors`: see error403.
     const resp = await this.request("GET", `/api/v1/workspaces/${ws}/operation-history`, {
       session: true,
-      typedPermissionErrors: true,
+      sessionAction: "read workspace operation history",
       params,
     });
-    const body = this.json(resp);
-    readModel(body, OPERATION_HISTORY_PAGE, "WorkspaceClient.list_operation_history");
-    // Returned as sent once the model accepts it, unknown keys kept, with
-    // the one default the model fills.
-    const page = body as Record<string, unknown>;
-    return (page.total_capped === undefined ? { ...page, total_capped: false } : page) as unknown as OperationHistoryPage;
+    return readHistoryPage(this.json(resp));
   }
 
   /** Change a member's role (member/admin/viewer only). */
@@ -825,15 +837,16 @@ export class WorkspaceClient extends KaguraRestClient {
 
   // ---- KaguraRestClient hooks -----------------------------------------
 
-  protected override error401(response: RestResponse): KaguraError {
+  protected override error401(response: RestResponse, context?: RequestContext): KaguraError {
     if (response.session === true) {
+      const action = context?.sessionAction;
       return new KaguraAuthError(
-        response.path.endsWith("/operation-history")
-          ? "A signed-in session is required to read workspace operation history."
-          : "A signed-in session is required to add a context member.",
+        action === undefined
+          ? "A signed-in web session is required for this request."
+          : `A signed-in session is required to ${action}.`,
       );
     }
-    return super.error401(response);
+    return super.error401(response, context);
   }
 
   protected override genericError(response: RestResponse): KaguraError {

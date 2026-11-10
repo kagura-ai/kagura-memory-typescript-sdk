@@ -265,6 +265,21 @@ function checked(p: Parts): Coerced<string> {
 }
 
 /**
+ * The instant of an RFC 3339 datetime string with an offset, as pydantic
+ * reads it (the first form of the module comment), in microseconds since
+ * the epoch; `null` for any other string: no offset (naive), a date alone,
+ * a Unix time, or a value pydantic refuses.
+ */
+export function awareDatetimeMicros(text: string): bigint | null {
+  const p = parseDateTime(text);
+  if (p === null || p.offset === null || p.year === 0) return null;
+  const at = new Date(0);
+  at.setUTCFullYear(p.year, p.month - 1, p.day);
+  at.setUTCHours(p.hour, p.minute, p.second, 0);
+  return BigInt(at.getTime()) * 1000n + BigInt(p.micro) - BigInt(p.offset) * 1_000_000n;
+}
+
+/**
  * `value` as a pydantic `datetime` field reads it, in pydantic's JSON form
  * (see the module comment), or pydantic's message for why it cannot be.
  */

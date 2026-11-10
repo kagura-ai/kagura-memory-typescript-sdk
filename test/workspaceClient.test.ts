@@ -1515,22 +1515,31 @@ describe("operation history (memory-cloud v0.154.0)", () => {
     expect(server.requests).toHaveLength(0);
   });
 
+  const asked = { header: false };
   it.each([
     ["an API key", { apiKey: "kagura_test" }],
-    ["an OAuth token", { oauth: { getAuthHeader: async () => "Bearer oauth-token" } }],
-  ])("refuses a client built with %s before any request", async (_label, credential) => {
+    ["an OAuth token", { oauth: { getAuthHeader: async () => ((asked.header = true), "Bearer oauth-token") } }],
+  ])("refuses a client built with %s before any request, on both session routes", async (_label, credential) => {
     const server = new FakeRest();
     server.body = JSON.stringify(PAGE);
+    asked.header = false;
     const client = new WorkspaceClient({ baseUrl: "https://x.test", fetch: server.fetch, ...credential });
-    const error = await caught(client.listOperationHistory(WS, { limit: 5 }));
-    expect(error).toBeInstanceOf(Error);
-    expect(error).not.toBeInstanceOf(KaguraError);
-    expect((error as Error).message).toBe(
-      "WorkspaceClient.listOperationHistory: the operation-history route accepts a signed-in web session only, " +
-        "not an API key, OAuth or resource token. Build a session client with " +
-        "new WorkspaceClient({ baseUrl, session: true, fetch }), where fetch carries the session cookie.",
-    );
+    for (const [method, call] of [
+      ["listOperationHistory", () => client.listOperationHistory(WS, { limit: 5 })],
+      // Arguments are not checked first: the guard comes before them.
+      ["addContextMember", () => client.addContextMember("not-a-uuid", "u", "editor")],
+    ] as const) {
+      const error = await caught(call());
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(KaguraError);
+      expect((error as Error).message).toBe(
+        `WorkspaceClient.${method}: this route accepts a signed-in web session only, ` +
+          "not an API key, OAuth or resource token. Build a session client with " +
+          "new WorkspaceClient({ baseUrl, session: true, fetch }), where fetch carries the session cookie.",
+      );
+    }
     expect(server.requests).toHaveLength(0);
+    expect(asked.header).toBe(false);
   });
 
   it("refuses a bearer client from fromMcpUrl before any request, before checking arguments", async () => {
@@ -1572,30 +1581,7 @@ describe("operation history (memory-cloud v0.154.0)", () => {
     expect((error as Error).message).toContain("WorkspaceClient.list_operation_history");
   });
 
-  it("maps an expired session to KaguraAuthError naming the history, not an empty page", async () => {
-    const server = new FakeRest();
-    server.status = 401;
-    server.body = envelope("AUTH-001", "Not authenticated");
-    const error = await caught(sessionClient(server).listOperationHistory(WS));
-    expect(error).toBeInstanceOf(KaguraAuthError);
-    expect((error as Error).message).toBe("A signed-in session is required to read workspace operation history.");
-    expect(error).toMatchObject({ code: "AUTH-001" });
-    // The context-member call keeps its own words.
-    await expect(sessionClient(server).addContextMember(CTX, "u", "editor")).rejects.toThrow(
-      "A signed-in session is required to add a context member.",
-    );
-  });
-
-  it("maps the owner/admin refusal to KaguraPermissionError with the required role", async () => {
-    const server = new FakeRest();
-    server.status = 403;
-    server.body = JSON.stringify({ error: "AUTH-003", message: "Insufficient permissions", details: { required_role: "admin" } });
-    const error = await caught(sessionClient(server).listOperationHistory(WS));
-    expect(error).toBeInstanceOf(KaguraPermissionError);
-    expect(error).toMatchObject({ code: "AUTH-003", requiredRole: "admin", message: "Insufficient permissions" });
-  });
-
-  it("maps v0.154.0's own 401 and uniform 403 bodies, never to an empty page", async () => {
+  it("maps an expired session (v0.154.0's HTTP-401) to KaguraAuthError worded by the call", async () => {
     const server = new FakeRest();
     const client = sessionClient(server);
     // `require_session_auth` without a session: HTTPException(401) in the HTTP-401 envelope.
@@ -1607,6 +1593,24 @@ describe("operation history (memory-cloud v0.154.0)", () => {
       code: "HTTP-401",
       message: "A signed-in session is required to read workspace operation history.",
     });
+    // The context-member call keeps its own words.
+    await expect(client.addContextMember(CTX, "u", "editor")).rejects.toThrow(
+      "A signed-in session is required to add a context member.",
+    );
+    // A session route that names no action gets a generic message, never another call's.
+    class Unlabelled extends WorkspaceClient {
+      probe(): Promise<unknown> {
+        return this.request("GET", "/api/v1/unlabelled", { session: true });
+      }
+    }
+    const unlabelled = await caught(new Unlabelled({ baseUrl: "https://x.test", session: true, fetch: server.fetch }).probe());
+    expect(unlabelled).toBeInstanceOf(KaguraAuthError);
+    expect((unlabelled as Error).message).toBe("A signed-in web session is required for this request.");
+  });
+
+  it("maps v0.154.0's uniform 403 AUTH-101 to KaguraPermissionError, never to an empty page", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
     // `check_workspace_admin`: a role too low, no membership, or no such
     // workspace all answer AuthorizationError, its details stripped.
     server.status = 403;
@@ -1627,6 +1631,26 @@ describe("operation history (memory-cloud v0.154.0)", () => {
     const error = await caught(sessionClient(server).listOperationHistory(WS));
     expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
     expect(error).toMatchObject({ feature: "members", code: "FEAT-001" });
+  });
+
+  it("returns the page as its model reads it, lax values coerced to the declared types", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({
+      total: "12", total_capped: "false", retention_days: true, next_cursor: null,
+      items: [{ ...EVENT, occurred_at: 1762000000, count: "3" }],
+    });
+    const page = await sessionClient(server).listOperationHistory(WS);
+    expect(page).toEqual({
+      total: 12, total_capped: false, retention_days: 1, next_cursor: null,
+      items: [{ ...EVENT, occurred_at: "2025-11-01T12:26:40Z", count: 3 }],
+    });
+  });
+
+  it("treats null options as none", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    await sessionClient(server).listOperationHistory(WS, null);
+    expect(server.requests[0]!.url).toBe(HISTORY);
   });
 
   it("returns unknown numeric fields as plain numbers, on the page and on items", async () => {

@@ -1918,7 +1918,9 @@ includes `is_own_private`. The existing positional role argument still works.
 For context roles, create a session client with
 `new WorkspaceClient({ baseUrl, session: true, fetch: sessionFetch })`.
 On Node the supplied fetch must carry the signed-in user's session and CSRF
-credentials. Call `addContextMember(contextId, userId, "editor")` on that client. A context outside the member's list raises
+credentials. Call `addContextMember(contextId, userId, "editor")` on that client;
+on a client built with an API key or OAuth it throws an `Error` before any
+request (from 0.18.0; it used to send the request with no credential). A context outside the member's list raises
 `KaguraContextNotInAccessListError` with `details.reason` equal to
 `context_not_in_access_list`. A workspace owner or admin may explicitly retry
 with `extendAccessList: true`. The response reports `access_list_extended`.
@@ -1957,10 +1959,16 @@ sent.
 
 - The caller must be a workspace **owner or admin**, and the workspace's plan
   must include `operation_history` (**Pro and Max**, or a custom plan that
-  includes the feature). A missing or expired session is `KaguraAuthError`; the
-  role refusal, which the server also gives for a workspace that does not exist,
-  `KaguraPermissionError`; the plan gate `KaguraFeatureNotAvailableError`. A
-  refusal is never an empty page.
+  includes the feature). A missing or expired session is `KaguraAuthError`. The
+  server answers a caller who is not an owner or admin, not a member, or asks
+  for a workspace that does not exist with the same `403 AUTH-101`
+  "Insufficient permissions" and no details: `KaguraPermissionError`, with
+  `requiredRole` `null`. The plan gate is `KaguraFeatureNotAvailableError`. The
+  route never answers 404 itself: a `KaguraNotFoundError` means a server before
+  v0.154.0, which has no such route. A refusal is never an empty page.
+- The page comes back as its model reads it: values the server sends in a lax
+  form are read into the declared types (`"12"` for `total` is `12`),
+  `occurred_at` is in pydantic's JSON form, and unknown keys are kept.
 - An event records ids, the operation, its outcome, a count and the **names** of
   the changed fields: no contents and no before/after values. Reads and searches
   are not recorded, and the history is not a full audit ledger.
