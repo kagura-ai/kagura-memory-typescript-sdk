@@ -1675,7 +1675,7 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
     // Python resolves a context always; this bin makes no call to pick one.
     notes.push(
       "Plugin settings (/plugin > kagura-memory > Configure): " +
-        `server_url = ${pluginServerUrl(written)}, ` +
+        `server_url = ${pluginServerUrl(written, input.contextId)}, ` +
         `context_id = ${input.contextId || "(none; pass -c)"}`,
       "The plugin has ONE guardrail context for every project: use this one only if it holds the " +
         "guardrails you want everywhere.",

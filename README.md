@@ -677,7 +677,15 @@ where to set `KAGURA_MCP_API_KEY`, and writes nothing, unless the
 user-scope entry is already identical. When `claude plugin list --json`
 shows the Kagura Memory plugin enabled, the notes list the plugin settings
 to enter, and say that the plugin has one guardrail context for every
-project and authenticates only with a user API key. `setup claude` writes
+project and authenticates only with a user API key. The printed
+`server_url` is the MCP URL without its query, except that `guardrails=off`
+stays and, from memory-cloud v0.149.0 and the plugin of that release,
+`context=<id>` stays when the MCP URL's first `context=` is the context
+printed as the plugin's `context_id` (compared as UUIDs in any case, written
+lower-case and dashed): the plugin's SessionStart hook then tells the model
+the default context, so it needs no `list_contexts` call. With no `-c`, a
+context that is not a UUID, or a `context=` naming another context, the
+`context=` is dropped. A plugin before v0.149.0 ignores it. `setup claude` writes
 `.kagura.json` and the MCP entry only; it installs none of the Python
 CLI's hooks or `/kagura-recall` and `/kagura-remember` commands. Their
 flags (`--[no-]session-hook`, `--[no-]sync-hook`, `--[no-]commands`) and

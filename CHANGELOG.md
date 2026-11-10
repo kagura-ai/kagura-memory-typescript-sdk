@@ -20,6 +20,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused before the request, as the server refuses it. A server before
   v0.145.0 ignores both and returns the unfiltered listing (#138).
 
+### Fixed
+
+- `setup claude` keeps `context=<id>` in the plugin `server_url` it prints
+  when the MCP URL's first `context=` is the context printed as the plugin's
+  `context_id` (UUIDs compared in any case, written lower-case and dashed,
+  before `guardrails=off`). Since memory-cloud v0.149.0 the plugin's
+  SessionStart hook names the default context to the model only then; the
+  printed URL used to drop it, so a user who entered it never got that line.
+  With no `-c`, a context that is not a UUID, or a `context=` naming another
+  context, the URL is unchanged. `pluginServerUrl` takes the plugin's context
+  as a second argument (#139).
+
 ## [0.17.0] - 2026-11-05
 
 ### Added

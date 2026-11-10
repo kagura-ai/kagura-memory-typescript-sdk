@@ -267,6 +267,88 @@ describe("pluginServerUrl", () => {
   });
 });
 
+// memory-cloud v0.149.0 (#139): the plugin's SessionStart hook names the
+// default context to the model when the first `context=` of its server_url is
+// its own context_id, in any case. The hook reads the raw first pair, so the
+// pair is written canonical (lower case, dashed), not percent-encoded.
+describe("pluginServerUrl keeps context= when it is the plugin's context (#139)", () => {
+  const BASE = "https://x.test/mcp";
+  const OTHER = "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f";
+  const UPPER = UUID.toUpperCase();
+
+  it.each([
+    [`?context=${UUID}`, `${BASE}?context=${UUID}`],
+    [`?context=${UUID}&guardrails=off`, `${BASE}?context=${UUID}&guardrails=off`],
+    // context first, whatever the order in the entry's URL.
+    [`?guardrails=off&context=${UUID}`, `${BASE}?context=${UUID}&guardrails=off`],
+    [`?guardrails=OFF&profile=core&context=${UUID}&add_tools=explore`, `${BASE}?context=${UUID}&guardrails=off`],
+    // the rest of the tool view and a guardrails context are still dropped.
+    [`?profile=core&context=${UUID}&tools=recall&guardrails=${OTHER}#f`, `${BASE}?context=${UUID}`],
+  ])("%s -> %s", (query, expected) => {
+    expect(pluginServerUrl(`${BASE}${query}`, UUID)).toBe(expected);
+    expect(pluginServerUrl(parseMcpUrl(`${BASE}${query}`), UUID)).toBe(expected);
+  });
+
+  it("compares in any case and writes the canonical lower-case, dashed form", () => {
+    expect(pluginServerUrl(`${BASE}?context=${UPPER}`, UUID)).toBe(`${BASE}?context=${UUID}`);
+    expect(pluginServerUrl(`${BASE}?context=${UUID}`, UPPER)).toBe(`${BASE}?context=${UUID}`);
+    expect(pluginServerUrl(`${BASE}?context=${UPPER}&guardrails=off`, UPPER)).toBe(`${BASE}?context=${UUID}&guardrails=off`);
+    // Another spelling of the same UUID reads as it, and is written dashed.
+    expect(pluginServerUrl(`${BASE}?context=${UUID.replaceAll("-", "")}`, UUID)).toBe(`${BASE}?context=${UUID}`);
+    expect(pluginServerUrl(`${BASE}?context=%7B${UUID}%7D`, UUID)).toBe(`${BASE}?context=${UUID}`);
+  });
+
+  it("strips both values as Python does, and reads the URL's percent-encoding as the server does", () => {
+    expect(pluginServerUrl(`${BASE}?context=%20${UUID}%20`, UUID)).toBe(`${BASE}?context=${UUID}`);
+    expect(pluginServerUrl(`${BASE}?context=${UUID}`, `  ${UUID}\n`)).toBe(`${BASE}?context=${UUID}`);
+    expect(pluginServerUrl(`${BASE}?con%74ext=${UUID}`, UUID)).toBe(`${BASE}?context=${UUID}`);
+  });
+
+  it("keeps it on a /mcp/w/<workspace-id> path, with and without guardrails=off", () => {
+    const ws = "https://x.test/mcp/w/11111111-2222-4333-8444-555555555555";
+    expect(pluginServerUrl(`${ws}?context=${UUID}`, UUID)).toBe(`${ws}?context=${UUID}`);
+    expect(pluginServerUrl(`${ws}?context=${UUID}&guardrails=off`, UUID)).toBe(`${ws}?context=${UUID}&guardrails=off`);
+    expect(pluginServerUrl(`${ws}?context=${OTHER}`, UUID)).toBe(ws);
+    expect(pluginServerUrl(`${ws}?guardrails=off&context=${OTHER}`, UUID)).toBe(`${ws}?guardrails=off`);
+  });
+
+  it("drops a context= that names another context, with and without guardrails=off", () => {
+    expect(pluginServerUrl(`${BASE}?context=${OTHER}`, UUID)).toBe(BASE);
+    expect(pluginServerUrl(`${BASE}?context=${OTHER}&guardrails=off`, UUID)).toBe(`${BASE}?guardrails=off`);
+  });
+
+  it.each([
+    ["no plugin context", undefined],
+    ["an empty plugin context", ""],
+    ["a blank plugin context", "   "],
+    ["a plugin context that is a name, not a UUID", "dev"],
+    ["a plugin context that is a UUID with a character cut", UUID.slice(0, -1)],
+  ])("drops it for %s, as before", (_label, plugin) => {
+    expect(pluginServerUrl(`${BASE}?context=${UUID}`, plugin)).toBe(BASE);
+    expect(pluginServerUrl(`${BASE}?context=${UUID}&guardrails=off`, plugin)).toBe(`${BASE}?guardrails=off`);
+  });
+
+  it("drops a context= that is not a UUID, however the plugin's context reads", () => {
+    for (const value of ["dev", "", `${UUID}x`, "x".repeat(36)]) {
+      expect(pluginServerUrl(`${BASE}?context=${value}`, UUID)).toBe(BASE);
+      expect(pluginServerUrl(`${BASE}?context=${value}`, value)).toBe(BASE);
+    }
+  });
+
+  it("lets the first context= decide", () => {
+    expect(pluginServerUrl(`${BASE}?context=${UUID}&context=${OTHER}`, UUID)).toBe(`${BASE}?context=${UUID}`);
+    expect(pluginServerUrl(`${BASE}?context=${OTHER}&context=${UUID}`, UUID)).toBe(BASE);
+    expect(pluginServerUrl(`${BASE}?context=&context=${UUID}`, UUID)).toBe(BASE);
+  });
+
+  it("is the URL it was without a plugin context, for every query", () => {
+    for (const query of ["", "?guardrails=off", `?profile=core&guardrails=${UUID}`, `?context=${UUID}&tools=recall`]) {
+      expect(pluginServerUrl(`${BASE}${query}`)).toBe(pluginServerUrl(`${BASE}${query}`, "not-a-uuid"));
+    }
+    expect(pluginServerUrl(`${BASE}?context=${UUID}`)).toBe(BASE);
+  });
+});
+
 describe("tomlHasServer", () => {
   it.each([
     "[mcp_servers.kagura-memory]\nurl = 'x'",

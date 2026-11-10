@@ -41,6 +41,24 @@ ignores `cursor`, and returns the unfiltered listing; the caller cannot tell
 from the reply that the filter was not applied.** Python SDK/CLI 0.44.0 and
 0.45.x have no `files list` filters.
 
+### Plugin `server_url` keeps `context=` (#139)
+
+The default-context line of the kagura-memory plugin's SessionStart hook needs
+memory-cloud **0.149.0** and the plugin of that release
+([memory-cloud#2690](https://github.com/kagura-ai/memory-cloud/issues/2690)):
+the hook prints it only when the first `context=` of the plugin's `server_url`
+is its `context_id`, compared as UUIDs in any case, and prints nothing
+otherwise. `setup claude` therefore keeps `context=<id>` in the `server_url` it
+prints when the MCP URL's first `context=` is the context it prints as
+`context_id`, written lower-case and dashed, before `guardrails=off`
+(`profile`, `add_tools`, `tools` and `guardrails=<context-id>` are still
+dropped). With no `-c`, a context that is not a UUID, or a `context=` naming
+another context, the printed URL is what it was. A plugin before 0.149.0 does
+not read `context=`. This follows the plugin's own setup guide (`context=` must
+stay when the MCP URL carries it and it is the plugin's context); Python SDK
+0.45.1's `_plugin_server_url` still drops `context=`, a documented difference,
+not a Python port.
+
 ### CLI help pages
 
 `list --help` and `files list --help` no longer match Python 0.44.0 (the
