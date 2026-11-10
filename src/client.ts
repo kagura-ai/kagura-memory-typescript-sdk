@@ -2284,7 +2284,10 @@ export class KaguraClient {
     this.mcpUrl = strippedUrl;
     this.baseUrl = baseUrlFromMcp(strippedUrl);
     this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    // Chosen now, called as a plain function: a browser's fetch throws
+    // "Illegal invocation" when the client is its receiver (#142).
+    const fetchFn = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = (input, init) => fetchFn(input, init);
     // Looked up per warning, so a console.warn replaced later still gets it.
     this.warn = options.warn ?? ((message) => console.warn(message));
 

@@ -1932,7 +1932,9 @@ history, newest first. The route accepts a signed-in **web session only**:
 build the client with `session: true`. A client built with an API key, an OAuth
 profile or a resource token throws an `Error` before any request and never
 switches to another credential. On Node the supplied fetch must carry the
-session cookie; in a browser the request is sent with `credentials: "include"`.
+session cookie; in a browser the request is sent with `credentials: "include"`,
+and the default `fetch` (or `window.fetch` passed as `fetch`) works as it is,
+with no `.bind(window)`.
 
 ```ts
 const history = new WorkspaceClient({ baseUrl, session: true, fetch: sessionFetch });

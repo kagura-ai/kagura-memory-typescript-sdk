@@ -367,7 +367,10 @@ export class KaguraRestClient {
     validateHttpsUrl(strippedUrl, "Base URL");
     this.baseUrl = strippedUrl;
     this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    // Chosen now, called as a plain function: a browser's fetch throws
+    // "Illegal invocation" when the client is its receiver (#142).
+    const fetchFn = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = (input, init) => fetchFn(input, init);
 
     this.sessionMode = mode === "session";
     if (mode === "session") {

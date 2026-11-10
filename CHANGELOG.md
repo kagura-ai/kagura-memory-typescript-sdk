@@ -21,6 +21,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   client not built with `session: true`. It used to send the request with no
   credential at all, which the session-only route refused (#136).
 
+### Fixed
+
+- Every client called its `fetch` with the client as the receiver, which a
+  browser's `fetch` refuses ("Illegal invocation"), so in a browser every call
+  of a client built without a `fetch` option, or with `fetch: window.fetch`,
+  failed with `KaguraConnectionError`. The fetch is still chosen when the client
+  is constructed and is called with the same arguments (#142).
+
 ## [0.17.0] - 2026-11-05
 
 ### Added
