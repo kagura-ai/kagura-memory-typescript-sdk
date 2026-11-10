@@ -27,8 +27,8 @@ import {
 import { MAX_CHARS_MAX, MAX_CHARS_MIN } from "../../responseBudget.js";
 import { examples, rejectExtraArgs, requireArg, type Command, type CommandDeps } from "../command.js";
 import { formatDumpsJson } from "../modelDump.js";
-import { optionalRanged, parseChoice, parseJsonObject, parseTags, refuseNonFinite } from "../parse.js";
-import type { FlagSpec, ParsedArgs } from "../parseArgs.js";
+import { optionalChoice, optionalRanged, parseJsonObject, parseTags, refuseNonFinite } from "../parse.js";
+import type { FlagSpec } from "../parseArgs.js";
 import { runClientCommand } from "../runClientCommand.js";
 
 const CONTEXT_ID: FlagSpec = {
@@ -51,12 +51,6 @@ const MAX_CHARS: FlagSpec = {
 
 /** `bootstrap`'s own floor (server `BOOTSTRAP_INDEX_MIN_CHARS`, v0.115.0+). */
 const BOOTSTRAP_MIN_CHARS = 2_000;
-
-/** A `click.Choice` option, or `undefined` when it was not given. */
-function choice<T extends string>(args: ParsedArgs, flag: FlagSpec, choices: readonly T[]): T | undefined {
-  const raw = args.values[flag.name];
-  return raw === undefined ? undefined : parseChoice(flag, raw, choices);
-}
 
 /**
  * Print a reply as the Python CLI prints `model.model_dump(mode="json")`.
@@ -110,7 +104,7 @@ const bootstrap: Command = {
     ),
   spec: { flags: [CONTEXT_ID, SINCE, INCLUDE, FORMAT, BOOTSTRAP_MAX_CHARS] },
   run: async (deps, args) => {
-    const format = choice(args, FORMAT, BOOTSTRAP_FORMATS);
+    const format = optionalChoice(args, FORMAT, BOOTSTRAP_FORMATS);
     const maxChars = optionalRanged(args, BOOTSTRAP_MAX_CHARS);
     rejectExtraArgs(args);
     const since = args.values.since;
@@ -205,14 +199,14 @@ const changes: Command = {
   },
 };
 
-const ORDER_BYS: readonly ListOrderBy[] = ["updated_at", "created_at", "importance", "observed_at"];
+const ORDER_BYS: readonly ListOrderBy[] = ["updated_at", "created_at", "importance", "observed_at", "event_start"];
 const DIRECTIONS = ["asc", "desc"] as const;
 
 const ORDER_BY: FlagSpec = {
   name: "order-by",
   type: "value",
-  metavar: "[updated_at|created_at|importance|observed_at]",
-  help: "Sort key (default updated_at; observed_at needs server v0.127.0+)",
+  metavar: "[updated_at|created_at|importance|observed_at|event_start]",
+  help: "Sort key (default updated_at; observed_at needs server v0.127.0+, event_start v0.152.0+)",
 };
 const DIRECTION: FlagSpec = { name: "direction", type: "value", metavar: "[asc|desc]", help: "Default desc" };
 
@@ -246,8 +240,8 @@ const list: Command = {
     ],
   },
   run: async (deps, args) => {
-    const orderBy = choice(args, ORDER_BY, ORDER_BYS);
-    const direction = choice(args, DIRECTION, DIRECTIONS);
+    const orderBy = optionalChoice(args, ORDER_BY, ORDER_BYS);
+    const direction = optionalChoice(args, DIRECTION, DIRECTIONS);
     const limit = optionalRanged(args, LIST_LIMIT);
     const maxChars = optionalRanged(args, MAX_CHARS);
     rejectExtraArgs(args);

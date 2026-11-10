@@ -14,6 +14,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   filters. The route accepts a signed-in web session only: a client built with
   an API key or OAuth token throws before any request. Pro and Max workspaces,
   owners and admins (#136).
+- `listMatching({ orderBy: "event_start" })` and `kagura-memory list --order-by
+  event_start` order by the date of the event a memory describes, and `recall`
+  takes `eventAfter` / `eventBefore` (merged into `filters.event_after` /
+  `filters.event_before`, refused beside the same key in `filters`), for
+  memory-cloud v0.152.0. Both are sent only when set (#137).
+- `FilesClient.list` takes `scope` (`"all"` or `"workspace"`) and
+  `bindingContextId` (the wire `context_id`), and `kagura-memory files list`
+  takes `--scope` and `--binding-context-id`, for memory-cloud v0.145.0. Both
+  are sent only when set; `scope: "workspace"` beside a bound context is
+  refused before the request, as the server refuses it. A server before
+  v0.145.0 ignores both and returns the unfiltered listing, which `list`
+  now detects from the rows' `context_id` and reports as a `KaguraError`
+  naming v0.145.0 instead of returning it (#138).
 
 ### Changed
 
@@ -28,6 +41,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of a client built without a `fetch` option, or with `fetch: window.fetch`,
   failed with `KaguraConnectionError`. The fetch is still chosen when the client
   is constructed and is called with the same arguments (#142).
+- `setup claude` keeps `context=<id>` in the plugin `server_url` it prints
+  when the MCP URL's first `context=` is the context printed as the plugin's
+  `context_id` (both in the plugin hook's dashed UUID form, equal in any
+  case, written lower-case, before `guardrails=off`). Since memory-cloud v0.149.0 the plugin's
+  SessionStart hook names the default context to the model only then; the
+  printed URL used to drop it, so a user who entered it never got that line.
+  When setup has no plugin context (no `-c`, no `context_id` in the
+  project's `.kagura.json`, no `KAGURA_CONTEXT_ID`), the context is not a
+  dashed UUID, or the `context=` names another context, the URL is unchanged. `pluginServerUrl` takes the plugin's context
+  as a second argument (#139).
 
 ## [0.17.0] - 2026-11-05
 

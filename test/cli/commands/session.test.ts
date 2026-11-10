@@ -79,7 +79,7 @@ describe("session commands", () => {
     ],
     [
       "list",
-      ["--filters TEXT", "--order-by [updated_at|created_at|importance|observed_at]", "--direction [asc|desc]", "--details", "--max-chars INTEGER"],
+      ["--filters TEXT", "--order-by [updated_at|created_at|importance|observed_at|event_start]", "--direction [asc|desc]", "--details", "--max-chars INTEGER"],
     ],
   ])("%s --help shows its options", async (command, options) => {
     const h = harness();

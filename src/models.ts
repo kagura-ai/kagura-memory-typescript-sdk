@@ -2458,9 +2458,10 @@ export type BootstrapFormat = "full" | "index";
 
 /**
  * Valid `listMatching` `orderBy` values (request side only). `observed_at`
- * needs memory-cloud v0.127.0+ (#2330) and puts memories without one last.
+ * needs memory-cloud v0.127.0+ (#2330), `event_start` v0.152.0+ (#2724);
+ * each puts memories without that date last, in both directions.
  */
-export type ListOrderBy = "updated_at" | "created_at" | "importance" | "observed_at";
+export type ListOrderBy = "updated_at" | "created_at" | "importance" | "observed_at" | "event_start";
 
 /**
  * One `plan_headroom` entry (memory-cloud v0.142.0+, #2615): a plan
