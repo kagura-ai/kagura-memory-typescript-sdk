@@ -902,6 +902,11 @@ added**, each on purpose or out of reach:
   entry, so it never stops there. This port's API-key form never runs
   `hermes mcp add`: it prints the entry to put in place of the existing
   one, as Python does under `-y`.
+- `sleep rollback` prints one line the Python CLI 0.44.0 does not:
+  `related_indexes_reverted` in the summary, after `points_requeued` (0
+  when the server sends no key). It is the counter memory-cloud v0.153.0
+  added for its opt-in Sleep related index, printed here as the Python CLI
+  prints it from 0.46.0; the rest of the output is 0.44.0's.
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from

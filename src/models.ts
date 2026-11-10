@@ -1109,11 +1109,12 @@ export interface RollbackSummary {
   /**
    * `index_related` actions of the opt-in Sleep related index
    * (`SLEEP_RELATED_INDEX_ENABLED` on the server) that the rollback undid
-   * (server v0.153.0+, memory-cloud#2728). The server sends the key only
-   * when at least one was undone, so it is absent otherwise; the model the
-   * CLI prints reads an absent key as 0.
-   *
-   * @default 0
+   * (server v0.153.0+, memory-cloud#2728). Unlike the counters above, the
+   * server sends this key only when at least one was undone: on
+   * `rollbackSleepRun`'s result and on `KaguraPartialRollbackError.summary`,
+   * which are the reply as it arrived, it is usually `undefined`, so read it
+   * as `related_indexes_reverted ?? 0`. The model `kagura-memory sleep
+   * rollback` prints reads an absent key as 0.
    */
   related_indexes_reverted?: number;
   /** One entry per action that could not be reversed. */

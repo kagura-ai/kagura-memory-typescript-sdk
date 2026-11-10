@@ -20,11 +20,19 @@ the model's dump, which drops a key the model does not declare, so the count
 was missing from its output on a complete and on a partial rollback. From
 0.18.1 the field is typed and printed, after `points_requeued` and with 0 when
 the server sends no key, as the Python SDK and CLI 0.46.0 do
-([python-sdk#335](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/335);
-field order and default read from the published 0.46.0 model). `sleep
-rollback` therefore prints one more line than the Python CLI 0.44.0 does.
-`SleepAction`'s doc comment lists `index_related`. Verified by contract tests;
-no call was made to a server with the related index enabled.
+([python-sdk#335](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/335)).
+On the library's results the key stays absent when the server sends none, so
+read it as `related_indexes_reverted ?? 0`. `SleepAction`'s doc comment lists
+`index_related`.
+
+The parity target stays the Python SDK and CLI 0.44.0. This one field is ahead
+of it on purpose: `sleep rollback` prints one more line than the Python CLI
+0.44.0 does, the line 0.46.0 prints, and the README lists it among the
+differences. The expected output is recorded from the published 0.46.0 models
+(`test/cli/commands/sleepRollback046.json`, written by
+`recordRollbackSummary046.py`; run under 0.44.0, the same script reproduces
+the 0.44.0 CLI record byte for byte). Verified by those records and contract
+tests; no call was made to a server with the related index enabled.
 
 ## 0.18.0
 

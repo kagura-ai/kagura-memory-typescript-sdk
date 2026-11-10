@@ -2,29 +2,33 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
-const cases: Array<{
+
+interface RecordedCase {
   name: string; argv: string[]; toolTexts: Record<string, string>;
   confirm: boolean | null; prompts: string[]; calls: unknown[];
   code: number; stdout: string; stderr: string;
-}> = JSON.parse(readFileSync(new URL("./sleepRollback110.json", import.meta.url), "utf8"));
-
-/**
- * The recorded 0.44.0 stdout as the Python CLI 0.46.0 prints it: its
- * `RollbackSummary` gained `related_indexes_reverted` (default 0) right
- * after `points_requeued` (python-sdk#335, memory-cloud v0.153.0), so every
- * summary dump has that one more line. Order and default were read from the
- * published kagura-memory 0.46.0 model.
- */
-function asPython046(stdout: string): string {
-  return stdout.replace(
-    /^( *)"points_requeued": \d+,\n/gm,
-    (line: string, indent: string) => `${line}${indent}"related_indexes_reverted": 0,\n`,
-  );
 }
+
+// Recorded with kagura-memory 0.44.0, click 8.3.3, pydantic 2.13.4.
+// CliRunner invokes the real CLI and SDK; only _call_tool and click.confirm
+// are replaced to capture requests/prompts without network or terminal I/O.
+const cases: RecordedCase[] = JSON.parse(readFileSync(new URL("./sleepRollback110.json", import.meta.url), "utf8"));
+
+// What the published kagura-memory 0.46.0 models print for the same replies
+// (recordRollbackSummary046.py; under 0.44.0 the same procedure reproduces
+// the 0.44.0 record above byte for byte). 0.46.0's `RollbackSummary` has
+// `related_indexes_reverted` (memory-cloud v0.153.0, python-sdk#335), so
+// every summary it prints has that line. The last two cases carry a count.
+const record046: {
+  recorded_with: string;
+  cases: Array<{ name: string; stdout: string; argv?: string[]; toolText?: string }>;
+} = JSON.parse(readFileSync(new URL("./sleepRollback046.json", import.meta.url), "utf8"));
+const stdout046 = new Map(record046.cases.filter(c => c.toolText === undefined).map(c => [c.name, c.stdout]));
+const relatedIndexCases = record046.cases.filter(c => c.toolText !== undefined);
 
 async function runRollback(c: {
   argv: string[]; toolTexts: Record<string, string>; confirm: boolean | null;
-}): Promise<{ code: number; stdout: string; stderr: string; prompts: string[]; server: FakeServer; closed: boolean }> {
+}): Promise<{ code: number; stdout: string; stderr: string; prompts: string[]; calls: unknown[]; closed: boolean }> {
   const server = new FakeServer();
   Object.assign(server.toolTexts, c.toolTexts);
   const out: string[] = [], err: string[] = [], prompts: string[] = [];
@@ -46,49 +50,64 @@ async function runRollback(c: {
     code,
     stdout: out.map(line => `${line}\n`).join(""),
     stderr: err.map(line => `${line}\n`).join(""),
-    prompts, server, closed,
+    prompts,
+    calls: server.requests.filter(r => r.body?.method === "tools/call").map(r => {
+      const p = r.body!.params as { name: string; arguments: unknown };
+      return [p.name, p.arguments];
+    }),
+    closed,
   };
 }
+
+describe("the Python 0.46.0 record (#144)", () => {
+  it("was made with kagura-memory 0.46.0 and covers every recorded summary", () => {
+    expect(record046.recorded_with).toBe("kagura-memory 0.46.0");
+    const withSummary = cases.filter(c => c.stdout.includes('"rollback_summary": {')).map(c => c.name);
+    expect(withSummary.length).toBeGreaterThan(0);
+    expect([...stdout046.keys()]).toEqual(withSummary);
+    expect(relatedIndexCases).toHaveLength(2);
+  });
+
+  it("differs from the 0.44.0 record by the related_indexes_reverted line alone", () => {
+    for (const c of cases) {
+      const later = stdout046.get(c.name);
+      if (later === undefined) continue;
+      expect(later).not.toBe(c.stdout);
+      expect(later.replace('    "related_indexes_reverted": 0,\n', "")).toBe(c.stdout);
+    }
+  });
+});
+
+// The stdout is the 0.46.0 record where a summary is printed, and the 0.44.0
+// record everywhere else (errors, a declined prompt, help, the report). The
+// prompts, stderr, calls and exit codes are the 0.44.0 CLI's.
+describe("sleep rollback, byte for byte Python 0.44.0, its summary as 0.46.0 prints it (#110, #144)", () => {
+  it.each(cases)("$name", async (c) => {
+    const run = await runRollback(c);
+    expect(run.code).toBe(c.code);
+    expect(run.stdout).toBe(stdout046.get(c.name) ?? c.stdout);
+    expect(run.stderr).toBe(c.stderr);
+    expect(run.prompts).toEqual(c.prompts);
+    expect(run.calls).toEqual(c.calls);
+    expect(run.closed).toBe(c.name !== "help");
+  });
+});
 
 // memory-cloud v0.153.0 counts the undone `index_related` actions of the
 // opt-in Sleep related index in the summary, only when at least one was
 // undone (#144).
-describe("sleep rollback prints related_indexes_reverted (#144)", () => {
-  const argv = ["sleep", "rollback", "ctx-1", "r-1", "--yes"];
-
-  it("keeps the count of a complete rollback", async () => {
-    const run = await runRollback({
-      argv,
-      confirm: null,
-      toolTexts: {
-        rollback_sleep_run: JSON.stringify({
-          report_id: "r-1", status: "rolled_back",
-          rollback_summary: { edges_deleted: 1, related_indexes_reverted: 2 },
-        }),
-      },
-    });
-    expect(run.code).toBe(0);
-    expect(run.stdout).toContain('    "points_requeued": 0,\n    "related_indexes_reverted": 2,\n    "errors": []\n');
-  });
-
-  it("keeps the count of a partial rollback", async () => {
-    const run = await runRollback({
-      argv,
-      confirm: null,
-      toolTexts: {
-        rollback_sleep_run: JSON.stringify({
-          status: "error", error: "partial_rollback", report_id: "r-1", message: "Some actions failed",
-          rollback_summary: { related_indexes_reverted: 3, errors: ["cannot undo merge"] },
-        }),
-      },
-    });
-    expect(run.code).toBe(1);
-    expect(run.stdout).toContain('    "points_requeued": 0,\n    "related_indexes_reverted": 3,\n    "errors": [\n');
+describe("sleep rollback prints related_indexes_reverted as Python 0.46.0 does (#144)", () => {
+  it.each(relatedIndexCases)("$name", async (c) => {
+    const partial = (JSON.parse(c.toolText!) as { error?: string }).error === "partial_rollback";
+    const run = await runRollback({ argv: c.argv!, confirm: null, toolTexts: { rollback_sleep_run: c.toolText! } });
+    expect(run.stdout).toBe(c.stdout);
+    expect(run.stdout).toMatch(/"related_indexes_reverted": [23],\n/);
+    expect(run.code).toBe(partial ? 1 : 0);
   });
 
   it("refuses a count that is not an integer, as the other counters are refused", async () => {
     const run = await runRollback({
-      argv,
+      argv: ["sleep", "rollback", "ctx-1", "r-1", "--yes"],
       confirm: null,
       toolTexts: {
         rollback_sleep_run: JSON.stringify({
@@ -99,49 +118,5 @@ describe("sleep rollback prints related_indexes_reverted (#144)", () => {
     });
     expect(run.code).toBe(1);
     expect(run.stdout).toBe("");
-  });
-});
-
-// Recorded with kagura-memory 0.44.0, click 8.3.3, pydantic 2.13.4.
-// CliRunner invokes the real CLI and SDK; only _call_tool and click.confirm
-// are replaced to capture requests/prompts without network or terminal I/O.
-// The expected stdout is that record with the one line 0.46.0 adds.
-describe("sleep rollback, byte for byte Python 0.44.0 plus 0.46.0's related_indexes_reverted (#110, #144)", () => {
-  it("adds exactly one line to each recorded summary", () => {
-    const recorded = cases.filter(c => c.stdout.includes('"points_requeued"'));
-    expect(recorded.length).toBeGreaterThan(0);
-    for (const c of recorded) {
-      const lines = asPython046(c.stdout).split("\n").length - c.stdout.split("\n").length;
-      expect(lines).toBe(1);
-    }
-  });
-
-  it.each(cases)("$name", async (c) => {
-    const server = new FakeServer();
-    Object.assign(server.toolTexts, c.toolTexts);
-    const out: string[] = [], err: string[] = [], prompts: string[] = [];
-    let closed = false;
-    const deps = {
-      write: (line: string) => void out.push(line),
-      writeError: (line: string) => void err.push(line),
-      confirm: async (text: string) => { prompts.push(text); return c.confirm; },
-      loadConfig: () => ({ api_key: "k" }),
-      makeClient: (options: Record<string, unknown>) => {
-        const client = makeClient(server, options);
-        const close = client.close.bind(client);
-        client.close = async () => { closed = true; await close(); };
-        return client;
-      },
-    } as unknown as CliDeps;
-    expect(await runCli(c.argv, deps)).toBe(c.code);
-    const stdout = out.map(line => `${line}\n`).join("");
-    expect(stdout).toBe(asPython046(c.stdout));
-    expect(err.map(line => `${line}\n`).join("")).toBe(c.stderr);
-    expect(prompts).toEqual(c.prompts);
-    expect(server.requests.filter(r => r.body?.method === "tools/call").map(r => {
-      const p = r.body!.params as { name: string; arguments: unknown };
-      return [p.name, p.arguments];
-    })).toEqual(c.calls);
-    expect(closed).toBe(c.name !== "help");
   });
 });
