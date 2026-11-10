@@ -13,17 +13,18 @@ import * as fs from "node:fs";
 
 import { sentReply } from "../../client.js";
 import { excMessage, KaguraError } from "../../errors.js";
-import type { FilesClient } from "../../filesClient.js";
+import type { FilesClient, FilesListScope } from "../../filesClient.js";
 import { realPath } from "../../guardrailExport.js";
 import type { FileObject } from "../../models.js";
 import { emitProgress, type ProgressEvent } from "../../progress.js";
 import { FILE_LIST_RESPONSE, FILE_OBJECT, readModel } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
+import { normalizeUuid } from "../../pyCompat.js";
 import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
 import { formatModelJson } from "../modelDump.js";
 import { cliErrorMessage, formatJson } from "../output.js";
-import { CliError, CliUsageError, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
+import { CliError, CliUsageError, optionalChoice, paramLabel, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { parseProgress, PROGRESS_FLAG, resolveProgress, VERBOSE_FLAG } from "../progress.js";
 
@@ -326,6 +327,26 @@ const LIMIT: FlagSpec = {
   help: "Max results (1-500)",
 };
 
+const SCOPES: readonly FilesListScope[] = ["all", "workspace"];
+
+const SCOPE: FlagSpec = {
+  name: "scope",
+  type: "value",
+  metavar: "[all|workspace]",
+  help:
+    "workspace: only the workspace-shared files, bound to no context (server v0.145.0+; an " +
+    "older server ignores it, and the command then fails if a listed file is bound to a " +
+    "context). Default: all",
+};
+
+const LIST_BINDING_CONTEXT_ID: FlagSpec = {
+  name: "binding-context-id",
+  type: "value",
+  help:
+    "Only the files bound to this context UUID (server v0.145.0+; an older server ignores " +
+    "it, and the command then fails if a listed file is bound elsewhere). Not with --scope workspace.",
+};
+
 const list: Command = {
   summary: "List uploaded files in a context, newest first.",
   description: "  Example:\n    kagura-memory files list --context-id ctx-uuid",
@@ -334,6 +355,8 @@ const list: Command = {
       { ...CONTEXT_ID, help: "Context (workspace) UUID to list" },
       LIMIT,
       { name: "cursor", type: "value", help: "Forward-compat cursor (server v0.16+)" },
+      SCOPE,
+      LIST_BINDING_CONTEXT_ID,
     ],
   },
   run: async (deps, args) => {
@@ -342,14 +365,36 @@ const list: Command = {
       raw === undefined
         ? 50
         : parseRanged(LIMIT, raw);
+    const scope = optionalChoice(args, SCOPE, SCOPES);
     rejectExtraArgs(args);
     const cursor = args.values.cursor;
+    const rawBinding = args.values["binding-context-id"];
+    if (scope === "workspace" && rawBinding !== undefined) {
+      throw new CliUsageError("--scope workspace cannot be combined with --binding-context-id.");
+    }
+    // Checked here, before the credential is paired, like the other UUID flags.
+    let bindingContextId: string | undefined;
+    if (rawBinding !== undefined) {
+      try {
+        bindingContextId = normalizeUuid(rawBinding, "--binding-context-id");
+      } catch {
+        throw new CliUsageError(
+          `Invalid value for ${paramLabel(LIST_BINDING_CONTEXT_ID)}: ${pyRepr(rawBinding)} is not a valid context UUID.`,
+        );
+      }
+    }
     // FilesClient.list has read the page through Python's models; this
     // reads it once more, as a whole, for the dump.
     return runFilesCommand(deps, args.values["context-id"], async (files, contextId) =>
       formatModelJson(
         readModel(
-          await files.list({ contextId, limit, ...(cursor !== undefined ? { cursor } : {}) }),
+          await files.list({
+            contextId,
+            limit,
+            ...(cursor !== undefined ? { cursor } : {}),
+            ...(scope !== undefined ? { scope } : {}),
+            ...(bindingContextId !== undefined ? { bindingContextId } : {}),
+          }),
           FILE_LIST_RESPONSE,
           "FilesClient.list",
         ),

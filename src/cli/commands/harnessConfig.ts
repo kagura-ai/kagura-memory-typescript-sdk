@@ -14,7 +14,8 @@
 
 import * as net from "node:net";
 
-import { mcpUrlGuardrailsOff, parseMcpUrl, withoutQuery, type McpUrl } from "../../http.js";
+import { mcpUrlGuardrailsOff, parseMcpUrl, queryParam, withoutQuery, type McpUrl } from "../../http.js";
+import { isCanonicalUuid, pyStrip } from "../../pyCompat.js";
 
 /**
  * The variable Codex and OpenClaw entries read the key from unless
@@ -91,19 +92,61 @@ export function isHttpUrl(url: string): boolean {
  * The URL for the Claude plugin's `server_url` setting.
  *
  * The plugin's hooks call the server themselves with their own
- * `context_id`, so the entry's tool view (`profile`, `add_tools`), default
- * `context` and guardrails context mean nothing there; they stay on the MCP
- * entry. `guardrails=off` is the one parameter kept: it is what stops the
- * server from also sending a digest of the memories the hooks already
- * deliver. It is read as the server reads it ({@link mcpUrlGuardrailsOff}):
- * the first value, trimmed as Python trims it, in any case. The rest is
- * rebuilt as Python's `urlunsplit` rebuilds it ({@link withoutQuery}), the
- * scheme lower-cased, as the entry's own URL is when setup rewrites it.
+ * `context_id`, so the entry's tool view (`profile`, `add_tools`) and
+ * guardrails context mean nothing there; they stay on the MCP entry. Two
+ * parameters are kept:
+ *
+ * - `guardrails=off`: it is what stops the server from also sending a
+ *   digest of the memories the hooks already deliver. It is read as the
+ *   server reads it ({@link mcpUrlGuardrailsOff}): the first value, trimmed
+ *   as Python trims it, in any case.
+ * - `context=<id>`, from memory-cloud v0.149.0 and the plugin of that
+ *   release: its SessionStart hook names the default context to the model
+ *   when the first `context=` of `server_url` is the plugin's own
+ *   `context_id`, and prints nothing otherwise. The hook's `canonical_uuid`
+ *   takes only the 36-character dashed form, in any case: a dashless,
+ *   braced or `urn:uuid:` spelling is no UUID to it, for the plugin's
+ *   `context_id` as for the URL. So `context` is kept only when
+ *   `pluginContextId` is given, both it and the URL's first `context` value
+ *   (read as the server reads a first value, {@link queryParam}) are
+ *   dashed UUIDs after Python's strip, and they are equal ignoring case.
+ *   It is written lower-case and not percent-encoded: the hook reads the raw
+ *   pair. A plugin before v0.149.0 never reads it. The Python SDK 0.45.1
+ *   still drops it.
+ *
+ * `context` comes first, then `guardrails=off`; the hook takes the first
+ * `context=` pair wherever it sits, so the order is only for the reader. The
+ * rest is rebuilt as Python's `urlunsplit` rebuilds it ({@link withoutQuery}),
+ * the scheme lower-cased, as the entry's own URL is when setup rewrites it.
+ *
+ * @param pluginContextId The context printed as the plugin's `context_id`
+ *   (`setup claude`'s resolved context: `-c`, else the project's
+ *   `.kagura.json` `context_id`, else `KAGURA_CONTEXT_ID`). Absent, or not a
+ *   dashed UUID (a name this bin did not resolve, or another spelling),
+ *   nothing can be compared: `context` is dropped.
  */
-export function pluginServerUrl(url: McpUrl): string {
+export function pluginServerUrl(url: McpUrl, pluginContextId?: string): string {
   const parsed = parseMcpUrl(url);
   const base = withoutQuery(parsed);
-  return mcpUrlGuardrailsOff(parsed) ? `${base}?guardrails=off` : base;
+  const params: string[] = [];
+  const context = pluginDefaultContext(parsed, pluginContextId);
+  if (context !== null) params.push(`context=${context}`);
+  if (mcpUrlGuardrailsOff(parsed)) params.push("guardrails=off");
+  return params.length > 0 ? `${base}?${params.join("&")}` : base;
+}
+
+/**
+ * The lower-case dashed UUID of the URL's first `context` value when it is
+ * the plugin's context, else `null`; both must be in the hook's accepted
+ * dashed form.
+ */
+function pluginDefaultContext(url: McpUrl, pluginContextId: string | undefined): string | null {
+  const given = queryParam(url, "context");
+  if (given === undefined || typeof pluginContextId !== "string") return null;
+  const wanted = pyStrip(pluginContextId);
+  const first = pyStrip(given);
+  if (!isCanonicalUuid(wanted) || !isCanonicalUuid(first)) return null;
+  return wanted.toLowerCase() === first.toLowerCase() ? wanted.toLowerCase() : null;
 }
 
 function escapeRegExp(text: string): string {

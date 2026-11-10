@@ -373,6 +373,9 @@ export interface RecallOptions {
    *   `updated_before`: ISO 8601.
    * - `observed_after` (inclusive) / `observed_before` (exclusive): when
    *   the fact held (server v0.127.0+); see {@link RecallOptions.observedAfter}.
+   * - `event_after` (inclusive) / `event_before` (exclusive): the days the
+   *   memory's event covers (server v0.152.0+); see
+   *   {@link RecallOptions.eventAfter}.
    * - `source_uri_prefix` (e.g. `"vault://my-vault/"`) and `source_type`.
    * - `trust_tier: "trusted"` excludes external/connector-ingested
    *   memories.
@@ -463,6 +466,26 @@ export interface RecallOptions {
    * `filters.observed_before`.
    */
   observedBefore?: string;
+  /**
+   * Keep memories whose event falls at or after this day (inclusive): a
+   * memory carries the date of the event it describes as
+   * `details.event_start` / `details.event_end`, which the server resolves
+   * from `details.event_phrase` (memory-cloud v0.152.0+, #2722 / #2724). An
+   * ISO 8601 date or datetime; a datetime counts as its UTC day. A memory
+   * matches when its event range overlaps the window, and a memory without
+   * an event date never matches. Sent as `filters.event_after`, the same as
+   * putting that key in {@link RecallOptions.filters}; giving both throws
+   * before any request. A server before v0.152.0 does not know the key and
+   * does not filter. On a deployment upgraded from an earlier version the
+   * event indexes exist only from v0.152.1.
+   */
+  eventAfter?: string;
+  /**
+   * Keep memories whose event starts before this day (exclusive), as
+   * {@link RecallOptions.eventAfter} does; a datetime past midnight counts
+   * as the day after it. Sent as `filters.event_before`.
+   */
+  eventBefore?: string;
 }
 
 export interface UpdateMemoryOptions {
@@ -1062,8 +1085,10 @@ export interface ListMatchingOptions {
    * `delivery_mode`, `tags` (+ `tags_match` `any` | `all`,
    * `tags_normalize`), `importance` `{gte|lte|gt|lt}`, `created_after` /
    * `created_before` / `updated_after` / `updated_before` (ISO 8601),
-   * `observed_after` / `observed_before` (v0.127.0+), `source_uri_prefix`,
-   * `trust_tier: "trusted"`, and `details.<key>` — a scalar matched with
+   * `observed_after` / `observed_before` (v0.127.0+), `event_after`
+   * (inclusive) / `event_before` (exclusive; v0.152.0+: a memory matches when
+   * its event range overlaps the window, one without an event date never
+   * does), `source_uri_prefix`, `trust_tier: "trusted"`, and `details.<key>` — a scalar matched with
    * its stored JSON type (`2` is not `2.0` or `"2"`; v0.96.0+). The server
    * refuses an unknown filter (`validation_error`). Sent when set, `{}`
    * included.
@@ -1071,9 +1096,10 @@ export interface ListMatchingOptions {
   filters?: Record<string, unknown>;
   /**
    * `"updated_at"` (server default; a never-edited memory sorts by
-   * `created_at`), `"created_at"`, `"importance"` or `"observed_at"`
-   * (memory-cloud v0.127.0+, #2330; memories without one go last). The id
-   * breaks ties.
+   * `created_at`), `"created_at"`, `"importance"`, `"observed_at"`
+   * (memory-cloud v0.127.0+, #2330) or `"event_start"` (v0.152.0+, #2724);
+   * memories without that date go last, in both directions. The id breaks
+   * ties.
    */
   orderBy?: ListOrderBy;
   /** `"asc"` or `"desc"` (server default). */
@@ -2930,8 +2956,8 @@ export class KaguraClient {
    *   more than 20 IDs; if `searchMode` is invalid; if `verbosity` is not
    *   `"compact"` / `"full"`; if `full` (0-100) or `maxChars`
    *   (10,000-100,000) is not an integer in range; or if `observedAfter` /
-   *   `observedBefore` is given beside the same key in `filters`. Checked
-   *   before any request.
+   *   `observedBefore` / `eventAfter` / `eventBefore` is given beside the
+   *   same key in `filters`. Checked before any request.
    */
   async recall(options: RecallOptions): Promise<RecallResponse> {
     const { query, contextId, contextIds, searchMode } = options;
@@ -2960,12 +2986,15 @@ export class KaguraClient {
     if (options.useRerank !== undefined) {
       args.use_rerank = options.useRerank;
     }
-    // observedAfter / observedBefore are filter keys (server v0.127.0+),
-    // merged into a copy of `filters`, never beside the same key there.
+    // observedAfter / observedBefore (server v0.127.0+) and eventAfter /
+    // eventBefore (v0.152.0+) are filter keys, merged into a copy of
+    // `filters`, never beside the same key there.
     let filters = options.filters;
     for (const [option, key] of [
       ["observedAfter", "observed_after"],
       ["observedBefore", "observed_before"],
+      ["eventAfter", "event_after"],
+      ["eventBefore", "event_before"],
     ] as const) {
       const value = options[option];
       if (!isSet(value)) continue;
@@ -5184,7 +5213,7 @@ export class KaguraClient {
    * a bounding box and the cross-context "my memories" view. This method is
    * MCP and takes `recall`'s exact filter vocabulary plus `details.<key>`
    * equality, orders by `updated_at` / `created_at` / `importance` /
-   * `observed_at` and pages with a cursor. In a private context both list
+   * `observed_at` / `event_start` (v0.152.0+) and pages with a cursor. In a private context both list
    * only the caller's own memories.
    *
    * Call again with `cursor: result.next_cursor` while `result.has_more`.

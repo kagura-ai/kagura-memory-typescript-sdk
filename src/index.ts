@@ -103,7 +103,7 @@ export type {
 } from "./memoryClient.js";
 
 export { FilesClient } from "./filesClient.js";
-export type { FilesClientOptions, UploadOptions } from "./filesClient.js";
+export type { FilesClientOptions, FilesListScope, UploadOptions } from "./filesClient.js";
 
 // Progress events from FilesClient.upload and ResourceClient.ingestEvents
 // (the Python SDK's `logger=` hooks, #57).

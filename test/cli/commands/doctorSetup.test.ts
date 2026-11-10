@@ -2206,6 +2206,87 @@ describe("setup claude --add-tools and --context (#83)", () => {
     );
   });
 
+  // memory-cloud v0.149.0 (#139): the plugin's hook prints the default-context
+  // line when the first context= of its server_url is its context_id.
+  describe("the plugin's server_url keeps context= when it is the plugin's context (#139)", () => {
+    const OTHER_CONTEXT = "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f";
+    const WORKSPACE_PATH = "/mcp/w/11111111-2222-4333-8444-555555555555";
+
+    async function printed(mcpUrl: string, ...flags: string[]): Promise<string> {
+      const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
+      expect(await runCli(claude("--mcp-url", mcpUrl, ...flags), h.deps)).toBe(0);
+      const settings = (JSON.parse(h.out.join("\n")).notes as string[]).find((n) => n.startsWith("Plugin settings"))!;
+      const match = /server_url = (\S+), context_id = (.*)$/.exec(settings)!;
+      return `${match[1]} | ${match[2]}`;
+    }
+
+    it.each([
+      ["", `https://x.test/mcp?context=${CONTEXT}`],
+      ["&guardrails=off", `https://x.test/mcp?context=${CONTEXT}&guardrails=off`],
+    ])("keeps a matching context= (query %j)", async (extra, expected) => {
+      expect(await printed(`https://x.test/mcp?profile=core&context=${CONTEXT}${extra}`, "-c", CONTEXT)).toBe(
+        `${expected} | ${CONTEXT}`,
+      );
+    });
+
+    it("keeps an upper-case one, written canonical, and one on a /mcp/w/<workspace-id> path", async () => {
+      expect(await printed(`https://x.test/mcp?context=${CONTEXT.toUpperCase()}`, "-c", CONTEXT)).toBe(
+        `https://x.test/mcp?context=${CONTEXT} | ${CONTEXT}`,
+      );
+      expect(await printed(`https://x.test${WORKSPACE_PATH}?guardrails=off&context=${CONTEXT}`, "-c", CONTEXT)).toBe(
+        `https://x.test${WORKSPACE_PATH}?context=${CONTEXT}&guardrails=off | ${CONTEXT}`,
+      );
+    });
+
+    // One run each: a run with -c writes it into the project's .kagura.json, which the next would read.
+    it.each([
+      ["another context", `https://x.test/mcp?context=${OTHER_CONTEXT}`, ["-c", CONTEXT], `https://x.test/mcp | ${CONTEXT}`],
+      [
+        "another context on a workspace path, with guardrails=off",
+        `https://x.test${WORKSPACE_PATH}?context=${OTHER_CONTEXT}&guardrails=off`,
+        ["-c", CONTEXT],
+        `https://x.test${WORKSPACE_PATH}?guardrails=off | ${CONTEXT}`,
+      ],
+      ["no -c", `https://x.test/mcp?context=${CONTEXT}`, [], "https://x.test/mcp | (none; pass -c)"],
+      [
+        "no -c, with guardrails=off",
+        `https://x.test/mcp?context=${CONTEXT}&guardrails=off`,
+        [],
+        "https://x.test/mcp?guardrails=off | (none; pass -c)",
+      ],
+      [
+        "a repeated context= whose first is another context",
+        `https://x.test/mcp?context=${OTHER_CONTEXT}&context=${CONTEXT}`,
+        ["-c", CONTEXT],
+        `https://x.test/mcp | ${CONTEXT}`,
+      ],
+      [
+        "a repeated context= whose first is the plugin's",
+        `https://x.test/mcp?context=${CONTEXT}&context=${OTHER_CONTEXT}`,
+        ["-c", CONTEXT],
+        `https://x.test/mcp?context=${CONTEXT} | ${CONTEXT}`,
+      ],
+    ])("prints %s as expected", async (_label, mcpUrl, flags, expected) => {
+      expect(await printed(mcpUrl, ...flags)).toBe(expected);
+    });
+
+    it("keeps it when the plugin context comes from the project's .kagura.json, which an earlier run wrote", async () => {
+      const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
+      expect(await runCli(claude("--mcp-url", "https://x.test/mcp", "-c", CONTEXT), h.deps)).toBe(0);
+      h.out.length = 0;
+      expect(await runCli(claude("--mcp-url", `https://x.test/mcp?context=${CONTEXT}`), h.deps)).toBe(0);
+      const settings = (JSON.parse(h.out.join("\n")).notes as string[]).find((n) => n.startsWith("Plugin settings"))!;
+      expect(settings).toContain(`server_url = https://x.test/mcp?context=${CONTEXT}, context_id = ${CONTEXT}`);
+    });
+
+    it("prints today's server_url when -c names a context that is no UUID", async () => {
+      const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
+      expect(await runCli(claude("--mcp-url", `https://x.test/mcp?context=${CONTEXT}`, "-c", "dev"), h.deps)).toBe(0);
+      const settings = (JSON.parse(h.out.join("\n")).notes as string[]).find((n) => n.startsWith("Plugin settings"))!;
+      expect(settings).toContain("server_url = https://x.test/mcp, ");
+    });
+  });
+
   it("keeps the plugin's server_url free of the tool view and the default context", async () => {
     const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
     await runCli(claude("--mcp-url", "https://x.test/mcp", "--guardrails", "off", "--add-tools", "explore", "--context", CONTEXT), h.deps);

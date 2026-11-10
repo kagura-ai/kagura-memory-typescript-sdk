@@ -277,6 +277,17 @@ export function parseChoice<T extends string>(
   return match;
 }
 
+/** A `click.Choice` option, or `undefined` when it was not given: {@link parseChoice} of its raw value. */
+export function optionalChoice<T extends string>(
+  args: ParsedArgs,
+  flag: FlagSpec,
+  choices: readonly T[],
+  options: ChoiceOptions = {},
+): T | undefined {
+  const raw = args.values[flag.name];
+  return raw === undefined ? undefined : parseChoice(flag, raw, choices, options);
+}
+
 /**
  * Click's error for a required option or argument that was not given:
  * `Missing option '--user' / '-u'.`, and for a Choice the choices, one per

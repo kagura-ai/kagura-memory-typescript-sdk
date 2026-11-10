@@ -41,6 +41,12 @@ interface Case {
   code: number;
   stdout: string;
   stderr: string;
+  /**
+   * What this CLI prints where it knowingly differs from the recorded Python
+   * 0.44.0 run: `--order-by` also takes `event_start` (server v0.152.0, #137),
+   * which Python 0.44.0 does not list.
+   */
+  ourStderr?: string;
 }
 
 const CASES: Case[] = [
@@ -349,6 +355,7 @@ const CASES: Case[] = [
     code: 2,
     stdout: "",
     stderr: "Usage: kagura list [OPTIONS]\nTry 'kagura list --help' for help.\n\nError: Invalid value for '--order-by': 'score' is not one of 'updated_at', 'created_at', 'importance', 'observed_at'.\n",
+    ourStderr: "Usage: kagura list [OPTIONS]\nTry 'kagura list --help' for help.\n\nError: Invalid value for '--order-by': 'score' is not one of 'updated_at', 'created_at', 'importance', 'observed_at', 'event_start'.\n",
   },
   {
     name: "list direction bogus",
@@ -629,7 +636,7 @@ describe("bootstrap / changes / list / forget --ids output, byte for byte the Py
       expect(reads.mock.calls).toHaveLength(1);
     }
     expect(terminalText(out)).toBe(c.stdout);
-    const stderr = c.stderr.replace(/^(Usage: |Try ')kagura(?= )/gm, "$1kagura-memory");
+    const stderr = (c.ourStderr ?? c.stderr).replace(/^(Usage: |Try ')kagura(?= )/gm, "$1kagura-memory");
     expect(terminalText(err)).toBe(stderr);
     const calls = server.requests.filter((r) => r.body?.method === "tools/call");
     expect(calls.map((r) => (r.body?.params as { arguments: unknown }).arguments)).toEqual(c.calls);

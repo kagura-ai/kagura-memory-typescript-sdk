@@ -1,5 +1,81 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.18.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### Event dates (#137)
+
+`listMatching({ orderBy: "event_start" })` (and `kagura-memory list --order-by
+event_start`), `recall`'s `eventAfter` / `eventBefore` and the `event_after` /
+`event_before` keys of `listMatching`'s `filters` need memory-cloud **0.152.0**
+([memory-cloud#2722](https://github.com/kagura-ai/memory-cloud/issues/2722),
+[#2724](https://github.com/kagura-ai/memory-cloud/issues/2724)). `event_after`
+is inclusive and `event_before` exclusive; a memory matches when its event range
+(`details.event_start` / `event_end`) overlaps the window, and a memory without
+an event date never matches. A datetime `event_after` counts as its UTC day and
+a datetime `event_before` past midnight as the day after it. Memories without
+an event date sort last under `event_start`, in both directions. Both are
+sent only when set. `eventAfter` / `eventBefore` go in `filters`, a free-form
+object, so a server before 0.152.0 ignores them and filters nothing. A
+deployment upgraded from an earlier version gets the Qdrant payload indexes for
+`event_start` / `event_end` only from 0.152.1
+([memory-cloud#2729](https://github.com/kagura-ai/memory-cloud/issues/2729)).
+Python SDK/CLI 0.44.0 and 0.45.x have no event options; `list --order-by` here
+accepts `event_start`, which Python's `--order-by` refuses. The typed response
+fields (`event_start`, `event_end`, `event_weekday`, `observed_weekday`,
+`event_unresolved`) are not modelled; they pass through at runtime.
+
+### Files list filters (#138)
+
+`FilesClient.list({ scope, bindingContextId })` and `kagura-memory files list
+--scope [all|workspace] --binding-context-id ID` need memory-cloud **0.145.0**
+([memory-cloud#2632](https://github.com/kagura-ai/memory-cloud/issues/2632)).
+`scope` is `all` (the default: the unchanged listing) or `workspace` (only
+workspace-shared files, those bound to no context); `bindingContextId` is the
+wire `context_id`, intersected with the caller's accessible contexts before the
+limit. `scope: "workspace"` together with `bindingContextId` is a 422 on the
+server and is refused before the request here. Both are sent only when set.
+**A server before 0.145.0 ignores query parameters it does not know, as it
+ignores `cursor`, and returns the unfiltered listing.** Every row carries its
+`context_id`, so the reply shows it: under `scope: "workspace"` a row bound to
+a context, and under `bindingContextId` a row not bound to that context
+(canonical UUIDs compared), prove the filter was ignored. `list` then throws a
+`KaguraError` naming 0.145.0 instead of returning the listing; `scope: "all"`,
+no filter and an empty listing are not checked, and `null` for either option
+means not set. Python SDK/CLI 0.44.0 and
+0.45.x have no `files list` filters.
+
+### Plugin `server_url` keeps `context=` (#139)
+
+The default-context line of the kagura-memory plugin's SessionStart hook needs
+memory-cloud **0.149.0** and the plugin of that release
+([memory-cloud#2690](https://github.com/kagura-ai/memory-cloud/issues/2690)):
+the hook prints it only when the first `context=` of the plugin's `server_url`
+is its `context_id`, and prints nothing otherwise. The hook's `canonical_uuid`
+accepts only the 36-character dashed form (any case), so a dashless, braced or
+`urn:uuid:` spelling of either value can never match. `setup claude` therefore keeps `context=<id>` in the `server_url` it
+prints when the MCP URL's first `context=` is the context it prints as
+`context_id` (both dashed UUIDs, equal ignoring case), written lower-case,
+before `guardrails=off`
+(`profile`, `add_tools`, `tools` and `guardrails=<context-id>` are still
+dropped). The plugin context is `-c`, else the project's `.kagura.json`
+`context_id`, else `KAGURA_CONTEXT_ID`. When setup has none of the three, the
+context is not a dashed UUID, or the `context=` names another context, the
+printed URL is what it was. A plugin before 0.149.0 does
+not read `context=`. This follows the plugin's own setup guide (`context=` must
+stay when the MCP URL carries it and it is the plugin's context); Python SDK
+0.45.1's `_plugin_server_url` still drops `context=`, a documented difference,
+not a Python port.
+
+### CLI help pages
+
+`list --help` and `files list --help` no longer match Python 0.44.0 (the
+`--order-by` choice names `event_start`; the two new `files list` options) and
+are recorded in [the exception fixture](../test/cli/typescriptHelp111.json).
+Of the 94 supported help pages, 48 now match Python and 46 retain a documented
+difference (the 0.17.0 counts were 50 and 44).
+
 ## 0.17.0
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
