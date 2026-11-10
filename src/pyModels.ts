@@ -360,6 +360,49 @@ export const CONTEXT_MEMBER: Model = {
   ],
 };
 
+/**
+ * One workspace operation-history event, as memory-cloud v0.154.0's
+ * `OperationHistoryItem` declares it (#136). No Python SDK model mirrors it
+ * yet; every nullable field is required, as the server always sends it, and
+ * a key a newer server adds is kept.
+ */
+const OPERATION_HISTORY_EVENT: Model = {
+  name: "OperationHistoryEvent",
+  extra: "allow",
+  fields: [
+    required("id", "str"),
+    required("occurred_at", "datetime"),
+    required("context_id", nullable("str")),
+    required("actor_user_id", nullable("str")),
+    required("actor_name", nullable("str")),
+    required("subject_user_id", nullable("str")),
+    required("agent_id", nullable("str")),
+    required("principal_kind", "str"),
+    required("credential_id", nullable("str")),
+    required("client_id", nullable("str")),
+    required("surface", "str"),
+    required("operation", "str"),
+    required("target_type", "str"),
+    required("target_id", nullable("str")),
+    required("outcome", "str"),
+    required("count", "int"),
+    required("changed_fields", listOf("str")),
+  ],
+};
+
+/** A page of `GET /api/v1/workspaces/{id}/operation-history` (memory-cloud v0.154.0+, #136). */
+export const OPERATION_HISTORY_PAGE: Model = {
+  name: "OperationHistoryPage",
+  extra: "allow",
+  fields: [
+    required("items", listOf({ model: OPERATION_HISTORY_EVENT })),
+    required("total", "int"),
+    optional("total_capped", "bool", false),
+    required("next_cursor", nullable("str")),
+    required("retention_days", "int"),
+  ],
+};
+
 export const WORKSPACE_INVITATION: Model = {
   name: "WorkspaceInvitation",
   fields: [

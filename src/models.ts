@@ -1925,6 +1925,71 @@ export interface MemberAPIKey {
   connector_id?: string | null;
 }
 
+/**
+ * One workspace operation-history event (memory-cloud v0.154.0+, #136),
+ * from `WorkspaceClient.listOperationHistory`.
+ *
+ * An event names who changed what, never the contents: ids, the operation,
+ * the outcome, a count and the names of the changed fields, not their
+ * values. `credential_id` / `client_id` identify the API key or OAuth
+ * client a programmatic call used; a shared credential identifies the
+ * credential and its account, not the person who used it. `actor_name` is
+ * the actor's current display name, resolved when the page is read
+ * (`null` once the account is gone). `principal_kind`, `surface`,
+ * `operation`, `target_type` and `outcome` are plain `string`s: the server
+ * is the authority and may add values. A field a newer server adds passes
+ * through.
+ */
+export interface OperationHistoryEvent {
+  id: string;
+  /** ISO 8601 datetime string, as the server sent it. */
+  occurred_at: string;
+  context_id: string | null;
+  actor_user_id: string | null;
+  actor_name: string | null;
+  /** The member the operation affected, when it is not the actor. */
+  subject_user_id: string | null;
+  agent_id: string | null;
+  principal_kind: string;
+  credential_id: string | null;
+  client_id: string | null;
+  /** Known values: `web`, `api`, `mcp`, `system`, `unknown`. */
+  surface: string;
+  /** e.g. `memory.created`, `context.updated`, `member.access_changed`, `credential.revoked`, `sleep.undo`. */
+  operation: string;
+  /** Known values: `memory`, `context`, `member`, `credential`, `integration`, `sleep`. */
+  target_type: string;
+  target_id: string | null;
+  /** Known values: `success`, `failure`, `denied`. */
+  outcome: string;
+  /** How many targets the event covers (a bulk forget records one event). */
+  count: number;
+  /** Names of the changed fields; their values are never recorded. */
+  changed_fields: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * A page of workspace operation history (memory-cloud v0.154.0+, #136),
+ * newest first.
+ *
+ * `total` counts the matching events the caller may see, capped at 1,000:
+ * past that the server sends `total: 1000, total_capped: true`, and paging
+ * still reaches every match. `next_cursor` is opaque; pass it back as
+ * `cursor` unchanged, and `null` means the last page. `retention_days` is
+ * the workspace's retention window (90 days plus any add-on); older events
+ * are not returned. A field a newer server adds passes through.
+ */
+export interface OperationHistoryPage {
+  items: OperationHistoryEvent[];
+  total: number;
+  /** `false` when the server leaves it out. */
+  total_capped: boolean;
+  next_cursor: string | null;
+  retention_days: number;
+  [key: string]: unknown;
+}
+
 // ---------------------------------------------------------------------------
 // Agent control plane (server v0.49.0+, RFC-0002 P0; SDK issues #1/#2/#3)
 // ---------------------------------------------------------------------------

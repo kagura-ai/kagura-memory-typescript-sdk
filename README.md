@@ -11,7 +11,7 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
 | **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
-| **`WorkspaceClient`** | REST API | Workspace member, invitation, and API key management |
+| **`WorkspaceClient`** | REST API | Workspace member, invitation, and API key management; operation history (web session) |
 | **`SecretClient`** | REST API | [Zero-knowledge secrets](#zero-knowledge-secrets) — age-encrypted on your machine, opaque to the server |
 | **`AgentsClient`** | REST API | Agent bootstrap for API-key-only callers (no MCP session) |
 | **`MemoryClient`** | REST API | [Tool guardrails](#tool-guardrails-over-rest-memory-cloud-v0740) for API-key-only callers — the `AGENTS.md` export digest and the guardrail set |
@@ -1922,6 +1922,55 @@ credentials. Call `addContextMember(contextId, userId, "editor")` on that client
 `KaguraContextNotInAccessListError` with `details.reason` equal to
 `context_not_in_access_list`. A workspace owner or admin may explicitly retry
 with `extendAccessList: true`. The response reports `access_list_extended`.
+
+### Workspace operation history (memory-cloud v0.154.0+)
+
+`listOperationHistory(workspaceId, options)` reads the workspace's operation
+history, newest first. The route accepts a signed-in **web session only**:
+build the client with `session: true`. A client built with an API key, an OAuth
+profile or a resource token throws an `Error` before any request and never
+switches to another credential. On Node the supplied fetch must carry the
+session cookie; in a browser the request is sent with `credentials: "include"`.
+
+```ts
+const history = new WorkspaceClient({ baseUrl, session: true, fetch: sessionFetch });
+const filters = { operation: "member.access_changed", since: new Date(Date.now() - 7 * 86_400_000), limit: 50 };
+let page = await history.listOperationHistory(workspaceId, filters);
+while (true) {
+  for (const event of page.items) {
+    console.log(event.occurred_at, event.actor_name ?? event.actor_user_id, event.operation, event.changed_fields);
+  }
+  if (page.next_cursor === null) break;
+  // The same filters with the cursor: it continues that result set.
+  page = await history.listOperationHistory(workspaceId, { ...filters, cursor: page.next_cursor });
+}
+```
+
+The filters combine: `query` (up to 120 characters, over actor names and ids,
+target/context/agent/credential ids, operation names and changed-field names),
+`contextId`, `actor`, `agentId`, `operation`, `targetType`, `outcome`, `since` /
+`until` (a `Date`, or an ISO 8601 string with an explicit offset; a naive string
+is refused, as the server refuses it), `limit` (1–100, server default 30) and
+`cursor`. Pass `next_cursor` back unchanged; it is opaque. Unset options are not
+sent.
+
+- The caller must be a workspace **owner or admin**, and the workspace's plan
+  must include `operation_history` (**Pro and Max**). A missing or expired
+  session is `KaguraAuthError`, the role refusal `KaguraPermissionError`, the
+  plan gate `KaguraFeatureNotAvailableError`. A refusal is never an empty page.
+- An event records ids, the operation, its outcome, a count and the **names** of
+  the changed fields: no contents and no before/after values. Reads and searches
+  are not recorded, and the history is not a full audit ledger.
+- A private context's history is shown only to its creator, even to workspace
+  owners and admins.
+- `credential_id` / `client_id` name the API key or OAuth client a programmatic
+  call used. A shared credential identifies the credential and its account, not
+  the person who used it.
+- Recording starts with server v0.154.0 (or when a workspace moves to an
+  entitled plan); nothing is backfilled.
+- Events are kept for `retention_days`: 90 days, plus any retention add-on.
+- `total` is capped at 1,000; past that `total_capped` is `true`, and paging
+  still reaches every match.
 
 ### Permission model (memory-cloud v0.126.0+)
 

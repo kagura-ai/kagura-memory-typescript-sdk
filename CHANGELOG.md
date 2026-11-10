@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `WorkspaceClient.listOperationHistory` for the workspace operation history of
+  memory-cloud v0.154.0 (`GET /api/v1/workspaces/{id}/operation-history`), with
+  the `OperationHistoryPage` / `OperationHistoryEvent` models and combined
+  filters. The route accepts a signed-in web session only: a client built with
+  an API key or OAuth token throws before any request. Pro and Max workspaces,
+  owners and admins (#136).
+
 ## [0.17.0] - 2026-11-05
 
 ### Added

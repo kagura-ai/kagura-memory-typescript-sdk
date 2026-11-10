@@ -1258,3 +1258,367 @@ describe("error mapping (v0.42.0 canonical envelope)", () => {
     await expect(client.listMembers(WS)).rejects.toThrow(/Connection failed/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Workspace operation history (memory-cloud v0.154.0, #136)
+// ---------------------------------------------------------------------------
+
+describe("operation history (memory-cloud v0.154.0)", () => {
+  const CTX = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const AGENT = "99999999-8888-7777-6666-555555555555";
+  const HISTORY = `https://x.test/api/v1/workspaces/${WS}/operation-history`;
+  const EVENT = {
+    id: "12345678-1234-5678-9abc-def012345678",
+    occurred_at: "2026-11-09T10:00:00.123456Z",
+    context_id: CTX,
+    actor_user_id: "google-oauth2|123",
+    actor_name: "Ada",
+    subject_user_id: "google-oauth2|456",
+    agent_id: AGENT,
+    principal_kind: "user",
+    credential_id: "akey_abc",
+    client_id: "kagura-cli",
+    surface: "api",
+    operation: "memory.updated",
+    target_type: "memory",
+    target_id: "m-1",
+    outcome: "success",
+    count: 1,
+    changed_fields: ["summary", "tags"],
+  };
+  const NULLABLE = [
+    "context_id", "actor_user_id", "actor_name", "subject_user_id", "agent_id",
+    "credential_id", "client_id", "target_id",
+  ] as const;
+  const PAGE = { items: [EVENT], total: 1, total_capped: false, next_cursor: null, retention_days: 90 };
+
+  function sessionClient(server: FakeRest): WorkspaceClient {
+    return new WorkspaceClient({ baseUrl: "https://x.test", session: true, fetch: server.fetch });
+  }
+
+  function query(server: FakeRest, index = 0): URLSearchParams {
+    return new URL(server.requests[index]!.url).searchParams;
+  }
+
+  it("reads a page over the web session: credentials included, no Authorization header", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const seen: RequestInit[] = [];
+    const client = new WorkspaceClient({
+      baseUrl: "https://x.test",
+      session: true,
+      fetch: (url, init) => {
+        seen.push(init!);
+        return server.fetch(url, init);
+      },
+    });
+    expect(await client.listOperationHistory(WS)).toEqual(PAGE);
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]).toMatchObject({ method: "GET", url: HISTORY, body: undefined });
+    expect(server.requests[0]!.headers.authorization).toBeUndefined();
+    expect(server.requests[0]!.headers["user-agent"]).toMatch(/^kagura-memory-sdk\//);
+    expect(seen[0]!.credentials).toBe("include");
+    expect(seen[0]!.redirect).toBe("error");
+    expect(new Headers(seen[0]!.headers).has("authorization")).toBe(false);
+  });
+
+  it("normalizes the workspace id and refuses one that is no UUID before any request", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const client = sessionClient(server);
+    await client.listOperationHistory(`{${WS.toUpperCase()}}`);
+    expect(server.requests[0]!.url).toBe(HISTORY);
+    await expect(client.listOperationHistory("../x")).rejects.toThrow(/workspaceId must be a UUID/);
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("reads an empty page, total_capped false when the server leaves it out", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({ items: [], total: 0, next_cursor: null, retention_days: 90 });
+    const page = await sessionClient(server).listOperationHistory(WS);
+    expect(page).toEqual({ items: [], total: 0, total_capped: false, next_cursor: null, retention_days: 90 });
+  });
+
+  it("keeps a capped total and the add-on retention as sent", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify({ ...PAGE, total: 1000, total_capped: true, retention_days: 455 });
+    const page = await sessionClient(server).listOperationHistory(WS);
+    expect(page).toMatchObject({ total: 1000, total_capped: true, retention_days: 455 });
+  });
+
+  it("sends every filter under its wire name, in canonical form, and nothing else", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const cursor = "WyIyMDI2LTExLTA5VDEwOjAwOjAwWiIsICJhYmMiXQ-_==";
+    await sessionClient(server).listOperationHistory(WS, {
+      query: "summary",
+      contextId: `{${CTX.toUpperCase()}}`,
+      actor: "google-oauth2|123",
+      agentId: AGENT.replace(/-/g, ""),
+      operation: "memory.updated",
+      targetType: "memory",
+      outcome: "success",
+      since: "2026-11-01T00:00:00+09:00",
+      until: new Date("2026-11-09T12:00:00.000Z"),
+      limit: 100,
+      cursor,
+    });
+    expect(server.requests[0]!.url).toBe(
+      `${HISTORY}?query=summary&context_id=${CTX}&actor=google-oauth2%7C123&agent_id=${AGENT}` +
+        "&operation=memory.updated&target_type=memory&outcome=success" +
+        "&since=2026-11-01T00%3A00%3A00%2B09%3A00&until=2026-11-09T12%3A00%3A00.000Z&limit=100" +
+        `&cursor=${encodeURIComponent(cursor)}`,
+    );
+    expect(query(server).get("cursor")).toBe(cursor);
+    expect(query(server).get("since")).toBe("2026-11-01T00:00:00+09:00");
+  });
+
+  it("leaves out every option that is not set, and sends no default limit", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const client = sessionClient(server);
+    await client.listOperationHistory(WS, {});
+    await client.listOperationHistory(WS, {
+      query: undefined, contextId: undefined, actor: undefined, agentId: undefined, operation: undefined,
+      targetType: undefined, outcome: undefined, since: undefined, until: undefined, limit: undefined,
+      cursor: undefined,
+    });
+    await client.listOperationHistory(WS, { outcome: "denied" });
+    expect(server.requests.map((r) => r.url)).toEqual([HISTORY, HISTORY, `${HISTORY}?outcome=denied`]);
+  });
+
+  it("passes enum values the SDK does not know through for the server to judge", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    await sessionClient(server).listOperationHistory(WS, {
+      operation: "future.op", targetType: "secret", outcome: "partial",
+    });
+    expect([...query(server).entries()]).toEqual([
+      ["operation", "future.op"], ["target_type", "secret"], ["outcome", "partial"],
+    ]);
+  });
+
+  it("reads two pages, handing next_cursor back unchanged", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    const cursor = "eyJhdCI6ICIyMDI2LTExLTA5In0+/=";
+    server.body = JSON.stringify({ ...PAGE, total: 2, next_cursor: cursor });
+    const first = await client.listOperationHistory(WS, { limit: 1, outcome: "success" });
+    expect(first.next_cursor).toBe(cursor);
+    const second = { ...PAGE, total: 2, items: [{ ...EVENT, id: "22222222-1234-5678-9abc-def012345678" }] };
+    server.body = JSON.stringify(second);
+    expect(await client.listOperationHistory(WS, { limit: 1, outcome: "success", cursor: first.next_cursor! })).toEqual(second);
+    expect(query(server, 0).has("cursor")).toBe(false);
+    expect(query(server, 1).get("cursor")).toBe(cursor);
+    expect([...query(server, 1).keys()]).toEqual(["outcome", "limit", "cursor"]);
+  });
+
+  it("sends a Date as its UTC instant and a string with an offset as written", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const client = sessionClient(server);
+    await client.listOperationHistory(WS, { since: new Date(Date.UTC(2026, 10, 1, 8, 30)), until: "2026-11-09T23:59:59.999999-05:00" });
+    expect(query(server).get("since")).toBe("2026-11-01T08:30:00.000Z");
+    expect(query(server).get("until")).toBe("2026-11-09T23:59:59.999999-05:00");
+    await client.listOperationHistory(WS, { since: "2026-11-01T00:00Z", until: "2026-11-01T00:00:00z" });
+    expect(query(server, 1).get("since")).toBe("2026-11-01T00:00Z");
+    // Equal bounds are a window of one instant, which the server takes.
+    await client.listOperationHistory(WS, { since: "2026-11-01T09:00:00+09:00", until: new Date("2026-11-01T00:00:00Z") });
+    expect(server.requests).toHaveLength(3);
+  });
+
+  it.each([
+    ["a naive datetime", "2026-11-01T00:00:00"],
+    ["a date alone", "2026-11-01"],
+    ["a Unix time", "1762000000"],
+    ["text", "yesterday"],
+    ["an impossible day", "2026-02-30T00:00:00Z"],
+    ["an empty string", ""],
+  ])("refuses %s for since/until before any request", async (_label, value) => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    await expect(client.listOperationHistory(WS, { since: value })).rejects.toThrow(/since must be an ISO 8601 datetime with a timezone offset/);
+    await expect(client.listOperationHistory(WS, { until: value })).rejects.toThrow(/until must be an ISO 8601 datetime with a timezone offset/);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("refuses an invalid Date, a Date outside years 1-9999 and a value that is no time", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    await expect(client.listOperationHistory(WS, { since: new Date(Number.NaN) })).rejects.toThrow(/since must be a valid Date/);
+    await expect(client.listOperationHistory(WS, { until: new Date(Date.UTC(10000, 0, 1)) })).rejects.toThrow(/until must be a valid Date/);
+    await expect(
+      client.listOperationHistory(WS, { since: 1762000000 as unknown as string }),
+    ).rejects.toThrow(/since must be an ISO 8601 datetime with a timezone offset or a Date/);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("refuses since after until, comparing instants across offsets", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    // 10:00+09:00 is 01:00Z, before 02:00Z: accepted.
+    server.body = JSON.stringify(PAGE);
+    await client.listOperationHistory(WS, { since: "2026-11-09T10:00:00+09:00", until: "2026-11-09T02:00:00Z" });
+    expect(server.requests).toHaveLength(1);
+    await expect(
+      client.listOperationHistory(WS, { since: "2026-11-09T02:00:00Z", until: "2026-11-09T10:00:00+09:00" }),
+    ).rejects.toThrow(/since must not be after until/);
+    await expect(
+      client.listOperationHistory(WS, { since: "2026-11-09T00:00:00.000001Z", until: new Date("2026-11-09T00:00:00Z") }),
+    ).rejects.toThrow(/since must not be after until/);
+    await expect(
+      client.listOperationHistory(WS, { since: new Date("2026-11-10T00:00:00Z"), until: new Date("2026-11-09T00:00:00Z") }),
+    ).rejects.toThrow(/since must not be after until/);
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it.each([
+    ["query", 120],
+    ["actor", 255],
+    ["operation", 40],
+    ["cursor", 512],
+  ] as const)("bounds %s at %i characters, counted in code points", async (name, max) => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const client = sessionClient(server);
+    // Two UTF-16 units each, one code point each, as the server counts.
+    const atLimit = "😀".repeat(max);
+    await client.listOperationHistory(WS, { [name]: atLimit });
+    expect(query(server).get(name)).toBe(atLimit);
+    await expect(client.listOperationHistory(WS, { [name]: "a".repeat(max + 1) })).rejects.toThrow(
+      new RegExp(`${name} must be at most ${max} characters, got ${max + 1}`),
+    );
+    await expect(client.listOperationHistory(WS, { [name]: 7 as unknown as string })).rejects.toThrow(
+      new RegExp(`${name} must be a string`),
+    );
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("bounds limit to an integer in 1-100", async () => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const client = sessionClient(server);
+    await client.listOperationHistory(WS, { limit: 1 });
+    await client.listOperationHistory(WS, { limit: 100 });
+    expect([query(server, 0).get("limit"), query(server, 1).get("limit")]).toEqual(["1", "100"]);
+    for (const bad of [0, 101, 1.5, Number.NaN, "5" as unknown as number]) {
+      await expect(client.listOperationHistory(WS, { limit: bad })).rejects.toThrow(/limit must be an integer between 1 and 100/);
+    }
+    expect(server.requests).toHaveLength(2);
+  });
+
+  it("refuses a contextId or agentId that is no UUID before any request", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    await expect(client.listOperationHistory(WS, { contextId: "ctx" })).rejects.toThrow(/contextId must be a UUID/);
+    await expect(client.listOperationHistory(WS, { agentId: "agent-1" })).rejects.toThrow(/agentId must be a UUID/);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ["an API key", { apiKey: "kagura_test" }],
+    ["an OAuth token", { oauth: { getAuthHeader: async () => "Bearer oauth-token" } }],
+  ])("refuses a client built with %s before any request", async (_label, credential) => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(PAGE);
+    const client = new WorkspaceClient({ baseUrl: "https://x.test", fetch: server.fetch, ...credential });
+    const error = await caught(client.listOperationHistory(WS, { limit: 5 }));
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(KaguraError);
+    expect((error as Error).message).toBe(
+      "WorkspaceClient.listOperationHistory: the operation-history route accepts a signed-in web session only, " +
+        "not an API key, OAuth or resource token. Build a session client with " +
+        "new WorkspaceClient({ baseUrl, session: true, fetch }), where fetch carries the session cookie.",
+    );
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("refuses a bearer client from fromMcpUrl before any request, before checking arguments", async () => {
+    const server = new FakeRest();
+    const client = WorkspaceClient.fromMcpUrl({ apiKey: "kagura_test", mcpUrl: "https://x.test/mcp", fetch: server.fetch, env: {} });
+    await expect(client.listOperationHistory("not-a-uuid", { limit: 0 })).rejects.toThrow(/accepts a signed-in web session only/);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("reads nullable fields as null and keeps unknown fields on the page and on items", async () => {
+    const server = new FakeRest();
+    const item = { ...EVENT, ...Object.fromEntries(NULLABLE.map((key) => [key, null])), changed_fields: [], risk: { level: 2 } };
+    const body = { ...PAGE, items: [item], next_cursor: null, export_url: "https://x.test/export", window: [1, 2] };
+    server.body = JSON.stringify(body);
+    const page = await sessionClient(server).listOperationHistory(WS);
+    expect(page).toEqual(body);
+    for (const key of NULLABLE) expect(page.items[0]![key]).toBeNull();
+    expect(page.items[0]!.risk).toEqual({ level: 2 });
+    expect(page.export_url).toBe("https://x.test/export");
+  });
+
+  it.each([
+    ["no items", { ...PAGE, items: undefined }],
+    ["items that are no list", { ...PAGE, items: {} }],
+    ["a total that is no integer", { ...PAGE, total: "many" }],
+    ["no retention_days", { ...PAGE, retention_days: undefined }],
+    ["no next_cursor key", { ...PAGE, next_cursor: undefined }],
+    ["an item without its id", { ...PAGE, items: [{ ...EVENT, id: undefined }] }],
+    ["an item whose nullable field is absent", { ...PAGE, items: [{ ...EVENT, actor_name: undefined }] }],
+    ["an item whose occurred_at is no datetime", { ...PAGE, items: [{ ...EVENT, occurred_at: "soon" }] }],
+    ["an item whose changed_fields is no list", { ...PAGE, items: [{ ...EVENT, changed_fields: "summary" }] }],
+    ["an item whose count is no integer", { ...PAGE, items: [{ ...EVENT, count: 1.5 }] }],
+    ["an array", [PAGE]],
+  ])("throws KaguraResponseError for a reply with %s", async (_label, body) => {
+    const server = new FakeRest();
+    server.body = JSON.stringify(body);
+    const error = await caught(sessionClient(server).listOperationHistory(WS));
+    expect(error).toBeInstanceOf(KaguraResponseError);
+    expect((error as Error).message).toContain("WorkspaceClient.list_operation_history");
+  });
+
+  it("maps an expired session to KaguraAuthError naming the history, not an empty page", async () => {
+    const server = new FakeRest();
+    server.status = 401;
+    server.body = envelope("AUTH-001", "Not authenticated");
+    const error = await caught(sessionClient(server).listOperationHistory(WS));
+    expect(error).toBeInstanceOf(KaguraAuthError);
+    expect((error as Error).message).toBe("A signed-in session is required to read workspace operation history.");
+    expect(error).toMatchObject({ code: "AUTH-001" });
+    // The context-member call keeps its own words.
+    await expect(sessionClient(server).addContextMember(CTX, "u", "editor")).rejects.toThrow(
+      "A signed-in session is required to add a context member.",
+    );
+  });
+
+  it("maps the owner/admin refusal to KaguraPermissionError with the required role", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({ error: "AUTH-003", message: "Insufficient permissions", details: { required_role: "admin" } });
+    const error = await caught(sessionClient(server).listOperationHistory(WS));
+    expect(error).toBeInstanceOf(KaguraPermissionError);
+    expect(error).toMatchObject({ code: "AUTH-003", requiredRole: "admin", message: "Insufficient permissions" });
+  });
+
+  it("maps the plan gate to KaguraFeatureNotAvailableError", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Feature 'operation_history' not available on M plan. Upgrade to L plan to access this feature.",
+      details: { gate: "plan", feature: "operation_history", required_plan: "pro", required_plan_display: "L", current_plan: "basic" },
+    });
+    const error = await caught(sessionClient(server).listOperationHistory(WS));
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect(error).toMatchObject({ feature: "operation_history", requiredPlan: "pro", code: "FEAT-001" });
+  });
+
+  it("keeps the server's 404 and 422 envelopes", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    server.status = 404;
+    server.body = envelope("RES-001", "Workspace not found");
+    await expect(client.listOperationHistory(WS)).rejects.toBeInstanceOf(KaguraNotFoundError);
+    server.status = 422;
+    server.body = JSON.stringify({ error: "VAL-001", message: "Invalid operation history cursor", details: { field: "cursor" } });
+    const invalid = await caught(client.listOperationHistory(WS, { cursor: "x" }));
+    expect(invalid).toBeInstanceOf(KaguraConnectionError);
+    expect(invalid).toMatchObject({ code: "VAL-001", details: { field: "cursor" } });
+    expect((invalid as Error).message).toBe("HTTP 422: Invalid operation history cursor");
+  });
+});
