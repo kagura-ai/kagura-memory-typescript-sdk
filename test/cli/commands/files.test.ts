@@ -680,11 +680,44 @@ describe("files delete / download-url / list", () => {
       expect(h.rest.requests).toEqual([]);
     });
 
-    it("refuses a --binding-context-id that is not a UUID, sending nothing", async () => {
-      const h = harness();
-      expect(await runCli(["files", "list", "--binding-context-id", "nope"], h.deps)).toBe(1);
-      expect(diagnosticBodies(h.err)[0]).toBe("Error: bindingContextId must be a UUID, got 'nope'");
+    it("refuses a --binding-context-id that is not a UUID as a usage error naming the flag, before any credential work", async () => {
+      // No credential resolves and no files client is built: the flag is checked first.
+      const h = harness({ auth: new Error("no credentials") });
+      expect(await runCli(["files", "list", "--binding-context-id", "nope", "-c", WS], h.deps)).toBe(2);
+      expect(diagnosticBodies(h.err)).toEqual([
+        "Error: Invalid value for '--binding-context-id': 'nope' is not a valid context UUID.",
+      ]);
+      expect(h.filesClients).toEqual([]);
       expect(h.rest.requests).toEqual([]);
+    });
+
+    it("sends --binding-context-id in its canonical form", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--binding-context-id", BOUND.toUpperCase()], h.deps)).toBe(0);
+      expect(h.rest.query().get("context_id")).toBe(BOUND);
+    });
+
+    it("prints the error of a server that ignored the filter", async () => {
+      const h = harness();
+      h.rest.routes["GET /api/v1/files"] = {
+        status: 200,
+        body: [
+          {
+            id: FILE_ID,
+            workspace_id: WS,
+            filename: "a.txt",
+            content_type: "text/plain",
+            size_bytes: 1,
+            sha256: "a".repeat(64),
+            status: "uploaded",
+            created_at: "2026-01-01T00:00:00Z",
+            context_id: BOUND,
+          },
+        ],
+      };
+      expect(await runCli(["files", "list", "--scope", "workspace"], h.deps)).toBe(1);
+      expect(diagnosticBodies(h.err)[0]).toMatch(/^Error: .*ignored.*memory-cloud v0\.145\.0/);
+      expect(h.out).toEqual([]);
     });
 
     it("names both flags in --help, with the v0.145.0 floor", async () => {

@@ -34,7 +34,7 @@ import type {
 } from "./models.js";
 import { pathSegment } from "./pathSegment.js";
 import { emitProgress, type ProgressCallback, type ProgressEvent } from "./progress.js";
-import { normalizeUuid, pyRepr } from "./pyCompat.js";
+import { normalizeUuid, pyRepr, uuidOrNone } from "./pyCompat.js";
 import {
   FILE_DOWNLOAD_URL_RESPONSE,
   FILE_LIST_RESPONSE,
@@ -300,12 +300,21 @@ export class FilesClient extends KaguraRestClient {
    *
    * `scope` and `bindingContextId` narrow the listing (memory-cloud
    * v0.145.0+). A server before v0.145.0 ignores query parameters it does
-   * not know, as it ignores `cursor`, and returns the unfiltered listing:
-   * nothing in the reply says the filter was not applied.
+   * not know, as it ignores `cursor`, and returns the unfiltered listing.
+   * The rows show it: each carries its `context_id`, so a row that the
+   * filter should have left out is checked for after the reply is read
+   * (`scope: "workspace"`: a row bound to a context; `bindingContextId`: a
+   * row bound to another context or to none, compared as canonical UUIDs),
+   * and then the call throws instead of returning the unfiltered rows.
+   * `scope: "all"`, no filter and an empty listing are not checked; a
+   * listing whose rows all fit the filter is returned as it is.
    *
    * @throws Error before any request if `scope` is not `"all"` or
    *   `"workspace"`, if `bindingContextId` is not a UUID, or if `scope` is
    *   `"workspace"` beside a `bindingContextId` (the server answers 422).
+   *   `null` for either means not set.
+   * @throws KaguraError when a row shows that the server ignored a filter
+   *   (it needs memory-cloud v0.145.0).
    * @throws KaguraResponseError if the 2xx body is not what the Python SDK
    *   reads: each item of a bare list as a `FileObject`, anything else as
    *   a `FileListResponse` (#66).
@@ -332,7 +341,9 @@ export class FilesClient extends KaguraRestClient {
      */
     bindingContextId?: string;
   }): Promise<FileListResponse> {
-    const { scope, bindingContextId } = options;
+    // null reads as not set, as undefined does: a caller driven by JSON or a config.
+    const scope = options.scope ?? undefined;
+    const bindingContextId = options.bindingContextId ?? undefined;
     if (scope !== undefined && scope !== "all" && scope !== "workspace") {
       throw new Error(`scope must be 'all' or 'workspace', got ${pyRepr(scope)}`);
     }
@@ -349,8 +360,10 @@ export class FilesClient extends KaguraRestClient {
     if (scope !== undefined) {
       params.scope = scope;
     }
+    let boundTo: string | undefined;
     if (bindingContextId !== undefined) {
-      params.context_id = normalizeUuid(bindingContextId, "bindingContextId");
+      boundTo = normalizeUuid(bindingContextId, "bindingContextId");
+      params.context_id = boundTo;
     }
     if (options.cursor !== undefined) {
       params.cursor = options.cursor;
@@ -362,9 +375,11 @@ export class FilesClient extends KaguraRestClient {
     // list's items as `FileObject`s, anything else whole.
     if (Array.isArray(raw)) {
       for (const item of raw) readModel(item, FILE_OBJECT, "FilesClient.list");
+      checkFilterApplied(raw as FileObject[], scope, boundTo);
       return { files: raw as FileObject[], next_cursor: null };
     }
     readModel(raw, FILE_LIST_RESPONSE, "FilesClient.list");
+    checkFilterApplied((raw as FileListResponse).files, scope, boundTo);
     return raw as FileListResponse;
   }
 
@@ -540,6 +555,34 @@ function extractExistingFile(error: unknown): FileObject | null {
     return null;
   }
   return existing as FileObject;
+}
+
+/**
+ * Throw when a row of a `list` reply shows that the server did not apply
+ * `scope` or the bound context (a server before memory-cloud v0.145.0
+ * ignores both): the rows then carry the context they are bound to.
+ */
+function checkFilterApplied(files: readonly FileObject[], scope: string | undefined, boundTo: string | undefined): void {
+  const contextOf = (file: FileObject): string | null =>
+    typeof file.context_id === "string" ? (uuidOrNone(file.context_id) ?? file.context_id.toLowerCase()) : null;
+  const shown = (file: FileObject): string => (contextOf(file) === null ? "no context" : `context ${String(file.context_id)}`);
+  let filter: string | undefined;
+  let row: FileObject | undefined;
+  if (scope === "workspace") {
+    row = files.find((file) => contextOf(file) !== null);
+    if (row !== undefined) filter = "scope";
+  }
+  if (row === undefined && boundTo !== undefined) {
+    row = files.find((file) => contextOf(file) !== boundTo);
+    if (row !== undefined) filter = "context_id";
+  }
+  if (row !== undefined) {
+    throw new KaguraError(
+      `FilesClient.list: the server ignored the ${filter} filter (the reply holds a file bound to ${shown(row)}). ` +
+        "The scope and bindingContextId filters need memory-cloud v0.145.0; an older server lists everything. " +
+        "No files are returned.",
+    );
+  }
 }
 
 /**

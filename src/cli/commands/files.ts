@@ -19,11 +19,12 @@ import type { FileObject } from "../../models.js";
 import { emitProgress, type ProgressEvent } from "../../progress.js";
 import { FILE_LIST_RESPONSE, FILE_OBJECT, readModel } from "../../pyModels.js";
 import { pyRepr } from "../../python.js";
+import { normalizeUuid } from "../../pyCompat.js";
 import { requireArg, rejectExtraArgs, type Command, type CommandDeps, type CommandGroup } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
 import { formatModelJson } from "../modelDump.js";
 import { cliErrorMessage, formatJson } from "../output.js";
-import { CliError, CliUsageError, parseChoice, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
+import { CliError, CliUsageError, optionalChoice, paramLabel, parseRanged, parseTags, pathIdParam, quote } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
 import { parseProgress, PROGRESS_FLAG, resolveProgress, VERBOSE_FLAG } from "../progress.js";
 
@@ -333,16 +334,17 @@ const SCOPE: FlagSpec = {
   type: "value",
   metavar: "[all|workspace]",
   help:
-    "workspace: only the workspace-shared files, bound to no context (server v0.145.0+; " +
-    "an older server ignores it and lists everything). Default: all",
+    "workspace: only the workspace-shared files, bound to no context (server v0.145.0+; an " +
+    "older server ignores it, and the command then fails if a listed file is bound to a " +
+    "context). Default: all",
 };
 
 const LIST_BINDING_CONTEXT_ID: FlagSpec = {
   name: "binding-context-id",
   type: "value",
   help:
-    "Only the files bound to this context UUID (server v0.145.0+; an older server " +
-    "ignores it and lists everything). Not with --scope workspace.",
+    "Only the files bound to this context UUID (server v0.145.0+; an older server ignores " +
+    "it, and the command then fails if a listed file is bound elsewhere). Not with --scope workspace.",
 };
 
 const list: Command = {
@@ -363,13 +365,23 @@ const list: Command = {
       raw === undefined
         ? 50
         : parseRanged(LIMIT, raw);
-    const rawScope = args.values.scope;
-    const scope = rawScope === undefined ? undefined : parseChoice(SCOPE, rawScope, SCOPES);
+    const scope = optionalChoice(args, SCOPE, SCOPES);
     rejectExtraArgs(args);
     const cursor = args.values.cursor;
-    const bindingContextId = args.values["binding-context-id"];
-    if (scope === "workspace" && bindingContextId !== undefined) {
+    const rawBinding = args.values["binding-context-id"];
+    if (scope === "workspace" && rawBinding !== undefined) {
       throw new CliUsageError("--scope workspace cannot be combined with --binding-context-id.");
+    }
+    // Checked here, before the credential is paired, like the other UUID flags.
+    let bindingContextId: string | undefined;
+    if (rawBinding !== undefined) {
+      try {
+        bindingContextId = normalizeUuid(rawBinding, "--binding-context-id");
+      } catch {
+        throw new CliUsageError(
+          `Invalid value for ${paramLabel(LIST_BINDING_CONTEXT_ID)}: ${pyRepr(rawBinding)} is not a valid context UUID.`,
+        );
+      }
     }
     // FilesClient.list has read the page through Python's models; this
     // reads it once more, as a whole, for the dump.

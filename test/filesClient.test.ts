@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
+  KaguraError,
   KaguraConnectionError,
   KaguraIntegrityError,
   KaguraFeatureNotAvailableError,
@@ -521,6 +522,76 @@ describe("list filters: scope and bindingContextId (#138)", () => {
   it("sends a bound context in its canonical form", async () => {
     const query = await listQuery({ contextId: WS, bindingContextId: BOUND.toUpperCase() });
     expect(query.get("context_id")).toBe(BOUND);
+  });
+
+  it("reads null as not set, as undefined", async () => {
+    const query = await listQuery({
+      contextId: WS,
+      scope: null as unknown as undefined,
+      bindingContextId: null as unknown as undefined,
+    });
+    expect([...query.keys()].sort()).toEqual(["limit", "workspace_id"]);
+    // Null beside the other filter is not a combination.
+    const alone = await listQuery({ contextId: WS, scope: "workspace", bindingContextId: null as unknown as undefined });
+    expect(alone.get("scope")).toBe("workspace");
+    expect(alone.has("context_id")).toBe(false);
+  });
+
+  describe("a server before v0.145.0 ignores the filters, which its rows show", () => {
+    const row = (context_id?: string | null) => ({
+      id: "f1",
+      workspace_id: WS,
+      filename: "a.txt",
+      content_type: "text/plain",
+      size_bytes: 1,
+      sha256: "x",
+      status: "confirmed",
+      created_at: "2026-01-01T00:00:00Z",
+      ...(context_id === undefined ? {} : { context_id }),
+    });
+
+    async function list(body: unknown, options: Partial<Parameters<FilesClient["list"]>[0]>) {
+      const server = new FakeServer();
+      server.routes["/api/v1/files"] = { status: 200, body };
+      return makeClient(server).list({ contextId: WS, ...options });
+    }
+
+    async function ignored(body: unknown, options: Partial<Parameters<FilesClient["list"]>[0]>) {
+      const error = await list(body, options).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KaguraError);
+      expect((error as Error).message).toContain("ignored");
+      expect((error as Error).message).toContain("memory-cloud v0.145.0");
+      return error as Error;
+    }
+
+    it("throws for scope=workspace when a row is bound to a context", async () => {
+      await ignored([row(null), row(BOUND)], { scope: "workspace" });
+      await ignored({ files: [row(BOUND)], next_cursor: null }, { scope: "workspace" });
+    });
+
+    it("returns scope=workspace rows that are bound to no context, a row with no context_id included", async () => {
+      const page = await list([row(null), row(), row(null)], { scope: "workspace" });
+      expect(page.files).toHaveLength(3);
+    });
+
+    it("throws for bindingContextId when a row is bound to another context or to none", async () => {
+      await ignored([row(BOUND), row("33333333-3333-4333-8333-333333333333")], { bindingContextId: BOUND });
+      await ignored([row(null)], { bindingContextId: BOUND });
+      await ignored([row()], { bindingContextId: BOUND });
+      await ignored({ files: [row(null)], next_cursor: null }, { bindingContextId: BOUND });
+    });
+
+    it("compares the bound context as canonical lower-case UUIDs", async () => {
+      const page = await list([row(BOUND.toUpperCase()), row(BOUND)], { bindingContextId: BOUND.toUpperCase() });
+      expect(page.files).toHaveLength(2);
+    });
+
+    it("checks nothing for scope=all, no filter, or an empty listing", async () => {
+      expect((await list([row(BOUND), row(null)], {})).files).toHaveLength(2);
+      expect((await list([row(BOUND), row(null)], { scope: "all" })).files).toHaveLength(2);
+      expect((await list([], { scope: "workspace" })).files).toEqual([]);
+      expect((await list([], { bindingContextId: BOUND })).files).toEqual([]);
+    });
   });
 
   it("refuses scope workspace with a bound context, as the server does, before the request", async () => {
