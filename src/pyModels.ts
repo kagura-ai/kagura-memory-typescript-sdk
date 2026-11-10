@@ -857,6 +857,8 @@ export const ROLLBACK_SUMMARY: Model = {
       "edges_deleted", "merges_reversed", "merges_unreversible", "importance_restored",
       "promotions_reversed", "importance_kept", "promotions_kept", "archives_restored",
       "chunks_requeued", "points_requeued",
+      // memory-cloud v0.153.0+ (#144; Python 0.46.0 puts it here, before `errors`).
+      "related_indexes_reverted",
     ].map((key) => optional(key, "int", 0)),
     optional("errors", listOf("str"), []),
   ],

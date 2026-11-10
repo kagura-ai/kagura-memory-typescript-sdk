@@ -995,7 +995,9 @@ export interface SleepReport {
  *
  * `action_type` and `phase` are free-form strings — the server may add new
  * types over time. Known `action_type` values include `create_edge`,
- * `merge`, `update_importance`, `promote`, `archive`, and `flag`.
+ * `merge`, `update_importance`, `promote`, `archive`, `flag` and
+ * `index_related` (memory-cloud v0.153.0+, #2728: an entry of the opt-in
+ * Sleep related index, undone by `rollbackSleepRun`).
  * `details` is a generic object whose shape depends on `action_type`.
  *
  * An action too large for its page (memory-cloud v0.82.0+, #1743) comes
@@ -1104,6 +1106,16 @@ export interface RollbackSummary {
    * @default 0
    */
   points_requeued?: number;
+  /**
+   * `index_related` actions of the opt-in Sleep related index
+   * (`SLEEP_RELATED_INDEX_ENABLED` on the server) that the rollback undid
+   * (server v0.153.0+, memory-cloud#2728). The server sends the key only
+   * when at least one was undone, so it is absent otherwise; the model the
+   * CLI prints reads an absent key as 0.
+   *
+   * @default 0
+   */
+  related_indexes_reverted?: number;
   /** One entry per action that could not be reversed. */
   errors?: string[];
 }

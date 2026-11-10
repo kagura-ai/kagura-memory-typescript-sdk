@@ -5017,6 +5017,10 @@ export class KaguraClient {
    * `summary.errors` names each action that was not (a merge a later write
    * changed is counted in `merges_unreversible` and listed there too). The
    * reversed steps stay committed and the report is marked `failed`.
+   * From memory-cloud v0.153.0 the summary also counts, as
+   * `related_indexes_reverted`, the undone entries of the opt-in Sleep
+   * related index; the server sends that key only when at least one was
+   * undone.
    *
    * There is no retry: the server rolls back only a `completed` or
    * `degraded` report, so calling this again on a `failed` one is refused
