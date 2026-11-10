@@ -681,10 +681,13 @@ project and authenticates only with a user API key. The printed
 `server_url` is the MCP URL without its query, except that `guardrails=off`
 stays and, from memory-cloud v0.149.0 and the plugin of that release,
 `context=<id>` stays when the MCP URL's first `context=` is the context
-printed as the plugin's `context_id` (compared as UUIDs in any case, written
-lower-case and dashed): the plugin's SessionStart hook then tells the model
-the default context, so it needs no `list_contexts` call. With no `-c`, a
-context that is not a UUID, or a `context=` naming another context, the
+printed as the plugin's `context_id` (both in the plugin hook's dashed UUID
+form, equal in any case; written lower-case): the plugin's SessionStart hook
+then tells the model the default context, so it needs no `list_contexts`
+call. When setup has no plugin context (no `-c`, no `context_id` in the
+project's `.kagura.json` and no `KAGURA_CONTEXT_ID`), the context is not a
+dashed UUID (a name, or a dashless, braced or `urn:uuid:` spelling, which the
+hook does not accept), or the `context=` names another context, the
 `context=` is dropped. A plugin before v0.149.0 ignores it. `setup claude` writes
 `.kagura.json` and the MCP entry only; it installs none of the Python
 CLI's hooks or `/kagura-recall` and `/kagura-remember` commands. Their
@@ -2165,8 +2168,13 @@ other than the two, a `bindingContextId` that is not a UUID, and `scope:
 before any request. `kagura-memory files list` takes `--scope [all|workspace]`
 and `--binding-context-id`, and the combination is a usage error. **A server
 before v0.145.0 ignores both parameters, as it ignores `cursor`, and returns
-the unfiltered listing; nothing in the reply tells the caller the filter was
-not applied.**
+the unfiltered listing. Every row carries its `context_id`, so `list` checks
+the reply: a row bound to a context under `scope: "workspace"`, or a row not
+bound to `bindingContextId` (compared as canonical UUIDs, in any case), proves
+the filter was ignored, and the call throws a `KaguraError` naming
+memory-cloud v0.145.0 instead of returning the unfiltered listing. `scope:
+"all"`, no filter and an empty listing are not checked. `null` for either
+option means not set.**
 
 ```ts
 const shared = await files.list({ contextId: "workspace-uuid", scope: "workspace" });

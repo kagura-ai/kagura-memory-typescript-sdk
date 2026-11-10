@@ -37,8 +37,13 @@ wire `context_id`, intersected with the caller's accessible contexts before the
 limit. `scope: "workspace"` together with `bindingContextId` is a 422 on the
 server and is refused before the request here. Both are sent only when set.
 **A server before 0.145.0 ignores query parameters it does not know, as it
-ignores `cursor`, and returns the unfiltered listing; the caller cannot tell
-from the reply that the filter was not applied.** Python SDK/CLI 0.44.0 and
+ignores `cursor`, and returns the unfiltered listing.** Every row carries its
+`context_id`, so the reply shows it: under `scope: "workspace"` a row bound to
+a context, and under `bindingContextId` a row not bound to that context
+(canonical UUIDs compared), prove the filter was ignored. `list` then throws a
+`KaguraError` naming 0.145.0 instead of returning the listing; `scope: "all"`,
+no filter and an empty listing are not checked, and `null` for either option
+means not set. Python SDK/CLI 0.44.0 and
 0.45.x have no `files list` filters.
 
 ### Plugin `server_url` keeps `context=` (#139)
@@ -47,13 +52,17 @@ The default-context line of the kagura-memory plugin's SessionStart hook needs
 memory-cloud **0.149.0** and the plugin of that release
 ([memory-cloud#2690](https://github.com/kagura-ai/memory-cloud/issues/2690)):
 the hook prints it only when the first `context=` of the plugin's `server_url`
-is its `context_id`, compared as UUIDs in any case, and prints nothing
-otherwise. `setup claude` therefore keeps `context=<id>` in the `server_url` it
+is its `context_id`, and prints nothing otherwise. The hook's `canonical_uuid`
+accepts only the 36-character dashed form (any case), so a dashless, braced or
+`urn:uuid:` spelling of either value can never match. `setup claude` therefore keeps `context=<id>` in the `server_url` it
 prints when the MCP URL's first `context=` is the context it prints as
-`context_id`, written lower-case and dashed, before `guardrails=off`
+`context_id` (both dashed UUIDs, equal ignoring case), written lower-case,
+before `guardrails=off`
 (`profile`, `add_tools`, `tools` and `guardrails=<context-id>` are still
-dropped). With no `-c`, a context that is not a UUID, or a `context=` naming
-another context, the printed URL is what it was. A plugin before 0.149.0 does
+dropped). The plugin context is `-c`, else the project's `.kagura.json`
+`context_id`, else `KAGURA_CONTEXT_ID`. When setup has none of the three, the
+context is not a dashed UUID, or the `context=` names another context, the
+printed URL is what it was. A plugin before 0.149.0 does
 not read `context=`. This follows the plugin's own setup guide (`context=` must
 stay when the MCP URL carries it and it is the plugin's context); Python SDK
 0.45.1's `_plugin_server_url` still drops `context=`, a documented difference,

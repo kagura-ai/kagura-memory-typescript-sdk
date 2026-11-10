@@ -5213,7 +5213,7 @@ export class KaguraClient {
    * a bounding box and the cross-context "my memories" view. This method is
    * MCP and takes `recall`'s exact filter vocabulary plus `details.<key>`
    * equality, orders by `updated_at` / `created_at` / `importance` /
-   * `observed_at` and pages with a cursor. In a private context both list
+   * `observed_at` / `event_start` (v0.152.0+) and pages with a cursor. In a private context both list
    * only the caller's own memories.
    *
    * Call again with `cursor: result.next_cursor` while `result.has_more`.
