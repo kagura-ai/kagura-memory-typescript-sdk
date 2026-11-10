@@ -473,6 +473,73 @@ describe("downloadUrl / delete / list", () => {
   });
 });
 
+// memory-cloud v0.145.0 (#138): GET /api/v1/files takes `scope` and `context_id`.
+describe("list filters: scope and bindingContextId (#138)", () => {
+  const BOUND = "22222222-2222-4222-8222-222222222222";
+
+  async function listQuery(options: Parameters<FilesClient["list"]>[0]): Promise<URLSearchParams> {
+    const server = new FakeServer();
+    server.routes["/api/v1/files"] = { status: 200, body: [] };
+    await makeClient(server).list(options);
+    expect(server.requests).toHaveLength(1);
+    return new URL(server.requests[0]!.url).searchParams;
+  }
+
+  async function refusedBeforeTheRequest(options: Parameters<FilesClient["list"]>[0], message: string): Promise<void> {
+    const server = new FakeServer();
+    server.routes["/api/v1/files"] = { status: 200, body: [] };
+    await expect(makeClient(server).list(options)).rejects.toThrow(message);
+    expect(server.requests).toEqual([]);
+  }
+
+  it("sends neither parameter when neither is set: the request of a v0.144.0 client", async () => {
+    const query = await listQuery({ contextId: WS });
+    expect([...query.keys()].sort()).toEqual(["limit", "workspace_id"]);
+    expect(query.has("scope")).toBe(false);
+    expect(query.has("context_id")).toBe(false);
+  });
+
+  it.each(["all", "workspace"] as const)("sends scope=%s alone", async (scope) => {
+    const query = await listQuery({ contextId: WS, scope });
+    expect(query.get("scope")).toBe(scope);
+    expect(query.has("context_id")).toBe(false);
+  });
+
+  it("sends bindingContextId as the wire context_id, beside the workspace_id", async () => {
+    const query = await listQuery({ contextId: WS, bindingContextId: BOUND });
+    expect(query.get("context_id")).toBe(BOUND);
+    expect(query.get("workspace_id")).toBe(WS);
+    expect(query.has("scope")).toBe(false);
+  });
+
+  it("sends scope=all with a bound context, which the server allows", async () => {
+    const query = await listQuery({ contextId: WS, scope: "all", bindingContextId: BOUND });
+    expect(query.get("scope")).toBe("all");
+    expect(query.get("context_id")).toBe(BOUND);
+  });
+
+  it("sends a bound context in its canonical form", async () => {
+    const query = await listQuery({ contextId: WS, bindingContextId: BOUND.toUpperCase() });
+    expect(query.get("context_id")).toBe(BOUND);
+  });
+
+  it("refuses scope workspace with a bound context, as the server does, before the request", async () => {
+    await refusedBeforeTheRequest(
+      { contextId: WS, scope: "workspace", bindingContextId: BOUND },
+      "scope='workspace' cannot be combined with bindingContextId",
+    );
+  });
+
+  it("refuses a scope other than all and workspace, and a bound context that is not a UUID", async () => {
+    await refusedBeforeTheRequest(
+      { contextId: WS, scope: "context" as unknown as "all" },
+      "scope must be 'all' or 'workspace', got 'context'",
+    );
+    await refusedBeforeTheRequest({ contextId: WS, scope: "" as unknown as "all" }, "scope must be 'all' or 'workspace', got ''");
+    await refusedBeforeTheRequest({ contextId: WS, bindingContextId: "not-a-uuid" }, "bindingContextId must be a UUID, got 'not-a-uuid'");
+  });
+});
+
 describe("file ids in the path (#66)", () => {
   it("delete and downloadUrl refuse ., .. and an empty id before sending anything", async () => {
     const server = new FakeServer();

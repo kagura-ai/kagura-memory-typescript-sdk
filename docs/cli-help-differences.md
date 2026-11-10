@@ -31,6 +31,7 @@ The audit test also checks that no registered command escapes this comparison.
 | `edge list` | option text, metavar, default wording, or switch grouping: `--min-weight FLOAT`. |
 | `edge update` | Usage/description wording. |
 | `explore` | option text, metavar, default wording, or switch grouping: `-d, --depth INTEGER`, `-w, --min-weight FLOAT`. |
+| `files list` | option text, metavar, default wording, or switch grouping: `--scope [all\|workspace]`, `--binding-context-id TEXT`. |
 | `files upload` | Usage/description wording. |
 | `ingest` | Python's optional URL/local-file ingest command is not implemented in this SDK; it is absent from the root list. |
 | `list` | option text, metavar, default wording, or switch grouping: `--order-by [updated_at\|created_at\|importance\|observed_at\|event_start]`, `--order-by [updated_at\|created_at\|importance\|observed_at]`. |

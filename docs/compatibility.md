@@ -26,12 +26,27 @@ accepts `event_start`, which Python's `--order-by` refuses. The typed response
 fields (`event_start`, `event_end`, `event_weekday`, `observed_weekday`,
 `event_unresolved`) are not modelled; they pass through at runtime.
 
+### Files list filters (#138)
+
+`FilesClient.list({ scope, bindingContextId })` and `kagura-memory files list
+--scope [all|workspace] --binding-context-id ID` need memory-cloud **0.145.0**
+([memory-cloud#2632](https://github.com/kagura-ai/memory-cloud/issues/2632)).
+`scope` is `all` (the default: the unchanged listing) or `workspace` (only
+workspace-shared files, those bound to no context); `bindingContextId` is the
+wire `context_id`, intersected with the caller's accessible contexts before the
+limit. `scope: "workspace"` together with `bindingContextId` is a 422 on the
+server and is refused before the request here. Both are sent only when set.
+**A server before 0.145.0 ignores query parameters it does not know, as it
+ignores `cursor`, and returns the unfiltered listing; the caller cannot tell
+from the reply that the filter was not applied.** Python SDK/CLI 0.44.0 and
+0.45.x have no `files list` filters.
+
 ### CLI help pages
 
-`list --help` no longer matches Python 0.44.0 (its `--order-by` choice and help
-name `event_start`) and is recorded in
-[the exception fixture](../test/cli/typescriptHelp111.json). Of the 94
-supported help pages, 49 now match Python and 45 retain a documented
+`list --help` and `files list --help` no longer match Python 0.44.0 (the
+`--order-by` choice names `event_start`; the two new `files list` options) and
+are recorded in [the exception fixture](../test/cli/typescriptHelp111.json).
+Of the 94 supported help pages, 48 now match Python and 46 retain a documented
 difference (the 0.17.0 counts were 50 and 44).
 
 ## 0.17.0

@@ -13,6 +13,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   takes `eventAfter` / `eventBefore` (merged into `filters.event_after` /
   `filters.event_before`, refused beside the same key in `filters`), for
   memory-cloud v0.152.0. Both are sent only when set (#137).
+- `FilesClient.list` takes `scope` (`"all"` or `"workspace"`) and
+  `bindingContextId` (the wire `context_id`), and `kagura-memory files list`
+  takes `--scope` and `--binding-context-id`, for memory-cloud v0.145.0. Both
+  are sent only when set; `scope: "workspace"` beside a bound context is
+  refused before the request, as the server refuses it. A server before
+  v0.145.0 ignores both and returns the unfiltered listing (#138).
 
 ## [0.17.0] - 2026-11-05
 

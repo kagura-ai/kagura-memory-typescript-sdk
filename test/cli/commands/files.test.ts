@@ -640,6 +640,63 @@ describe("files delete / download-url / list", () => {
     expect(JSON.parse(h.out.join("\n"))).toEqual({ files: [], next_cursor: null });
   });
 
+  describe("list --scope and --binding-context-id (#138)", () => {
+    const BOUND = "22222222-2222-4222-8222-222222222222";
+
+    it("sends neither parameter unless given", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list"], h.deps)).toBe(0);
+      expect(h.rest.query().has("scope")).toBe(false);
+      expect(h.rest.query().has("context_id")).toBe(false);
+    });
+
+    it.each(["all", "workspace"])("--scope %s is sent as scope", async (scope) => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--scope", scope], h.deps)).toBe(0);
+      expect(h.rest.query().get("scope")).toBe(scope);
+      expect(h.rest.query().has("context_id")).toBe(false);
+    });
+
+    it("--binding-context-id is sent as context_id, beside the workspace", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--binding-context-id", BOUND, "-c", WS], h.deps)).toBe(0);
+      expect(h.rest.query().get("context_id")).toBe(BOUND);
+      expect(h.rest.query().get("workspace_id")).toBe(WS);
+    });
+
+    it("refuses --scope workspace with --binding-context-id as a usage error, sending nothing", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--scope", "workspace", "--binding-context-id", BOUND], h.deps)).toBe(2);
+      expect(diagnosticBodies(h.err)).toEqual(["Error: --scope workspace cannot be combined with --binding-context-id."]);
+      expect(h.rest.requests).toEqual([]);
+    });
+
+    it("takes only the two scopes", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--scope", "context"], h.deps)).toBe(2);
+      expect(diagnosticBodies(h.err)).toEqual([
+        "Error: Invalid value for '--scope': 'context' is not one of 'all', 'workspace'.",
+      ]);
+      expect(h.rest.requests).toEqual([]);
+    });
+
+    it("refuses a --binding-context-id that is not a UUID, sending nothing", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--binding-context-id", "nope"], h.deps)).toBe(1);
+      expect(diagnosticBodies(h.err)[0]).toBe("Error: bindingContextId must be a UUID, got 'nope'");
+      expect(h.rest.requests).toEqual([]);
+    });
+
+    it("names both flags in --help, with the v0.145.0 floor", async () => {
+      const h = harness();
+      expect(await runCli(["files", "list", "--help"], h.deps)).toBe(0);
+      const text = prose(h.out.join("\n"));
+      expect(text).toContain("--scope [all|workspace]");
+      expect(text).toContain("--binding-context-id TEXT");
+      expect(text).toContain("server v0.145.0+");
+    });
+  });
+
   it("list range-checks --limit locally", async () => {
     const h = harness();
     expect(await runCli(["files", "list", "--limit", "501"], h.deps)).toBe(2);

@@ -2146,6 +2146,25 @@ Python SDK accepts it and confirms at another route. `list` and
 be a UUID; got '…'`), and sends a `{braced}`, `urn:uuid:` or dashless one
 in its canonical form.
 
+`list` takes two filters (memory-cloud v0.145.0+), each sent only when set:
+`scope` (`"all"`, the unchanged listing, or `"workspace"`, only the
+workspace-shared files, those bound to no context) and `bindingContextId`
+(only the files bound to that context, among the contexts the caller may
+access; the wire `context_id`, the field `upload`'s `bindingContextId`
+binds a file with, while `contextId` is the wire `workspace_id`). A `scope`
+other than the two, a `bindingContextId` that is not a UUID, and `scope:
+"workspace"` beside a `bindingContextId` (the server answers 422) throw
+before any request. `kagura-memory files list` takes `--scope [all|workspace]`
+and `--binding-context-id`, and the combination is a usage error. **A server
+before v0.145.0 ignores both parameters, as it ignores `cursor`, and returns
+the unfiltered listing; nothing in the reply tells the caller the filter was
+not applied.**
+
+```ts
+const shared = await files.list({ contextId: "workspace-uuid", scope: "workspace" });
+const bound = await files.list({ contextId: "workspace-uuid", bindingContextId: "context-uuid" });
+```
+
 Every id a client puts in a URL path (a `FilesClient` file id, a
 `ResourceClient` resource id, `KaguraClient`'s context id for memory
 stats, duplicates and the tags drill-down, a `WorkspaceClient` user id, a

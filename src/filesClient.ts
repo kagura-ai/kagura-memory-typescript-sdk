@@ -61,6 +61,9 @@ export interface FilesClientOptions extends KaguraRestClientOptions {
   uploadTimeoutMs?: number;
 }
 
+/** `FilesClient.list`'s `scope` (memory-cloud v0.145.0+). */
+export type FilesListScope = "all" | "workspace";
+
 export interface UploadOptions {
   /**
    * Target context (workspace) UUID. Mapped to the backend's
@@ -295,6 +298,14 @@ export class FilesClient extends KaguraRestClient {
   /**
    * List uploaded files in a workspace, newest first.
    *
+   * `scope` and `bindingContextId` narrow the listing (memory-cloud
+   * v0.145.0+). A server before v0.145.0 ignores query parameters it does
+   * not know, as it ignores `cursor`, and returns the unfiltered listing:
+   * nothing in the reply says the filter was not applied.
+   *
+   * @throws Error before any request if `scope` is not `"all"` or
+   *   `"workspace"`, if `bindingContextId` is not a UUID, or if `scope` is
+   *   `"workspace"` beside a `bindingContextId` (the server answers 422).
    * @throws KaguraResponseError if the 2xx body is not what the Python SDK
    *   reads: each item of a bare list as a `FileObject`, anything else as
    *   a `FileListResponse` (#66).
@@ -305,11 +316,42 @@ export class FilesClient extends KaguraRestClient {
     limit?: number;
     /** Forward-compatible pagination cursor (ignored by the current server). */
     cursor?: string;
+    /**
+     * `"all"` (the server default, so not needed to get the unchanged
+     * listing) or `"workspace"`: only the workspace-shared files, those not
+     * bound to a context (memory-cloud v0.145.0+). Sent only when set. Not
+     * with `bindingContextId`.
+     */
+    scope?: FilesListScope;
+    /**
+     * Only the files bound to this context (memory-cloud v0.145.0+),
+     * intersected with the contexts the caller may access before the limit.
+     * Sent as the wire `context_id`, the field {@link UploadOptions.bindingContextId}
+     * binds a file with; `contextId` above is the wire `workspace_id`. Sent
+     * only when set, in its canonical lower-case form.
+     */
+    bindingContextId?: string;
   }): Promise<FileListResponse> {
+    const { scope, bindingContextId } = options;
+    if (scope !== undefined && scope !== "all" && scope !== "workspace") {
+      throw new Error(`scope must be 'all' or 'workspace', got ${pyRepr(scope)}`);
+    }
+    if (scope === "workspace" && bindingContextId !== undefined) {
+      throw new Error(
+        "scope='workspace' cannot be combined with bindingContextId: " +
+          "workspace-shared files are bound to no context; give one of them",
+      );
+    }
     const params: Record<string, unknown> = {
       workspace_id: normalizeContextId(options.contextId),
       limit: options.limit ?? 50,
     };
+    if (scope !== undefined) {
+      params.scope = scope;
+    }
+    if (bindingContextId !== undefined) {
+      params.context_id = normalizeUuid(bindingContextId, "bindingContextId");
+    }
     if (options.cursor !== undefined) {
       params.cursor = options.cursor;
     }
