@@ -2270,6 +2270,15 @@ describe("setup claude --add-tools and --context (#83)", () => {
       expect(await printed(mcpUrl, ...flags)).toBe(expected);
     });
 
+    it("keeps it when the plugin context comes from the project's .kagura.json, which an earlier run wrote", async () => {
+      const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
+      expect(await runCli(claude("--mcp-url", "https://x.test/mcp", "-c", CONTEXT), h.deps)).toBe(0);
+      h.out.length = 0;
+      expect(await runCli(claude("--mcp-url", `https://x.test/mcp?context=${CONTEXT}`), h.deps)).toBe(0);
+      const settings = (JSON.parse(h.out.join("\n")).notes as string[]).find((n) => n.startsWith("Plugin settings"))!;
+      expect(settings).toContain(`server_url = https://x.test/mcp?context=${CONTEXT}, context_id = ${CONTEXT}`);
+    });
+
     it("prints today's server_url when -c names a context that is no UUID", async () => {
       const h = harness({}, pluginList([{ id: "kagura-memory@kagura", enabled: true }]));
       expect(await runCli(claude("--mcp-url", `https://x.test/mcp?context=${CONTEXT}`, "-c", "dev"), h.deps)).toBe(0);

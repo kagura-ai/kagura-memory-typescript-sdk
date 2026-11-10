@@ -289,13 +289,32 @@ describe("pluginServerUrl keeps context= when it is the plugin's context (#139)"
     expect(pluginServerUrl(parseMcpUrl(`${BASE}${query}`), UUID)).toBe(expected);
   });
 
-  it("compares in any case and writes the canonical lower-case, dashed form", () => {
+  it("compares the dashed form in any case and writes it lower-case", () => {
     expect(pluginServerUrl(`${BASE}?context=${UPPER}`, UUID)).toBe(`${BASE}?context=${UUID}`);
     expect(pluginServerUrl(`${BASE}?context=${UUID}`, UPPER)).toBe(`${BASE}?context=${UUID}`);
     expect(pluginServerUrl(`${BASE}?context=${UPPER}&guardrails=off`, UPPER)).toBe(`${BASE}?context=${UUID}&guardrails=off`);
-    // Another spelling of the same UUID reads as it, and is written dashed.
-    expect(pluginServerUrl(`${BASE}?context=${UUID.replaceAll("-", "")}`, UUID)).toBe(`${BASE}?context=${UUID}`);
-    expect(pluginServerUrl(`${BASE}?context=%7B${UUID}%7D`, UUID)).toBe(`${BASE}?context=${UUID}`);
+  });
+
+  // The hook's canonical_uuid takes only the 36-character dashed form (any
+  // case): keeping context= for another spelling would promise a line that
+  // cannot appear, on either side.
+  const SPELLINGS: [string, string][] = [
+    ["dashless", UUID.replaceAll("-", "")],
+    ["braced", `{${UUID}}`],
+    ["urn", `urn:uuid:${UUID}`],
+    ["dashes misplaced", `${UUID.slice(0, 13)}${UUID.slice(14, 18)}-${UUID.slice(13, 14)}${UUID.slice(19)}`],
+  ];
+  it.each(SPELLINGS)("drops it when the URL's context is %s", (_label, spelling) => {
+    for (const written of [spelling, encodeURIComponent(spelling), spelling.toUpperCase()]) {
+      expect(pluginServerUrl(`${BASE}?context=${written}`, UUID)).toBe(BASE);
+      expect(pluginServerUrl(`${BASE}?context=${written}&guardrails=off`, UUID)).toBe(`${BASE}?guardrails=off`);
+    }
+  });
+  it.each(SPELLINGS)("drops it when the plugin's context is %s", (_label, spelling) => {
+    expect(pluginServerUrl(`${BASE}?context=${UUID}`, spelling)).toBe(BASE);
+    expect(pluginServerUrl(`${BASE}?context=${UUID}&guardrails=off`, spelling)).toBe(`${BASE}?guardrails=off`);
+    // Even when the two are the same spelling.
+    expect(pluginServerUrl(`${BASE}?context=${spelling}`, spelling)).toBe(BASE);
   });
 
   it("strips both values as Python does, and reads the URL's percent-encoding as the server does", () => {
