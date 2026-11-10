@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-10
+
+Catches up with memory-cloud 0.145.0 – 0.155.0: workspace operation history,
+event-date ordering and filters, `files list` filters and the plugin
+`server_url` hint. The memory-cloud 0.75.0 floor and the Python SDK/CLI 0.44.0
+parity target are unchanged; `docs/compatibility.md` lists what each server
+release changed for this SDK.
+
 ### Added
 
 - `WorkspaceClient.listOperationHistory` for the workspace operation history of
@@ -31,8 +39,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - `WorkspaceClient.addContextMember` throws an `Error` before any request on a
-  client not built with `session: true`. It used to send the request with no
-  credential at all, which the session-only route refused (#136).
+  client not built with `session: true`. A client built with an API key or
+  OAuth used to send the request without that credential, so the session-only
+  route refused it unless the browser itself supplied a session cookie (#136).
 
 ### Fixed
 
@@ -3468,7 +3477,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.14.1...v0.15.0
