@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `kagura-memory sleep rollback` dropped `related_indexes_reverted` from the
+  summary it prints, on a complete and on a partial rollback: the
+  `RollbackSummary` model did not declare the counter memory-cloud v0.153.0
+  added for its opt-in Sleep related index. The field is now in the model and
+  typed on `RollbackSummary` (after `points_requeued`, 0 when the server sends
+  no key, as in the Python SDK 0.46.0), so the CLI prints it.
+  `rollbackSleepRun` and `KaguraPartialRollbackError.summary` already returned
+  the value at runtime, untyped (#144).
+
 ## [0.18.0] - 2026-11-10
 
 Catches up with memory-cloud 0.145.0 – 0.155.0: workspace operation history,

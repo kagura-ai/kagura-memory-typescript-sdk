@@ -545,7 +545,10 @@ export class KaguraCapacityLockedError extends KaguraError {
  * The server commits each step, so what was reversed stays reversed, and
  * the report is marked `failed`. `summary` is the same
  * {@link RollbackSummary} a clean rollback returns: its counts say what
- * was undone, and `summary.errors` names each action that was not.
+ * was undone, and `summary.errors` names each action that was not. It is
+ * the summary as the server sent it, so `related_indexes_reverted`
+ * (memory-cloud v0.153.0+) is `undefined` unless an entry of the opt-in
+ * Sleep related index was undone.
  *
  * The server will not roll back a `failed` report again, so there is no
  * retry; the actions in `summary.errors` need handling some other way.

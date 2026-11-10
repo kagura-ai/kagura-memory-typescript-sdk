@@ -1,5 +1,39 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.18.1
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### Sleep related index (#144)
+
+`RollbackSummary.related_indexes_reverted` needs memory-cloud **0.153.0**
+([memory-cloud#2728](https://github.com/kagura-ai/memory-cloud/issues/2728)).
+It counts the `index_related` actions of the server's opt-in Sleep related
+index (`SLEEP_RELATED_INDEX_ENABLED`) that `rollback_sleep_run` undid. The
+server adds the key only when at least one entry was reverted, and a
+deployment without the related index never sends it.
+
+0.18.0 did not declare the field. `rollbackSleepRun` and
+`KaguraPartialRollbackError.summary` return the reply as it arrived, so the
+count was there at runtime but untyped; `kagura-memory sleep rollback` prints
+the model's dump, which drops a key the model does not declare, so the count
+was missing from its output on a complete and on a partial rollback. From
+0.18.1 the field is typed and printed, after `points_requeued` and with 0 when
+the server sends no key, as the Python SDK and CLI 0.46.0 do
+([python-sdk#335](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/335)).
+On the library's results the key stays absent when the server sends none, so
+read it as `related_indexes_reverted ?? 0`. `SleepAction`'s doc comment lists
+`index_related`.
+
+The parity target stays the Python SDK and CLI 0.44.0. This one field is ahead
+of it on purpose: `sleep rollback` prints one more line than the Python CLI
+0.44.0 does, the line 0.46.0 prints, and the README lists it among the
+differences. The expected output is recorded from the published 0.46.0 models
+(`test/cli/commands/sleepRollback046.json`, written by
+`recordRollbackSummary046.py`; run under 0.44.0, the same script reproduces
+the 0.44.0 CLI record byte for byte). Verified by those records and contract
+tests; no call was made to a server with the related index enabled.
+
 ## 0.18.0
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
@@ -26,7 +60,7 @@ each feature's floor.
 | 0.152.0 | `event_start`, `event_end`, `event_weekday` on rows; `event_unresolved` on write replies; `details.event_phrase` | pass through, untyped; `details` is sent as given |
 | 0.152.0 | `plan_blocked` on pending invitations, the passkey limit, 403 on usage readouts for a former member | not called by this SDK |
 | 0.152.1 | payload indexes for the event dates on existing collections | none |
-| 0.153.0 | opt-in Sleep related index (`index_related` actions) | `action_type` is read as a free-form string |
+| 0.153.0 | opt-in Sleep related index (`index_related` actions; `related_indexes_reverted` in the rollback summary) | `action_type` is read as a free-form string. The rollback counter was missed here: untyped, and dropped from `sleep rollback`'s output, until 0.18.1 (#144) |
 | 0.154.0 | workspace operation history | `WorkspaceClient.listOperationHistory` (#136) |
 | 0.155.0 | `partially_unavailable_fields` on a versioned `reference` | passes through, untyped |
 | 0.155.0 | `workspace_totals.active_users_week`, 7-day usage windows | not called by this SDK |

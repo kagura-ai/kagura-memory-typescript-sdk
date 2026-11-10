@@ -902,6 +902,11 @@ added**, each on purpose or out of reach:
   entry, so it never stops there. This port's API-key form never runs
   `hermes mcp add`: it prints the entry to put in place of the existing
   one, as Python does under `-y`.
+- `sleep rollback` prints one line the Python CLI 0.44.0 does not:
+  `related_indexes_reverted` in the summary, after `points_requeued` (0
+  when the server sends no key). It is the counter memory-cloud v0.153.0
+  added for its opt-in Sleep related index, printed here as the Python CLI
+  prints it from 0.46.0; the rest of the output is 0.44.0's.
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
@@ -1865,7 +1870,7 @@ Ephemeral, TTL-bounded, and excluded from recall — deliberately not memories.
 |--------|--------------|
 | `getSleepHistory` | Recent runs, newest first. Since v0.138.0 the server lists Sleep runs only unless `source` says otherwise (`"analysis"` for the rows Memory Analysis writes for its LLM spend, `"all"` for both), and each row carries `source`; older servers have no filter. |
 | `getSleepReport` | One run in detail, including the per-action audit log. `contextId` is not sent: the server finds the run by `reportId`. From v0.82.0 the log comes a page at a time (`actionsLimit`, default 50, at most 200; `maxChars` 10,000–100,000): while `actions_has_more` is true, pass `actions_next_cursor` as `actionsCursor`. An action too large for its page has `details_omitted` and `details_total_chars` instead of `details`; an analysis report carries a `note` (v0.140.0+). |
-| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. `chunks_requeued` / `points_requeued` (v0.112.0+) count restored memories queued for the embedding sweep to rebuild — not errors. |
+| `rollbackSleepRun` | Reverse a completed or degraded run. The server commits per step, so a partial rollback is possible: it throws `KaguraPartialRollbackError` instead of returning, and the steps it did reverse stay reversed. There is no retry: the report is now `failed`, and the server will not roll back a `failed` report again. `err.summary` has the same counts a clean run returns, and the actions in `err.summary.errors` were not reversed and need handling some other way. `chunks_requeued` / `points_requeued` (v0.112.0+) count restored memories queued for the embedding sweep to rebuild — not errors. `related_indexes_reverted` (v0.153.0+) counts the undone entries of the server's opt-in Sleep related index; the server sends it only when at least one was undone, and `kagura-memory sleep rollback` prints 0 otherwise. |
 
 `getSleepReport` and `rollbackSleepRun`, and `kagura-memory sleep
 report|rollback`, send `report_id` only. Their `contextId` is ignored and

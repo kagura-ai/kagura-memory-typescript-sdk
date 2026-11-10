@@ -1,0 +1,57 @@
+{
+ "recorded_with": "kagura-memory 0.46.0",
+ "cases": [
+  {
+   "name": "defaults and unknown fields",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": [\n      \"取り消せない\"\n    ]\n  }\n}\n"
+  },
+  {
+   "name": "large integer count",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 9007199254740993,\n    \"related_indexes_reverted\": 0,\n    \"errors\": []\n  }\n}\n"
+  },
+  {
+   "name": "partial rollback",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"error\": \"partial_rollback\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 2,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": [\n      \"cannot undo merge\"\n    ]\n  }\n}\n"
+  },
+  {
+   "name": "prompt None",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": []\n  }\n}\n"
+  },
+  {
+   "name": "prompt 2026-06-01T00:00:00Z",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": []\n  }\n}\n"
+  },
+  {
+   "name": "prompt 2026-06-01T03:02:10.5+09:00",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": []\n  }\n}\n"
+  },
+  {
+   "name": "prompt 2026-06-01",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": []\n  }\n}\n"
+  },
+  {
+   "name": "related index: complete rollback with a count",
+   "argv": [
+    "sleep",
+    "rollback",
+    "ctx-1",
+    "r-1",
+    "--yes"
+   ],
+   "toolText": "{\"report_id\": \"r-1\", \"status\": \"rolled_back\", \"rollback_summary\": {\"edges_deleted\": 1, \"related_indexes_reverted\": 2}}",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 1,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 2,\n    \"errors\": []\n  }\n}\n"
+  },
+  {
+   "name": "related index: partial rollback with a count",
+   "argv": [
+    "sleep",
+    "rollback",
+    "ctx-1",
+    "r-1",
+    "--yes"
+   ],
+   "toolText": "{\"status\": \"error\", \"error\": \"partial_rollback\", \"report_id\": \"r-1\", \"message\": \"Some actions failed\", \"rollback_summary\": {\"related_indexes_reverted\": 3, \"errors\": [\"cannot undo merge\"]}}",
+   "stdout": "{\n  \"report_id\": \"r-1\",\n  \"error\": \"partial_rollback\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 0,\n    \"merges_reversed\": 0,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 3,\n    \"errors\": [\n      \"cannot undo merge\"\n    ]\n  }\n}\n"
+  }
+ ]
+}

@@ -343,12 +343,14 @@ const PYTHON_SLEEP_CASES: SleepCase[] = [
     stderr: "Error: get_sleep_report: Sleep report 11111111-2222-4333-8444-555555555555 not found or not owned by you.\n",
   },
   {
+    // The Python CLI 0.44.0's stdout plus the one line 0.46.0 adds:
+    // `related_indexes_reverted` after `points_requeued` (#144, python-sdk#335).
     name: "rollback --yes: a reply with the model's keys in its order",
     argv: ["sleep","rollback","ctx-1","11111111-2222-4333-8444-555555555555","--yes"],
     results: {"rollback_sleep_run":{"report_id":"11111111-2222-4333-8444-555555555555","status":"rolled_back","rollback_summary":{"edges_deleted":3,"merges_reversed":1,"merges_unreversible":0,"importance_restored":0,"promotions_reversed":0,"importance_kept":0,"promotions_kept":0,"archives_restored":0,"errors":[]}}},
     calls: [["rollback_sleep_run",{"report_id":"11111111-2222-4333-8444-555555555555"}]],
     code: 0,
-    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 1,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"errors\": []\n  }\n}\n",
+    stdout: "{\n  \"report_id\": \"11111111-2222-4333-8444-555555555555\",\n  \"status\": \"rolled_back\",\n  \"rollback_summary\": {\n    \"edges_deleted\": 3,\n    \"merges_reversed\": 1,\n    \"merges_unreversible\": 0,\n    \"importance_restored\": 0,\n    \"promotions_reversed\": 0,\n    \"importance_kept\": 0,\n    \"promotions_kept\": 0,\n    \"archives_restored\": 0,\n    \"chunks_requeued\": 0,\n    \"points_requeued\": 0,\n    \"related_indexes_reverted\": 0,\n    \"errors\": []\n  }\n}\n",
     stderr: "",
   },
   {
