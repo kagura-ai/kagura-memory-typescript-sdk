@@ -1595,6 +1595,51 @@ describe("operation history (memory-cloud v0.154.0)", () => {
     expect(error).toMatchObject({ code: "AUTH-003", requiredRole: "admin", message: "Insufficient permissions" });
   });
 
+  it("maps v0.154.0's own 401 and uniform 403 bodies, never to an empty page", async () => {
+    const server = new FakeRest();
+    const client = sessionClient(server);
+    // `require_session_auth` without a session: HTTPException(401) in the HTTP-401 envelope.
+    server.status = 401;
+    server.body = envelope("HTTP-401", "Not authenticated");
+    const expired = await caught(client.listOperationHistory(WS));
+    expect(expired).toBeInstanceOf(KaguraAuthError);
+    expect(expired).toMatchObject({
+      code: "HTTP-401",
+      message: "A signed-in session is required to read workspace operation history.",
+    });
+    // `check_workspace_admin`: a role too low, no membership, or no such
+    // workspace all answer AuthorizationError, its details stripped.
+    server.status = 403;
+    server.body = envelope("AUTH-101", "Insufficient permissions");
+    const refused = await caught(client.listOperationHistory(WS));
+    expect(refused).toBeInstanceOf(KaguraPermissionError);
+    expect(refused).toMatchObject({ code: "AUTH-101", requiredRole: null, message: "Insufficient permissions" });
+  });
+
+  it("maps a suspended admin seat to KaguraFeatureNotAvailableError for members", async () => {
+    const server = new FakeRest();
+    server.status = 403;
+    server.body = JSON.stringify({
+      error: "FEAT-001",
+      message: "Members above the plan's seats are paused.",
+      details: { gate: "plan", feature: "members", required_plan: "pro", required_plan_display: "L", current_plan: "basic", limit: 3, current: 5 },
+    });
+    const error = await caught(sessionClient(server).listOperationHistory(WS));
+    expect(error).toBeInstanceOf(KaguraFeatureNotAvailableError);
+    expect(error).toMatchObject({ feature: "members", code: "FEAT-001" });
+  });
+
+  it("returns unknown numeric fields as plain numbers, on the page and on items", async () => {
+    const server = new FakeRest();
+    server.body = `{"items": [${JSON.stringify(EVENT).slice(0, -1)}, "weight": 2.5, "rank": 7}], ` +
+      `"total": 1, "next_cursor": null, "retention_days": 90, "score": 3, "ratio": 0.25}`;
+    const page = await sessionClient(server).listOperationHistory(WS);
+    for (const value of [page.total, page.retention_days, page.score, page.ratio, page.items[0]!.count, page.items[0]!.weight, page.items[0]!.rank]) {
+      expect(typeof value).toBe("number");
+    }
+    expect(page).toEqual({ ...PAGE, items: [{ ...EVENT, weight: 2.5, rank: 7 }], score: 3, ratio: 0.25 });
+  });
+
   it("maps the plan gate to KaguraFeatureNotAvailableError", async () => {
     const server = new FakeRest();
     server.status = 403;
@@ -1611,9 +1656,12 @@ describe("operation history (memory-cloud v0.154.0)", () => {
   it("keeps the server's 404 and 422 envelopes", async () => {
     const server = new FakeRest();
     const client = sessionClient(server);
+    // memory-cloud v0.153.0 has no such route: Starlette's 404, in its HTTP-404 envelope.
     server.status = 404;
-    server.body = envelope("RES-001", "Workspace not found");
-    await expect(client.listOperationHistory(WS)).rejects.toBeInstanceOf(KaguraNotFoundError);
+    server.body = envelope("HTTP-404", "Not Found");
+    const missing = await caught(client.listOperationHistory(WS));
+    expect(missing).toBeInstanceOf(KaguraNotFoundError);
+    expect(missing).toMatchObject({ code: "HTTP-404", message: "Not Found" });
     server.status = 422;
     server.body = JSON.stringify({ error: "VAL-001", message: "Invalid operation history cursor", details: { field: "cursor" } });
     const invalid = await caught(client.listOperationHistory(WS, { cursor: "x" }));

@@ -1947,7 +1947,7 @@ export interface OperationHistoryEvent {
   context_id: string | null;
   actor_user_id: string | null;
   actor_name: string | null;
-  /** The member the operation affected, when it is not the actor. */
+  /** The member the operation affected, recorded apart from the actor and the target. */
   subject_user_id: string | null;
   agent_id: string | null;
   principal_kind: string;

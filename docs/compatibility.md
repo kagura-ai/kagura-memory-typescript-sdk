@@ -10,19 +10,25 @@
 (tag `v0.154.0`, commit `e66b9e5d4b5b`; the route, its read service and the
 [feature document](https://github.com/kagura-ai/memory-cloud/blob/v0.154.0/docs/concepts/operation-history.md)
 are unchanged in v0.155.0). This floor applies to this method only; the SDK-wide
-minimum stays 0.75.0. The v0.153.0 source has no such route; an unknown route
-normally answers 404 (`KaguraNotFoundError`).
+minimum stays 0.75.0. memory-cloud v0.153.0 has no such route and no other
+route matching the path, so its backend answers `404` with
+`{"error": "HTTP-404", "message": "Not Found", "details": {}}` (Starlette's
+unmatched-route 404 in the canonical envelope), which the method raises as
+`KaguraNotFoundError`.
 
 The route, `GET /api/v1/workspaces/{workspace_id}/operation-history`, accepts a
 web session only. The method refuses a client built with an API key or OAuth
 token before any request; it never sends another credential. The server checks
-owner/admin first (`KaguraPermissionError`), then the `operation_history` plan
-feature (Pro and Max; `403 FEAT-001`, `KaguraFeatureNotAvailableError`). The
-query bounds (`query` 120, `actor` 255, `operation` 40, `cursor` 512 characters;
-`limit` 1–100, default 30; `since` / `until` with a timezone, `since` not after
-`until`) are checked locally; operation, target-type and outcome values are left
-to the server. The page and event models take every field of the v0.154.0
-`OperationHistoryPage` / `OperationHistoryItem` (nullable fields required, as
+owner/admin first (`403 AUTH-101`, also for a workspace that does not exist;
+`KaguraPermissionError`), then the `operation_history` plan feature (Pro and
+Max, or a custom plan that includes it; `403 FEAT-001`,
+`KaguraFeatureNotAvailableError`). The query bounds (`query` 120, `actor` 255,
+`operation` 40, `cursor` 512 characters; `limit` 1–100, default 30; `since` /
+`until` with a timezone, `since` not after `until`) are checked locally;
+operation, target-type and outcome values are left to the server. One local
+check is stricter than the server: a Unix-time string for `since` / `until`,
+which the server reads as UTC, is refused. The page and event models take every
+field of the v0.154.0 `OperationHistoryPage` / `OperationHistoryItem` (nullable fields required, as
 the server always sends them; `total_capped` defaults to `false`) and keep keys a
 newer server adds.
 

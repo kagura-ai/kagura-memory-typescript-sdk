@@ -208,7 +208,9 @@ export interface ListOperationHistoryOptions {
    * Window start, inclusive (`since`): a `Date`, sent as its UTC instant
    * (`toISOString()`), or an ISO 8601 datetime string with an explicit
    * offset (`Z` or `±HH:MM`), sent as written. A string without an offset
-   * is refused, as the server refuses it.
+   * (a naive datetime, a date alone) is refused, as the server refuses it.
+   * A Unix time (`"1762000000"`) is refused too, which is stricter than the
+   * server: it reads one as a UTC instant.
    */
   since?: string | Date;
   /** Window end, inclusive (`until`), in the form {@link since} takes; not before `since`. */
@@ -448,10 +450,10 @@ export class WorkspaceClient extends KaguraRestClient {
    * never falls back to another credential.
    *
    * The caller must be an owner or admin of the workspace, and the
-   * workspace's plan must include `operation_history` (Pro and Max).
-   * History is recorded from server v0.154.0 on, with no backfill, and is
-   * kept for `retention_days` (90 days plus any add-on). It holds who
-   * changed what — ids, operation, outcome, count and changed-field names
+   * workspace's plan must include `operation_history` (Pro and Max, or a
+   * custom plan that includes the feature). History is recorded from
+   * server v0.154.0 on, with no backfill, and is kept for `retention_days`
+   * (90 days plus any add-on). It holds who changed what — ids, operation, outcome, count and changed-field names
    * — never contents or before/after values; reads and searches are not
    * recorded, and it is not a full audit ledger. A private context's
    * history is shown only to its creator. A shared credential identifies
@@ -462,16 +464,22 @@ export class WorkspaceClient extends KaguraRestClient {
    * UUID; a `limit` that is no integer in 1-100; a `query` over 120,
    * `actor` over 255, `operation` over 40 or `cursor` over 512 characters
    * (code points); a `since` / `until` string without a timezone offset,
-   * an invalid `Date`, or `since` after `until`. `cursor` is sent as given.
+   * an invalid `Date`, or `since` after `until`. Stricter than the server:
+   * a `since` / `until` string that is a Unix time is refused too, where
+   * the server reads it as UTC. `cursor` is sent as given.
    *
    * @throws Error when the client was not built with `session: true`, or an
    *   option is refused, before any request.
    * @throws KaguraAuthError when the session is missing or expired (401).
    * @throws KaguraPermissionError when the caller is not a workspace owner
-   *   or admin (403), with `requiredRole` when the server names one.
+   *   or admin, or the workspace does not exist (the server's uniform
+   *   `403 AUTH-101` "Insufficient permissions"), with `requiredRole` when
+   *   the server names one.
    * @throws KaguraFeatureNotAvailableError when the workspace's plan lacks
-   *   `operation_history` (403 `FEAT-001`).
-   * @throws KaguraNotFoundError for a workspace that is not found (404).
+   *   `operation_history` (403 `FEAT-001`, `feature: "operation_history"`),
+   *   or the admin's seat is suspended (`feature: "members"`).
+   * @throws KaguraNotFoundError from a server without the route:
+   *   memory-cloud v0.153.0 answers this path `404 HTTP-404` "Not Found".
    * @throws KaguraConnectionError for a 422 the server answers (an unknown
    *   `operation`, a malformed `cursor`), keeping its `code` and `details`,
    *   or a transport failure.

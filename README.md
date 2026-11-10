@@ -1950,14 +1950,17 @@ The filters combine: `query` (up to 120 characters, over actor names and ids,
 target/context/agent/credential ids, operation names and changed-field names),
 `contextId`, `actor`, `agentId`, `operation`, `targetType`, `outcome`, `since` /
 `until` (a `Date`, or an ISO 8601 string with an explicit offset; a naive string
-is refused, as the server refuses it), `limit` (1–100, server default 30) and
+is refused, as the server refuses it, and so is a Unix time, which the server
+would read as UTC), `limit` (1–100, server default 30) and
 `cursor`. Pass `next_cursor` back unchanged; it is opaque. Unset options are not
 sent.
 
 - The caller must be a workspace **owner or admin**, and the workspace's plan
-  must include `operation_history` (**Pro and Max**). A missing or expired
-  session is `KaguraAuthError`, the role refusal `KaguraPermissionError`, the
-  plan gate `KaguraFeatureNotAvailableError`. A refusal is never an empty page.
+  must include `operation_history` (**Pro and Max**, or a custom plan that
+  includes the feature). A missing or expired session is `KaguraAuthError`; the
+  role refusal, which the server also gives for a workspace that does not exist,
+  `KaguraPermissionError`; the plan gate `KaguraFeatureNotAvailableError`. A
+  refusal is never an empty page.
 - An event records ids, the operation, its outcome, a count and the **names** of
   the changed fields: no contents and no before/after values. Reads and searches
   are not recorded, and the history is not a full audit ledger.
