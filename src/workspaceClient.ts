@@ -18,10 +18,13 @@
 import { SOURCE_LABEL } from "./auth/types.js";
 import { KaguraAuthError, KaguraContextNotInAccessListError, KaguraPermissionError, KaguraConnectionError, KaguraError, KaguraQuotaError, KaguraResponseError } from "./errors.js";
 import { responseRetryAfter, sanitizeServerDetail } from "./http.js";
-import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "./models.js";
-import { pyTypeName } from "./python.js";
+import type { MemberAPIKey, OperationHistoryPage, WorkspaceInvitation, WorkspaceMember } from "./models.js";
+import { jsonValue } from "./losslessJson.js";
+import { awareDatetimeMicros } from "./pydanticDatetime.js";
+import { validateIntRange } from "./responseBudget.js";
+import { isSet, pyRepr, pyTypeName } from "./python.js";
 import { responseShapeError } from "./responseShape.js";
-import { WORKSPACE_MEMBER_ACCESS_FIELDS, CONTEXT_MEMBER, MEMBER_CONTEXT_ACCESS, MEMBER_CONTEXT_ACCESS_UPDATE, MEMBER_API_KEY, WORKSPACE_INVITATION, readModel, type Model } from "./pyModels.js";
+import { WORKSPACE_MEMBER_ACCESS_FIELDS, CONTEXT_MEMBER, MEMBER_CONTEXT_ACCESS, MEMBER_CONTEXT_ACCESS_UPDATE, MEMBER_API_KEY, OPERATION_HISTORY_PAGE, WORKSPACE_INVITATION, readModel, type Model } from "./pyModels.js";
 import { pathSegment } from "./pathSegment.js";
 import { normalizeUuid } from "./pyCompat.js";
 import { KaguraRestClient, requireInt, requirePublicId } from "./restBase.js";
@@ -129,6 +132,10 @@ export interface ContextMember {
   access_list_extended: boolean;
 }
 
+function isSessionOptions(options: KaguraRestClientOptions | WorkspaceSessionOptions): options is WorkspaceSessionOptions {
+  return "session" in options && Boolean(options.session);
+}
+
 function contextIds(ids: readonly string[] | null): string[] | null {
   return ids === null ? null : ids.map(id => normalizeUuid(id, "allowedContextIds"));
 }
@@ -156,13 +163,157 @@ export interface ListInvitationsOptions {
   includeAccepted?: boolean;
 }
 
+/** An operation-history `target_type` filter: the values memory-cloud v0.154.0 knows, or any other string. */
+export type OperationHistoryTargetType =
+  | "memory"
+  | "context"
+  | "member"
+  | "credential"
+  | "integration"
+  | "sleep"
+  | (string & {});
+
+/** An operation-history `outcome` filter: the values memory-cloud v0.154.0 knows, or any other string. */
+export type OperationHistoryOutcome = "success" | "failure" | "denied" | (string & {});
+
+/**
+ * Options for {@link WorkspaceClient.listOperationHistory}. Each is sent
+ * only when set, under the server's wire name; the filters combine.
+ * `targetType`, `outcome` and `operation` are not checked against a list
+ * here: the server is the authority, and refuses a value it does not know
+ * with a 422.
+ */
+export interface ListOperationHistoryOptions {
+  /**
+   * Text search over actor names and ids, target, context, agent and
+   * credential/client ids, operation names and changed-field names
+   * (`query`, at most 120 characters).
+   */
+  query?: string;
+  /** Only events in this context (`context_id`, a UUID). */
+  contextId?: string;
+  /** Only events by this actor user id (`actor`, at most 255 characters). */
+  actor?: string;
+  /** Only events attributed to this agent (`agent_id`, a UUID). */
+  agentId?: string;
+  /**
+   * One of the server's operation names, such as `memory.created`,
+   * `context.updated`, `member.access_changed`, `credential.revoked` or
+   * `sleep.undo` (`operation`, at most 40 characters).
+   */
+  operation?: string;
+  /** `memory`, `context`, `member`, `credential`, `integration` or `sleep` (`target_type`). */
+  targetType?: OperationHistoryTargetType;
+  /** `success`, `failure` or `denied` (`outcome`). */
+  outcome?: OperationHistoryOutcome;
+  /**
+   * Window start, inclusive (`since`): a `Date`, sent as its UTC instant
+   * (`toISOString()`), or an ISO 8601 datetime string with an explicit
+   * offset (`Z` or `±HH:MM`), sent as written. A string without an offset
+   * (a naive datetime, a date alone) is refused, as the server refuses it.
+   * A Unix time (`"1762000000"`) is refused too, which is stricter than the
+   * server: it reads one as a UTC instant.
+   */
+  since?: string | Date;
+  /** Window end, inclusive (`until`), in the form {@link since} takes; not before `since`. */
+  until?: string | Date;
+  /** Page size, an integer in 1-100 (`limit`); the server's default is 30. */
+  limit?: number;
+  /**
+   * A previous page's `next_cursor`, passed back unchanged (`cursor`, at
+   * most 512 characters). It is opaque: never build or edit one.
+   */
+  cursor?: string;
+}
+
+/** The operation-history route's text bounds, in characters (code points) as pydantic's `max_length` counts. */
+const HISTORY_QUERY_MAX = 120;
+const HISTORY_ACTOR_MAX = 255;
+const HISTORY_OPERATION_MAX = 40;
+const HISTORY_CURSOR_MAX = 512;
+const HISTORY_LIMIT_MIN = 1;
+const HISTORY_LIMIT_MAX = 100;
+
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a string, got ${pyTypeName(value)}`);
+  }
+  return value;
+}
+
+/** `value` as a string of at most `max` code points, or an `Error` naming the option. */
+function boundedText(value: unknown, name: string, max: number): string {
+  const text = requireString(value, name);
+  const length = [...text].length;
+  if (length > max) {
+    throw new Error(`${name} must be at most ${max} characters, got ${length}`);
+  }
+  return text;
+}
+
+/** A `since` / `until` value: the text sent, and its instant in microseconds since the epoch. */
+interface HistoryTime {
+  text: string;
+  micros: bigint;
+}
+
+/**
+ * A time filter as the server reads it. A `Date` is its UTC instant. A
+ * string is sent as written once the server's own parser (pydantic's
+ * `datetime`, {@link awareDatetimeMicros}) reads it as an ISO 8601
+ * datetime with an offset: a naive datetime and a date alone are refused,
+ * as the route refuses a naive value, and so is a Unix time.
+ */
+function historyTime(value: unknown, name: string): HistoryTime {
+  if (value instanceof Date) {
+    const time = value.getTime();
+    const year = value.getUTCFullYear();
+    if (Number.isNaN(time) || year < 1 || year > 9999) {
+      throw new Error(`${name} must be a valid Date in years 1-9999`);
+    }
+    return { text: value.toISOString(), micros: BigInt(time) * 1000n };
+  }
+  const micros = typeof value === "string" ? awareDatetimeMicros(value) : null;
+  if (micros === null) {
+    const shown = typeof value === "string" ? pyRepr(value) : pyTypeName(value);
+    throw new Error(
+      `${name} must be an ISO 8601 datetime with a timezone offset or a Date ` +
+        `(2026-11-09T10:00:00Z, 2026-11-09T19:00:00+09:00), got ${shown}`,
+    );
+  }
+  return { text: value as string, micros };
+}
+
+/**
+ * A read model's own values as plain JSON values: an int field read
+ * exactly (`bigint`) as the nearest `number`, as {@link readWorkspaceRow}
+ * gives it, and an unknown key's number as the number the body wrote,
+ * never the reader's internal literal.
+ */
+function plainRow(row: Record<string, unknown>): Record<string, unknown> {
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value === "bigint") row[key] = Number(value);
+    else row[key] = jsonValue(value);
+  }
+  return row;
+}
+
+/** An operation-history page as its model reads it, items included, in plain values. */
+function readHistoryPage(raw: unknown): OperationHistoryPage {
+  const page = plainRow(readModel(raw, OPERATION_HISTORY_PAGE, "WorkspaceClient.list_operation_history"));
+  (page.items as Record<string, unknown>[]).forEach(plainRow);
+  return page as unknown as OperationHistoryPage;
+}
+
 /**
  * REST API client for workspace member / invitation management.
  *
  * Requires the workspace OWNER's API key when called programmatically
  * (memory-cloud v0.42.0+). OAuth profiles are rejected by the server on
  * this surface — resolve a static owner key (`KAGURA_API_KEY` env or
- * `.kagura.json`) instead.
+ * `.kagura.json`) instead. {@link addContextMember} and
+ * {@link listOperationHistory} use a signed-in web session instead: build
+ * the client with `session: true` for them.
  *
  * All methods may reject with:
  * - `KaguraAuthError` — authentication failed (401)
@@ -182,7 +333,23 @@ export interface ListInvitationsOptions {
  */
 export class WorkspaceClient extends KaguraRestClient {
   constructor(options: KaguraRestClientOptions | WorkspaceSessionOptions = {}) {
-    super(options, "session" in options && options.session ? "session" : "bearer");
+    super(options, isSessionOptions(options) ? "session" : "bearer");
+  }
+
+  /**
+   * Refuse a session-only call on a client not built with `session: true`,
+   * before any request: such a client holds an API key or OAuth token,
+   * which these routes refuse, and the call never swaps, adds or drops a
+   * credential to get through.
+   */
+  private requireSession(method: string): void {
+    if (!this.sessionMode) {
+      throw new Error(
+        `WorkspaceClient.${method}: this route accepts a signed-in web session only, ` +
+          "not an API key, OAuth or resource token. Build a session client with " +
+          "new WorkspaceClient({ baseUrl, session: true, fetch }), where fetch carries the session cookie.",
+      );
+    }
   }
 
   // -------------------------------------------------------------------
@@ -252,21 +419,122 @@ export class WorkspaceClient extends KaguraRestClient {
     return readModel(this.json(resp), MEMBER_CONTEXT_ACCESS_UPDATE, "WorkspaceClient.set_member_context_access") as unknown as MemberContextAccessUpdate;
   }
 
-  /** Requires a signed-in web session. On Node, provide a fetch that carries the session cookie. */
+  /**
+   * Requires a signed-in web session. On Node, provide a fetch that carries the session cookie.
+   *
+   * @throws Error when the client was not built with `session: true`, before any request.
+   */
   async addContextMember(
     contextId: string, userId: string, role: "owner" | "editor" | "viewer",
     options: { extendAccessList?: boolean } = {},
   ): Promise<ContextMember> {
+    this.requireSession("addContextMember");
     const id = normalizeUuid(contextId, "contextId");
     userIdSegment(userId);
     const resp = await this.request("POST", `/api/v1/contexts/${id}/members`, {
       session: true,
+      sessionAction: "add a context member",
       json: {
         user_id: userId, role,
         ...(options.extendAccessList === undefined ? {} : { extend_access_list: options.extendAccessList }),
       },
     });
     return readModel(this.json(resp), CONTEXT_MEMBER, "WorkspaceClient.add_context_member") as unknown as ContextMember;
+  }
+
+  // -------------------------------------------------------------------
+  // Operation history (memory-cloud v0.154.0+, #136)
+  // -------------------------------------------------------------------
+
+  /**
+   * Read one page of the workspace's operation history, newest first:
+   * `GET /api/v1/workspaces/{workspaceId}/operation-history`
+   * (memory-cloud v0.154.0+).
+   *
+   * **Web session only.** Build the client with
+   * `new WorkspaceClient({ baseUrl, session: true, fetch })`; on Node the
+   * fetch must carry the signed-in user's session cookie. The server
+   * refuses every API key, OAuth token and resource token on this route,
+   * so a client built with one throws before any request is made, and
+   * never falls back to another credential.
+   *
+   * The caller must be an owner or admin of the workspace, and the
+   * workspace's plan must include `operation_history` (Pro and Max, or a
+   * custom plan that includes the feature). History is recorded from
+   * server v0.154.0 on, with no backfill, and is kept for `retention_days`
+   * (90 days plus any add-on). It holds who changed what — ids, operation,
+   * outcome, count and changed-field names — never contents or before/after values; reads and searches are not
+   * recorded, and it is not a full audit ledger. A private context's
+   * history is shown only to its creator. A shared credential identifies
+   * the credential and its account, not the person who used it.
+   *
+   * Refused locally, with an `Error` and before any request, as the server
+   * would refuse them: a `workspaceId`, `contextId` or `agentId` that is no
+   * UUID; a `limit` that is no integer in 1-100; a `query` over 120,
+   * `actor` over 255, `operation` over 40 or `cursor` over 512 characters
+   * (code points); a `since` / `until` string without a timezone offset,
+   * an invalid `Date`, or `since` after `until`. Stricter than the server:
+   * a `since` / `until` string that is a Unix time is refused too, where
+   * the server reads it as UTC. `cursor` is sent as given.
+   *
+   * The page is returned as its model reads it, in pydantic's lax mode:
+   * `"12"` for `total` reads `12`, and `occurred_at` is pydantic's JSON
+   * form of the datetime (`2026-11-09T10:00:00.123456Z`). Unknown keys are
+   * kept on the page and on each event, numbers as plain `number`s.
+   *
+   * @throws Error when the client was not built with `session: true`, or an
+   *   option is refused, before any request.
+   * @throws KaguraAuthError when the session is missing or expired (401).
+   * @throws KaguraPermissionError when the caller is not a workspace owner
+   *   or admin, is no member, or the workspace does not exist or is deleted:
+   *   the server answers all of them with the same `403 AUTH-101`
+   *   "Insufficient permissions" and no details, so `requiredRole` is
+   *   `null`.
+   * @throws KaguraFeatureNotAvailableError when the workspace's plan lacks
+   *   `operation_history` (403 `FEAT-001`, `feature: "operation_history"`),
+   *   or the admin's seat is suspended (`feature: "members"`).
+   * @throws KaguraNotFoundError from a server before v0.154.0, which has no
+   *   such route (v0.153.0 answers `404 HTTP-404` "Not Found"); the route
+   *   itself never answers 404.
+   * @throws KaguraConnectionError for a 422 the server answers (an unknown
+   *   `operation`, a malformed `cursor`), keeping its `code` and `details`,
+   *   or a transport failure.
+   * @throws KaguraResponseError when the reply is not an operation-history
+   *   page (`operation` `"WorkspaceClient.list_operation_history"`).
+   */
+  async listOperationHistory(
+    workspaceId: string,
+    options: ListOperationHistoryOptions | null = {},
+  ): Promise<OperationHistoryPage> {
+    this.requireSession("listOperationHistory");
+    options ??= {};
+    const ws = normalizeWorkspaceId(workspaceId);
+    const params: Record<string, string | number> = {};
+    if (isSet(options.query)) params.query = boundedText(options.query, "query", HISTORY_QUERY_MAX);
+    if (isSet(options.contextId)) params.context_id = normalizeUuid(options.contextId, "contextId");
+    if (isSet(options.actor)) params.actor = boundedText(options.actor, "actor", HISTORY_ACTOR_MAX);
+    if (isSet(options.agentId)) params.agent_id = normalizeUuid(options.agentId, "agentId");
+    if (isSet(options.operation)) params.operation = boundedText(options.operation, "operation", HISTORY_OPERATION_MAX);
+    if (isSet(options.targetType)) params.target_type = requireString(options.targetType, "targetType");
+    if (isSet(options.outcome)) params.outcome = requireString(options.outcome, "outcome");
+    const since = isSet(options.since) ? historyTime(options.since, "since") : null;
+    const until = isSet(options.until) ? historyTime(options.until, "until") : null;
+    if (since !== null && until !== null && since.micros > until.micros) {
+      throw new Error(`since must not be after until, got since=${since.text} and until=${until.text}`);
+    }
+    if (since !== null) params.since = since.text;
+    if (until !== null) params.until = until.text;
+    if (isSet(options.limit)) params.limit = validateIntRange("limit", options.limit, HISTORY_LIMIT_MIN, HISTORY_LIMIT_MAX);
+    if (isSet(options.cursor)) params.cursor = boundedText(options.cursor, "cursor", HISTORY_CURSOR_MAX);
+
+    // A session request's 403 is typed (KaguraPermissionError) without
+    // `typedPermissionErrors`: see error403.
+    const resp = await this.request("GET", `/api/v1/workspaces/${ws}/operation-history`, {
+      session: true,
+      sessionAction: "read workspace operation history",
+      params,
+    });
+    return readHistoryPage(this.json(resp));
   }
 
   /** Change a member's role (member/admin/viewer only). */
@@ -569,11 +837,16 @@ export class WorkspaceClient extends KaguraRestClient {
 
   // ---- KaguraRestClient hooks -----------------------------------------
 
-  protected override error401(response: RestResponse): KaguraError {
+  protected override error401(response: RestResponse, context?: RequestContext): KaguraError {
     if (response.session === true) {
-      return new KaguraAuthError("A signed-in session is required to add a context member.");
+      const action = context?.sessionAction;
+      return new KaguraAuthError(
+        action === undefined
+          ? "A signed-in web session is required for this request."
+          : `A signed-in session is required to ${action}.`,
+      );
     }
-    return super.error401(response);
+    return super.error401(response, context);
   }
 
   protected override genericError(response: RestResponse): KaguraError {

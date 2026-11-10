@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `WorkspaceClient.listOperationHistory` for the workspace operation history of
+  memory-cloud v0.154.0 (`GET /api/v1/workspaces/{id}/operation-history`), with
+  the `OperationHistoryPage` / `OperationHistoryEvent` models and combined
+  filters. The route accepts a signed-in web session only: a client built with
+  an API key or OAuth token throws before any request. Pro and Max workspaces,
+  owners and admins (#136).
 - `listMatching({ orderBy: "event_start" })` and `kagura-memory list --order-by
   event_start` order by the date of the event a memory describes, and `recall`
   takes `eventAfter` / `eventBefore` (merged into `filters.event_after` /
@@ -22,8 +28,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now detects from the rows' `context_id` and reports as a `KaguraError`
   naming v0.145.0 instead of returning it (#138).
 
+### Changed
+
+- `WorkspaceClient.addContextMember` throws an `Error` before any request on a
+  client not built with `session: true`. It used to send the request with no
+  credential at all, which the session-only route refused (#136).
+
 ### Fixed
 
+- Every client called its `fetch` with the client as the receiver, which a
+  browser's `fetch` refuses ("Illegal invocation"), so in a browser every call
+  of a client built without a `fetch` option, or with `fetch: window.fetch`,
+  failed with `KaguraConnectionError`. The fetch is still chosen when the client
+  is constructed and is called with the same arguments (#142).
 - `setup claude` keeps `context=<id>` in the plugin `server_url` it prints
   when the MCP URL's first `context=` is the context printed as the plugin's
   `context_id` (both in the plugin hook's dashed UUID form, equal in any

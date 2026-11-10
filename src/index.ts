@@ -138,6 +138,9 @@ export type {
   ContextMember,
   CreateInvitationOptions,
   ListInvitationsOptions,
+  ListOperationHistoryOptions,
+  OperationHistoryOutcome,
+  OperationHistoryTargetType,
 } from "./workspaceClient.js";
 
 // Zero-knowledge secret store (#28). SecretClient is the fourth REST client,

@@ -4,6 +4,49 @@
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.144.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
 
+### Workspace operation history (#136)
+
+`WorkspaceClient.listOperationHistory` needs memory-cloud **v0.154.0** or later
+(tag `v0.154.0`, commit `e66b9e5d4b5b`; the route, its read service and the
+[feature document](https://github.com/kagura-ai/memory-cloud/blob/v0.154.0/docs/concepts/operation-history.md)
+are unchanged in v0.155.0). This floor applies to this method only; the SDK-wide
+minimum stays 0.75.0. memory-cloud v0.153.0 has no such route and no other
+route matching the path, so its backend answers `404` with
+`{"error": "HTTP-404", "message": "Not Found", "details": {}}` (Starlette's
+unmatched-route 404 in the canonical envelope), which the method raises as
+`KaguraNotFoundError`.
+
+The route, `GET /api/v1/workspaces/{workspace_id}/operation-history`, accepts a
+web session only. The method refuses a client built with an API key or OAuth
+token before any request; it never sends another credential. The server checks
+owner/admin first: a role too low, no membership and a missing or deleted
+workspace all answer `403 AUTH-101` "Insufficient permissions" with no details
+(`KaguraPermissionError`, `requiredRole` `null`); the route itself never answers
+404. Then it checks the `operation_history` plan feature (Pro and Max, or a
+custom plan that includes it; `403 FEAT-001`, `KaguraFeatureNotAvailableError`). The query bounds (`query` 120, `actor` 255,
+`operation` 40, `cursor` 512 characters; `limit` 1–100, default 30; `since` /
+`until` with a timezone, `since` not after `until`) are checked locally;
+operation, target-type and outcome values are left to the server. One local
+check is stricter than the server: a Unix-time string for `since` / `until`,
+which the server reads as UTC, is refused. The page and event models take every
+field of the v0.154.0 `OperationHistoryPage` / `OperationHistoryItem` (nullable
+fields required, as the server always sends them; `total_capped` defaults to
+`false`), return the page as the model reads it in pydantic's lax mode, and keep
+keys a newer server adds, numbers as plain numbers.
+
+The guard that refuses a non-session client also covers
+`WorkspaceClient.addContextMember` from 0.18.0. That route accepts a web session
+only too, and a client built with an API key or OAuth used to send it with no
+credential at all.
+
+The method is verified by contract tests with mocked transports against the
+v0.154.0 source (`backend/src/api/routes/operation_history.py`,
+`backend/src/services/operation_history.py`). No live call was made: the route
+needs a browser session. The SDK reads no plan feature list (it consumes
+`/api/v1/system/info` deployment flags and `plan_headroom` notices only), so the
+additive `operation_history` plan feature needs no other change. The Python SDK
+(up to v0.45.1) has no equivalent yet.
+
 ### Event dates (#137)
 
 `listMatching({ orderBy: "event_start" })` (and `kagura-memory list --order-by
