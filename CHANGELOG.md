@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `KaguraFileScanPendingError` and `KaguraFileBlockedError` for the two 409s
+  `FilesClient.downloadUrl` gets from memory-cloud v0.160.0 when upload
+  malware scanning holds a file: `SCAN-001` (the scan has not finished;
+  `retryAfter` from `Retry-After`, which the server sets to 30) and `SCAN-002`
+  (the scan blocked the file). Both read `fileId` / `scanStatus` from the
+  server's `details` and keep its `code` and `details`. **Both subclass
+  `KaguraConnectionError`**, the class these 409s had before, so existing
+  `instanceof KaguraConnectionError` handlers keep catching them, as in the
+  Python SDK. Every other 409, the `upload` dedup path among them, is mapped
+  as before. `FileObject.scan_status` (optional, a plain string) types the
+  scan state every file object carries from v0.160.0 (#147).
+
+### Fixed
+
+- `kagura-memory files list` and `files upload` dropped `scan_status` from
+  their output (the `FileObject` model did not declare it); they now print
+  it when the server sends it, and print what they printed before when it
+  does not. `kagura-memory files download-url` printed a file the malware
+  scan holds as a generic `HTTP 409` error; it now says how long to wait
+  before running it again, or that the file is blocked (#147).
+
 ## [0.18.1] - 2026-11-10
 
 One fix that 0.18.0's check of memory-cloud 0.153.0 missed, matching the

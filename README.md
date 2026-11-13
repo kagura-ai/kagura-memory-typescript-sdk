@@ -907,6 +907,14 @@ added**, each on purpose or out of reach:
   when the server sends no key). It is the counter memory-cloud v0.153.0
   added for its opt-in Sleep related index, printed here as the Python CLI
   prints it from 0.46.0; the rest of the output is 0.44.0's.
+- `files list` and `files upload` print a file's `scan_status`, after
+  `context_id`, when the server sends it (memory-cloud v0.160.0+), which the
+  Python CLI 0.44.0 drops; a reply without it prints as 0.44.0 prints it,
+  with no such key. `files download-url` on a file the malware scan holds
+  or blocked prints one line more under the error: how long to wait and to
+  run the command again, or that the file cannot be downloaded (the
+  wording of the Python SDK's
+  [#337](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/337)).
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
@@ -1448,6 +1456,8 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraCapacityLockedError` | memory-cloud v0.99.0+: a Free workspace over its capacity — MCP `capacity_locked`, REST 403 `CAPACITY-001` (`details.gate` `"capacity"`). Search and saving are refused until it is cleaned up or re-subscribed; listing, deleting, export and `getUsage` keep working. Neither a quota nor a plan gate, so it extends neither class. A caller outside the locked workspace (a public context) gets every figure `null` | `cleanupUrl`, `memoryCount`, `memoryLimit`, `overMemories`, `usedBytes`, `storageLimitBytes`, `overBytes`, `gate` (`"capacity"`) |
 | `KaguraAuthError` | HTTP 401; and from memory-cloud v0.79.0 an OAuth token that lacks the scope a call needs (HTTP 403 `insufficient_scope`): `memory:read` for the read-only tools, `recall` and `getAgentBootstrap`, `memory:write` for every other tool, so a `kagura-memory auth login --read-only` profile gets it on every write. The message names the scope and the re-login | `code` `"insufficient_scope"`, `details.required_scope` |
 | `KaguraServiceUnavailableError` | any HTTP 503 from `/mcp` or a REST route (the OAuth endpoints keep their own errors): `/mcp`'s `temporarily_unavailable` (the credential could not be verified, v0.82.0+) and its JSON-RPC transport failures (a dependency down or timed out), REST `DB-002` (the database unavailable). A `KaguraConnectionError`, so existing handlers keep catching it | `retryAfter` (the `Retry-After` header, else `data.retry_after_seconds`; `null` on a write whose outcome is unknown), `reason` (REST `details.reason`, else the MCP `cause`, else the code) |
+| `KaguraFileScanPendingError` | memory-cloud v0.160.0+: `FilesClient.downloadUrl` for a file whose malware scan has not finished — REST 409 `SCAN-001`, with `Retry-After: 30`. The same call succeeds once the scan says clean; the SDK does not retry. A `KaguraConnectionError`, the class this 409 had before, so existing handlers keep catching it; `retryable` is `true` | `retryAfter` (the `Retry-After` header; `null` when absent or not a number of seconds), `fileId`, `scanStatus` (`"pending"`), read from `details` |
+| `KaguraFileBlockedError` | memory-cloud v0.160.0+: `FilesClient.downloadUrl` for a file the malware scan blocked — REST 409 `SCAN-002`. Waiting does not help (`retryable` is `false`). A `KaguraConnectionError`, as the 409 was before | `fileId`, `scanStatus` (`"infected"`, `"error"` or another value the server does not allow), read from `details` |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraPartialSessionRollbackError` | `rollbackSession` (memory-cloud v0.113.0+) failed some items of a real run (`partial_rollback`); every other item was handled and saved, and a call with the same arguments retries the failed ones. A field the SDK cannot read is `null` rather than a second error | `sessionSummary` (with `errors`), `totals`, `rollbackId`, `remaining` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. That includes `getServerInfo`, `checkServerVersion` (as `KaguraClient.get_server_info`), `getEmbeddingStatus`, `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`, which check the body against the Python model and return it as sent. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
@@ -1470,13 +1480,18 @@ The codes the SDK types, by surface:
 | `timeout`, `service_unavailable` (JSON-RPC `data.error`) | MCP 503 | `KaguraServiceUnavailableError` | v0.82.0+ |
 | `DB-002` (`details.reason`: `pool_exhausted`, `connection_refused`, `database_error`, `deadlock`) | REST 503 | `KaguraServiceUnavailableError` | v0.104.0+ (`deadlock` v0.105.0) |
 | `payload_too_large` (`limit`, `actual`) | MCP | `KaguraError` | v0.108.0+ |
+| `SCAN-001` (`Retry-After`; `details.file_id`, `details.scan_status`) | REST 409 | `KaguraFileScanPendingError` | v0.160.0+ |
+| `SCAN-002` (`details.file_id`, `details.scan_status`) | REST 409 | `KaguraFileBlockedError` | v0.160.0+ |
 | `invalid_request`, `invalid_client`, `invalid_scope` (`device/authorize`) | OAuth | `KaguraAuthError`, `error_description` in the message and `details` | v0.78.0+ |
 
 A gate is read before the code, so a v0.75.0+ server's `gate` decides the
 class whatever the code. `kagura-memory` commands print, under the error
 message, the reset time, the required plan, the capacity lock's cleanup
-page (unless `help` already names it), a 503's retry window and the
-server's `help` and correlation id, as the Python CLI does.
+page (unless `help` already names it), a 503's retry window, how long to
+wait for a file the malware scan holds (`The malware scan of file … has
+not finished: wait 30 s and run the command again.`) or that a blocked one
+cannot be downloaded, and the server's `help` and correlation id, as the
+Python CLI does.
 
 `authorizeDevice` turns an RFC 6749 refusal from `device/authorize`
 (memory-cloud v0.78.0+) into a `KaguraAuthError` whose `code` is the OAuth
@@ -2246,6 +2261,56 @@ option means not set.**
 ```ts
 const shared = await files.list({ contextId: "workspace-uuid", scope: "workspace" });
 const bound = await files.list({ contextId: "workspace-uuid", bindingContextId: "context-uuid" });
+```
+
+**Malware scanning (memory-cloud v0.160.0+).** A deployment can scan
+uploads for malware (off by default). Every file object then carries
+`scan_status`, a plain string: `unscanned` (uploaded while scanning was
+off; downloadable), `pending`, `clean`, `infected` or `error`; it is
+absent on an older server. `kagura-memory files list` and `files upload`
+print it when the server sends it, and print what they printed before when
+it does not. With scanning off, the default, `scan_status` is the only
+change, and only an `infected` file (one scanned while scanning was on) is
+refused. With scanning on, `downloadUrl` answers two 409s, after the access
+checks (a file the caller cannot read is still `KaguraNotFoundError`):
+
+- `SCAN-001`, `KaguraFileScanPendingError`: the scan has not finished. Wait
+  `retryAfter` seconds (the server's `Retry-After`, 30) and call again; the
+  SDK does not retry. A file that was downloadable before can answer this
+  again: when its stored object no longer matches the scanned version, the
+  server sets it back to `pending` and scans it again.
+- `SCAN-002`, `KaguraFileBlockedError`: the scan blocked the file
+  (`scanStatus` `infected`, or `error` when the scanner could not check
+  it); it cannot be downloaded. The server's gate is an allow-list, so any
+  other state but `clean`, `unscanned` and `pending` is refused this way.
+
+Both extend `KaguraConnectionError`, the class these 409s had before, and
+keep the server's `code` and `details` (`{file_id, scan_status}`).
+`kagura-memory files download-url` prints how long to wait, or that the file
+is blocked, under the error. `upload` can return a file whose `scan_status`
+is `pending`, a reserve dedup hit included (the duplicate is returned while
+its scan runs); a duplicate the scan blocked is never returned, and that 409
+is thrown as before (`KaguraConnectionError`, its message ending "an earlier
+upload of this file was blocked by the malware scan"). With scanning on,
+the largest file a reserve accepts is the scanner's stream limit when that
+limit is below the server's per-file cap (both default to 100 MiB, so by
+default nothing changes); a larger one gets the server's usual 422
+`VAL-001`, its message ending "(the largest file the malware scan checks)".
+
+```ts
+import { KaguraFileBlockedError, KaguraFileScanPendingError } from "kagura-memory";
+
+try {
+  const url = await files.downloadUrl(fileId, { contextId: "workspace-uuid" });
+} catch (e) {
+  if (e instanceof KaguraFileScanPendingError) {
+    console.log(`still scanning; retry in ${e.retryAfter ?? 30} s`);
+  } else if (e instanceof KaguraFileBlockedError) {
+    console.log(`blocked by the malware scan (${e.scanStatus})`);
+  } else {
+    throw e;
+  }
+}
 ```
 
 Every id a client puts in a URL path (a `FilesClient` file id, a

@@ -55,6 +55,8 @@ export {
   KaguraError,
   KaguraFeatureNotAvailableError,
   KaguraFetchError,
+  KaguraFileBlockedError,
+  KaguraFileScanPendingError,
   KaguraIngestError,
   KaguraIntegrityError,
   KaguraLLMError,
@@ -75,6 +77,7 @@ export {
 export type {
   KaguraCapacityLockedErrorOptions,
   KaguraErrorOptions,
+  KaguraFileScanPendingErrorOptions,
   KaguraGateOptions,
   KaguraPartialSessionRollbackErrorOptions,
   KaguraQuotaErrorOptions,

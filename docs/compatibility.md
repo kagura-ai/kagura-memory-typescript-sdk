@@ -1,5 +1,62 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.19.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### Upload malware scanning (#147)
+
+`FileObject.scan_status`, `KaguraFileScanPendingError` and
+`KaguraFileBlockedError` need memory-cloud **0.160.0**
+([memory-cloud#565](https://github.com/kagura-ai/memory-cloud/issues/565)).
+From that release every file object (the `files list` rows, the confirm reply,
+a reserve 409's `existing_file`) carries `scan_status`: `unscanned` (uploaded
+while scanning was off; downloadable), `pending`, `clean`, `infected` or
+`error`. It is typed as a plain string, optional, so a reply from an older
+server still reads; `kagura-memory files list` / `files upload` print it after
+`context_id` when it is sent and print what they printed before when it is
+not.
+
+Scanning is off by default (`FILE_SCAN_ENABLED`). With it on, the download gate
+(`ensure_downloadable` in `backend/src/services/file_scan_service.py`, run by
+`FileStorageService.get_presigned_download` after the access checks, so a
+caller who cannot read the file still gets the uniform 404) is an allow-list:
+`clean` and `unscanned` pass, `pending` answers **409 `SCAN-001`**
+(`FileScanPendingError`, `Retry-After: 30`, `details` `{file_id, scan_status:
+"pending"}`), and every other state answers **409 `SCAN-002`**
+(`FileBlockedError`, `details` `{file_id, scan_status}`). With it off, only an
+`infected` file is refused (`SCAN-002`). A `clean` file can answer `SCAN-001`
+again: with checksum binding off, or for a row under the legacy digest rule,
+the server compares the stored object with the scanned version first and sets
+a changed one back to `pending`. Both errors come in the canonical
+`{error, message, details}` body with the exception's `response_headers`
+(`backend/src/utils/exceptions.py`, `backend/src/api/main.py`).
+
+`FilesClient.downloadUrl` (and every REST client, which share the mapping)
+throws `KaguraFileScanPendingError` for a 409 `SCAN-001`, with `retryAfter`
+from a numeric `Retry-After` (`null` otherwise), and `KaguraFileBlockedError`
+for a 409 `SCAN-002`; both read `fileId` / `scanStatus` from `details` and keep
+the server's `code` and `details`. **Both subclass `KaguraConnectionError`**, the
+class a 409 had before, so an existing `instanceof KaguraConnectionError`
+handler keeps catching them, as the Python SDK's classes of the same names do
+([python-sdk#337](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/337)).
+Only the status and the code decide: a scan code on another status, the
+files API's dedup `409 RES-002` that `upload` reads its `existing_file` from,
+and a refused `expectedVersion` (`409 RES-002`, `reason: "version_conflict"`)
+are mapped as before. `kagura-memory files download-url` prints how long to
+wait for `SCAN-001` and that the file cannot be downloaded for `SCAN-002`.
+
+The reserve dedup 409 returns a duplicate whose scan is still `pending`, but
+not one the scan blocked: that 409 carries no `existing_file`, and its message
+ends "; an earlier upload of this file was blocked by the malware scan", so
+`upload` throws it as the `KaguraConnectionError` it was. With scanning on, a
+reserve larger than the scanner's stream limit (`clamd_stream_max_bytes`) is
+refused when that limit is below the per-file cap (`file_object_max_size_mb`);
+both default to 100 MiB. The refusal is the usual 422 `VAL-001`, its message
+ending "(the largest file the malware scan checks)", and passes through.
+Checked against the `v0.161.0` source; verified by contract tests with mocked
+transports, no call to a deployment with scanning on.
+
 ## 0.18.1
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

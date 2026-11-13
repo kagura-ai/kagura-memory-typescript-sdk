@@ -249,6 +249,90 @@ export class KaguraServiceUnavailableError extends KaguraConnectionError {
   }
 }
 
+/** {@link KaguraErrorOptions} plus how long a held download says to wait. */
+export interface KaguraFileScanPendingErrorOptions extends KaguraErrorOptions {
+  /** Seconds to wait; see {@link KaguraFileScanPendingError.retryAfter}. */
+  retryAfter?: number | null;
+}
+
+/**
+ * The file's malware scan has not finished (memory-cloud v0.160.0+, #565).
+ *
+ * `FilesClient.downloadUrl` got `409 SCAN-001`: upload scanning is on and
+ * the file is still `pending`. The same request succeeds once the scan
+ * says clean, so wait {@link retryAfter} seconds and call again; the SDK
+ * does not retry by itself. A file that was downloadable before can come
+ * back to this when its stored object no longer matches the scanned
+ * version: the server queues it for a new scan.
+ *
+ * A {@link KaguraConnectionError}, the class a 409 had before, so existing
+ * `instanceof KaguraConnectionError` handlers still catch it (the Python
+ * SDK's class of the same name makes the same choice). `code` is
+ * `"SCAN-001"` and `details` the server's `{file_id, scan_status:
+ * "pending"}`, read by the getters below (`null` when a field is missing
+ * or is no string).
+ */
+export class KaguraFileScanPendingError extends KaguraConnectionError {
+  /**
+   * Seconds to wait, from the `Retry-After` header (memory-cloud sends 30);
+   * `null` when it is absent or is not a whole number of seconds.
+   */
+  readonly retryAfter: number | null;
+
+  constructor(message: string, options: KaguraFileScanPendingErrorOptions = {}) {
+    super(message, options);
+    this.retryAfter = options.retryAfter ?? null;
+  }
+
+  /** The file the scan holds (`details.file_id`). */
+  get fileId(): string | null {
+    return strDetail(this.details, "file_id");
+  }
+
+  /** The file's scan state (`details.scan_status`, `"pending"`). */
+  get scanStatus(): string | null {
+    return strDetail(this.details, "scan_status");
+  }
+
+  /** `true`: the same call succeeds once the scan finishes. */
+  override get retryable(): boolean | null {
+    return true;
+  }
+}
+
+/**
+ * The malware scan blocked the file; it cannot be downloaded (memory-cloud
+ * v0.160.0+, #565).
+ *
+ * `FilesClient.downloadUrl` got `409 SCAN-002`. {@link scanStatus} is
+ * `"infected"` (a finding; refused even after scanning is turned off) or,
+ * while scanning is on, `"error"` (the scanner could not check the file)
+ * or any other value the server does not allow: its download gate is an
+ * allow-list. Waiting does not help, so it is not retryable. The finding's
+ * name is never part of the response.
+ *
+ * A {@link KaguraConnectionError}, the class a 409 had before, so existing
+ * handlers still catch it, as in the Python SDK. `code` is `"SCAN-002"` and
+ * `details` the server's `{file_id, scan_status}`, read by the getters
+ * below (`null` when a field is missing or is no string).
+ */
+export class KaguraFileBlockedError extends KaguraConnectionError {
+  /** The blocked file (`details.file_id`). */
+  get fileId(): string | null {
+    return strDetail(this.details, "file_id");
+  }
+
+  /** The file's scan state (`details.scan_status`), e.g. `"infected"` or `"error"`. */
+  get scanStatus(): string | null {
+    return strDetail(this.details, "scan_status");
+  }
+
+  /** `false`: a blocked file does not become downloadable by waiting. */
+  override get retryable(): boolean | null {
+    return false;
+  }
+}
+
 /** Requested resource not found (HTTP 404). */
 export class KaguraNotFoundError extends KaguraError {}
 

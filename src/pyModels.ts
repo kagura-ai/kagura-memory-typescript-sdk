@@ -107,6 +107,13 @@ export interface Field {
   kind: Kind;
   /** The value when the key is absent (a fresh one each read); without it, absent is `Field required`. */
   default?: () => unknown;
+  /**
+   * `true` for a field this SDK reads beyond the Python SDK 0.44.0 model,
+   * its parity target ({@link whenSent}): absent, the key is left out of
+   * the read and so of the CLI's dump, which prints what Python 0.44.0
+   * prints for that reply; sent, it is read as `kind`.
+   */
+  omitWhenAbsent?: true;
 }
 
 export interface Model {
@@ -128,6 +135,13 @@ const optional = (key: string, kind: Kind, value: unknown = null): Field => ({
   kind,
   default: () => (typeof value === "object" && value !== null ? structuredClone(value) : value),
 });
+/**
+ * A field a newer server sends that the Python SDK 0.44.0 model lacks: read
+ * as `kind` when sent, left out of the read when absent (no default, never
+ * `Field required`), so a reply from a server that predates it reads and
+ * dumps exactly as before.
+ */
+const whenSent = (key: string, kind: Kind): Field => ({ key, kind, omitWhenAbsent: true });
 const nullable = (kind: Kind): Kind => ({ nullable: kind });
 const listOf = (kind: Kind): Kind => ({ list: kind });
 
@@ -282,6 +296,7 @@ function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Rec
   for (const field of model.fields) {
     const value = valueAt(obj, field.key);
     if (value === undefined) {
+      if (field.omitWhenAbsent) continue;
       if (field.default !== undefined) {
         out[field.key] = field.default();
       } else {
@@ -642,6 +657,8 @@ export const FILE_OBJECT: Model = {
     required("created_at", "datetime"),
     optional("uploaded_at", nullable("datetime")),
     optional("context_id", nullable("str")),
+    // memory-cloud v0.160.0+ (#565), last as in the Python SDK's model.
+    whenSent("scan_status", nullable("str")),
   ],
 };
 

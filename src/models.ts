@@ -1709,6 +1709,14 @@ export interface ListTagsResponse {
  * control (server v0.41.0+). It is `null` for legacy/workspace-scoped
  * files that were uploaded with no binding context — those stay fully
  * listable and accessible to the workspace.
+ *
+ * `scan_status` is the upload malware scan's state (memory-cloud
+ * v0.160.0+, #565), a plain `string` like `status`: `unscanned` (uploaded
+ * while scanning was off; downloadable), `pending` (being scanned:
+ * `FilesClient.downloadUrl` throws `KaguraFileScanPendingError` until it
+ * finishes), `clean`, `infected` or `error` (blocked:
+ * `KaguraFileBlockedError`). The server sends it on every file; it is
+ * absent on a server before v0.160.0.
  */
 export interface FileObject {
   id: string;
@@ -1723,6 +1731,8 @@ export interface FileObject {
   /** ISO 8601 datetime string. */
   uploaded_at?: string | null;
   context_id?: string | null;
+  /** Malware scan state (memory-cloud v0.160.0+); see above. */
+  scan_status?: string | null;
 }
 
 /** Internal response from `POST /api/v1/files/reserve`. */

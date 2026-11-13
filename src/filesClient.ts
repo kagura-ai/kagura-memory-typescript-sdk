@@ -142,6 +142,19 @@ export class FilesClient extends KaguraRestClient {
    * the server returns 409 and this surfaces the existing FileObject
    * (dedup happy-path) rather than throwing.
    *
+   * With upload malware scanning on (memory-cloud v0.160.0+, #565) the
+   * file returned, a dedup hit included, may still have `scan_status`
+   * `"pending"`, so {@link downloadUrl} can refuse it for a while
+   * ({@link KaguraFileScanPendingError}). A duplicate the scan blocked is
+   * never returned: that 409 names no file and is thrown as the
+   * {@link KaguraConnectionError} it always was, its message ending
+   * "an earlier upload of this file was blocked by the malware scan". With
+   * scanning on, a file larger than the scanner checks (its stream limit,
+   * when that is below the server's per-file cap; both default to 100 MiB)
+   * is refused at the reserve with the server's usual validation error
+   * (422 `VAL-001`), its message ending "(the largest file the malware scan
+   * checks)".
+   *
    * `contextId` is sent in its canonical form: a `{braced}`, `urn:uuid:` or
    * dashless UUID is accepted, as the Python SDK accepts it.
    *
@@ -274,6 +287,21 @@ export class FilesClient extends KaguraRestClient {
   /**
    * Return a short-lived presigned GET URL for `fileId`.
    *
+   * @throws KaguraNotFoundError if the file does not exist, has not been
+   *   uploaded, or the caller cannot read it; the server checks this before
+   *   the malware scan's gate, so such a caller never learns a scan state.
+   * @throws KaguraFileScanPendingError on `409 SCAN-001` (memory-cloud
+   *   v0.160.0+, #565): upload scanning is on and the file's scan has not
+   *   finished. Call again after `retryAfter` seconds (the server sends
+   *   `Retry-After: 30`); this method does not retry. A file that was
+   *   downloadable before can answer this again when its stored object no
+   *   longer matches the scanned version (the server queues it for a new
+   *   scan).
+   * @throws KaguraFileBlockedError on `409 SCAN-002`: the scan blocked the
+   *   file (`scanStatus` `"infected"`, or with scanning on `"error"` or any
+   *   other value the server does not allow). Not retryable; an `infected`
+   *   file stays refused after scanning is turned off. Both scan errors are
+   *   {@link KaguraConnectionError}s, as the 409 was before.
    * @throws KaguraResponseError if the 2xx body is not what the Python
    *   SDK's `FileDownloadUrlResponse` model reads (#66).
    */
