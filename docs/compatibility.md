@@ -57,6 +57,37 @@ ending "(the largest file the malware scan checks)", and passes through.
 Checked against the `v0.161.0` source; verified by contract tests with mocked
 transports, no call to a deployment with scanning on.
 
+### `rememberBatch` items may carry the batch-level keys (#148)
+
+An item that carries `dedupe`, `tags_normalize` or `verbose` needs memory-cloud
+**0.156.0** ([memory-cloud#2753](https://github.com/kagura-ai/memory-cloud/issues/2753);
+`batch_level_values` and `_undeclared_keys` in
+`backend/src/mcp_server/tools/batch.py`, unchanged up to 0.161.0). Up to 0.18.1
+`rememberBatch` refused such an item before any request; it now sends the items
+as given and leaves the decision to the server, which compares JSON type and
+value after `remember`'s string coercion (`"true"` equals `true`, `1` does not):
+
+- an item that repeats the value set on the batch is accepted;
+- an item whose value differs from the batch's is refused (`invalid_argument`),
+  that item only;
+- with no batch value, when every otherwise accepted item that carries the key
+  agrees on one valid value, the server applies it to the whole batch and adds
+  a top-level `lint` entry `{code: "batch_level_argument", hint, subject}`
+  (typed as `RememberBatchResult.lint`); an item refused for another reason does
+  not count;
+- with no batch value, when those items disagree or agree on an invalid value,
+  nothing is adopted and every item that carries the key is refused;
+- with `atomic: true`, any refused item refuses the whole batch
+  (`batch_refused`).
+
+**A server before 0.156.0 refuses every item that carries one of the three**
+(`invalid_argument`), and with `atomic: true` the whole batch; set them on the
+batch there. The other local checks (1-50 objects, no other context's
+`context_id`, the tag caps) are unchanged. The Python SDK drops its local
+refusal the same way
+([python-sdk#338](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/338)).
+Verified by contract tests that replay the server's replies for each rule.
+
 ## 0.18.1
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

@@ -1145,6 +1145,10 @@ export const REMEMBER_BATCH_RESULT: Model = {
     optional("committed_after_timeout", "bool", false),
     optional("message", nullable("str")),
     optional("session_id", nullable("str")),
+    // memory-cloud v0.156.0+ (#2753): the batch-level keys taken from the
+    // items, before plan_headroom as in the Python SDK's model; left out of
+    // the read when absent, so a reply without it reads as Python 0.44.0's.
+    whenSent("lint", nullable(listOf("dict"))),
     PLAN_HEADROOM,
   ],
 };

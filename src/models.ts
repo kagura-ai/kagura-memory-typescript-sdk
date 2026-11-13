@@ -2801,6 +2801,13 @@ export interface RememberBatchItemResult {
  * some items may be missing. `session_id` is the session the writes are
  * recorded under (v0.113.0+, for `KaguraClient.changesSince` /
  * `KaguraClient.rollbackSession`).
+ *
+ * `lint` (memory-cloud v0.156.0+, #2753) is the batch's own lint, apart
+ * from each row's: one `{code, hint, subject}` entry per batch-level key
+ * (`dedupe`, `tags_normalize` or `verbose`, the `subject`) that the batch
+ * left unset and the server took from the items, which all agreed on it
+ * (`code` `"batch_level_argument"`; `hint` says to set it once on the
+ * batch). Absent when no key was adopted, and on an older server.
  */
 export interface RememberBatchResult extends ContextEcho {
   /** @default "success" */
@@ -2817,6 +2824,8 @@ export interface RememberBatchResult extends ContextEcho {
   committed_after_timeout?: boolean;
   message?: string | null;
   session_id?: string | null;
+  /** Batch-level keys taken from the items (memory-cloud v0.156.0+); see above. */
+  lint?: Record<string, unknown>[] | null;
   /**
    * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
    * #2615), throttled to once an hour per workspace, dimension and level —

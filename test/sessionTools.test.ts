@@ -326,11 +326,6 @@ describe("rememberBatch", () => {
     ["51 items", Array.from({ length: 51 }, () => ITEM), "items must hold 1 to 50 items, got 51"],
     ["a non-object item", [ITEM, ["x"]], "items[1] must be a dict, got list"],
     [
-      "batch-level keys on an item",
-      [{ ...ITEM, dedupe: "off", verbose: true }],
-      "items[0] carries dedupe, verbose: set dedupe / tags_normalize / verbose on rememberBatch itself, not on an item",
-    ],
-    [
       "another context's id",
       [{ ...ITEM, context_id: "other" }],
       "items[0] carries another context_id: the batch's context_id applies to every item",

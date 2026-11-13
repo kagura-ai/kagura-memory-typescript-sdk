@@ -1123,8 +1123,20 @@ export interface ListMatchingOptions {
  * fails that item (`invalid_argument`; a whole atomic batch is refused).
  * `summary`, `content` and `type` are required: an item without one fails
  * (`missing_fields`) on every server since v0.93.0. An item may repeat the
- * batch's `context_id` but name no other; `dedupe`, `tags_normalize` and
- * `verbose` are set on the batch, never on an item.
+ * batch's `context_id` but name no other.
+ *
+ * `dedupe`, `tags_normalize` and `verbose` are batch-level: set them on
+ * {@link RememberBatchOptions}. An item that carries one is sent as given,
+ * and memory-cloud v0.156.0+ (#2753) decides on it, comparing JSON type and
+ * value after `remember`'s string coercion (`"true"` equals `true`, `1` does
+ * not): an item that repeats the value set on the batch is accepted, and
+ * one that differs from it is refused (`invalid_argument`, that item only).
+ * When the batch does not set the key and every otherwise accepted item
+ * that carries it agrees on one valid value, the server applies that value
+ * to the whole batch and says so in the reply's top-level `lint`
+ * (`batch_level_argument`); when those items disagree, or agree on an
+ * invalid value, every item that carries the key is refused. A server
+ * before v0.156.0 refuses every item that carries one of the three.
  */
 export interface RememberBatchItem {
   summary: string;
@@ -2001,10 +2013,14 @@ const BOOTSTRAP_COMPONENTS: readonly BootstrapComponentName[] = ["pinned", "upco
 const BOOTSTRAP_FORMATS: readonly BootstrapFormat[] = ["full", "index"];
 /** `bootstrap`'s own `max_chars` floor (server `BOOTSTRAP_INDEX_MIN_CHARS`, v0.115.0+); `format: "full"` keeps 10,000. */
 const BOOTSTRAP_MIN_CHARS = 2_000;
-/** `remember_batch` items (server `MAX_BATCH_ITEMS`). */
+/**
+ * `remember_batch` items (server `MAX_BATCH_ITEMS`). The batch-level keys an
+ * item may carry (server `_BATCH_LEVEL`: `dedupe`, `tags_normalize`,
+ * `verbose`) are not checked here: memory-cloud v0.156.0+ (#2753) decides on
+ * them with a type-strict rule after `remember`'s string coercion, which a
+ * local copy would drift from.
+ */
 const BATCH_MAX_ITEMS = 50;
-/** The `remember` arguments set once, on the batch, never per item (server `_BATCH_LEVEL`). */
-const BATCH_LEVEL_KEYS = ["dedupe", "tags_normalize", "verbose"] as const;
 /** `forget({ memoryIds })` ids per call (server `FORGET_MAX_IDS`). */
 const FORGET_MAX_IDS = 50;
 /** `describe_tools` names / `guide` topics per call (server `MAX_NAMES` / `MAX_TOPICS`). */
@@ -2108,10 +2124,11 @@ function checkedBootstrapInclude(include: unknown): string[] {
 /**
  * Refuse a `rememberBatch` `items` list before any request — the Python
  * SDK's `_checked_batch_items`, with its messages. Per-item rules the
- * server reports per item (a missing `summary`, an unknown key) stay the
- * server's. Refused here: not 1-50 items, an item that is no object, the
- * batch-level keys, an item `context_id` other than the batch's, and the
- * tag cap {@link KaguraClient.remember} also checks.
+ * server reports per item (a missing `summary`, an unknown key, a
+ * batch-level `dedupe` / `tags_normalize` / `verbose` it does not accept)
+ * stay the server's. Refused here: not 1-50 items, an item that is no
+ * object, an item `context_id` other than the batch's, and the tag cap
+ * {@link KaguraClient.remember} also checks.
  */
 function checkedBatchItems(items: unknown, contextId: string): Record<string, unknown>[] {
   if (!Array.isArray(items)) {
@@ -2123,13 +2140,6 @@ function checkedBatchItems(items: unknown, contextId: string): Record<string, un
   items.forEach((item: unknown, index) => {
     if (!isRecord(item)) {
       throw new Error(`items[${index}] must be a dict, got ${pyTypeName(item)}`);
-    }
-    const batchLevel = BATCH_LEVEL_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(item, key));
-    if (batchLevel.length > 0) {
-      throw new Error(
-        `items[${index}] carries ${batchLevel.join(", ")}: set dedupe / tags_normalize / verbose ` +
-          "on rememberBatch itself, not on an item",
-      );
     }
     if (Object.prototype.hasOwnProperty.call(item, "context_id") && item.context_id !== contextId) {
       throw new Error(
@@ -5276,11 +5286,19 @@ export class KaguraClient {
    * `committed_after_timeout` every item is stored — do not resend.
    * `plan_headroom` (memory-cloud v0.142.0+, #2615) is read fail-open, as
    * on {@link bootstrap}: an entry `PlanHeadroomNotice` cannot read is
-   * dropped, and the key is left out when none reads.
+   * dropped, and the key is left out when none reads. `lint`
+   * (v0.156.0+, #2753) names the batch-level keys the server took from the
+   * items (`batch_level_argument`).
+   *
+   * An item may carry `dedupe`, `tags_normalize` or `verbose`; it is sent
+   * as given, and the server accepts or refuses it (see
+   * {@link RememberBatchItem}): a refused item is an `error` row with
+   * `invalid_argument` (on a server before v0.156.0, every such item), and
+   * with `atomic: true` it refuses the whole batch (`batch_refused`
+   * below).
    *
    * @throws Error before any request: `items` is not a list of 1-50
-   *   objects, an item carries `dedupe`, `tags_normalize` or `verbose`
-   *   (batch-level here) or a `context_id` other than the batch's, or an
+   *   objects, an item carries a `context_id` other than the batch's, or an
    *   item's `tags` break the 50-tag / 100-character cap.
    * @throws KaguraQuotaError when an atomic batch did not fit the daily
    *   quota (`quota_exceeded`; nothing was written, a smaller batch may

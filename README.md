@@ -1765,10 +1765,24 @@ resend. A batch that wrote nothing throws: `KaguraError` with `code`
 `batch_failed` (every item failed) or `batch_refused` (an atomic batch
 with an invalid item), the rows in `details.results`, or `timeout` (an
 atomic batch rolled back, no rows); an atomic batch over the daily quota
-is `KaguraQuotaError`. Items are checked first: 1-50 objects, no
-`dedupe` / `tags_normalize` / `verbose` on an item, no other context's
-`context_id`, `remember`'s tag caps. A batch near a plan limit carries
+is `KaguraQuotaError`. Items are checked first: 1-50 objects, no other
+context's `context_id`, `remember`'s tag caps. A batch near a plan limit carries
 `plan_headroom` (v0.142.0+; see [Plan headroom](#plan-headroom-memory-cloud-v01420)).
+
+**`rememberBatch`'s batch-level keys.** `dedupe`, `tags_normalize` and
+`verbose` belong on the batch. An item that carries one is sent as given, and
+the server decides (memory-cloud v0.156.0+), comparing JSON type and value
+after `remember`'s string coercion (`"true"` equals `true`, `1` does not): an
+item that repeats the batch's value is accepted; one whose value differs is
+refused (`invalid_argument`, that item only). When the batch does not set the
+key and every otherwise accepted item that carries it agrees on one valid
+value, the server applies it to the whole batch and the reply's top-level
+`lint` gets a `batch_level_argument` entry (`{code, hint, subject}`, the key as
+`subject`); when they disagree, or agree on an invalid value, every item that
+carries the key is refused, those that agree included. With `atomic: true` a
+refused item refuses the batch (`batch_refused`). A server before v0.156.0
+refuses every item that carries one of the three (and so, with `atomic:
+true`, the whole batch), so on an older server set them on the batch only.
 
 **`forget` by ids.** `forget({ contextId, memoryIds })` (v0.117.0+)
 forgets each id exactly as `memoryId` would, committed on its own, and

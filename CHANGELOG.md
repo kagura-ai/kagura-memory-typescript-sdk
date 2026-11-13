@@ -19,6 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Python SDK. Every other 409, the `upload` dedup path among them, is mapped
   as before. `FileObject.scan_status` (optional, a plain string) types the
   scan state every file object carries from v0.160.0 (#147).
+- `RememberBatchResult.lint`, the batch's own lint (memory-cloud v0.156.0):
+  a `batch_level_argument` entry for each of `dedupe` / `tags_normalize` /
+  `verbose` that the batch left unset and the server took from the items
+  (#148).
 
 ### Fixed
 
@@ -28,6 +32,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does not. `kagura-memory files download-url` printed a file the malware
   scan holds as a generic `HTTP 409` error; it now says how long to wait
   before running it again, or that the file is blocked (#147).
+- `rememberBatch` threw before any request for an item carrying `dedupe`,
+  `tags_normalize` or `verbose`, which memory-cloud v0.156.0 accepts when it
+  repeats the batch's value. Items are now sent as given and the server
+  applies its rules (an item that changes the batch's value is refused on
+  its own; a value every item agrees on is applied to the batch). A server
+  before v0.156.0 still refuses every such item (#148).
 
 ## [0.18.1] - 2026-11-10
 

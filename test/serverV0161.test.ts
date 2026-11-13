@@ -12,6 +12,12 @@
  * `backend/src/utils/exceptions.py`, as `memory_cloud_exception_handler`
  * renders them (`{error, message, details}` plus the exception's
  * `response_headers`).
+ *
+ * `remember_batch`'s batch-level keys (v0.156.0+, memory-cloud#2753; #148):
+ * `batch_level_values` and `_undeclared_keys` in
+ * `backend/src/mcp_server/tools/batch.py` (unchanged since v0.156.0). The
+ * SDK sends the items as given and returns or throws what the server
+ * answers, so each case below checks what is sent and what comes back.
  */
 
 import { describe, expect, it } from "vitest";
@@ -27,8 +33,9 @@ import {
 import { FilesClient } from "../src/filesClient.js";
 import * as sdk from "../src/index.js";
 import type { FileObject } from "../src/models.js";
+import type { RememberBatchResult } from "../src/models.js";
 import { FILE_OBJECT, readModel } from "../src/pyModels.js";
-import { FakeRest } from "./fakeServer.js";
+import { FakeRest, FakeServer, makeClient } from "./fakeServer.js";
 
 const WS = "00000000-0000-4000-8000-000000000001";
 const FILE_ID = "10000000-0000-4000-8000-000000000002";
@@ -239,5 +246,200 @@ describe("upload: the reserve dedup 409 with scanning on (#147)", () => {
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(KaguraConnectionError);
     expect((err as Error).message).toBe(`HTTP 422: ${message}`);
+  });
+});
+
+const CTX = "11111111-2222-4333-8444-555555555555";
+const M1 = "aaaaaaaa-0000-4000-8000-000000000001";
+const M2 = "aaaaaaaa-0000-4000-8000-000000000002";
+const ITEM = { summary: "Adopt FastAPI DI", content: "Use Depends()", type: "decision" };
+
+/** `sorted(_ITEM_KEYS - {"context_id"})` of v0.161.0: remember's arguments minus the batch-level ones. */
+const ITEM_ACCEPTS =
+  "content, context, context_summary, delivery_mode, details, importance, linked_memory_ids, " +
+  "linked_source_uris, observed_at, source_type, source_uri, summary, supersedes, tags, type";
+
+/** `_undeclared_keys`' refusal of an item carrying a batch-level `key` it may not carry. */
+function batchLevelRefusal(key: string, batchValue?: string): Record<string, unknown> {
+  const conflict =
+    batchValue === undefined ? "" : `The batch's ${key} is ${batchValue}; an item may repeat it, not change it. `;
+  return {
+    error: "invalid_argument",
+    message:
+      `item does not accept '${key}' (batch-level). ${conflict}dedupe, tags_normalize, verbose are ` +
+      `batch-level arguments: set them on remember_batch itself, not on an item. An item accepts: ${ITEM_ACCEPTS}.`,
+  };
+}
+
+const written = (index: number, memoryId: string): Record<string, unknown> => ({
+  index,
+  status: "success",
+  memory_id: memoryId,
+  scope: "persistent",
+});
+
+function batchServer(reply: unknown): FakeServer {
+  const server = new FakeServer();
+  server.toolResults.remember_batch = reply;
+  return server;
+}
+
+describe("rememberBatch: batch-level keys on an item (memory-cloud v0.156.0+, #148)", () => {
+  it("sends an item that repeats the batch's value, and returns the server's success", async () => {
+    const reply = {
+      status: "success",
+      results: [written(0, M1)],
+      count: 1,
+      succeeded: 1,
+      candidates: 0,
+      failed: 0,
+      skipped: 0,
+    };
+    const server = batchServer(reply);
+    const items = [{ ...ITEM, dedupe: "off" }];
+    const result = await makeClient(server).rememberBatch({ contextId: CTX, dedupe: "off", items });
+    // Sent as given: no local refusal, nothing stripped.
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, items, dedupe: "off" });
+    expect(result).toEqual(reply);
+    expect(result).not.toHaveProperty("lint");
+  });
+
+  it("sends agreeing items with no batch value, and reads the top-level lint", async () => {
+    const lint = [
+      {
+        code: "batch_level_argument",
+        hint:
+          "tags_normalize is a batch-level argument: the items' tags_normalize=true was applied to the whole " +
+          "batch. Set it once on remember_batch (tags_normalize=true), not on each item.",
+        subject: "tags_normalize",
+      },
+    ];
+    const reply = {
+      status: "success",
+      results: [written(0, M1), written(1, M2)],
+      count: 2,
+      succeeded: 2,
+      candidates: 0,
+      failed: 0,
+      skipped: 0,
+      lint,
+    };
+    const server = batchServer(reply);
+    // "true" equals true after remember's string coercion, so the two agree.
+    const items = [
+      { ...ITEM, tags_normalize: true },
+      { ...ITEM, summary: "Second", tags_normalize: "true" },
+    ];
+    const result: RememberBatchResult = await makeClient(server).rememberBatch({ contextId: CTX, items });
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, items });
+    const typed: Record<string, unknown>[] | null | undefined = result.lint;
+    expect(typed).toEqual(lint);
+    expect(result.results.map((row) => row.status)).toEqual(["success", "success"]);
+  });
+
+  it("returns the partial batch where only the item conflicting with the batch's value is refused", async () => {
+    const reply = {
+      status: "partial",
+      results: [written(0, M1), { index: 1, status: "error", ...batchLevelRefusal("dedupe", '"check"') }],
+      count: 2,
+      succeeded: 1,
+      candidates: 0,
+      failed: 1,
+      skipped: 0,
+    };
+    const server = batchServer(reply);
+    const items = [{ ...ITEM, dedupe: "check" }, { ...ITEM, summary: "Second", dedupe: "off" }];
+    const result = await makeClient(server).rememberBatch({ contextId: CTX, dedupe: "check", items });
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, items, dedupe: "check" });
+    expect(result.status).toBe("partial");
+    expect(result.results[0]!.status).toBe("success");
+    expect(result.results[1]).toMatchObject({ index: 1, status: "error", error: "invalid_argument" });
+    expect(result.results[1]!.message).toContain("The batch's dedupe is \"check\"; an item may repeat it, not change it.");
+  });
+
+  it("returns every item that carries a key the items disagree on refused, with no batch value", async () => {
+    const reply = {
+      status: "partial",
+      results: [
+        { index: 0, status: "error", ...batchLevelRefusal("verbose") },
+        { index: 1, status: "error", ...batchLevelRefusal("verbose") },
+        written(2, M1),
+      ],
+      count: 3,
+      succeeded: 1,
+      candidates: 0,
+      failed: 2,
+      skipped: 0,
+    };
+    const server = batchServer(reply);
+    const items = [
+      { ...ITEM, verbose: true },
+      { ...ITEM, summary: "Second", verbose: false },
+      { ...ITEM, summary: "Third" },
+    ];
+    const result = await makeClient(server).rememberBatch({ contextId: CTX, items });
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, items });
+    expect(result.results.map((row) => [row.status, row.error ?? null])).toEqual([
+      ["error", "invalid_argument"],
+      ["error", "invalid_argument"],
+      ["success", null],
+    ]);
+    expect(result).not.toHaveProperty("lint");
+  });
+
+  it("throws batch_failed when every item carries a key the items disagree on", async () => {
+    const results = [
+      { index: 0, status: "error", ...batchLevelRefusal("dedupe") },
+      { index: 1, status: "error", ...batchLevelRefusal("dedupe") },
+    ];
+    const server = batchServer({
+      status: "error",
+      error: "batch_failed",
+      message: "No item was written; see results.",
+      results,
+      count: 2,
+      succeeded: 0,
+      candidates: 0,
+      failed: 2,
+      skipped: 0,
+    });
+    const items = [{ ...ITEM, dedupe: "off" }, { ...ITEM, summary: "Second", dedupe: "check" }];
+    const err = await makeClient(server).rememberBatch({ contextId: CTX, items }).catch((e: unknown) => e);
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, items });
+    expect(err).toBeInstanceOf(KaguraError);
+    expect((err as KaguraError).code).toBe("batch_failed");
+    expect((err as KaguraError).details.results).toEqual(results);
+  });
+
+  it("throws batch_refused for atomic: true when an item conflicts, with the rest skipped", async () => {
+    const results = [
+      { index: 0, status: "skipped", message: "batch refused: another item is invalid" },
+      { index: 1, status: "error", ...batchLevelRefusal("verbose", "false") },
+    ];
+    const server = batchServer({
+      status: "error",
+      error: "batch_refused",
+      message: "1 of 2 items are invalid; atomic=true writes nothing.",
+      results,
+      count: 2,
+      succeeded: 0,
+      candidates: 0,
+      failed: 1,
+      skipped: 1,
+    });
+    const items = [ITEM, { ...ITEM, summary: "Second", verbose: true }];
+    const err = await makeClient(server)
+      .rememberBatch({ contextId: CTX, items, atomic: true, verbose: false })
+      .catch((e: unknown) => e);
+    expect(server.toolCallArgs(0)).toEqual({ context_id: CTX, items, atomic: true, verbose: false });
+    expect(err).toBeInstanceOf(KaguraError);
+    expect((err as KaguraError).code).toBe("batch_refused");
+    expect((err as KaguraError).details.results).toEqual(results);
+  });
+
+  it("refuses a top-level lint that is not a list, as the Python model does", async () => {
+    const server = batchServer({ status: "success", results: [], count: 0, succeeded: 0, failed: 0, lint: "x" });
+    const err = await makeClient(server).rememberBatch({ contextId: CTX, items: [ITEM] }).catch((e: unknown) => e);
+    expect((err as Error).message).toContain("lint: Input should be a valid list");
   });
 });
