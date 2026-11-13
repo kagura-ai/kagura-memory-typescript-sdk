@@ -73,17 +73,24 @@ value after `remember`'s string coercion (`"true"` equals `true`, `1` does not):
 - with no batch value, when every otherwise accepted item that carries the key
   agrees on one valid value, the server applies it to the whole batch and adds
   a top-level `lint` entry `{code: "batch_level_argument", hint, subject}`
-  (typed as `RememberBatchResult.lint`); an item refused for another reason does
-  not count;
+  (typed as `RememberBatchResult.lint` and read fail-open: the items are
+  already written, so an entry that is no object is dropped and a value that
+  is not a list is left out, never failing the reply); an item refused for
+  another reason does not count;
 - with no batch value, when those items disagree or agree on an invalid value,
   nothing is adopted and every item that carries the key is refused;
 - with `atomic: true`, any refused item refuses the whole batch
   (`batch_refused`).
 
-**A server before 0.156.0 refuses every item that carries one of the three**
-(`invalid_argument`), and with `atomic: true` the whole batch; set them on the
-batch there. The other local checks (1-50 objects, no other context's
-`context_id`, the tag caps) are unchanged. The Python SDK drops its local
+**Older servers differ.** memory-cloud 0.96.0 – 0.155.x refuse every item that
+carries one of the three (`invalid_argument` per item, from `_undeclared_keys`,
+memory-cloud#1873: a non-atomic batch writes the other items, an atomic one is
+refused whole). 0.93.0 – 0.95.x, the first releases with `remember_batch`, build
+each item's request from `remember`'s fields only, so they ignore the item's key
+and write the item with the batch's setting: an item's `dedupe: "check"` checks
+nothing there. On those servers set the three on `rememberBatch` itself. The
+other local checks (1-50 objects, no other context's `context_id`, the tag
+caps) are unchanged. The Python SDK drops its local
 refusal the same way
 ([python-sdk#338](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/338)).
 Verified by contract tests that replay the server's replies for each rule.

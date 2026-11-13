@@ -446,10 +446,45 @@ describe("rememberBatch: batch-level keys on an item (memory-cloud v0.156.0+, #1
     expect((err as KaguraError).details.results).toEqual(results);
   });
 
-  it("refuses a top-level lint that is not a list, as the Python model does", async () => {
-    const server = batchServer({ status: "success", results: [], count: 0, succeeded: 0, failed: 0, lint: "x" });
-    const err = await makeClient(server).rememberBatch({ contextId: CTX, items: [ITEM] }).catch((e: unknown) => e);
-    expect((err as Error).message).toContain("lint: Input should be a valid list");
+  describe("the top-level lint is read fail-open: the items are already written", () => {
+    const committed = (lint: unknown): Record<string, unknown> => ({
+      status: "success",
+      results: [written(0, M1)],
+      count: 1,
+      succeeded: 1,
+      candidates: 0,
+      failed: 0,
+      skipped: 0,
+      lint,
+    });
+    const entry = { code: "batch_level_argument", hint: "Set it once.", subject: "verbose", extra: 1 };
+
+    it.each([
+      ["a string", "x"],
+      ["an object", { code: "batch_level_argument" }],
+      ["null", null],
+      ["a list of no objects", ["x", 5, null, [entry]]],
+      ["an empty list", []],
+    ])("leaves out a lint that is %s, and returns the written rows", async (_name, lint) => {
+      const result = await makeClient(batchServer(committed(lint))).rememberBatch({ contextId: CTX, items: [ITEM] });
+      expect(result).not.toHaveProperty("lint");
+      expect(result.results[0]!.memory_id).toBe(M1);
+      expect(result.succeeded).toBe(1);
+    });
+
+    it("drops the entries that are no object and keeps the rest as sent", async () => {
+      const result = await makeClient(batchServer(committed(["x", entry, 7]))).rememberBatch({
+        contextId: CTX,
+        items: [ITEM],
+      });
+      expect(result.lint).toEqual([entry]);
+    });
+
+    it("returns a lint that reads whole as sent", async () => {
+      const reply = committed([entry]);
+      const result = await makeClient(batchServer(reply)).rememberBatch({ contextId: CTX, items: [ITEM] });
+      expect(result).toEqual(reply);
+    });
   });
 });
 

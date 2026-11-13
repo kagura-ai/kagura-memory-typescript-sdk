@@ -2863,7 +2863,10 @@ export interface RememberBatchItemResult {
  * (`dedupe`, `tags_normalize` or `verbose`, the `subject`) that the batch
  * left unset and the server took from the items, which all agreed on it
  * (`code` `"batch_level_argument"`; `hint` says to set it once on the
- * batch). Absent when no key was adopted, and on an older server.
+ * batch). Absent when no key was adopted, and on an older server. Read
+ * fail-open, as `plan_headroom` is, since the items are already written:
+ * an entry that is no object is dropped, and a value that is not a list,
+ * or keeps no entry, is left out — never a failed call.
  */
 export interface RememberBatchResult extends ContextEcho {
   /** @default "success" */

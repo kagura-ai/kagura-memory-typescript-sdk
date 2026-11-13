@@ -22,7 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `RememberBatchResult.lint`, the batch's own lint (memory-cloud v0.156.0):
   a `batch_level_argument` entry for each of `dedupe` / `tags_normalize` /
   `verbose` that the batch left unset and the server took from the items
-  (#148).
+  (#148). Read fail-open, as `plan_headroom` is: the items are already
+  written, so a drifted entry never fails the reply.
 - `BootstrapResponse.notices` (`ServiceNotices` / `ServiceNotice`), the service
   notices memory-cloud v0.161.0 can put in the `bootstrap` reply: information
   for the user, not instructions, each delivered once per person. Read
@@ -43,8 +44,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tags_normalize` or `verbose`, which memory-cloud v0.156.0 accepts when it
   repeats the batch's value. Items are now sent as given and the server
   applies its rules (an item that changes the batch's value is refused on
-  its own; a value every item agrees on is applied to the batch). A server
-  before v0.156.0 still refuses every such item (#148).
+  its own; a value every item agrees on is applied to the batch). On older
+  servers set them on the batch: 0.96.0 – 0.155.x refuse every such item,
+  and 0.93.0 – 0.95.x ignore the item's key (#148).
 - `kagura-memory bootstrap` dropped the `notices` block from its output, while
   memory-cloud v0.161.0 counts a notice as delivered once it is in the reply,
   so the notice was used up and never shown. It now prints the block right

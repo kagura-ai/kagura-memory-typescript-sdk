@@ -1785,11 +1785,15 @@ refused (`invalid_argument`, that item only). When the batch does not set the
 key and every otherwise accepted item that carries it agrees on one valid
 value, the server applies it to the whole batch and the reply's top-level
 `lint` gets a `batch_level_argument` entry (`{code, hint, subject}`, the key as
-`subject`); when they disagree, or agree on an invalid value, every item that
-carries the key is refused, those that agree included. With `atomic: true` a
-refused item refuses the batch (`batch_refused`). A server before v0.156.0
-refuses every item that carries one of the three (and so, with `atomic:
-true`, the whole batch), so on an older server set them on the batch only.
+`subject`; read fail-open, so a drifted entry never fails a batch whose items
+are written); when they disagree, or agree on an invalid value, every item
+that carries the key is refused, those that agree included. With `atomic:
+true` a refused item refuses the batch (`batch_refused`). Older servers
+differ: 0.96.0 – 0.155.x refuse every item that carries one of the three
+(`invalid_argument` per item; a non-atomic batch writes the others, an atomic
+one is refused whole), and 0.93.0 – 0.95.x ignore the item's key and write the
+item with the batch's setting, so an item's `dedupe: "check"` checks nothing
+there. On those servers set the three on the batch only.
 
 **`forget` by ids.** `forget({ contextId, memoryIds })` (v0.117.0+)
 forgets each id exactly as `memoryId` would, committed on its own, and

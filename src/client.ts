@@ -117,6 +117,7 @@ import type {
   ToolDescriptions,
 } from "./models.js";
 import {
+  BATCH_LINT_ENTRY,
   BOOTSTRAP_RESPONSE,
   CHANGES_SINCE_RESPONSE,
   FORGET_BATCH_RESULT,
@@ -1138,8 +1139,14 @@ export interface ListMatchingOptions {
  * that carries it agrees on one valid value, the server applies that value
  * to the whole batch and says so in the reply's top-level `lint`
  * (`batch_level_argument`); when those items disagree, or agree on an
- * invalid value, every item that carries the key is refused. A server
- * before v0.156.0 refuses every item that carries one of the three.
+ * invalid value, every item that carries the key is refused.
+ *
+ * Older servers: memory-cloud 0.96.0 – 0.155.x refuse every item that
+ * carries one of the three (`invalid_argument` per item: a non-atomic
+ * batch writes the other items, an atomic one is refused whole), and
+ * 0.93.0 – 0.95.x ignore the item's key and write the item with the
+ * batch's setting, so an item's `dedupe: "check"` checks nothing there. On
+ * those servers set them on {@link RememberBatchOptions} instead.
  */
 export interface RememberBatchItem {
   summary: string;
@@ -1641,6 +1648,32 @@ function withReadablePlanHeadroom(reply: ToolResult, operation: string, read?: R
     out.plan_headroom = notices;
   }
   SENT_REPLIES.set(out, reply);
+  return out;
+}
+
+/**
+ * `reply` (a `remember_batch` success) with its top-level `lint`
+ * (memory-cloud v0.156.0+, #2753) read fail-open: the items are already
+ * written, so a drifted lint must never fail the reply, which a caller
+ * would answer by resending and duplicating them. An entry that is no
+ * object is dropped, and a value that is not a list, or keeps no entry, is
+ * left out. A list that reads whole is returned as sent, and so is a reply
+ * without the key.
+ *
+ * @param read The reply's `REMEMBER_BATCH_RESULT` reading.
+ */
+function withReadableBatchLint(reply: ToolResult, read: Record<string, unknown>): ToolResult {
+  if (!Object.prototype.hasOwnProperty.call(reply, "lint")) return reply;
+  const sent = reply.lint;
+  const modelRead = read.lint as unknown[] | null | undefined;
+  if (Array.isArray(sent) && Array.isArray(modelRead) && modelRead.length === sent.length) return reply;
+  const entries = modelRead === null ? undefined : readableEntries(sent, BATCH_LINT_ENTRY, "remember_batch");
+  const out: ToolResult = { ...reply };
+  if (entries === undefined) {
+    delete out.lint;
+  } else {
+    out.lint = entries;
+  }
   return out;
 }
 
@@ -5342,14 +5375,16 @@ export class KaguraClient {
    * on {@link bootstrap}: an entry `PlanHeadroomNotice` cannot read is
    * dropped, and the key is left out when none reads. `lint`
    * (v0.156.0+, #2753) names the batch-level keys the server took from the
-   * items (`batch_level_argument`).
+   * items (`batch_level_argument`); it is read fail-open too, since the
+   * items are already written: an entry that is no object is dropped, and
+   * a value that is not a list, or keeps no entry, is left out.
    *
    * An item may carry `dedupe`, `tags_normalize` or `verbose`; it is sent
    * as given, and the server accepts or refuses it (see
    * {@link RememberBatchItem}): a refused item is an `error` row with
-   * `invalid_argument` (on a server before v0.156.0, every such item), and
-   * with `atomic: true` it refuses the whole batch (`batch_refused`
-   * below).
+   * `invalid_argument` (on memory-cloud 0.96.0 – 0.155.x every such item;
+   * 0.93.0 – 0.95.x ignore the key instead), and with `atomic: true` it
+   * refuses the whole batch (`batch_refused` below).
    *
    * @throws Error before any request: `items` is not a list of 1-50
    *   objects, an item carries a `context_id` other than the batch's, or an
@@ -5388,7 +5423,10 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("remember_batch", args);
     const read = readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
-    return withReadablePlanHeadroom(result, "remember_batch", read) as unknown as RememberBatchResult;
+    return withReadableBatchLint(
+      withReadablePlanHeadroom(result, "remember_batch", read),
+      read,
+    ) as unknown as RememberBatchResult;
   }
 
   /**

@@ -1215,6 +1215,13 @@ const REMEMBER_BATCH_ITEM_RESULT: Model = {
   ],
 };
 
+/**
+ * One entry of a `remember_batch` reply's top-level `lint` (memory-cloud
+ * v0.156.0+, #2753): any object, its keys kept as sent
+ * (`{code, hint, subject}` today).
+ */
+export const BATCH_LINT_ENTRY: Model = { name: "dict", fields: [], extra: "allow" };
+
 /** A `remember_batch` reply, as Python's `RememberBatchResult` reads it. */
 export const REMEMBER_BATCH_RESULT: Model = {
   name: "RememberBatchResult",
@@ -1233,7 +1240,9 @@ export const REMEMBER_BATCH_RESULT: Model = {
     // memory-cloud v0.156.0+ (#2753): the batch-level keys taken from the
     // items, before plan_headroom as in the Python SDK's model; left out of
     // the read when absent, so a reply without it reads as Python 0.44.0's.
-    whenSent("lint", nullable(listOf("dict"))),
+    // Fail-open: the items are already written, so a drifted entry must
+    // never fail the reply (a caller would resend and duplicate them).
+    whenSent("lint", { failOpenList: BATCH_LINT_ENTRY }),
     PLAN_HEADROOM,
   ],
 };
