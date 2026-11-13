@@ -52,6 +52,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the notice was used up and never shown. It now prints the block right
   after `status`; a reply without it prints what it printed before (#149).
 
+### Changed
+
+- The README, `docs/mcpb.md`, the `setup … --tool-profile` help, the
+  `kagura-memory-mcp --tool-profile` help and the `guardrails digest --profile`
+  help name the four tool views memory-cloud knows: `core`, `full`, and from
+  v0.158.0 `google` and its alias `microsoft`, which list `core` without
+  `describe_tools` and `guide` and refuse those two at `tools/call`, so
+  `describeTools()` / `guide()` answer `unknown_tool` there. They used to say
+  the server knows only `core` and `full` and that every method works on any
+  URL. A `google` / `microsoft` digest preview is that view's base text with no
+  digest. The `guardrails digest` help now differs from Python 0.44.0's and is
+  listed in `docs/cli-help-differences.md`. README and `docs/compatibility.md`
+  say this release is checked against memory-cloud up to 0.161.0, with a table
+  of what 0.156.0 – 0.161.0 changed for this SDK. No SDK behaviour changes
+  (#150).
+
 ## [0.18.1] - 2026-11-10
 
 One fix that 0.18.0's check of memory-cloud 0.153.0 missed, matching the

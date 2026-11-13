@@ -35,7 +35,7 @@ runtime dependencies — the one optional peer dependency, for
 unless you ask for it.
 
 Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`) and is checked
-against memory-cloud up to **v0.155.0**; the Python SDK 0.44.0, its
+against memory-cloud up to **v0.161.0**; the Python SDK 0.44.0, its
 parity target, is checked up to v0.142.0 (v0.143.0 changes nothing a
 client sees), and its own `MIN_SERVER_VERSION` stays at an advisory
 0.17.1. `checkServerVersion()` warns, and never throws, on an older
@@ -570,14 +570,22 @@ compare decoded, as the server reads them (`guard%72ails` is
 
 **What `tools/list` shows** (the entry's tool view). Since memory-cloud
 0.93.0 a bare MCP URL lists the `core` profile, the memory loop (21 tools
-on 0.141.0), and `?profile=full` every tool (72). `tools/call` is
-unaffected: a profile is a view, not an authorization boundary, so an
-unlisted tool stays callable and every `KaguraClient` method works on any
-URL. `--tool-profile NAME` (every harness; memory-cloud v0.73.0+) sets
-`profile`; the server knows only `core` and `full` (case-sensitive) and
-fails `tools/list` for any other name, which leaves the harness with no
-Kagura tools. Setup leaves that check to the server and refuses only a
-blank name or one starting with `-` (exit 2), as Python does.
+on 0.141.0), and `?profile=full` every tool (72). From memory-cloud
+0.158.0, `?profile=google` and its alias `?profile=microsoft` list `core`
+without `describe_tools` and `guide` (`?add_tools=` cannot bring them back),
+with tool descriptions that name no other tool and instructions that carry
+no guardrail digest. Otherwise `tools/call` is unaffected: a profile is a
+view, not an authorization boundary, so an unlisted tool stays callable and
+every `KaguraClient` method works on any URL — except that on a `google` /
+`microsoft` URL (without a `?tools=` allowlist, which wins over the
+profile) `describe_tools` and `guide` are refused at `tools/call` too, so
+`describeTools()` and `guide()` throw `KaguraError` with `code`
+`unknown_tool` there. `--tool-profile NAME` (every harness; memory-cloud
+v0.73.0+) sets `profile`; the server knows `core`, `full`, `google` and
+`microsoft` (case-sensitive; the last two need v0.158.0+) and fails
+`tools/list` for any other name, which leaves the harness with no Kagura
+tools. Setup leaves that check to the server and refuses only a blank name
+or one starting with `-` (exit 2), as Python does.
 `--add-tools NAME[,NAME…]` (every harness; v0.129.0+; may
 repeat) lists more tools on top of the profile: trimmed, de-duplicated,
 at most 100, unknown names ignored by the server. `recall`'s
@@ -938,7 +946,9 @@ block, or with `--target instructions` the MCP server instructions this
 credential would receive, where `--profile`, `--tools` and `--add-tools`
 (memory-cloud v0.129.0+; comma-separated, may repeat) repeat an MCP URL's
 `?profile=`, `?tools=` and `?add_tools=`; without them, memory-cloud 0.93.0+
-previews the `core` view a bare URL lists. A context with no tool guardrails prints
+previews the `core` view a bare URL lists. `--profile` takes `full`, `core`,
+`google` or `microsoft`; for the last two (v0.158.0+) the preview is that
+view's base text, with no digest. A context with no tool guardrails prints
 nothing, and says so on stderr. With `--out FILE`, it splices the block
 into FILE between its marker lines: an earlier block is replaced in place,
 an unchanged set rewrites nothing, and an empty set removes an earlier
@@ -1987,7 +1997,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 | `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
-| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, and `?tools=a,b` is an allowlist. `tools/call` never reads the view, so every method of this client works on any URL; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
+| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, `?tools=a,b` is an allowlist, and `?profile=google` / `?profile=microsoft` (v0.158.0+) list `core` without `describe_tools` and `guide`. `tools/call` does not read the view, so every method of this client works on any URL — except on a `google` / `microsoft` URL, where `describeTools()` and `guide()` throw `KaguraError` `unknown_tool`; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 
@@ -2167,7 +2177,7 @@ an API key, an agent-bound key included, with no MCP session:
 
 | Method | What it does |
 |--------|--------------|
-| `getGuardrailDigest` | The rendered tool-triggered set for clients without tool hooks (`GET /api/v1/memory/guardrails/digest`). `target: "export"` (the default) returns the `AGENTS.md` block, between its marker lines, or `""` when the context has none; `"instructions"` returns the exact MCP server instructions this credential would receive, and `profile` / `tools` / `addTools` repeat the MCP URL's `?profile=` / `?tools=` / `?add_tools=` (`addTools`, memory-cloud v0.129.0+, is validated and joined as the server reads the names, sent only when it names a tool, and refused before any request for more than 100 names or one starting with `-`). `tool_triggered_version` is the response header, `null` when absent. The text is returned as is. |
+| `getGuardrailDigest` | The rendered tool-triggered set for clients without tool hooks (`GET /api/v1/memory/guardrails/digest`). `target: "export"` (the default) returns the `AGENTS.md` block, between its marker lines, or `""` when the context has none; `"instructions"` returns the exact MCP server instructions this credential would receive, and `profile` / `tools` / `addTools` repeat the MCP URL's `?profile=` / `?tools=` / `?add_tools=` (`profile` `google` / `microsoft`, v0.158.0+, previews that view's base text with no digest; `addTools`, memory-cloud v0.129.0+, is validated and joined as the server reads the names, sent only when it names a tool, and refused before any request for more than 100 names or one starting with `-`). `tool_triggered_version` is the response header, `null` when absent. The text is returned as is. |
 | `loadGuardrails` | The REST twin of `KaguraClient.loadGuardrails` (`POST /api/v1/memory/guardrails`): the same two lanes and truncation flags, without the context block (`context_id` and `context_name` are `null`). The set is read as the Python SDK's `GuardrailSet` model reads it, by the same reader `guardrails load` prints with: the model's fields only, in its order, `null` for an optional one left out (so `GuardrailItem`'s optional fields and `ToolTrigger.match` are typed nullable), and a `tool_trigger` that is no trigger `null`. A set missing a required field, a truncation flag included, or holding one of the wrong type (`pinned.0.type: Input should be a valid string`) raises `KaguraResponseError` (`operation` `MemoryClient.load_guardrails`) rather than read as complete. |
 
 Both refuse a `contextId` that is not a UUID before any request, in the
@@ -2505,7 +2515,7 @@ CLI as `kagura-memory`: 23 of the 24 top-level commands of the Python CLI
 differ.
 
 The parity target is the Python SDK and CLI **0.44.0**, checked against
-memory-cloud up to **v0.155.0**.
+memory-cloud up to **v0.161.0**.
 
 **SDK ↔ memory-cloud compatibility.**
 [`docs/compatibility.md`](docs/compatibility.md) records, for each release

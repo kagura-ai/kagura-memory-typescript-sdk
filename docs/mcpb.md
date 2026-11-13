@@ -67,8 +67,13 @@ Proxy options are explicit: API-key environment variables and project-local
 earlier value, as the Python CLI's `kagura-mcp` does; the profile's stored URL
 is not changed. Since memory-cloud 0.93.0 a bare endpoint lists the `core` tool
 profile (21 tools on 0.141.0) and `--tool-profile full` every tool; `recall`'s
-`explore_hints` need `--add-tools explore` (or `full`). A profile is a view,
-not an authorization boundary: `tools/call` reaches unlisted tools too. A
+`explore_hints` need `--add-tools explore` (or `full`). The server knows `core`,
+`full`, `google` and `microsoft` (case-sensitive; the last two need
+memory-cloud v0.158.0+) and fails `tools/list` for any other name. A profile is
+a view, not an authorization boundary: `tools/call` reaches unlisted tools too,
+except that under `google` / `microsoft` (`core` without `describe_tools` and
+`guide`) those two are refused at `tools/call` (`unknown_tool`), and
+`--add-tools` cannot bring them back. A
 `?tools=` allowlist already in `--server` wins over `--tool-profile` and
 `--add-tools`, with a warning on stderr. `--context` makes that context the
 default for tools called without `context_id`; an explicit one wins. Older

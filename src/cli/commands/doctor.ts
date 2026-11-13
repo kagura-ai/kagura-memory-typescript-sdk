@@ -532,8 +532,10 @@ function toolView(mcpUrl: string, version: unknown): { tools: string } | { profi
  * client the server check opened — how many tools, and which view. It
  * reads the CLI's MCP URL, not a Claude Code entry's. A profile is a view,
  * not an authorization boundary: `tools/call` reaches an unlisted tool
- * too, so a short list never breaks a `KaguraClient` method; it decides
- * what an MCP client following `tools/list` sees.
+ * too, so a short list never breaks a `KaguraClient` method (but on the
+ * `google` / `microsoft` views, memory-cloud v0.158.0+, `describeTools` and
+ * `guide` answer `unknown_tool`); it decides what an MCP client following
+ * `tools/list` sees.
  *
  * Any failure fails the check, never doctor; a 401 for a static key
  * without the `kagura_` prefix gets the bearer-routing hint, the key

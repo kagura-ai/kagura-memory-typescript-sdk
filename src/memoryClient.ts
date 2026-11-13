@@ -177,9 +177,11 @@ export interface GetGuardrailDigestOptions {
   target?: GuardrailDigestTarget;
   /**
    * `target: "instructions"` only: the MCP URL's `?profile=` value
-   * (`full` | `core`), so the truncation note names the tool that URL
-   * lists. Without it (and without `tools`), memory-cloud 0.93.0+ previews
-   * the `core` view a bare MCP URL lists (memory-cloud#1849). An empty
+   * (`full` | `core` | `google` | `microsoft`), so the truncation note names
+   * the tool that URL lists. Without it (and without `tools`), memory-cloud
+   * 0.93.0+ previews the `core` view a bare MCP URL lists
+   * (memory-cloud#1849). For `google` / `microsoft` (v0.158.0+, without
+   * `tools`) the preview is that view's base text, with no digest. An empty
    * string is sent as is (the server ignores it).
    */
   profile?: string;

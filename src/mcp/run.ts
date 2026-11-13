@@ -42,7 +42,9 @@ Connect a stdio MCP host to Kagura Cloud using an OAuth profile.
                        Set ?guardrails= on the endpoint (server v0.74.0+); off
                        also removes the guardrails block of get_context_info
   --tool-profile NAME  Set ?profile= (server v0.73.0+): core, which a bare
-                       endpoint lists since v0.93.0, or full (every tool)
+                       endpoint lists since v0.93.0, full (every tool), or
+                       google / microsoft (v0.158.0+: core without
+                       describe_tools and guide)
   --add-tools NAME[,NAME...]
                        Set ?add_tools= (server v0.129.0+): tools listed on top
                        of the profile, e.g. explore; may repeat, at most 100
@@ -56,7 +58,9 @@ Connect a stdio MCP host to Kagura Cloud using an OAuth profile.
 
 The query options replace any value already in the endpoint's query; a
 ?tools= allowlist there wins over --tool-profile and --add-tools. A profile
-is a view, not an authorization boundary: tools/call reaches unlisted tools.
+is a view, not an authorization boundary: tools/call reaches unlisted tools,
+except that google and microsoft refuse describe_tools and guide
+(unknown_tool), which --add-tools cannot bring back.
 `;
 
 /** Names the session when `--session-id` is not given (Python's `SESSION_ENV`). */

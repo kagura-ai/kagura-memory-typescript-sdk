@@ -4090,7 +4090,10 @@ export class KaguraClient {
   /**
    * Call tools/list to get available MCP tool definitions (names,
    * descriptions, parameter schemas): the view the MCP URL's query selects
-   * (`core` for a bare URL on memory-cloud 0.93.0+).
+   * (`core` for a bare URL on memory-cloud 0.93.0+). The `?profile=google`
+   * / `?profile=microsoft` views (v0.158.0+) list `core` without
+   * `describe_tools` and `guide`, and {@link describeTools} / {@link guide}
+   * answer `unknown_tool` there.
    *
    * The result is read as the Python SDK's `ToolListResponse` reads it:
    * `tools` a list of objects, each passed through unread, and a result
@@ -5435,10 +5438,15 @@ export class KaguraClient {
    * Calls the `describe_tools` MCP tool (memory-cloud v0.93.0+, #1849). A
    * profile only shapes `tools/list`: this client can call every tool, but
    * a model behind a mainstream MCP client can call listed tools only, so
-   * the reply says which URL query lists more.
+   * the reply says which URL query lists more. The exception is the
+   * `?profile=google` / `?profile=microsoft` views (memory-cloud v0.158.0+),
+   * which refuse this tool at `tools/call`.
    *
    * @throws Error if `names` is not a list of strings or holds more than
    *   20 names, before any request.
+   * @throws KaguraError with `code` `"unknown_tool"` on a `?profile=google`
+   *   / `?profile=microsoft` MCP URL (memory-cloud v0.158.0+, without a
+   *   `?tools=` allowlist, which wins over the profile).
    * @throws KaguraResponseError when the reply does not match the model
    *   (`operation` `"describe_tools"`).
    */
@@ -5462,13 +5470,18 @@ export class KaguraClient {
    * walkthroughs the short tool descriptions leave out — how to read a
    * reply, when to pick one tool over another, the write rules. A caller
    * error's `help` often names a topic (`'Manual: guide(["<tool>"])'`).
-   * Static text, nothing caller-specific.
+   * Static text, nothing caller-specific. The `?profile=google` /
+   * `?profile=microsoft` views (memory-cloud v0.158.0+) refuse this tool at
+   * `tools/call`, and their error envelopes name no manual.
    *
    * @param topics Up to 20 tool names (`"recall"`) or `"<tool>.<section>"`
    *   topics. Omit for the server's `["index"]`, which lists them all.
    *   Unknown names come back in `unknown`, not thrown.
    * @throws Error if `topics` is not a list of strings or holds more than
    *   20 names, before any request.
+   * @throws KaguraError with `code` `"unknown_tool"` on a `?profile=google`
+   *   / `?profile=microsoft` MCP URL (memory-cloud v0.158.0+, without a
+   *   `?tools=` allowlist).
    * @throws KaguraResponseError when the reply does not match the model
    *   (`operation` `"guide"`).
    */

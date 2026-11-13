@@ -2,7 +2,53 @@
 
 ## 0.19.0
 
-**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.161.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### What memory-cloud 0.156.0 – 0.161.0 changed for this SDK
+
+The server source at each tag was compared with this SDK. No MCP tool input
+property and no REST operation was removed between `v0.155.0` and `v0.161.0`.
+The changes this SDK acts on are covered by contract tests with mocked
+transports; no call was made through this SDK to a live server for this
+release. The sections below give each feature's floor: **0.156.0** for
+batch-level keys on `rememberBatch` items (#148), **0.158.0** for the `google`
+/ `microsoft` tool views (#150), **0.160.0** for upload malware scanning
+(#147) and **0.161.0** for `bootstrap`'s service notices (#149).
+
+| Server | Change | This SDK |
+|---|---|---|
+| 0.156.0 | `remember_batch` items may repeat a batch-level key (`dedupe`, `tags_normalize`, `verbose`); items that agree set one the batch leaves unset, with a top-level `lint` ([memory-cloud#2753](https://github.com/kagura-ai/memory-cloud/issues/2753)) | items sent as given, `RememberBatchResult.lint` (#148) |
+| 0.156.0 | more `details.event_phrase` phrases resolved ([memory-cloud#2751](https://github.com/kagura-ai/memory-cloud/issues/2751)) | `details` is sent as given |
+| 0.156.0 | `details.event_direction` (`past` / `future`; other values refused; `update_memory(details=…)` replaces `details`, so the value is lost unless it is sent again) ([memory-cloud#2752](https://github.com/kagura-ai/memory-cloud/issues/2752)) | `details` is sent as given |
+| 0.156.0 | write lint `event_date_mismatch` ([memory-cloud#2752](https://github.com/kagura-ai/memory-cloud/issues/2752)) | `lint` passes through |
+| 0.156.0 | recall `hint` (opt-in on the server, MCP only) and the recall description ([memory-cloud#2754](https://github.com/kagura-ai/memory-cloud/issues/2754), [memory-cloud#2755](https://github.com/kagura-ai/memory-cloud/issues/2755)) | passes through |
+| 0.157.0 / 0.159.0 | `GET /api/v1/system/info`: top-level `chatgpt_app_url` and `features.connector_channel_routing` (0.157.0); top-level `announcement_consent_version` and `features.email_signup`, `features.open_registration`, `features.provider_link_confirmation`, `features.system_admin` (0.159.0) (`backend/src/api/routes/system.py`) | `getServerInfo` returns them as sent; `SERVER_INFO` / `SERVER_FEATURES` in `src/pyModels.ts` check only the fields they declare |
+| 0.158.0 | `?profile=google` and its alias `?profile=microsoft` ([memory-cloud#2773](https://github.com/kagura-ai/memory-cloud/issues/2773), [memory-cloud#2778](https://github.com/kagura-ai/memory-cloud/issues/2778)) | README and help text (#150); `describeTools()` / `guide()` answer `unknown_tool` there |
+| 0.160.0 | upload malware scanning: `scan_status` on file objects, 409 `SCAN-001` / `SCAN-002` on `download-url` ([memory-cloud#565](https://github.com/kagura-ai/memory-cloud/issues/565)) | `FileObject.scan_status`, `KaguraFileScanPendingError`, `KaguraFileBlockedError` (#147) |
+| 0.160.0 | with upload scanning on, the upload size limit drops to the scanner's stream limit when that limit is below the per-file cap (both default to 100 MiB). An upload over it gets the usual validation error (`backend/src/services/file_storage_service.py`, `scan_capped`) | the server's validation message passes through |
+| 0.161.0 | `bootstrap` service notices ([memory-cloud#2762](https://github.com/kagura-ai/memory-cloud/issues/2762)) | `BootstrapResponse.notices`, printed by `kagura-memory bootstrap` (#149) |
+
+**Not called by this SDK** (browser sign-in, session-only routes, admin
+surfaces, connectors, OIDC):
+
+- 0.157.0: workspace connector channel routes and the worker `capabilities`
+  query; `GET /api/v1/memory-health` and the deprecated admin route.
+- 0.158.0: `/.well-known/google-connected-apps` and the OAuth client changes
+  for connected apps / Grok / `client_secret_basic`. This SDK signs in as a
+  public device-flow client.
+- 0.158.1: the optional OIDC provider.
+- 0.159.0: email sign-up, provider-link confirmation, announcement emails, the
+  `SYSTEM_ADMIN_MODE` setting and invitation accept rules.
+- 0.160.0: Google / GitHub browser sign-in changes (the session clients take a
+  caller-supplied fetch and never call `/auth/{provider}/login`) and admin
+  operations status.
+- 0.161.0: `GET /api/v1/me/workspaces` and its `/{workspace_id}/access`
+  sub-route (OIDC access tokens with `workspaces:read` only,
+  `backend/src/api/routes/me_workspaces.py`); MCP notice settings and admin
+  notices.
+
+Typing the pass-through fields (`event_direction`, the new `ServerFeatures`
+flags, recall `hint`) is left for later.
 
 ### Upload malware scanning (#147)
 
@@ -132,6 +178,46 @@ given, so a caller that does not show the reply to a person adds
 `?notices=off` there. The Python SDK keeps the block the same way
 ([python-sdk#339](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/339)).
 Verified by contract tests; no call to a deployment with notices on.
+
+### `google` / `microsoft` tool views (#150)
+
+`?profile=google` ([memory-cloud#2773](https://github.com/kagura-ai/memory-cloud/issues/2773))
+and its alias `?profile=microsoft`
+([memory-cloud#2778](https://github.com/kagura-ai/memory-cloud/issues/2778))
+need memory-cloud **0.158.0**. The view is the `core` set without
+`describe_tools` and `guide`, which `?add_tools=` cannot bring back
+(`GOOGLE_EXCLUDED_TOOLS` / `GOOGLE_VIEW_PROFILES` in
+`backend/src/mcp_server/tools/_profiles.py`); its tool descriptions name no
+other tool, and its instructions carry no guardrail digest. Unlike any other
+profile, it also gates `tools/call`: a call of `describe_tools` or `guide`
+answers `unknown_tool` (`backend/src/mcp_server/tools/__init__.py`, under
+`google_mode_active()`), so `describeTools()` and `guide()` throw `KaguraError`
+with `code` `"unknown_tool"` on such a URL. A `?tools=` allowlist wins over the
+profile, and then the view is not the google one. The server knows the four
+names `full`, `core`, `google` and `microsoft` (case-sensitive, trimmed) and
+fails `tools/list` for any other. `GET /api/v1/memory/guardrails/digest?target=instructions`
+takes the two new names as `profile` too and returns that view's base text with
+no digest (`backend/src/api/routes/memory.py`, the `is_google_view` branch).
+
+This SDK changes no behaviour here: `--tool-profile` and
+`MemoryClient.getGuardrailDigest({ profile })` take any name
+(`normalizeToolProfile` refuses only a blank one or one starting with `-`), and
+`describeTools()` / `guide()` are not refused locally; the server's
+`unknown_tool` reply already says why. The README's "What `tools/list` shows",
+the `setup … --tool-profile` help and the `guardrails digest --profile` help now
+name the four views and the two refused tools.
+
+### CLI help pages
+
+The `--tool-profile NAME` row of `setup claude`, `setup codex`, `setup hermes`
+and `setup openclaw` and the `--profile TEXT` row of `guardrails digest` no
+longer match Python 0.44.0, which names `full` and `core` only (#150). The
+four `setup` pages already differed and are re-recorded in
+[the exception fixture](../test/cli/typescriptHelp111.json); `guardrails
+digest` is a new entry there and in
+[`docs/cli-help-differences.md`](cli-help-differences.md). Of the 94 supported
+help pages, 47 now match Python and 47 retain a documented difference (the
+0.18.0 counts were 48 and 46).
 
 ## 0.18.1
 

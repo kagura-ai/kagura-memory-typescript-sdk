@@ -33,6 +33,7 @@ The audit test also checks that no registered command escapes this comparison.
 | `explore` | option text, metavar, default wording, or switch grouping: `-d, --depth INTEGER`, `-w, --min-weight FLOAT`. |
 | `files list` | option text, metavar, default wording, or switch grouping: `--scope [all\|workspace]`, `--binding-context-id TEXT`. |
 | `files upload` | Usage/description wording. |
+| `guardrails digest` | option text, metavar, default wording, or switch grouping: `--profile TEXT`. |
 | `ingest` | Python's optional URL/local-file ingest command is not implemented in this SDK; it is absent from the root list. |
 | `list` | option text, metavar, default wording, or switch grouping: `--order-by [updated_at\|created_at\|importance\|observed_at\|event_start]`, `--order-by [updated_at\|created_at\|importance\|observed_at]`. |
 | `recall` | option text, metavar, default wording, or switch grouping: `-k INTEGER`, `--rerank`, `--no-rerank`, `--rerank / --no-rerank`. |
@@ -56,13 +57,20 @@ The audit test also checks that no registered command escapes this comparison.
 | `secret put` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--to PUBKEY_ID`, `--from-file PATH`, `--profile TEXT`, `--to TEXT`, `--from-file FILE`. |
 | `secret revoke` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--to PUBKEY_ID`, `--to TEXT`. |
 | `secret rotate` | option text, metavar, default wording, or switch grouping: `--from-file PATH`, `--profile TEXT`, `--from-file FILE`. |
-| `setup claude` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--mcp-url URL`, `-c, --context-id TEXT`, `--profile TEXT`, `--project-dir DIR`, `-y, --non-interactive`, `--guardrails off\|CONTEXT_ID`, `--scope [project\|user]`, `--context CONTEXT_ID`, `--session-hook`, `--no-session-hook`, `--sync-hook`, `--no-sync-hook`, `--commands`, `--no-commands`, `--no-auto-context`, `--mcp-url TEXT`, `--context-id TEXT`, `--project-dir TEXT`, `--session-hook / --no-session-hook`, `--sync-hook / --no-sync-hook`, `--commands / --no-commands`. |
+| `setup claude` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--mcp-url URL`, `-c, --context-id TEXT`, `--profile TEXT`, `--project-dir DIR`, `-y, --non-interactive`, `--guardrails off\|CONTEXT_ID`, `--tool-profile NAME`, `--scope [project\|user]`, `--context CONTEXT_ID`, `--session-hook`, `--no-session-hook`, `--sync-hook`, `--no-sync-hook`, `--commands`, `--no-commands`, `--no-auto-context`, `--mcp-url TEXT`, `--context-id TEXT`, `--project-dir TEXT`, `--session-hook / --no-session-hook`, `--sync-hook / --no-sync-hook`, `--commands / --no-commands`. |
 | `setup codex` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--profile TEXT`, `-c, --context-id TEXT`, `--guardrails off\|CONTEXT_ID`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
 | `setup hermes` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--profile TEXT`, `-c, --context-id TEXT`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--agents-md [PATH]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
 | `setup openclaw` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--profile TEXT`, `-c, --context-id TEXT`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--agents-md [PATH]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
 | `sleep history` | option text, metavar, default wording, or switch grouping: `--limit INTEGER RANGE`. |
 | `workspace invite revoke` | Usage/description wording. |
 | `workspace member add` | Usage/description wording. |
+
+The `--tool-profile NAME` text of the four `setup` pages and the `--profile
+TEXT` text of `guardrails digest` name the four tool views memory-cloud knows
+from v0.158.0 (`full`, `core`, `google`, `microsoft`) and say that the
+`google` / `microsoft` views refuse `describe_tools` and `guide` at
+`tools/call` and preview no digest; Python 0.44.0 names `full` and `core`
+only (#150).
 
 In particular, setup describes the Node integration actually installed:
 Python's hooks, slash commands and Python-process entry forms are not promised.
