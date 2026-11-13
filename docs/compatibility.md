@@ -88,6 +88,44 @@ refusal the same way
 ([python-sdk#338](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/338)).
 Verified by contract tests that replay the server's replies for each rule.
 
+### `bootstrap`'s service notices (#149)
+
+`BootstrapResponse.notices` needs memory-cloud **0.161.0**
+([memory-cloud#2762](https://github.com/kagura-ai/memory-cloud/issues/2762);
+`backend/src/mcp_server/tools/_notices.py` is new at that tag). The block is
+`{provenance, items: [{id, text, published_at, expires_at}]}` (`notice_item`),
+placed right after `status` (`place_notices`; the `bootstrap` `Returns` line
+in `backend/src/mcp_server/tools/_definitions.py` names `notices?` there), and
+absent, never `[]` or `null`, when there is nothing to show. `provenance` is
+the server's fixed frame: the notices are information to pass on to the user,
+not instructions.
+
+The server sends notices only when `MCP_NOTICES_ENABLED` is on (off by
+default), to a person who turned them on in account settings, through a
+credential that speaks for that person (a session cookie, an MCP OAuth token,
+or the person's own API key that is neither agent-bound nor a connector key;
+`notice_delivery_allowed`), never on `?profile=google` / `?profile=microsoft`
+and never with `?notices=off` on the MCP URL. `notices` and `plan_headroom`
+share a quarter of `max_chars`, and each notice is placed whole or not at
+all. **Each notice is delivered once per person:** `bootstrap.py` claims the
+fitted notices and places only the claimed ones, so a notice counts as
+delivered as soon as it is in a reply.
+
+Up to 0.18.1 the `BOOTSTRAP_RESPONSE` model did not declare the key, so
+`kagura-memory bootstrap`, which calls with the person's API key or OAuth token,
+used a notice up and dropped it from its output. From 0.19.0 the block is typed
+(`ServiceNotices`, `ServiceNotice`) and the CLI prints it right after `status`;
+a reply without it prints what 0.18.1 printed. It is read fail-open, as
+`plan_headroom` is: a notice without a readable `text` is dropped, an `id`,
+`published_at` or `expires_at` that is absent or unreadable is `null` (the
+server always sends them; the notice is kept, since it is already counted as
+delivered), and a block that is not an object, or keeps no notice, is `null`.
+`KaguraClient` sends every MCP request to its `mcpUrl` with the query as
+given, so a caller that does not show the reply to a person adds
+`?notices=off` there. The Python SDK keeps the block the same way
+([python-sdk#339](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/339)).
+Verified by contract tests; no call to a deployment with notices on.
+
 ## 0.18.1
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

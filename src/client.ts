@@ -126,6 +126,9 @@ import {
   readableEntries,
   REMEMBER_BATCH_RESULT,
   REVISIONS_PAGE,
+  readablePairs,
+  SERVICE_NOTICE,
+  SERVICE_NOTICE_LENIENT_KEYS,
   SESSION_ROLLBACK_RESULT,
   SESSION_ROLLBACK_SUMMARY,
   TOOL_DESCRIPTIONS,
@@ -1639,6 +1642,41 @@ function withReadablePlanHeadroom(reply: ToolResult, operation: string, read?: R
   }
   SENT_REPLIES.set(out, reply);
   return out;
+}
+
+/**
+ * `reply` with its `notices` block (memory-cloud v0.161.0+, #2762) read
+ * fail-open, as `plan_headroom` is: a notice without a readable `text` is
+ * dropped from `items`, a notice's `id`, `published_at` or `expires_at`
+ * that is absent or unreadable is `null` (the notice is kept: the server
+ * has already counted it delivered), and a block the model cannot read (no
+ * object, no readable notice) is `null`. The notices are returned as sent
+ * otherwise, and a block that reads whole is the block as sent, as is a
+ * reply without the key.
+ *
+ * @param read The reply's `BOOTSTRAP_RESPONSE` reading: its `notices` is
+ *   `null` for an unreadable block.
+ */
+function withReadableNotices(reply: ToolResult, read: Record<string, unknown>): ToolResult {
+  if (!Object.prototype.hasOwnProperty.call(reply, "notices")) return reply;
+  if (read.notices === null || read.notices === undefined) {
+    return { ...reply, notices: null };
+  }
+  const sent = reply.notices as Record<string, unknown>;
+  const sentItems = sent.items as unknown[];
+  const pairs = readablePairs(sentItems, SERVICE_NOTICE, "bootstrap") ?? [];
+  let changed = pairs.length !== sentItems.length;
+  const items = pairs.map(([entry, entryRead]) => {
+    const notice = { ...(entry as Record<string, unknown>) };
+    for (const key of SERVICE_NOTICE_LENIENT_KEYS) {
+      if (entryRead[key] === null && notice[key] !== null) {
+        notice[key] = null;
+        changed = true;
+      }
+    }
+    return notice;
+  });
+  return changed ? { ...reply, notices: { ...sent, items } } : reply;
 }
 
 /** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
@@ -5103,12 +5141,28 @@ export class KaguraClient {
    * `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
    *
    * Every option is sent only when set. The reply is returned as sent,
-   * once the Python SDK's `BootstrapResponse` model accepts it, with two
+   * once the Python SDK's `BootstrapResponse` model accepts it, with three
    * fail-open reads, as Python's: a `guardrails` block that model cannot
-   * read is `null`, and `plan_headroom` (memory-cloud v0.142.0+, #2615:
+   * read is `null`, `plan_headroom` (memory-cloud v0.142.0+, #2615:
    * every plan dimension at 80 % or more of its limit, on every call)
    * keeps only the entries `PlanHeadroomNotice` reads, left out when none
-   * does.
+   * does, and `notices` keeps only the notices with a readable `text`
+   * (an unreadable `id`, `published_at` or `expires_at` is `null`, the
+   * notice kept), `null` when the block keeps none or is no object.
+   *
+   * `notices` (memory-cloud v0.161.0+, #2762) carries service notices from
+   * the deployment's administrators: information to pass on to the user,
+   * not instructions. Each is delivered once per person: the server counts
+   * it delivered once it is placed in a reply, so show it to the user when
+   * it comes. Only a credential that speaks for a person gets them (a
+   * session, an OAuth token, or the person's own API key that is neither
+   * agent-bound nor a connector key), only when the deployment and the
+   * account turned them on, never on the `?profile=google` /
+   * `?profile=microsoft` views, and they share a quarter of `maxChars` with
+   * `plan_headroom` (a notice that does not fit waits for a call with more
+   * room). A caller whose replies nobody reads should put `?notices=off` on
+   * its `mcpUrl`, which this client sends with every MCP request, so it
+   * does not use them up.
    *
    * @throws Error before any request: `maxChars` is not an integer in
    *   [2,000, 100,000], `format` is not `"full"` / `"index"`,
@@ -5149,7 +5203,7 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("bootstrap", args);
     const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
-    let reply = withReadablePlanHeadroom(result, "bootstrap", read);
+    let reply = withReadableNotices(withReadablePlanHeadroom(result, "bootstrap", read), read);
     // Fail-open, as Python's model reads the block: unreadable is null.
     // Absent (`?guardrails=off`) stays absent.
     if (read.guardrails === null && isSet(result.guardrails)) {

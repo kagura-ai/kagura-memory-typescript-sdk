@@ -100,7 +100,20 @@ export type Kind =
    * refuses is dropped, and a value that is not a list, or keeps no entry,
    * is `None` (`null`) — never a problem of the enclosing reply.
    */
-  | { failOpenList: Model };
+  | { failOpenList: Model }
+  /**
+   * `list[Model]` keeping the entries the model reads and dropping the rest
+   * (the Python SDK's `_notice_items`); a value that is not a list, or keeps
+   * no entry, is a problem of the enclosing model. For a block read with
+   * `orNone`, which then reads `null` (`_notices_or_none`).
+   */
+  | { readableList: Model }
+  /**
+   * `T | None` read fail-open, as the Python SDK's wrap validator that
+   * turns a `ValidationError` into `None` reads it: a value `T` refuses is
+   * `null`, never a problem of the enclosing model.
+   */
+  | { orNull: Kind };
 
 export interface Field {
   key: string;
@@ -199,6 +212,29 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
   if ("orNone" in kind) return readOrNull(r.operation, kind.orNone, value);
   if ("failOpenList" in kind) {
     return readableReads(value, kind.failOpenList, r.operation)?.map(([, read]) => read) ?? null;
+  }
+  if ("orNull" in kind) {
+    if (value === null) return null;
+    const own = new ResponseReader(r.operation, r.model);
+    const read = readValue(own, kind.orNull, raw, at);
+    try {
+      own.check();
+    } catch {
+      return null;
+    }
+    return read ?? null;
+  }
+  if ("readableList" in kind) {
+    if (!Array.isArray(value)) {
+      r.issue(at, "Input should be a valid list");
+      return undefined;
+    }
+    const kept = readableReads(value, kind.readableList, r.operation);
+    if (kept === undefined) {
+      r.issue(at, "List should have at least 1 item after validation, not 0");
+      return undefined;
+    }
+    return kept.map(([, read]) => read);
   }
   if ("dictOf" in kind) {
     if (!isObject(value)) {
@@ -1056,12 +1092,61 @@ const BOOTSTRAP_COMPONENTS: Model = {
   ],
 };
 
+/**
+ * One service notice of `bootstrap`'s `notices` block (memory-cloud
+ * v0.161.0+, #2762), as the Python SDK's `ServiceNotice` reads it. The
+ * server counts a notice delivered once it is in a reply, so only `text` is
+ * required: v0.161.0 always sends `id`, `published_at` and `expires_at`, but
+ * one that is absent, `null` or unreadable reads `null` rather than losing
+ * the notice.
+ */
+export const SERVICE_NOTICE: Model = {
+  name: "ServiceNotice",
+  fields: [
+    optional("id", { orNull: "str" }),
+    required("text", "str"),
+    optional("published_at", { orNull: "datetime" }),
+    optional("expires_at", { orNull: "datetime" }),
+  ],
+};
+
+/** The {@link SERVICE_NOTICE} fields that read `null` when absent or unreadable. */
+export const SERVICE_NOTICE_LENIENT_KEYS: readonly string[] = ["id", "published_at", "expires_at"];
+
+/**
+ * The entries of `value` that `model` reads, each as `[entry as sent, its
+ * read]`, or `undefined` when `value` is not a list or no entry reads: for
+ * the client, which returns such entries as sent but must know what each
+ * read as.
+ */
+export function readablePairs(
+  value: unknown,
+  model: Model,
+  operation: string,
+): Array<[sent: unknown, read: Record<string, unknown>]> | undefined {
+  return readableReads(value, model, operation)?.map(([index, read]) => [(value as unknown[])[index], read]);
+}
+
+/**
+ * `bootstrap`'s `notices` block (memory-cloud v0.161.0+, #2762): a notice
+ * `SERVICE_NOTICE` refuses is dropped, and a block with none left is
+ * refused, which its `orNone` field reads as `null`.
+ */
+export const SERVICE_NOTICES: Model = {
+  name: "ServiceNotices",
+  fields: [optional("provenance", nullable("str")), required("items", { readableList: SERVICE_NOTICE })],
+};
+
 /** A `bootstrap` reply, as Python's `BootstrapResponse` reads it (dumped by alias). */
 export const BOOTSTRAP_RESPONSE: Model = {
   name: "BootstrapResponse",
   fields: [
     ...CONTEXT_ECHO_FIELDS,
     optional("status", "str", "success"),
+    // memory-cloud v0.161.0+ (#2762), right after `status` as the server
+    // places it. Fail-open: unreadable is `null`; absent stays absent, so a
+    // reply without it reads and dumps as before.
+    whenSent("notices", { orNone: SERVICE_NOTICES }),
     optional("format", nullable("str")),
     optional("degraded", "bool", false),
     optional("context", nullable({ model: CONTEXT_DETAIL })),

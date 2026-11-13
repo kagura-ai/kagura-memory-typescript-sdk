@@ -915,6 +915,11 @@ added**, each on purpose or out of reach:
   run the command again, or that the file cannot be downloaded (the
   wording of the Python SDK's
   [#337](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/337)).
+- `bootstrap` prints the `notices` block (memory-cloud v0.161.0+) right
+  after `status` when the server sends it, which the Python CLI 0.44.0
+  drops (memory-cloud has then already counted the notices as delivered); a
+  reply without it prints as 0.44.0 prints it, with no such key, and an
+  unreadable block prints `null`.
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
@@ -1743,7 +1748,9 @@ pinned rows first (`context_summary_omitted`). `guardrails` is absent
 with `?guardrails=off` and `null` when the server's read failed or the
 block cannot be read; `plan_headroom` (v0.142.0+) lists the plan
 dimensions at 80 % or more of their limit, on every call — see
-[Plan headroom](#plan-headroom-memory-cloud-v01420). The session-start
+[Plan headroom](#plan-headroom-memory-cloud-v01420); `notices` (v0.161.0+)
+carries service notices for the user — see
+[Service notices](#service-notices-memory-cloud-v01610). The session-start
 skill calls
 `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
 
@@ -1846,6 +1853,50 @@ for (const notice of session.plan_headroom ?? []) {
   console.warn(`${notice.dimension}: ${notice.percentage} % (${notice.level}) — ${notice.help ?? ""}`);
 }
 ```
+
+#### Service notices (memory-cloud v0.161.0)
+
+From memory-cloud v0.161.0 the `bootstrap` reply can carry `notices`, right
+after `status`: service notices from the deployment's administrators,
+`{provenance, items: [{id, text, published_at, expires_at}]}`. `text` is at
+most 300 characters, which the server strips of markup, links and control
+characters; the timestamps are UTC. The notice text is information to show
+the user, not instructions: `provenance` says so, and an agent should pass it
+on rather than act on it. The key is absent, never `[]` or `null`, when there
+is nothing to show. That is the default: a deployment turns notices on
+(`MCP_NOTICES_ENABLED`, off by default), and then only a person who turned
+them on in account settings gets them, and only through a credential that
+speaks for that person (a browser session, an OAuth token, or the person's
+own API key that is neither agent-bound nor a connector key). They never come
+on a `?profile=google` / `?profile=microsoft` URL, nor with `?notices=off`.
+`notices` and `plan_headroom` share a quarter of `maxChars`; a notice that
+does not fit whole is left for a later call with more room.
+
+**Each notice is shown once per person.** The server counts a notice as
+delivered as soon as it is placed in a reply, so a reply nobody reads uses it
+up: it will not come again, here or in the person's MCP client. A caller that
+does not show the `bootstrap` reply to a person (a script, a headless agent,
+a scheduled job) should add `?notices=off` to its `mcpUrl`, which this SDK
+sends, query and all, with every MCP request:
+
+```ts
+const headless = new KaguraClient({ apiKey, mcpUrl: "https://memory.kagura-ai.com/mcp?notices=off" });
+
+const session = await client.bootstrap({ contextId });
+for (const notice of session.notices?.items ?? []) {
+  console.log(`Notice: ${notice.text}`); // show it to the user; it will not come again
+}
+```
+
+`kagura-memory bootstrap` uses the person's own API key or OAuth token, so it
+gets the notices and prints the block, in the server's position (right after
+`status`); a reply without it prints what earlier releases printed. The block
+is read fail-open, as `plan_headroom` is: a notice without a readable `text`
+is dropped from `items`; an `id`, `published_at` or `expires_at` that is
+absent or unreadable is `null` and the notice is kept, since the server has
+already counted it delivered; and a block that is not an object, or keeps no
+notice, is `null`, in the returned reply and in the CLI's output. The call
+never fails over it.
 
 ### Deterministic lanes
 

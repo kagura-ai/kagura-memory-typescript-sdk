@@ -23,6 +23,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `batch_level_argument` entry for each of `dedupe` / `tags_normalize` /
   `verbose` that the batch left unset and the server took from the items
   (#148).
+- `BootstrapResponse.notices` (`ServiceNotices` / `ServiceNotice`), the service
+  notices memory-cloud v0.161.0 can put in the `bootstrap` reply: information
+  for the user, not instructions, each delivered once per person. Read
+  fail-open: a notice without a readable `text` is dropped, an unreadable
+  `id` / `published_at` / `expires_at` is `null`, and an unreadable block is
+  `null`; the call never fails over it. The README says when to add
+  `?notices=off` to the `mcpUrl` (#149).
 
 ### Fixed
 
@@ -38,6 +45,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies its rules (an item that changes the batch's value is refused on
   its own; a value every item agrees on is applied to the batch). A server
   before v0.156.0 still refuses every such item (#148).
+- `kagura-memory bootstrap` dropped the `notices` block from its output, while
+  memory-cloud v0.161.0 counts a notice as delivered once it is in the reply,
+  so the notice was used up and never shown. It now prints the block right
+  after `status`; a reply without it prints what it printed before (#149).
 
 ## [0.18.1] - 2026-11-10
 

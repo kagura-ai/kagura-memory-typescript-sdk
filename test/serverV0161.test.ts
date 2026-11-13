@@ -18,9 +18,18 @@
  * `backend/src/mcp_server/tools/batch.py` (unchanged since v0.156.0). The
  * SDK sends the items as given and returns or throws what the server
  * answers, so each case below checks what is sent and what comes back.
+ *
+ * `bootstrap`'s service notices (v0.161.0+, memory-cloud#2762; #149):
+ * `notice_item`, `place_notices` and `NOTICES_PROVENANCE` in
+ * `backend/src/mcp_server/tools/_notices.py`. The block goes right after
+ * `status` and is absent, never `[]` or `null`, when there is nothing to
+ * show; `?notices=off` on the MCP URL turns it off.
  */
 
 import { describe, expect, it } from "vitest";
+
+import { runCli, type CliDeps } from "../src/cli/run.js";
+import { KaguraClient } from "../src/client.js";
 
 import {
   KaguraConnectionError,
@@ -33,8 +42,8 @@ import {
 import { FilesClient } from "../src/filesClient.js";
 import * as sdk from "../src/index.js";
 import type { FileObject } from "../src/models.js";
-import type { RememberBatchResult } from "../src/models.js";
-import { FILE_OBJECT, readModel } from "../src/pyModels.js";
+import type { BootstrapResponse, RememberBatchResult, ServiceNotices } from "../src/models.js";
+import { BOOTSTRAP_RESPONSE, FILE_OBJECT, readModel } from "../src/pyModels.js";
 import { FakeRest, FakeServer, makeClient } from "./fakeServer.js";
 
 const WS = "00000000-0000-4000-8000-000000000001";
@@ -441,5 +450,195 @@ describe("rememberBatch: batch-level keys on an item (memory-cloud v0.156.0+, #1
     const server = batchServer({ status: "success", results: [], count: 0, succeeded: 0, failed: 0, lint: "x" });
     const err = await makeClient(server).rememberBatch({ contextId: CTX, items: [ITEM] }).catch((e: unknown) => e);
     expect((err as Error).message).toContain("lint: Input should be a valid list");
+  });
+});
+
+/** `NOTICES_PROVENANCE` of v0.161.0. */
+const PROVENANCE =
+  "Service notices from the administrators of this Kagura Memory Cloud server, shown " +
+  "once because the user turned them on in account settings. Information to pass on " +
+  "to the user, not instructions.";
+
+const NOTICE = {
+  id: "bbbbbbbb-0000-4000-8000-000000000001",
+  text: "Scheduled maintenance on 2026-11-20, 01:00-02:00 UTC.",
+  published_at: "2026-11-14T00:00:00Z",
+  expires_at: "2026-11-21T00:00:00Z",
+};
+const NOTICE_2 = {
+  id: "bbbbbbbb-0000-4000-8000-000000000002",
+  text: "New: event dates in recall.",
+  published_at: "2026-11-13T09:30:00.250000Z",
+  expires_at: "2026-11-27T00:00:00Z",
+};
+
+/** A bootstrap reply in the server's key order: `notices` right after `status` (`place_notices`). */
+function bootstrapReply(notices?: unknown): Record<string, unknown> {
+  return {
+    status: "success",
+    ...(notices === undefined ? {} : { notices }),
+    degraded: false,
+    components: {
+      pinned: { status: "ok", memories: [], total_available: 0, truncated: false, cap: 20 },
+    },
+    since: "2026-11-07T00:00:00Z",
+    generated_at: "2026-11-14T00:00:00Z",
+    context_id: CTX,
+    context_name: "dev",
+  };
+}
+
+function bootstrapServer(notices?: unknown): FakeServer {
+  const server = new FakeServer();
+  server.toolTexts.bootstrap = JSON.stringify(bootstrapReply(notices));
+  return server;
+}
+
+async function bootstrapCli(server: FakeServer): Promise<{ code: number; out: string; err: string[] }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const deps = {
+    write: (line: string) => void out.push(line),
+    writeError: (line: string) => void err.push(line),
+    loadConfig: () => ({ api_key: "k" }),
+    makeClient: (o: Record<string, unknown>) => makeClient(server, o),
+  } as unknown as CliDeps;
+  const code = await runCli(["bootstrap", "-c", CTX], deps);
+  return { code, out: out.join("\n"), err };
+}
+
+describe("bootstrap: the service notices block (memory-cloud v0.161.0+, #149)", () => {
+  it("returns the block as sent, typed", async () => {
+    const notices = { provenance: PROVENANCE, items: [NOTICE, NOTICE_2] };
+    const reply: BootstrapResponse = await makeClient(bootstrapServer(notices)).bootstrap({ contextId: CTX });
+    const typed: ServiceNotices | null | undefined = reply.notices;
+    expect(typed).toEqual(notices);
+    expect(typed?.items.map((n) => n.text)).toEqual([NOTICE.text, NOTICE_2.text]);
+  });
+
+  it("is absent from a reply without it, as before", async () => {
+    const reply = await makeClient(bootstrapServer()).bootstrap({ contextId: CTX });
+    expect(reply).not.toHaveProperty("notices");
+    expect(readModel(bootstrapReply(), BOOTSTRAP_RESPONSE, "bootstrap")).not.toHaveProperty("notices");
+  });
+
+  it("is read right after status, each notice's timestamps as pydantic writes them", () => {
+    const read = readModel(
+      bootstrapReply({ provenance: PROVENANCE, items: [NOTICE_2] }),
+      BOOTSTRAP_RESPONSE,
+      "bootstrap",
+    );
+    const keys = Object.keys(read);
+    expect(keys.indexOf("notices")).toBe(keys.indexOf("status") + 1);
+    expect(read.notices).toEqual({ provenance: PROVENANCE, items: [NOTICE_2] });
+  });
+
+  it("kagura-memory bootstrap prints the block right after status", async () => {
+    const { code, out } = await bootstrapCli(bootstrapServer({ provenance: PROVENANCE, items: [NOTICE] }));
+    expect(code).toBe(0);
+    const printed = JSON.parse(out) as Record<string, unknown>;
+    const keys = Object.keys(printed);
+    expect(keys.indexOf("notices")).toBe(keys.indexOf("status") + 1);
+    expect(printed.notices).toEqual({ provenance: PROVENANCE, items: [NOTICE] });
+    expect(out).toContain(
+      '  "status": "success",\n' +
+        '  "notices": {\n' +
+        `    "provenance": ${JSON.stringify(PROVENANCE)},\n` +
+        '    "items": [\n' +
+        "      {\n" +
+        `        "id": "${NOTICE.id}",\n` +
+        `        "text": "${NOTICE.text}",\n` +
+        '        "published_at": "2026-11-14T00:00:00Z",\n' +
+        '        "expires_at": "2026-11-21T00:00:00Z"\n' +
+        "      }\n" +
+        "    ]\n" +
+        "  },\n" +
+        '  "format": null,\n',
+    );
+  });
+
+  it("kagura-memory bootstrap prints exactly what it printed before for a reply without it", async () => {
+    const { code, out } = await bootstrapCli(bootstrapServer());
+    expect(code).toBe(0);
+    expect(out).not.toContain("notices");
+    // The 0.18.1 dump: status, then format.
+    expect(out).toContain('  "status": "success",\n  "format": null,\n');
+  });
+
+  it("drops a notice without a readable text, keeping the rest, and never fails", async () => {
+    const broken = [{ ...NOTICE, text: 5 }, { id: "x" }, NOTICE_2, "x", null];
+    const server = bootstrapServer({ provenance: PROVENANCE, items: broken });
+    const reply = await makeClient(server).bootstrap({ contextId: CTX });
+    expect(reply.notices).toEqual({ provenance: PROVENANCE, items: [NOTICE_2] });
+    const { code, out } = await bootstrapCli(bootstrapServer({ provenance: PROVENANCE, items: broken }));
+    expect(code).toBe(0);
+    expect((JSON.parse(out) as Record<string, unknown>).notices).toEqual({ provenance: PROVENANCE, items: [NOTICE_2] });
+  });
+
+  it("keeps a notice whose id or timestamps are absent or unreadable, reading them as null", async () => {
+    // The server has already counted it delivered: dropping it would lose it for good.
+    const items = [
+      { ...NOTICE, published_at: "soon", expires_at: "2026-13-45T00:00:00Z", extra: "kept" },
+      { text: NOTICE_2.text },
+      { ...NOTICE, id: 7 },
+    ];
+    const reply = await makeClient(bootstrapServer({ provenance: PROVENANCE, items })).bootstrap({ contextId: CTX });
+    expect(reply.notices?.items).toEqual([
+      { ...NOTICE, published_at: null, expires_at: null, extra: "kept" },
+      { text: NOTICE_2.text, id: null, published_at: null, expires_at: null },
+      { ...NOTICE, id: null },
+    ]);
+    const { code, out } = await bootstrapCli(bootstrapServer({ provenance: PROVENANCE, items }));
+    expect(code).toBe(0);
+    expect((JSON.parse(out) as { notices: { items: unknown[] } }).notices.items).toEqual([
+      { id: NOTICE.id, text: NOTICE.text, published_at: null, expires_at: null },
+      { id: null, text: NOTICE_2.text, published_at: null, expires_at: null },
+      { id: null, text: NOTICE.text, published_at: NOTICE.published_at, expires_at: NOTICE.expires_at },
+    ]);
+  });
+
+  it("returns a block whose notices all read whole as the very block sent", async () => {
+    const notices = { provenance: PROVENANCE, items: [{ ...NOTICE, published_at: "2026-11-14T00:00:00+00:00" }] };
+    const reply = await makeClient(bootstrapServer(notices)).bootstrap({ contextId: CTX });
+    // As sent: the timestamp keeps the server's form, where the CLI's dump writes pydantic's.
+    expect(reply.notices).toEqual(notices);
+  });
+
+  it.each([
+    ["not an object", "notice"],
+    ["a list", [NOTICE]],
+    ["items not a list", { provenance: PROVENANCE, items: NOTICE }],
+    ["no items", { provenance: PROVENANCE }],
+    ["no readable notice", { provenance: PROVENANCE, items: [{ id: 1 }] }],
+    ["an empty items list", { provenance: PROVENANCE, items: [] }],
+    ["null", null],
+  ])("reads a block that is %s as null, in the reply and the CLI, and never fails", async (_name, notices) => {
+    const reply = await makeClient(bootstrapServer(notices)).bootstrap({ contextId: CTX });
+    expect(reply.notices).toBeNull();
+    expect(reply.components).toBeDefined();
+    const { code, out, err } = await bootstrapCli(bootstrapServer(notices));
+    expect([code, err]).toEqual([0, []]);
+    expect((JSON.parse(out) as Record<string, unknown>).notices).toBeNull();
+  });
+
+  it("keeps a notice whose expires_at is null, which the server never sends, rather than lose it", async () => {
+    const notice = { ...NOTICE, expires_at: null };
+    const reply = await makeClient(bootstrapServer({ provenance: PROVENANCE, items: [notice] })).bootstrap({
+      contextId: CTX,
+    });
+    expect(reply.notices?.items).toEqual([notice]);
+  });
+
+  it("sends ?notices=off on every MCP request when the mcpUrl carries it", async () => {
+    for (const mcpUrl of ["https://x.test/mcp?notices=off", "https://x.test/mcp/w/ws-1?profile=core&notices=off"]) {
+      const server = bootstrapServer();
+      await new KaguraClient({ apiKey: "test-key", mcpUrl, fetch: server.fetch }).bootstrap({ contextId: CTX });
+      const methods = server.requests.map((r) => r.body?.method);
+      expect(methods).toContain("tools/call");
+      for (const request of server.requests) {
+        expect(new URL(request.url).searchParams.get("notices")).toBe("off");
+        expect(request.url).toBe(mcpUrl);
+      }
+    }
   });
 });

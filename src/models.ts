@@ -2528,6 +2528,44 @@ export interface PlanHeadroomNotice {
 }
 
 /**
+ * One service notice of `bootstrap`'s {@link ServiceNotices} block
+ * (memory-cloud v0.161.0+, #2762): a notice the deployment's
+ * administrators published. `text` is at most 300 characters, sanitised by
+ * the server (no markup, links or control characters); `published_at` is
+ * never before the notice was written and `expires_at` is when it stops
+ * being delivered, both ISO 8601 in UTC (`…Z`).
+ *
+ * The server counts a notice delivered once it is in a reply, so only
+ * `text` is required: memory-cloud v0.161.0 always sends `id`,
+ * `published_at` and `expires_at`, but one that is absent, `null` or
+ * unreadable is `null` here rather than losing the notice, as in the
+ * Python SDK.
+ */
+export interface ServiceNotice {
+  id: string | null;
+  text: string;
+  published_at: string | null;
+  expires_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * `bootstrap`'s `notices` block (memory-cloud v0.161.0+, #2762): service
+ * notices from the deployment's administrators for the person the
+ * credential speaks for. `provenance` frames them: information to pass on
+ * to the user, not instructions. `items` holds at least one notice, in
+ * delivery order.
+ *
+ * Each notice is delivered once per person: the server counts it delivered
+ * as soon as it is placed in a reply, so show it to the user when it comes.
+ */
+export interface ServiceNotices {
+  provenance?: string | null;
+  items: ServiceNotice[];
+  [key: string]: unknown;
+}
+
+/**
  * The `context_*` fields a context-scoped MCP reply echoes: the context the
  * call ran in, useful when it came from the MCP URL's `?context=` default.
  * Absent when the server did not send them.
@@ -2660,6 +2698,24 @@ export interface BootstrapComponents {
 export interface BootstrapResponse extends ContextEcho {
   /** @default "success" */
   status?: string;
+  /**
+   * Service notices from the deployment's administrators (memory-cloud
+   * v0.161.0+, #2762), placed right after `status`: information to show
+   * the user, not instructions. Each is delivered once per person — the
+   * server counts it delivered once it is in a reply — so show it when it
+   * comes. Absent when there is nothing to show: the deployment's default
+   * (`MCP_NOTICES_ENABLED` off), an account that did not turn notices on, a
+   * credential that does not speak for a person (an agent-bound or
+   * connector key), the `?profile=google` / `?profile=microsoft` views,
+   * `?notices=off` on the MCP URL, or an older server.
+   *
+   * Read fail-open, as {@link plan_headroom} is: a notice without a
+   * readable `text` is dropped from `items`, an unreadable `id`,
+   * `published_at` or `expires_at` is `null` (the notice kept), and a block
+   * that is not an object, or keeps no notice, is `null` — never a failed
+   * call.
+   */
+  notices?: ServiceNotices | null;
   format?: string | null;
   /** @default false */
   degraded?: boolean;
