@@ -192,8 +192,12 @@ other tool, and its instructions carry no guardrail digest. Unlike any other
 profile, it also gates `tools/call`: a call of `describe_tools` or `guide`
 answers `unknown_tool` (`backend/src/mcp_server/tools/__init__.py`, under
 `google_mode_active()`), so `describeTools()` and `guide()` throw `KaguraError`
-with `code` `"unknown_tool"` on such a URL. A `?tools=` allowlist wins over the
-profile, and then the view is not the google one. The server knows the four
+with `code` `"unknown_tool"` on such a URL. The view also trims replies
+(`scrub_google_reply` in `backend/src/mcp_server/tools/_google_profile.py`):
+the sentences of the server's own `help` / `hint` / `message` / `example` text
+that point at another tool are dropped, and `recall` makes no learning writes.
+A `?tools=` allowlist wins over the profile, and then the view is not the
+google one. The server knows the four
 names `full`, `core`, `google` and `microsoft` (case-sensitive, trimmed) and
 fails `tools/list` for any other. `GET /api/v1/memory/guardrails/digest?target=instructions`
 takes the two new names as `profile` too and returns that view's base text with

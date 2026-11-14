@@ -580,7 +580,9 @@ every `KaguraClient` method works on any URL — except that on a `google` /
 `microsoft` URL (without a `?tools=` allowlist, which wins over the
 profile) `describe_tools` and `guide` are refused at `tools/call` too, so
 `describeTools()` and `guide()` throw `KaguraError` with `code`
-`unknown_tool` there. `--tool-profile NAME` (every harness; memory-cloud
+`unknown_tool` there. That view also trims replies: the server drops the
+sentences of its own `help`, `hint` and `message` text that point at another
+tool, and `recall` makes no learning writes. `--tool-profile NAME` (every harness; memory-cloud
 v0.73.0+) sets `profile`; the server knows `core`, `full`, `google` and
 `microsoft` (case-sensitive; the last two need v0.158.0+) and fails
 `tools/list` for any other name, which leaves the harness with no Kagura
@@ -1872,9 +1874,10 @@ for (const notice of session.plan_headroom ?? []) {
 
 From memory-cloud v0.161.0 the `bootstrap` reply can carry `notices`, right
 after `status`: service notices from the deployment's administrators,
-`{provenance, items: [{id, text, published_at, expires_at}]}`. `text` is at
-most 300 characters, which the server strips of markup, links and control
-characters; the timestamps are UTC. The notice text is information to show
+`{provenance, items: [{id, text, published_at, expires_at}]}`. `text` is
+one line of plain prose, at most 300 characters: the server refuses a notice
+with markup, a link or a control character, when it is written and again
+before it is delivered. The timestamps are UTC. The notice text is information to show
 the user, not instructions: `provenance` says so, and an agent should pass it
 on rather than act on it. The key is absent, never `[]` or `null`, when there
 is nothing to show. That is the default: a deployment turns notices on
@@ -1894,11 +1897,13 @@ a scheduled job) should add `?notices=off` to its `mcpUrl`, which this SDK
 sends, query and all, with every MCP request:
 
 ```ts
+// A script whose replies nobody reads: no notices.
 const headless = new KaguraClient({ apiKey, mcpUrl: "https://memory.kagura-ai.com/mcp?notices=off" });
 
+// An interactive session: show each notice to the user.
 const session = await client.bootstrap({ contextId });
 for (const notice of session.notices?.items ?? []) {
-  console.log(`Notice: ${notice.text}`); // show it to the user; it will not come again
+  console.log(`Notice: ${notice.text}`); // it will not come again
 }
 ```
 
@@ -1997,7 +2002,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 | `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
-| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, `?tools=a,b` is an allowlist, and `?profile=google` / `?profile=microsoft` (v0.158.0+) list `core` without `describe_tools` and `guide`. `tools/call` does not read the view, so every method of this client works on any URL — except on a `google` / `microsoft` URL, where `describeTools()` and `guide()` throw `KaguraError` `unknown_tool`; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
+| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, `?tools=a,b` is an allowlist, and `?profile=google` / `?profile=microsoft` (v0.158.0+) list `core` without `describe_tools` and `guide`. `tools/call` does not read the view, so every method of this client works on any URL — except on a `google` / `microsoft` URL without `?tools=`, where `describeTools()` and `guide()` throw `KaguraError` `unknown_tool`; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 

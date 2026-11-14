@@ -69,8 +69,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (#150).
 - File upload descriptions (the package description, the README, doc
   comments) no longer name the storage backend; they say file storage, the
-  object store or the presigned URL. The `KaguraIntegrityError` message stays
-  the Python SDK's word for word.
+  object store or the presigned URL. So does the `KaguraIntegrityError`
+  message of a rejected upload PUT ("… most commonly a storage BadDigest …"),
+  which matches the Python SDK 0.47.0's word for word (#151).
 
 ## [0.18.1] - 2026-11-10
 
