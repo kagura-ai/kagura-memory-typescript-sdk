@@ -3,11 +3,12 @@
  *
  * Drives the 3-step file upload flow against memory-cloud:
  * 1. `POST /api/v1/files/reserve` — server returns a presigned PUT URL.
- * 2. `PUT` to R2 with body bytes and the `x-amz-checksum-sha256` header
- *    (base64 of the raw sha256 digest), when the presign signed it.
+ * 2. `PUT` to the presigned URL (the object store) with body bytes and the
+ *    `x-amz-checksum-sha256` header (base64 of the raw sha256 digest), when
+ *    the presign signed it.
  * 3. `POST /api/v1/files/{file_id}/confirm` — finalize the row.
  *
- * Plus `downloadUrl()`, `delete()` and `list()`. The R2 PUT is sent with a
+ * Plus `downloadUrl()`, `delete()` and `list()`. The upload PUT is sent with a
  * plain fetch and NO Authorization header so the SDK's Bearer credential
  * cannot leak to the object store — the presigned URL carries its own
  * short-lived SigV4 signature.
@@ -57,7 +58,7 @@ interface ErrorWithResponse extends KaguraConnectionError {
 }
 
 export interface FilesClientOptions extends KaguraRestClientOptions {
-  /** R2 PUT timeout in ms (default 300000 — 5 min for large files). */
+  /** Timeout of the upload PUT to the object store, in ms (default 300000 — 5 min for large files). */
   uploadTimeoutMs?: number;
 }
 
@@ -160,7 +161,8 @@ export class FilesClient extends KaguraRestClient {
    *
    * @throws Error if `contextId` is not a UUID, or `source` is bytes and
    *   `filename` is not provided.
-   * @throws KaguraIntegrityError if R2 rejected the body sha256 binding.
+   * @throws KaguraIntegrityError if the object store rejected the body
+   *   sha256 binding.
    * @throws KaguraResponseError if the reserve's or the confirm's 2xx body,
    *   or a 409's existing file, is not what the Python SDK's
    *   `FileReserveResponse` / `FileObject` model reads (#66), or the
@@ -412,11 +414,11 @@ export class FilesClient extends KaguraRestClient {
   }
 
   // -------------------------------------------------------------------
-  // R2 PUT (unauthenticated by design)
+  // Object store PUT (unauthenticated by design)
   // -------------------------------------------------------------------
 
   /**
-   * PUT `body` to the presigned R2 URL with checksum binding. Sends
+   * PUT `body` to the presigned URL with checksum binding. Sends
    * `x-amz-checksum-sha256` (base64 of the raw digest) only when the
    * presign signed it; a 400 from the store → {@link KaguraIntegrityError}.
    */
@@ -431,7 +433,7 @@ export class FilesClient extends KaguraRestClient {
       "user-agent": `kagura-memory-sdk/${SDK_VERSION}`,
     };
     // Send the checksum header ONLY when the presign signed it: a server with
-    // R2 checksum binding OFF presigns without it, and sending it anyway makes
+    // checksum binding OFF presigns without it, and sending it anyway makes
     // the SigV4 signature mismatch → 403 SignatureDoesNotMatch (#226).
     if (presignSignsChecksum(uploadUrl)) {
       headers["x-amz-checksum-sha256"] = sha256Base64;

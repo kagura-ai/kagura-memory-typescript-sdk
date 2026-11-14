@@ -10,7 +10,7 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 |--------|----------|----------|
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
-| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
+| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding |
 | **`WorkspaceClient`** | REST API | Workspace member, invitation, and API key management; operation history (web session) |
 | **`SecretClient`** | REST API | [Zero-knowledge secrets](#zero-knowledge-secrets) — age-encrypted on your machine, opaque to the server |
 | **`AgentsClient`** | REST API | Agent bootstrap for API-key-only callers (no MCP session) |

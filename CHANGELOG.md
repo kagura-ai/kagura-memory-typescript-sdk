@@ -67,6 +67,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   say this release is checked against memory-cloud up to 0.161.0, with a table
   of what 0.156.0 – 0.161.0 changed for this SDK. No SDK behaviour changes
   (#150).
+- File upload descriptions (the package description, the README, doc
+  comments) no longer name the storage backend; they say file storage, the
+  object store or the presigned URL. The `KaguraIntegrityError` message stays
+  the Python SDK's word for word.
 
 ## [0.18.1] - 2026-11-10
 

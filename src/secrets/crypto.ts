@@ -64,7 +64,7 @@ import { excMessage, KaguraCryptoError } from "../errors.js";
  */
 export const RECIPIENT_RE = /^age1[02-9ac-hj-np-z]{20,110}$/;
 
-/** Server cap on stored ciphertext (256 KiB). `blob_ref` (R2) is future work. */
+/** Server cap on stored ciphertext (256 KiB). `blob_ref` (file storage) is future work. */
 export const MAX_CIPHERTEXT_BYTES = 262144;
 
 const ARMOR_BEGIN = "-----BEGIN AGE ENCRYPTED FILE-----";

@@ -1825,7 +1825,7 @@ export interface IngestResult {
   /** @default 0 */
   skipped_images?: number;
   /**
-   * `FileObject.id` when the source was archived to R2, else `null`.
+   * `FileObject.id` when the source was archived to file storage, else `null`.
    * `null` covers three cases: archival was opt-out, no files client was
    * supplied, or the upload failed (also visible as an
    * `errors[*].step === "archive"` record).

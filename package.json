@@ -1,7 +1,7 @@
 {
   "name": "kagura-memory",
   "version": "0.18.1",
-  "description": "TypeScript SDK for Kagura Memory Cloud — memory management, graph exploration, and R2 file storage for AI agents",
+  "description": "TypeScript SDK for Kagura Memory Cloud — memory management, graph exploration, and file storage for AI agents",
   "keywords": [
     "ai",
     "memory",

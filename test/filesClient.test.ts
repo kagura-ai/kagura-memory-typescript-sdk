@@ -26,13 +26,13 @@ interface Route {
   body?: unknown;
   /** The body as sent, for JSON `JSON.stringify` cannot write (`NaN`, big ints). */
   raw?: string;
-  /** Echo the request; used to capture the R2 PUT body. */
+  /** Echo the request; used to capture the upload PUT body. */
   capture?: (rec: Recorded) => void;
 }
 
 /**
  * Fake server covering the 3-leg upload flow: the reserve/confirm REST
- * calls (matched by pathname) and the R2 PUT (matched by absolute URL).
+ * calls (matched by pathname) and the upload PUT (matched by absolute URL).
  */
 class FakeServer {
   requests: Recorded[] = [];
@@ -48,12 +48,12 @@ class FakeServer {
     if (typeof init?.body === "string") {
       body = JSON.parse(init.body) as unknown;
     } else if (init?.body !== undefined && init?.body !== null) {
-      body = init.body; // Uint8Array for the R2 PUT
+      body = init.body; // Uint8Array for the upload PUT
     }
     const rec: Recorded = { url, method: init?.method ?? "GET", headers, body };
     this.requests.push(rec);
 
-    // Match the R2 PUT by full URL first, then REST calls by pathname.
+    // Match the upload PUT by full URL first, then REST calls by pathname.
     const key = this.routes[url] ? url : new URL(url).pathname;
     const route = this.routes[key];
     if (!route) {
@@ -152,7 +152,7 @@ describe("upload happy path", () => {
       sha256: hex,
     });
 
-    // R2 PUT was unauthenticated and carried the base64 checksum header.
+    // The upload PUT was unauthenticated and carried the base64 checksum header.
     const put = server.find(uploadUrl)!;
     expect(put.method).toBe("PUT");
     expect(put.headers.authorization).toBeUndefined();
@@ -195,7 +195,7 @@ describe("upload happy path", () => {
 });
 
 describe("upload error paths", () => {
-  it("maps an R2 400 to KaguraIntegrityError", async () => {
+  it("maps an object store 400 to KaguraIntegrityError", async () => {
     const bytes = new Uint8Array([9]);
     const uploadUrl = "https://r2.test/o?X-Amz-SignedHeaders=host%3Bx-amz-checksum-sha256";
     const server = new FakeServer();

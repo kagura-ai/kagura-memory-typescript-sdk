@@ -735,7 +735,7 @@ export class KaguraPermissionError extends KaguraError {
  * Object store rejected an upload with HTTP 400.
  *
  * Raised for any HTTP 400 response from the object store on a presigned
- * PUT — most commonly R2 `BadDigest` (the body's sha256 did not match the
+ * PUT — most commonly `BadDigest` (the body's sha256 did not match the
  * value bound into the presigned PUT URL), but also covers other 400
  * causes such as a malformed presigned URL or a Content-Length mismatch.
  */
