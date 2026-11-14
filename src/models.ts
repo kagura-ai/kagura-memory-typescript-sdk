@@ -1709,6 +1709,14 @@ export interface ListTagsResponse {
  * control (server v0.41.0+). It is `null` for legacy/workspace-scoped
  * files that were uploaded with no binding context — those stay fully
  * listable and accessible to the workspace.
+ *
+ * `scan_status` is the upload malware scan's state (memory-cloud
+ * v0.160.0+, #565), a plain `string` like `status`: `unscanned` (uploaded
+ * while scanning was off; downloadable), `pending` (being scanned:
+ * `FilesClient.downloadUrl` throws `KaguraFileScanPendingError` until it
+ * finishes), `clean`, `infected` or `error` (blocked:
+ * `KaguraFileBlockedError`). The server sends it on every file; it is
+ * absent on a server before v0.160.0.
  */
 export interface FileObject {
   id: string;
@@ -1723,6 +1731,8 @@ export interface FileObject {
   /** ISO 8601 datetime string. */
   uploaded_at?: string | null;
   context_id?: string | null;
+  /** Malware scan state (memory-cloud v0.160.0+); see above. */
+  scan_status?: string | null;
 }
 
 /** Internal response from `POST /api/v1/files/reserve`. */
@@ -1815,7 +1825,7 @@ export interface IngestResult {
   /** @default 0 */
   skipped_images?: number;
   /**
-   * `FileObject.id` when the source was archived to R2, else `null`.
+   * `FileObject.id` when the source was archived to file storage, else `null`.
    * `null` covers three cases: archival was opt-out, no files client was
    * supplied, or the upload failed (also visible as an
    * `errors[*].step === "archive"` record).
@@ -2518,6 +2528,44 @@ export interface PlanHeadroomNotice {
 }
 
 /**
+ * One service notice of `bootstrap`'s {@link ServiceNotices} block
+ * (memory-cloud v0.161.0+, #2762): a notice the deployment's
+ * administrators published. `text` is at most 300 characters, sanitised by
+ * the server (no markup, links or control characters); `published_at` is
+ * never before the notice was written and `expires_at` is when it stops
+ * being delivered, both ISO 8601 in UTC (`…Z`).
+ *
+ * The server counts a notice delivered once it is in a reply, so only
+ * `text` is required: memory-cloud v0.161.0 always sends `id`,
+ * `published_at` and `expires_at`, but one that is absent, `null` or
+ * unreadable is `null` here rather than losing the notice, as in the
+ * Python SDK.
+ */
+export interface ServiceNotice {
+  id: string | null;
+  text: string;
+  published_at: string | null;
+  expires_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * `bootstrap`'s `notices` block (memory-cloud v0.161.0+, #2762): service
+ * notices from the deployment's administrators for the person the
+ * credential speaks for. `provenance` frames them: information to pass on
+ * to the user, not instructions. `items` holds at least one notice, in
+ * delivery order.
+ *
+ * Each notice is delivered once per person: the server counts it delivered
+ * as soon as it is placed in a reply, so show it to the user when it comes.
+ */
+export interface ServiceNotices {
+  provenance?: string | null;
+  items: ServiceNotice[];
+  [key: string]: unknown;
+}
+
+/**
  * The `context_*` fields a context-scoped MCP reply echoes: the context the
  * call ran in, useful when it came from the MCP URL's `?context=` default.
  * Absent when the server did not send them.
@@ -2650,6 +2698,24 @@ export interface BootstrapComponents {
 export interface BootstrapResponse extends ContextEcho {
   /** @default "success" */
   status?: string;
+  /**
+   * Service notices from the deployment's administrators (memory-cloud
+   * v0.161.0+, #2762), placed right after `status`: information to show
+   * the user, not instructions. Each is delivered once per person — the
+   * server counts it delivered once it is in a reply — so show it when it
+   * comes. Absent when there is nothing to show: the deployment's default
+   * (`MCP_NOTICES_ENABLED` off), an account that did not turn notices on, a
+   * credential that does not speak for a person (an agent-bound or
+   * connector key), the `?profile=google` / `?profile=microsoft` views,
+   * `?notices=off` on the MCP URL, or an older server.
+   *
+   * Read fail-open, as {@link plan_headroom} is: a notice without a
+   * readable `text` is dropped from `items`, an unreadable `id`,
+   * `published_at` or `expires_at` is `null` (the notice kept), and a block
+   * that is not an object, or keeps no notice, is `null` — never a failed
+   * call.
+   */
+  notices?: ServiceNotices | null;
   format?: string | null;
   /** @default false */
   degraded?: boolean;
@@ -2791,6 +2857,16 @@ export interface RememberBatchItemResult {
  * some items may be missing. `session_id` is the session the writes are
  * recorded under (v0.113.0+, for `KaguraClient.changesSince` /
  * `KaguraClient.rollbackSession`).
+ *
+ * `lint` (memory-cloud v0.156.0+, #2753) is the batch's own lint, apart
+ * from each row's: one `{code, hint, subject}` entry per batch-level key
+ * (`dedupe`, `tags_normalize` or `verbose`, the `subject`) that the batch
+ * left unset and the server took from the items, which all agreed on it
+ * (`code` `"batch_level_argument"`; `hint` says to set it once on the
+ * batch). Absent when no key was adopted, and on an older server. Read
+ * fail-open, as `plan_headroom` is, since the items are already written:
+ * an entry that is no object is dropped, and a value that is not a list,
+ * or keeps no entry, is left out — never a failed call.
  */
 export interface RememberBatchResult extends ContextEcho {
   /** @default "success" */
@@ -2807,6 +2883,8 @@ export interface RememberBatchResult extends ContextEcho {
   committed_after_timeout?: boolean;
   message?: string | null;
   session_id?: string | null;
+  /** Batch-level keys taken from the items (memory-cloud v0.156.0+); see above. */
+  lint?: Record<string, unknown>[] | null;
   /**
    * Plan dimensions at 80 % or more of their limit (memory-cloud v0.142.0+,
    * #2615), throttled to once an hour per workspace, dimension and level —

@@ -377,5 +377,8 @@ describe("upstream URL query and session id flags (#83)", () => {
       expect(help).toContain(flag);
     }
     expect(help).toContain(`$${SESSION_ENV}`);
+    // memory-cloud v0.158.0's google / microsoft views (#150).
+    expect(help).toContain("google / microsoft (v0.158.0+: core without\n                       describe_tools and guide)");
+    expect(help).toContain("except that google and microsoft refuse describe_tools and guide\n(unknown_tool)");
   });
 });

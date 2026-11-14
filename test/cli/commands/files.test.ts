@@ -49,6 +49,8 @@ const OAUTH: ResolvedAuth = {
 interface Route {
   status: number;
   body?: unknown;
+  /** Response headers, e.g. a 409 SCAN-001's `Retry-After`. */
+  headers?: Record<string, string>;
 }
 
 /** The REST side: the upload's three legs, plus list / delete / download-url. */
@@ -92,7 +94,10 @@ class FakeFiles {
     this.onRequest(`${method} ${new URL(url).pathname}`);
     if (route === undefined) return new Response('{"detail":"Not Found"}', { status: 404 });
     const empty = route.status === 204;
-    return new Response(empty ? null : JSON.stringify(route.body ?? {}), { status: route.status });
+    return new Response(empty ? null : JSON.stringify(route.body ?? {}), {
+      status: route.status,
+      ...(route.headers === undefined ? {} : { headers: route.headers }),
+    });
   };
 
   query(): URLSearchParams {
@@ -625,11 +630,119 @@ describe("files delete / download-url / list", () => {
     expect(h.rest.query().get("workspace_id")).toBe(WS);
   });
 
+  describe("download-url of a file the malware scan holds (memory-cloud v0.160.0+, #147)", () => {
+    // memory-cloud v0.161.0's FileScanPendingError / FileBlockedError
+    // (backend/src/utils/exceptions.py), as its exception handler sends them.
+    const route = `GET /api/v1/files/${FILE_ID}/download-url`;
+    const pending = (headers?: Record<string, string>): Route => ({
+      status: 409,
+      body: {
+        error: "SCAN-001",
+        message: "This file is still being checked for malware. Try again shortly.",
+        details: { file_id: FILE_ID, scan_status: "pending" },
+      },
+      ...(headers === undefined ? {} : { headers }),
+    });
+
+    it("prints how long to wait for SCAN-001, from Retry-After", async () => {
+      const h = harness();
+      h.rest.routes[route] = pending({ "Retry-After": "30" });
+      expect(await runCli(["files", "download-url", FILE_ID], h.deps)).toBe(1);
+      expect(h.out).toEqual([]);
+      expect(diagnosticBodies(h.err)).toEqual([
+        "Error: HTTP 409: This file is still being checked for malware. Try again shortly.\n" +
+          `  The malware scan of file ${FILE_ID} has not finished: wait 30 s and run the command again.`,
+      ]);
+    });
+
+    it("says to wait a moment for SCAN-001 without a usable Retry-After", async () => {
+      for (const headers of [undefined, { "Retry-After": "Thu, 20 Nov 2026 01:00:00 GMT" }]) {
+        const h = harness();
+        h.rest.routes[route] = pending(headers);
+        expect(await runCli(["files", "download-url", FILE_ID], h.deps)).toBe(1);
+        expect(diagnosticBodies(h.err)[0]).toContain("has not finished: wait a moment and run the command again.");
+      }
+    });
+
+    it("says a SCAN-002 file is blocked, with its scan_status, and not to retry", async () => {
+      const h = harness();
+      h.rest.routes[route] = {
+        status: 409,
+        body: {
+          error: "SCAN-002",
+          message: "This file cannot be downloaded: the malware scan blocked it.",
+          details: { file_id: FILE_ID, scan_status: "infected" },
+        },
+      };
+      expect(await runCli(["files", "download-url", FILE_ID], h.deps)).toBe(1);
+      expect(diagnosticBodies(h.err)).toEqual([
+        "Error: HTTP 409: This file cannot be downloaded: the malware scan blocked it.\n" +
+          `  File ${FILE_ID} was blocked by the malware scan (scan_status: infected); it cannot be downloaded.`,
+      ]);
+      expect(h.err.join("\n")).not.toContain("run the command again");
+    });
+  });
+
   it("download-url needs a workspace the credential's source can supply", async () => {
     const h = harness({ config: { api_key: "k" } });
     expect(await runCli(["files", "download-url", FILE_ID], h.deps)).toBe(1);
     expect(diagnosticBodies(h.err)[0]).toMatch(/context_id is missing or "auto".*--context-id/);
     expect(h.rest.requests).toEqual([]);
+  });
+
+  describe("scan_status in list and upload (memory-cloud v0.160.0+, #147)", () => {
+    const row = (extra: Record<string, unknown>): Record<string, unknown> => ({
+      id: FILE_ID,
+      workspace_id: WS,
+      context_id: null,
+      filename: "hello.txt",
+      content_type: "text/plain",
+      size_bytes: 18,
+      sha256: "a".repeat(64),
+      status: "uploaded",
+      ...extra,
+      created_at: "2026-01-01T00:00:00Z",
+      uploaded_at: "2026-01-01T00:00:01Z",
+    });
+
+    it("list prints scan_status where the server sends it, after context_id", async () => {
+      const h = harness();
+      h.rest.routes["GET /api/v1/files"] = {
+        status: 200,
+        body: [row({ scan_status: "pending" }), row({ scan_status: "unscanned" })],
+      };
+      expect(await runCli(["files", "list"], h.deps)).toBe(0);
+      const printed = JSON.parse(h.out.join("\n")) as { files: Array<Record<string, unknown>> };
+      expect(printed.files.map((f) => f.scan_status)).toEqual(["pending", "unscanned"]);
+      expect(Object.keys(printed.files[0]!).slice(-2)).toEqual(["context_id", "scan_status"]);
+    });
+
+    it("list prints no scan_status key for a server before v0.160.0, as before", async () => {
+      const h = harness();
+      h.rest.routes["GET /api/v1/files"] = { status: 200, body: [row({})] };
+      expect(await runCli(["files", "list"], h.deps)).toBe(0);
+      const text = h.out.join("\n");
+      expect(text).not.toContain("scan_status");
+      expect(Object.keys((JSON.parse(text) as { files: Array<Record<string, unknown>> }).files[0]!)).toEqual([
+        "id",
+        "workspace_id",
+        "filename",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "status",
+        "created_at",
+        "uploaded_at",
+        "context_id",
+      ]);
+    });
+
+    it("upload prints the confirmed file's scan_status", async () => {
+      const h = harness();
+      h.rest.routes[`POST /api/v1/files/${FILE_ID}/confirm`] = { status: 200, body: row({ scan_status: "pending" }) };
+      expect(await runCli(["files", "upload", file, "-c", WS], h.deps)).toBe(0);
+      expect((JSON.parse(h.out.join("\n")) as Record<string, unknown>).scan_status).toBe("pending");
+    });
   });
 
   it("list sends the paired workspace and the default limit", async () => {

@@ -12,6 +12,8 @@ import {
   KaguraCapacityLockedError,
   KaguraError,
   KaguraFeatureNotAvailableError,
+  KaguraFileBlockedError,
+  KaguraFileScanPendingError,
   KaguraQuotaError,
   KaguraRateLimitError,
   KaguraServiceUnavailableError,
@@ -373,6 +375,31 @@ describe("cliErrorMessage", () => {
       "HTTP 503: x\n  Retry after: 1.23456e+06 s",
     );
     expect(cliErrorMessage(new KaguraServiceUnavailableError("HTTP 503"))).toBe("HTTP 503");
+  });
+
+  it("adds how long to wait for a download the malware scan holds (#147)", () => {
+    const details = { file_id: "f-1", scan_status: "pending" };
+    expect(
+      cliErrorMessage(new KaguraFileScanPendingError("HTTP 409: held", { retryAfter: 30, code: "SCAN-001", details })),
+    ).toBe("HTTP 409: held\n  The malware scan of file f-1 has not finished: wait 30 s and run the command again.");
+    // A whole number as Python's f-string writes it, not in {:g} form.
+    expect(cliErrorMessage(new KaguraFileScanPendingError("x", { retryAfter: 1234565, details }))).toContain(
+      "wait 1234565 s",
+    );
+    expect(cliErrorMessage(new KaguraFileScanPendingError("HTTP 409"))).toBe(
+      "HTTP 409\n  The malware scan of file (unknown) has not finished: wait a moment and run the command again.",
+    );
+  });
+
+  it("says a file the malware scan blocked cannot be downloaded (#147)", () => {
+    expect(
+      cliErrorMessage(
+        new KaguraFileBlockedError("HTTP 409: blocked", { details: { file_id: "f-1", scan_status: "error" } }),
+      ),
+    ).toBe("HTTP 409: blocked\n  File f-1 was blocked by the malware scan (scan_status: error); it cannot be downloaded.");
+    expect(cliErrorMessage(new KaguraFileBlockedError("HTTP 409"))).toBe(
+      "HTTP 409\n  File (unknown) was blocked by the malware scan (scan_status: unknown); it cannot be downloaded.",
+    );
   });
 
   it("adds any server error's help and correlation id, under a command's own first line", () => {

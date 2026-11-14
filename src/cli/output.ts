@@ -21,6 +21,8 @@ import {
   KaguraCapacityLockedError,
   KaguraError,
   KaguraFeatureNotAvailableError,
+  KaguraFileBlockedError,
+  KaguraFileScanPendingError,
   KaguraQuotaError,
   KaguraServiceUnavailableError,
   KaguraVersionConflictError,
@@ -348,7 +350,9 @@ export function pyFormatG(n: number): string {
  * differ, else whichever it sent. The capacity lock adds its cleanup page
  * (unless the server's `help` already names it), a 503 how long to wait,
  * a refused `expectedVersion` the memory's current version (python-sdk
- * #302), and any server error its `help` and `correlation_id`. `firstLine`
+ * #302), a download the malware scan holds how long to wait and one it
+ * blocked that it cannot be downloaded (python-sdk#337), and any server
+ * error its `help` and `correlation_id`. `firstLine`
  * replaces the message when a command words the failure itself, keeping
  * the other lines. As in Python, a `KaguraRateLimitError` (an HTTP 429 on
  * `KaguraClient`'s transport) adds no gate lines.
@@ -374,6 +378,17 @@ export function cliErrorMessage(e: unknown, firstLine?: string): string {
   }
   if (e instanceof KaguraVersionConflictError && e.currentVersion !== null) {
     lines.push(`  Current version: ${e.currentVersion}`);
+  }
+  if (e instanceof KaguraFileScanPendingError) {
+    // An int, as Python's f-string writes it (no `g` format here, unlike the 503 line).
+    const wait = e.retryAfter !== null ? `wait ${String(e.retryAfter)} s` : "wait a moment";
+    lines.push(`  The malware scan of file ${e.fileId || "(unknown)"} has not finished: ${wait} and run the command again.`);
+  }
+  if (e instanceof KaguraFileBlockedError) {
+    lines.push(
+      `  File ${e.fileId || "(unknown)"} was blocked by the malware scan ` +
+        `(scan_status: ${e.scanStatus || "unknown"}); it cannot be downloaded.`,
+    );
   }
   if (e instanceof KaguraError) {
     if (e.help) lines.push(`  Help: ${e.help}`);

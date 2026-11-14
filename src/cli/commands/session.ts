@@ -8,7 +8,11 @@
  * (`formatDumpsJson` of the model's read), so a field the server left out
  * prints with its default and a timestamp in pydantic's form; a
  * `plan_headroom` notice prints with its defaults filled, an unreadable one
- * dropped (#88). `forget --ids` lives with `forget` in `memory.ts`.
+ * dropped (#88). `bootstrap` prints the `notices` block (memory-cloud
+ * v0.161.0+, #149) right after `status` when the server sends it, an
+ * unreadable notice dropped and an unreadable block `null`; a reply
+ * without it prints as before. `forget --ids` lives with `forget` in
+ * `memory.ts`.
  */
 
 import { pythonOptionNames } from "../../client.js";

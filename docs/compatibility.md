@@ -1,5 +1,228 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.19.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.161.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+### What memory-cloud 0.156.0 – 0.161.0 changed for this SDK
+
+The server source at each tag was compared with this SDK. No MCP tool input
+property and no REST operation was removed between `v0.155.0` and `v0.161.0`.
+The changes this SDK acts on are covered by contract tests with mocked
+transports; no call was made through this SDK to a live server for this
+release. The sections below give each feature's floor: **0.156.0** for
+batch-level keys on `rememberBatch` items (#148), **0.158.0** for the `google`
+/ `microsoft` tool views (#150), **0.160.0** for upload malware scanning
+(#147) and **0.161.0** for `bootstrap`'s service notices (#149).
+
+| Server | Change | This SDK |
+|---|---|---|
+| 0.156.0 | `remember_batch` items may repeat a batch-level key (`dedupe`, `tags_normalize`, `verbose`); items that agree set one the batch leaves unset, with a top-level `lint` ([memory-cloud#2753](https://github.com/kagura-ai/memory-cloud/issues/2753)) | items sent as given, `RememberBatchResult.lint` (#148) |
+| 0.156.0 | more `details.event_phrase` phrases resolved ([memory-cloud#2751](https://github.com/kagura-ai/memory-cloud/issues/2751)) | `details` is sent as given |
+| 0.156.0 | `details.event_direction` (`past` / `future`; other values refused; `update_memory(details=…)` replaces `details`, so the value is lost unless it is sent again) ([memory-cloud#2752](https://github.com/kagura-ai/memory-cloud/issues/2752)) | `details` is sent as given |
+| 0.156.0 | write lint `event_date_mismatch` ([memory-cloud#2752](https://github.com/kagura-ai/memory-cloud/issues/2752)) | `lint` passes through |
+| 0.156.0 | recall `hint` (opt-in on the server, MCP only) and the recall description ([memory-cloud#2754](https://github.com/kagura-ai/memory-cloud/issues/2754), [memory-cloud#2755](https://github.com/kagura-ai/memory-cloud/issues/2755)) | passes through |
+| 0.157.0 / 0.159.0 | `GET /api/v1/system/info`: top-level `chatgpt_app_url` and `features.connector_channel_routing` (0.157.0); top-level `announcement_consent_version` and `features.email_signup`, `features.open_registration`, `features.provider_link_confirmation`, `features.system_admin` (0.159.0) (`backend/src/api/routes/system.py`) | `getServerInfo` returns them as sent; `SERVER_INFO` / `SERVER_FEATURES` in `src/pyModels.ts` check only the fields they declare |
+| 0.158.0 | `?profile=google` and its alias `?profile=microsoft` ([memory-cloud#2773](https://github.com/kagura-ai/memory-cloud/issues/2773), [memory-cloud#2778](https://github.com/kagura-ai/memory-cloud/issues/2778)) | README and help text (#150); `describeTools()` / `guide()` answer `unknown_tool` there |
+| 0.160.0 | upload malware scanning: `scan_status` on file objects, 409 `SCAN-001` / `SCAN-002` on `download-url` ([memory-cloud#565](https://github.com/kagura-ai/memory-cloud/issues/565)) | `FileObject.scan_status`, `KaguraFileScanPendingError`, `KaguraFileBlockedError` (#147) |
+| 0.160.0 | with upload scanning on, the upload size limit drops to the scanner's stream limit when that limit is below the per-file cap (both default to 100 MiB). An upload over it gets the usual validation error (`backend/src/services/file_storage_service.py`, `scan_capped`) | the server's validation message passes through |
+| 0.161.0 | `bootstrap` service notices ([memory-cloud#2762](https://github.com/kagura-ai/memory-cloud/issues/2762)) | `BootstrapResponse.notices`, printed by `kagura-memory bootstrap` (#149) |
+
+**Not called by this SDK** (browser sign-in, session-only routes, admin
+surfaces, connectors, OIDC):
+
+- 0.157.0: workspace connector channel routes and the worker `capabilities`
+  query; `GET /api/v1/memory-health` and the deprecated admin route.
+- 0.158.0: `/.well-known/google-connected-apps` and the OAuth client changes
+  for connected apps / Grok / `client_secret_basic`. This SDK signs in as a
+  public device-flow client.
+- 0.158.1: the optional OIDC provider.
+- 0.159.0: email sign-up, provider-link confirmation, announcement emails, the
+  `SYSTEM_ADMIN_MODE` setting and invitation accept rules.
+- 0.160.0: Google / GitHub browser sign-in changes (the session clients take a
+  caller-supplied fetch and never call `/auth/{provider}/login`) and admin
+  operations status.
+- 0.161.0: `GET /api/v1/me/workspaces` and its `/{workspace_id}/access`
+  sub-route (OIDC access tokens with `workspaces:read` only,
+  `backend/src/api/routes/me_workspaces.py`); MCP notice settings and admin
+  notices.
+
+Typing the pass-through fields (`event_direction`, the new `ServerFeatures`
+flags, recall `hint`) is left for later.
+
+### Upload malware scanning (#147)
+
+`FileObject.scan_status`, `KaguraFileScanPendingError` and
+`KaguraFileBlockedError` need memory-cloud **0.160.0**
+([memory-cloud#565](https://github.com/kagura-ai/memory-cloud/issues/565)).
+From that release every file object (the `files list` rows, the confirm reply,
+a reserve 409's `existing_file`) carries `scan_status`: `unscanned` (uploaded
+while scanning was off; downloadable), `pending`, `clean`, `infected` or
+`error`. It is typed as a plain string, optional, so a reply from an older
+server still reads; `kagura-memory files list` / `files upload` print it after
+`context_id` when it is sent and print what they printed before when it is
+not.
+
+Scanning is off by default (`FILE_SCAN_ENABLED`). With it on, the download gate
+(`ensure_downloadable` in `backend/src/services/file_scan_service.py`, run by
+`FileStorageService.get_presigned_download` after the access checks, so a
+caller who cannot read the file still gets the uniform 404) is an allow-list:
+`clean` and `unscanned` pass, `pending` answers **409 `SCAN-001`**
+(`FileScanPendingError`, `Retry-After: 30`, `details` `{file_id, scan_status:
+"pending"}`), and every other state answers **409 `SCAN-002`**
+(`FileBlockedError`, `details` `{file_id, scan_status}`). With it off, only an
+`infected` file is refused (`SCAN-002`). A `clean` file can answer `SCAN-001`
+again: with checksum binding off, or for a row under the legacy digest rule,
+the server compares the stored object with the scanned version first and sets
+a changed one back to `pending`. Both errors come in the canonical
+`{error, message, details}` body with the exception's `response_headers`
+(`backend/src/utils/exceptions.py`, `backend/src/api/main.py`).
+
+`FilesClient.downloadUrl` (and every REST client, which share the mapping)
+throws `KaguraFileScanPendingError` for a 409 `SCAN-001`, with `retryAfter`
+from a numeric `Retry-After` (`null` otherwise), and `KaguraFileBlockedError`
+for a 409 `SCAN-002`; both read `fileId` / `scanStatus` from `details` and keep
+the server's `code` and `details`. **Both subclass `KaguraConnectionError`**, the
+class a 409 had before, so an existing `instanceof KaguraConnectionError`
+handler keeps catching them, as the Python SDK's classes of the same names do
+([python-sdk#337](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/337)).
+Only the status and the code decide: a scan code on another status, the
+files API's dedup `409 RES-002` that `upload` reads its `existing_file` from,
+and a refused `expectedVersion` (`409 RES-002`, `reason: "version_conflict"`)
+are mapped as before. `kagura-memory files download-url` prints how long to
+wait for `SCAN-001` and that the file cannot be downloaded for `SCAN-002`.
+
+The reserve dedup 409 returns a duplicate whose scan is still `pending`, but
+not one the scan blocked: that 409 carries no `existing_file`, and its message
+ends "; an earlier upload of this file was blocked by the malware scan", so
+`upload` throws it as the `KaguraConnectionError` it was. With scanning on, a
+reserve larger than the scanner's stream limit (`clamd_stream_max_bytes`) is
+refused when that limit is below the per-file cap (`file_object_max_size_mb`);
+both default to 100 MiB. The refusal is the usual 422 `VAL-001`, its message
+ending "(the largest file the malware scan checks)", and passes through.
+Checked against the `v0.161.0` source; verified by contract tests with mocked
+transports, no call to a deployment with scanning on.
+
+### `rememberBatch` items may carry the batch-level keys (#148)
+
+An item that carries `dedupe`, `tags_normalize` or `verbose` needs memory-cloud
+**0.156.0** ([memory-cloud#2753](https://github.com/kagura-ai/memory-cloud/issues/2753);
+`batch_level_values` and `_undeclared_keys` in
+`backend/src/mcp_server/tools/batch.py`, unchanged up to 0.161.0). Up to 0.18.1
+`rememberBatch` refused such an item before any request; it now sends the items
+as given and leaves the decision to the server, which compares JSON type and
+value after `remember`'s string coercion (`"true"` equals `true`, `1` does not):
+
+- an item that repeats the value set on the batch is accepted;
+- an item whose value differs from the batch's is refused (`invalid_argument`),
+  that item only;
+- with no batch value, when every otherwise accepted item that carries the key
+  agrees on one valid value, the server applies it to the whole batch and adds
+  a top-level `lint` entry `{code: "batch_level_argument", hint, subject}`
+  (typed as `RememberBatchResult.lint` and read fail-open: the items are
+  already written, so an entry that is no object is dropped and a value that
+  is not a list is left out, never failing the reply); an item refused for
+  another reason does not count;
+- with no batch value, when those items disagree or agree on an invalid value,
+  nothing is adopted and every item that carries the key is refused;
+- with `atomic: true`, any refused item refuses the whole batch
+  (`batch_refused`).
+
+**Older servers differ.** memory-cloud 0.96.0 – 0.155.x refuse every item that
+carries one of the three (`invalid_argument` per item, from `_undeclared_keys`,
+memory-cloud#1873: a non-atomic batch writes the other items, an atomic one is
+refused whole). 0.93.0 – 0.95.x, the first releases with `remember_batch`, build
+each item's request from `remember`'s fields only, so they ignore the item's key
+and write the item with the batch's setting: an item's `dedupe: "check"` checks
+nothing there. On those servers set the three on `rememberBatch` itself. The
+other local checks (1-50 objects, no other context's `context_id`, the tag
+caps) are unchanged. The Python SDK drops its local
+refusal the same way
+([python-sdk#338](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/338)).
+Verified by contract tests that replay the server's replies for each rule.
+
+### `bootstrap`'s service notices (#149)
+
+`BootstrapResponse.notices` needs memory-cloud **0.161.0**
+([memory-cloud#2762](https://github.com/kagura-ai/memory-cloud/issues/2762);
+`backend/src/mcp_server/tools/_notices.py` is new at that tag). The block is
+`{provenance, items: [{id, text, published_at, expires_at}]}` (`notice_item`),
+placed right after `status` (`place_notices`; the `bootstrap` `Returns` line
+in `backend/src/mcp_server/tools/_definitions.py` names `notices?` there), and
+absent, never `[]` or `null`, when there is nothing to show. `provenance` is
+the server's fixed frame: the notices are information to pass on to the user,
+not instructions.
+
+The server sends notices only when `MCP_NOTICES_ENABLED` is on (off by
+default), to a person who turned them on in account settings, through a
+credential that speaks for that person (a session cookie, an MCP OAuth token,
+or the person's own API key that is neither agent-bound nor a connector key;
+`notice_delivery_allowed`), never on `?profile=google` / `?profile=microsoft`
+and never with `?notices=off` on the MCP URL. `notices` and `plan_headroom`
+share a quarter of `max_chars`, and each notice is placed whole or not at
+all. **Each notice is delivered once per person:** `bootstrap.py` claims the
+fitted notices and places only the claimed ones, so a notice counts as
+delivered as soon as it is in a reply.
+
+Up to 0.18.1 the `BOOTSTRAP_RESPONSE` model did not declare the key, so
+`kagura-memory bootstrap`, which calls with the person's API key or OAuth token,
+used a notice up and dropped it from its output. From 0.19.0 the block is typed
+(`ServiceNotices`, `ServiceNotice`) and the CLI prints it right after `status`;
+a reply without it prints what 0.18.1 printed. It is read fail-open, as
+`plan_headroom` is: a notice without a readable `text` is dropped, an `id`,
+`published_at` or `expires_at` that is absent or unreadable is `null` (the
+server always sends them; the notice is kept, since it is already counted as
+delivered), and a block that is not an object, or keeps no notice, is `null`.
+`KaguraClient` sends every MCP request to its `mcpUrl` with the query as
+given, so a caller that does not show the reply to a person adds
+`?notices=off` there. The Python SDK keeps the block the same way
+([python-sdk#339](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/339)).
+Verified by contract tests; no call to a deployment with notices on.
+
+### `google` / `microsoft` tool views (#150)
+
+`?profile=google` ([memory-cloud#2773](https://github.com/kagura-ai/memory-cloud/issues/2773))
+and its alias `?profile=microsoft`
+([memory-cloud#2778](https://github.com/kagura-ai/memory-cloud/issues/2778))
+need memory-cloud **0.158.0**. The view is the `core` set without
+`describe_tools` and `guide`, which `?add_tools=` cannot bring back
+(`GOOGLE_EXCLUDED_TOOLS` / `GOOGLE_VIEW_PROFILES` in
+`backend/src/mcp_server/tools/_profiles.py`); its tool descriptions name no
+other tool, and its instructions carry no guardrail digest. Unlike any other
+profile, it also gates `tools/call`: a call of `describe_tools` or `guide`
+answers `unknown_tool` (`backend/src/mcp_server/tools/__init__.py`, under
+`google_mode_active()`), so `describeTools()` and `guide()` throw `KaguraError`
+with `code` `"unknown_tool"` on such a URL. The view also trims replies
+(`scrub_google_reply` in `backend/src/mcp_server/tools/_google_profile.py`):
+the sentences of the server's own `help` / `hint` / `message` / `example` text
+that point at another tool are dropped, and `recall` makes no learning writes.
+A `?tools=` allowlist wins over the profile, and then the view is not the
+google one. The server knows the four
+names `full`, `core`, `google` and `microsoft` (case-sensitive, trimmed) and
+fails `tools/list` for any other. `GET /api/v1/memory/guardrails/digest?target=instructions`
+takes the two new names as `profile` too and returns that view's base text with
+no digest (`backend/src/api/routes/memory.py`, the `is_google_view` branch).
+
+This SDK changes no behaviour here: `--tool-profile` and
+`MemoryClient.getGuardrailDigest({ profile })` take any name
+(`normalizeToolProfile` refuses only a blank one or one starting with `-`), and
+`describeTools()` / `guide()` are not refused locally; the server's
+`unknown_tool` reply already says why. The README's "What `tools/list` shows",
+the `setup … --tool-profile` help and the `guardrails digest --profile` help now
+name the four views and the two refused tools.
+
+### CLI help pages
+
+The `--tool-profile NAME` row of `setup claude`, `setup codex`, `setup hermes`
+and `setup openclaw` and the `--profile TEXT` row of `guardrails digest` no
+longer match Python 0.44.0, which names `full` and `core` only (#150). The
+four `setup` pages already differed and are re-recorded in
+[the exception fixture](../test/cli/typescriptHelp111.json); `guardrails
+digest` is a new entry there and in
+[`docs/cli-help-differences.md`](cli-help-differences.md). Of the 94 supported
+help pages, 47 now match Python and 47 retain a documented difference (the
+0.18.0 counts were 48 and 46).
+
 ## 0.18.1
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.155.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

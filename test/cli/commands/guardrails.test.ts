@@ -200,10 +200,23 @@ describe("guardrails group", () => {
     expect(h.out.join("\n")).toBe(pythonHelp("guardrails load"));
   });
 
-  it("documents digest's options as click does", async () => {
+  it("documents digest's options as click does, --profile naming the four views (#150)", async () => {
     const h = harness();
     expect(await runCli(["guardrails","digest","--help"], h.deps)).toBe(0);
-    expect(h.out.join("\n")).toBe(pythonHelp("guardrails digest"));
+    // Python 0.44.0's row lists full | core; memory-cloud v0.158.0 added google /
+    // microsoft (docs/cli-help-differences.md). The rest of the page is Python's.
+    const pad = " ".repeat(34);
+    const python =
+      "  --profile TEXT                  With --target instructions: the MCP URL's\n" +
+      `${pad}?profile= value (full | core)`;
+    const ours =
+      "  --profile TEXT                  With --target instructions: the MCP URL's\n" +
+      `${pad}?profile= value (full | core | google |\n` +
+      `${pad}microsoft). For google / microsoft (server\n` +
+      `${pad}v0.158.0+) the preview is that view's base\n` +
+      `${pad}text, with no digest`;
+    expect(pythonHelp("guardrails digest")).toContain(python);
+    expect(h.out.join("\n")).toBe(pythonHelp("guardrails digest").replace(python, ours));
   });
 });
 

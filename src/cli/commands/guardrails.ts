@@ -165,7 +165,12 @@ const digest: Command = {
       {
         name: "profile",
         type: "value",
-        help: "With --target instructions: the MCP URL's ?profile= value (full | core)",
+        // full | core in Python 0.44.0; google / microsoft from memory-cloud
+        // v0.158.0 (#150, docs/cli-help-differences.md).
+        help:
+          "With --target instructions: the MCP URL's ?profile= value (full | core | google | " +
+          "microsoft). For google / microsoft (server v0.158.0+) the preview is that view's base " +
+          "text, with no digest",
       },
       { name: "tools", type: "value", help: "With --target instructions: the MCP URL's ?tools= allowlist" },
       {

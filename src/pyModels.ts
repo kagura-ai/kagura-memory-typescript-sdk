@@ -100,13 +100,33 @@ export type Kind =
    * refuses is dropped, and a value that is not a list, or keeps no entry,
    * is `None` (`null`) — never a problem of the enclosing reply.
    */
-  | { failOpenList: Model };
+  | { failOpenList: Model }
+  /**
+   * `list[Model]` keeping the entries the model reads and dropping the rest
+   * (the Python SDK's `_notice_items`); a value that is not a list, or keeps
+   * no entry, is a problem of the enclosing model. For a block read with
+   * `orNone`, which then reads `null` (`_notices_or_none`).
+   */
+  | { readableList: Model }
+  /**
+   * `T | None` read fail-open, as the Python SDK's wrap validator that
+   * turns a `ValidationError` into `None` reads it: a value `T` refuses is
+   * `null`, never a problem of the enclosing model.
+   */
+  | { orNull: Kind };
 
 export interface Field {
   key: string;
   kind: Kind;
   /** The value when the key is absent (a fresh one each read); without it, absent is `Field required`. */
   default?: () => unknown;
+  /**
+   * `true` for a field this SDK reads beyond the Python SDK 0.44.0 model,
+   * its parity target ({@link whenSent}): absent, the key is left out of
+   * the read and so of the CLI's dump, which prints what Python 0.44.0
+   * prints for that reply; sent, it is read as `kind`.
+   */
+  omitWhenAbsent?: true;
 }
 
 export interface Model {
@@ -128,6 +148,13 @@ const optional = (key: string, kind: Kind, value: unknown = null): Field => ({
   kind,
   default: () => (typeof value === "object" && value !== null ? structuredClone(value) : value),
 });
+/**
+ * A field a newer server sends that the Python SDK 0.44.0 model lacks: read
+ * as `kind` when sent, left out of the read when absent (no default, never
+ * `Field required`), so a reply from a server that predates it reads and
+ * dumps exactly as before.
+ */
+const whenSent = (key: string, kind: Kind): Field => ({ key, kind, omitWhenAbsent: true });
 const nullable = (kind: Kind): Kind => ({ nullable: kind });
 const listOf = (kind: Kind): Kind => ({ list: kind });
 
@@ -185,6 +212,29 @@ function readValue(r: ResponseReader, kind: Kind, raw: unknown, at: Loc): unknow
   if ("orNone" in kind) return readOrNull(r.operation, kind.orNone, value);
   if ("failOpenList" in kind) {
     return readableReads(value, kind.failOpenList, r.operation)?.map(([, read]) => read) ?? null;
+  }
+  if ("orNull" in kind) {
+    if (value === null) return null;
+    const own = new ResponseReader(r.operation, r.model);
+    const read = readValue(own, kind.orNull, raw, at);
+    try {
+      own.check();
+    } catch {
+      return null;
+    }
+    return read ?? null;
+  }
+  if ("readableList" in kind) {
+    if (!Array.isArray(value)) {
+      r.issue(at, "Input should be a valid list");
+      return undefined;
+    }
+    const kept = readableReads(value, kind.readableList, r.operation);
+    if (kept === undefined) {
+      r.issue(at, "List should have at least 1 item after validation, not 0");
+      return undefined;
+    }
+    return kept.map(([, read]) => read);
   }
   if ("dictOf" in kind) {
     if (!isObject(value)) {
@@ -248,7 +298,7 @@ function readOrNull(operation: string, model: Model, raw: unknown): Record<strin
  * The entries of `value` that `model` reads, each as `[index, read]` in
  * order, or `undefined` where a `failOpenList` field reads `null`: `value`
  * is not a list, or no entry reads. Python's `_plan_headroom_or_none`,
- * shared by that reader kind (the reads) and {@link readableEntries} (the
+ * shared by that reader kind (the reads) and {@link readablePairs} (the
  * entries as sent).
  */
 function readableReads(
@@ -266,13 +316,26 @@ function readableReads(
 }
 
 /**
- * What a `failOpenList` field keeps of `value`, as sent: the entries
- * `model` reads, or `undefined` where the field reads `null` (`value` is
- * not a list, or no entry reads). For the client, which returns a reply as
- * sent once its model accepted it.
+ * The entries of `value` that `model` reads, each as `[entry as sent, its
+ * read]`, or `undefined` where a `failOpenList` field reads `null` (`value`
+ * is not a list, or no entry reads): for the client, which returns such
+ * entries as sent but may need what each read as.
+ */
+export function readablePairs(
+  value: unknown,
+  model: Model,
+  operation: string,
+): Array<[sent: unknown, read: Record<string, unknown>]> | undefined {
+  return readableReads(value, model, operation)?.map(([index, read]) => [(value as unknown[])[index], read]);
+}
+
+/**
+ * What a `failOpenList` field keeps of `value`, as sent: the entries of
+ * {@link readablePairs}, or `undefined` where the field reads `null`. For
+ * the client, which returns a reply as sent once its model accepted it.
  */
 export function readableEntries(value: unknown, model: Model, operation: string): unknown[] | undefined {
-  return readableReads(value, model, operation)?.map(([index]) => (value as unknown[])[index]);
+  return readablePairs(value, model, operation)?.map(([sent]) => sent);
 }
 
 function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Record<string, unknown> | undefined {
@@ -282,6 +345,7 @@ function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Rec
   for (const field of model.fields) {
     const value = valueAt(obj, field.key);
     if (value === undefined) {
+      if (field.omitWhenAbsent) continue;
       if (field.default !== undefined) {
         out[field.key] = field.default();
       } else {
@@ -642,6 +706,8 @@ export const FILE_OBJECT: Model = {
     required("created_at", "datetime"),
     optional("uploaded_at", nullable("datetime")),
     optional("context_id", nullable("str")),
+    // memory-cloud v0.160.0+ (#565), last as in the Python SDK's model.
+    whenSent("scan_status", nullable("str")),
   ],
 };
 
@@ -1039,12 +1105,52 @@ const BOOTSTRAP_COMPONENTS: Model = {
   ],
 };
 
+/**
+ * One service notice of `bootstrap`'s `notices` block (memory-cloud
+ * v0.161.0+, #2762), as the Python SDK's `ServiceNotice` reads it. The
+ * server counts a notice delivered once it is in a reply, so only `text` is
+ * required: v0.161.0 always sends `id`, `published_at` and `expires_at`, but
+ * one that is absent, `null` or unreadable reads `null` rather than losing
+ * the notice.
+ */
+export const SERVICE_NOTICE: Model = {
+  name: "ServiceNotice",
+  fields: [
+    optional("id", { orNull: "str" }),
+    required("text", "str"),
+    optional("published_at", { orNull: "datetime" }),
+    optional("expires_at", { orNull: "datetime" }),
+  ],
+};
+
+/**
+ * The {@link SERVICE_NOTICE} fields that read `null` when absent or
+ * unreadable: those of an `orNull` kind.
+ */
+export const SERVICE_NOTICE_LENIENT_KEYS: readonly string[] = SERVICE_NOTICE.fields
+  .filter((field) => typeof field.kind === "object" && "orNull" in field.kind)
+  .map((field) => field.key);
+
+/**
+ * `bootstrap`'s `notices` block (memory-cloud v0.161.0+, #2762): a notice
+ * `SERVICE_NOTICE` refuses is dropped, and a block with none left is
+ * refused, which its `orNone` field reads as `null`.
+ */
+export const SERVICE_NOTICES: Model = {
+  name: "ServiceNotices",
+  fields: [optional("provenance", nullable("str")), required("items", { readableList: SERVICE_NOTICE })],
+};
+
 /** A `bootstrap` reply, as Python's `BootstrapResponse` reads it (dumped by alias). */
 export const BOOTSTRAP_RESPONSE: Model = {
   name: "BootstrapResponse",
   fields: [
     ...CONTEXT_ECHO_FIELDS,
     optional("status", "str", "success"),
+    // memory-cloud v0.161.0+ (#2762), right after `status` as the server
+    // places it. Fail-open: unreadable is `null`; absent stays absent, so a
+    // reply without it reads and dumps as before.
+    whenSent("notices", { orNone: SERVICE_NOTICES }),
     optional("format", nullable("str")),
     optional("degraded", "bool", false),
     optional("context", nullable({ model: CONTEXT_DETAIL })),
@@ -1113,6 +1219,13 @@ const REMEMBER_BATCH_ITEM_RESULT: Model = {
   ],
 };
 
+/**
+ * One entry of a `remember_batch` reply's top-level `lint` (memory-cloud
+ * v0.156.0+, #2753): any object, its keys kept as sent
+ * (`{code, hint, subject}` today).
+ */
+export const BATCH_LINT_ENTRY: Model = { name: "dict", fields: [], extra: "allow" };
+
 /** A `remember_batch` reply, as Python's `RememberBatchResult` reads it. */
 export const REMEMBER_BATCH_RESULT: Model = {
   name: "RememberBatchResult",
@@ -1128,6 +1241,12 @@ export const REMEMBER_BATCH_RESULT: Model = {
     optional("committed_after_timeout", "bool", false),
     optional("message", nullable("str")),
     optional("session_id", nullable("str")),
+    // memory-cloud v0.156.0+ (#2753): the batch-level keys taken from the
+    // items, before plan_headroom as in the Python SDK's model; left out of
+    // the read when absent, so a reply without it reads as Python 0.44.0's.
+    // Fail-open: the items are already written, so a drifted entry must
+    // never fail the reply (a caller would resend and duplicate them).
+    whenSent("lint", { failOpenList: BATCH_LINT_ENTRY }),
     PLAN_HEADROOM,
   ],
 };

@@ -331,8 +331,9 @@ export function readAddToolsFlag(values: readonly string[]): { names: string[] }
 
 /**
  * Validate a tool profile name (`?profile=`) — Python's
- * `normalize_tool_profile`. memory-cloud knows `core` and `full` and fails
- * `tools/list` for any other name, so that list is left to the server.
+ * `normalize_tool_profile`. memory-cloud knows `core` and `full`, and from
+ * v0.158.0 `google` and its alias `microsoft`, and fails `tools/list` for
+ * any other name, so that list is left to the server.
  * Refused here is what breaks an entry before the server sees it: a blank
  * name, and one starting with `-`, which a stored proxy argv would read as
  * a flag.
@@ -370,7 +371,7 @@ export function normalizeGuardrails(value: string): string {
 export interface McpUrlQuery {
   /** `?guardrails=`: `off` or a context UUID, as {@link normalizeGuardrails} returns it (memory-cloud v0.74.0+). */
   guardrails?: string | undefined;
-  /** `?profile=`: the tool profile `tools/list` serves (`core`, `full`; v0.73.0+), validated by {@link normalizeToolProfile}. */
+  /** `?profile=`: the tool profile `tools/list` serves (`core`, `full`; v0.73.0+; `google`, `microsoft` v0.158.0+), validated by {@link normalizeToolProfile}. */
   profile?: string | undefined;
   /** `?tools=`: an allowlist, which the server applies instead of `profile` and `add_tools` (v0.73.0+). A list naming no tool leaves the key alone. */
   tools?: readonly string[] | undefined;

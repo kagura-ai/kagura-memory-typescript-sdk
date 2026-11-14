@@ -3,11 +3,12 @@
  *
  * Drives the 3-step file upload flow against memory-cloud:
  * 1. `POST /api/v1/files/reserve` — server returns a presigned PUT URL.
- * 2. `PUT` to R2 with body bytes and the `x-amz-checksum-sha256` header
- *    (base64 of the raw sha256 digest), when the presign signed it.
+ * 2. `PUT` to the presigned URL (the object store) with body bytes and the
+ *    `x-amz-checksum-sha256` header (base64 of the raw sha256 digest), when
+ *    the presign signed it.
  * 3. `POST /api/v1/files/{file_id}/confirm` — finalize the row.
  *
- * Plus `downloadUrl()`, `delete()` and `list()`. The R2 PUT is sent with a
+ * Plus `downloadUrl()`, `delete()` and `list()`. The upload PUT is sent with a
  * plain fetch and NO Authorization header so the SDK's Bearer credential
  * cannot leak to the object store — the presigned URL carries its own
  * short-lived SigV4 signature.
@@ -57,7 +58,7 @@ interface ErrorWithResponse extends KaguraConnectionError {
 }
 
 export interface FilesClientOptions extends KaguraRestClientOptions {
-  /** R2 PUT timeout in ms (default 300000 — 5 min for large files). */
+  /** Timeout of the upload PUT to the object store, in ms (default 300000 — 5 min for large files). */
   uploadTimeoutMs?: number;
 }
 
@@ -142,12 +143,26 @@ export class FilesClient extends KaguraRestClient {
    * the server returns 409 and this surfaces the existing FileObject
    * (dedup happy-path) rather than throwing.
    *
+   * With upload malware scanning on (memory-cloud v0.160.0+, #565) the
+   * file returned, a dedup hit included, may still have `scan_status`
+   * `"pending"`, so {@link downloadUrl} can refuse it for a while
+   * ({@link KaguraFileScanPendingError}). A duplicate the scan blocked is
+   * never returned: that 409 names no file and is thrown as the
+   * {@link KaguraConnectionError} it always was, its message ending
+   * "an earlier upload of this file was blocked by the malware scan". With
+   * scanning on, a file larger than the scanner checks (its stream limit,
+   * when that is below the server's per-file cap; both default to 100 MiB)
+   * is refused at the reserve with the server's usual validation error
+   * (422 `VAL-001`), its message ending "(the largest file the malware scan
+   * checks)".
+   *
    * `contextId` is sent in its canonical form: a `{braced}`, `urn:uuid:` or
    * dashless UUID is accepted, as the Python SDK accepts it.
    *
    * @throws Error if `contextId` is not a UUID, or `source` is bytes and
    *   `filename` is not provided.
-   * @throws KaguraIntegrityError if R2 rejected the body sha256 binding.
+   * @throws KaguraIntegrityError if the object store rejected the body
+   *   sha256 binding.
    * @throws KaguraResponseError if the reserve's or the confirm's 2xx body,
    *   or a 409's existing file, is not what the Python SDK's
    *   `FileReserveResponse` / `FileObject` model reads (#66), or the
@@ -274,6 +289,21 @@ export class FilesClient extends KaguraRestClient {
   /**
    * Return a short-lived presigned GET URL for `fileId`.
    *
+   * @throws KaguraNotFoundError if the file does not exist, has not been
+   *   uploaded, or the caller cannot read it; the server checks this before
+   *   the malware scan's gate, so such a caller never learns a scan state.
+   * @throws KaguraFileScanPendingError on `409 SCAN-001` (memory-cloud
+   *   v0.160.0+, #565): upload scanning is on and the file's scan has not
+   *   finished. Call again after `retryAfter` seconds (the server sends
+   *   `Retry-After: 30`); this method does not retry. A file that was
+   *   downloadable before can answer this again when its stored object no
+   *   longer matches the scanned version (the server queues it for a new
+   *   scan).
+   * @throws KaguraFileBlockedError on `409 SCAN-002`: the scan blocked the
+   *   file (`scanStatus` `"infected"`, or with scanning on `"error"` or any
+   *   other value the server does not allow). Not retryable; an `infected`
+   *   file stays refused after scanning is turned off. Both scan errors are
+   *   {@link KaguraConnectionError}s, as the 409 was before.
    * @throws KaguraResponseError if the 2xx body is not what the Python
    *   SDK's `FileDownloadUrlResponse` model reads (#66).
    */
@@ -384,11 +414,11 @@ export class FilesClient extends KaguraRestClient {
   }
 
   // -------------------------------------------------------------------
-  // R2 PUT (unauthenticated by design)
+  // Object store PUT (unauthenticated by design)
   // -------------------------------------------------------------------
 
   /**
-   * PUT `body` to the presigned R2 URL with checksum binding. Sends
+   * PUT `body` to the presigned URL with checksum binding. Sends
    * `x-amz-checksum-sha256` (base64 of the raw digest) only when the
    * presign signed it; a 400 from the store → {@link KaguraIntegrityError}.
    */
@@ -403,7 +433,7 @@ export class FilesClient extends KaguraRestClient {
       "user-agent": `kagura-memory-sdk/${SDK_VERSION}`,
     };
     // Send the checksum header ONLY when the presign signed it: a server with
-    // R2 checksum binding OFF presigns without it, and sending it anyway makes
+    // checksum binding OFF presigns without it, and sending it anyway makes
     // the SigV4 signature mismatch → 403 SignatureDoesNotMatch (#226).
     if (presignSignsChecksum(uploadUrl)) {
       headers["x-amz-checksum-sha256"] = sha256Base64;
@@ -422,7 +452,7 @@ export class FilesClient extends KaguraRestClient {
     }
     if (response.status === 400) {
       throw new KaguraIntegrityError(
-        "Object store rejected upload with HTTP 400 — most commonly R2 " +
+        "Object store rejected upload with HTTP 400 — most commonly a storage " +
           "BadDigest (body sha256 did not match the presigned PUT binding). " +
           "Verify that the SDK is computing sha256 over the exact bytes being PUT.",
       );

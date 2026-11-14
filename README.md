@@ -10,7 +10,7 @@ This SDK connects your TypeScript/JavaScript code to [Kagura Memory Cloud](https
 |--------|----------|----------|
 | **`KaguraClient`** | MCP (JSON-RPC) | Direct memory ops — remember, recall, explore, reference, forget |
 | **`ResourceClient`** | REST API | External data ingestion — push data from Slack, CI/CD, CRM into Kagura |
-| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding (R2) |
+| **`FilesClient`** | REST + presigned PUT | File uploads with sha256 integrity binding |
 | **`WorkspaceClient`** | REST API | Workspace member, invitation, and API key management; operation history (web session) |
 | **`SecretClient`** | REST API | [Zero-knowledge secrets](#zero-knowledge-secrets) — age-encrypted on your machine, opaque to the server |
 | **`AgentsClient`** | REST API | Agent bootstrap for API-key-only callers (no MCP session) |
@@ -35,7 +35,7 @@ runtime dependencies — the one optional peer dependency, for
 unless you ask for it.
 
 Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`) and is checked
-against memory-cloud up to **v0.155.0**; the Python SDK 0.44.0, its
+against memory-cloud up to **v0.161.0**; the Python SDK 0.44.0, its
 parity target, is checked up to v0.142.0 (v0.143.0 changes nothing a
 client sees), and its own `MIN_SERVER_VERSION` stays at an advisory
 0.17.1. `checkServerVersion()` warns, and never throws, on an older
@@ -570,14 +570,24 @@ compare decoded, as the server reads them (`guard%72ails` is
 
 **What `tools/list` shows** (the entry's tool view). Since memory-cloud
 0.93.0 a bare MCP URL lists the `core` profile, the memory loop (21 tools
-on 0.141.0), and `?profile=full` every tool (72). `tools/call` is
-unaffected: a profile is a view, not an authorization boundary, so an
-unlisted tool stays callable and every `KaguraClient` method works on any
-URL. `--tool-profile NAME` (every harness; memory-cloud v0.73.0+) sets
-`profile`; the server knows only `core` and `full` (case-sensitive) and
-fails `tools/list` for any other name, which leaves the harness with no
-Kagura tools. Setup leaves that check to the server and refuses only a
-blank name or one starting with `-` (exit 2), as Python does.
+on 0.141.0), and `?profile=full` every tool (72). From memory-cloud
+0.158.0, `?profile=google` and its alias `?profile=microsoft` list `core`
+without `describe_tools` and `guide` (`?add_tools=` cannot bring them back),
+with tool descriptions that name no other tool and instructions that carry
+no guardrail digest. Otherwise `tools/call` is unaffected: a profile is a
+view, not an authorization boundary, so an unlisted tool stays callable and
+every `KaguraClient` method works on any URL — except that on a `google` /
+`microsoft` URL (without a `?tools=` allowlist, which wins over the
+profile) `describe_tools` and `guide` are refused at `tools/call` too, so
+`describeTools()` and `guide()` throw `KaguraError` with `code`
+`unknown_tool` there. That view also trims replies: the server drops the
+sentences of its own `help`, `hint` and `message` text that point at another
+tool, and `recall` makes no learning writes. `--tool-profile NAME` (every harness; memory-cloud
+v0.73.0+) sets `profile`; the server knows `core`, `full`, `google` and
+`microsoft` (case-sensitive; the last two need v0.158.0+) and fails
+`tools/list` for any other name, which leaves the harness with no Kagura
+tools. Setup leaves that check to the server and refuses only a blank name
+or one starting with `-` (exit 2), as Python does.
 `--add-tools NAME[,NAME…]` (every harness; v0.129.0+; may
 repeat) lists more tools on top of the profile: trimmed, de-duplicated,
 at most 100, unknown names ignored by the server. `recall`'s
@@ -907,6 +917,19 @@ added**, each on purpose or out of reach:
   when the server sends no key). It is the counter memory-cloud v0.153.0
   added for its opt-in Sleep related index, printed here as the Python CLI
   prints it from 0.46.0; the rest of the output is 0.44.0's.
+- `files list` and `files upload` print a file's `scan_status`, after
+  `context_id`, when the server sends it (memory-cloud v0.160.0+), which the
+  Python CLI 0.44.0 drops; a reply without it prints as 0.44.0 prints it,
+  with no such key. `files download-url` on a file the malware scan holds
+  or blocked prints one line more under the error: how long to wait and to
+  run the command again, or that the file cannot be downloaded (the
+  wording of the Python SDK's
+  [#337](https://github.com/kagura-ai/kagura-memory-python-sdk/issues/337)).
+- `bootstrap` prints the `notices` block (memory-cloud v0.161.0+) right
+  after `status` when the server sends it, which the Python CLI 0.44.0
+  drops (memory-cloud has then already counted the notices as delivered); a
+  reply without it prints as 0.44.0 prints it, with no such key, and an
+  unreadable block prints `null`.
 
 **`guardrails load` and `guardrails digest`** (memory-cloud v0.74.0+)
 take the context as an optional argument, else `context_id` from
@@ -925,7 +948,9 @@ block, or with `--target instructions` the MCP server instructions this
 credential would receive, where `--profile`, `--tools` and `--add-tools`
 (memory-cloud v0.129.0+; comma-separated, may repeat) repeat an MCP URL's
 `?profile=`, `?tools=` and `?add_tools=`; without them, memory-cloud 0.93.0+
-previews the `core` view a bare URL lists. A context with no tool guardrails prints
+previews the `core` view a bare URL lists. `--profile` takes `full`, `core`,
+`google` or `microsoft`; for the last two (v0.158.0+) the preview is that
+view's base text, with no digest. A context with no tool guardrails prints
 nothing, and says so on stderr. With `--out FILE`, it splices the block
 into FILE between its marker lines: an earlier block is replaced in place,
 an unchanged set rewrites nothing, and an empty set removes an earlier
@@ -1448,6 +1473,8 @@ keyed on the error code and the envelope's fields, never on the message:
 | `KaguraCapacityLockedError` | memory-cloud v0.99.0+: a Free workspace over its capacity — MCP `capacity_locked`, REST 403 `CAPACITY-001` (`details.gate` `"capacity"`). Search and saving are refused until it is cleaned up or re-subscribed; listing, deleting, export and `getUsage` keep working. Neither a quota nor a plan gate, so it extends neither class. A caller outside the locked workspace (a public context) gets every figure `null` | `cleanupUrl`, `memoryCount`, `memoryLimit`, `overMemories`, `usedBytes`, `storageLimitBytes`, `overBytes`, `gate` (`"capacity"`) |
 | `KaguraAuthError` | HTTP 401; and from memory-cloud v0.79.0 an OAuth token that lacks the scope a call needs (HTTP 403 `insufficient_scope`): `memory:read` for the read-only tools, `recall` and `getAgentBootstrap`, `memory:write` for every other tool, so a `kagura-memory auth login --read-only` profile gets it on every write. The message names the scope and the re-login | `code` `"insufficient_scope"`, `details.required_scope` |
 | `KaguraServiceUnavailableError` | any HTTP 503 from `/mcp` or a REST route (the OAuth endpoints keep their own errors): `/mcp`'s `temporarily_unavailable` (the credential could not be verified, v0.82.0+) and its JSON-RPC transport failures (a dependency down or timed out), REST `DB-002` (the database unavailable). A `KaguraConnectionError`, so existing handlers keep catching it | `retryAfter` (the `Retry-After` header, else `data.retry_after_seconds`; `null` on a write whose outcome is unknown), `reason` (REST `details.reason`, else the MCP `cause`, else the code) |
+| `KaguraFileScanPendingError` | memory-cloud v0.160.0+: `FilesClient.downloadUrl` for a file whose malware scan has not finished — REST 409 `SCAN-001`, with `Retry-After: 30`. The same call succeeds once the scan says clean; the SDK does not retry. A `KaguraConnectionError`, the class this 409 had before, so existing handlers keep catching it; `retryable` is `true` | `retryAfter` (the `Retry-After` header; `null` when absent or not a number of seconds), `fileId`, `scanStatus` (`"pending"`), read from `details` |
+| `KaguraFileBlockedError` | memory-cloud v0.160.0+: `FilesClient.downloadUrl` for a file the malware scan blocked — REST 409 `SCAN-002`. Waiting does not help (`retryable` is `false`). A `KaguraConnectionError`, as the 409 was before | `fileId`, `scanStatus` (`"infected"`, `"error"` or another value the server does not allow), read from `details` |
 | `KaguraPartialRollbackError` | `rollbackSleepRun` reversed some actions but not all. A `rollback_summary` the SDK cannot read adds ` (rollback_summary could not be read)` to the message, as Python's does, with `summary` `{}` (Python: `None`) and the `KaguraResponseError` as `cause` | `reportId`, `summary` |
 | `KaguraPartialSessionRollbackError` | `rollbackSession` (memory-cloud v0.113.0+) failed some items of a real run (`partial_rollback`); every other item was handled and saved, and a call with the same arguments retries the failed ones. A field the SDK cannot read is `null` rather than a second error | `sessionSummary` (with `errors`), `totals`, `rollbackId`, `remaining` |
 | `KaguraResponseError` | a successful response the SDK cannot read, usually because the server is newer than this SDK. That includes `getServerInfo`, `checkServerVersion` (as `KaguraClient.get_server_info`), `getEmbeddingStatus`, `getMemoryStats`, `findDuplicates` and `listEmbeddingModels`, which check the body against the Python model and return it as sent. The message reads as the Python SDK's: the call, then the failing fields, never their values (`<operation>: unexpected server response for <Model> (<field>: Field required). …`), then a suggestion to upgrade. It is not a `KaguraConnectionError`: a retry fails the same way | `operation` |
@@ -1470,13 +1497,18 @@ The codes the SDK types, by surface:
 | `timeout`, `service_unavailable` (JSON-RPC `data.error`) | MCP 503 | `KaguraServiceUnavailableError` | v0.82.0+ |
 | `DB-002` (`details.reason`: `pool_exhausted`, `connection_refused`, `database_error`, `deadlock`) | REST 503 | `KaguraServiceUnavailableError` | v0.104.0+ (`deadlock` v0.105.0) |
 | `payload_too_large` (`limit`, `actual`) | MCP | `KaguraError` | v0.108.0+ |
+| `SCAN-001` (`Retry-After`; `details.file_id`, `details.scan_status`) | REST 409 | `KaguraFileScanPendingError` | v0.160.0+ |
+| `SCAN-002` (`details.file_id`, `details.scan_status`) | REST 409 | `KaguraFileBlockedError` | v0.160.0+ |
 | `invalid_request`, `invalid_client`, `invalid_scope` (`device/authorize`) | OAuth | `KaguraAuthError`, `error_description` in the message and `details` | v0.78.0+ |
 
 A gate is read before the code, so a v0.75.0+ server's `gate` decides the
 class whatever the code. `kagura-memory` commands print, under the error
 message, the reset time, the required plan, the capacity lock's cleanup
-page (unless `help` already names it), a 503's retry window and the
-server's `help` and correlation id, as the Python CLI does.
+page (unless `help` already names it), a 503's retry window, how long to
+wait for a file the malware scan holds (`The malware scan of file … has
+not finished: wait 30 s and run the command again.`) or that a blocked one
+cannot be downloaded, and the server's `help` and correlation id, as the
+Python CLI does.
 
 `authorizeDevice` turns an RFC 6749 refusal from `device/authorize`
 (memory-cloud v0.78.0+) into a `KaguraAuthError` whose `code` is the OAuth
@@ -1728,7 +1760,9 @@ pinned rows first (`context_summary_omitted`). `guardrails` is absent
 with `?guardrails=off` and `null` when the server's read failed or the
 block cannot be read; `plan_headroom` (v0.142.0+) lists the plan
 dimensions at 80 % or more of their limit, on every call — see
-[Plan headroom](#plan-headroom-memory-cloud-v01420). The session-start
+[Plan headroom](#plan-headroom-memory-cloud-v01420); `notices` (v0.161.0+)
+carries service notices for the user — see
+[Service notices](#service-notices-memory-cloud-v01610). The session-start
 skill calls
 `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
 
@@ -1750,10 +1784,28 @@ resend. A batch that wrote nothing throws: `KaguraError` with `code`
 `batch_failed` (every item failed) or `batch_refused` (an atomic batch
 with an invalid item), the rows in `details.results`, or `timeout` (an
 atomic batch rolled back, no rows); an atomic batch over the daily quota
-is `KaguraQuotaError`. Items are checked first: 1-50 objects, no
-`dedupe` / `tags_normalize` / `verbose` on an item, no other context's
-`context_id`, `remember`'s tag caps. A batch near a plan limit carries
+is `KaguraQuotaError`. Items are checked first: 1-50 objects, no other
+context's `context_id`, `remember`'s tag caps. A batch near a plan limit carries
 `plan_headroom` (v0.142.0+; see [Plan headroom](#plan-headroom-memory-cloud-v01420)).
+
+**`rememberBatch`'s batch-level keys.** `dedupe`, `tags_normalize` and
+`verbose` belong on the batch. An item that carries one is sent as given, and
+the server decides (memory-cloud v0.156.0+), comparing JSON type and value
+after `remember`'s string coercion (`"true"` equals `true`, `1` does not): an
+item that repeats the batch's value is accepted; one whose value differs is
+refused (`invalid_argument`, that item only). When the batch does not set the
+key and every otherwise accepted item that carries it agrees on one valid
+value, the server applies it to the whole batch and the reply's top-level
+`lint` gets a `batch_level_argument` entry (`{code, hint, subject}`, the key as
+`subject`; read fail-open, so a drifted entry never fails a batch whose items
+are written); when they disagree, or agree on an invalid value, every item
+that carries the key is refused, those that agree included. With `atomic:
+true` a refused item refuses the batch (`batch_refused`). Older servers
+differ: 0.96.0 – 0.155.x refuse every item that carries one of the three
+(`invalid_argument` per item; a non-atomic batch writes the others, an atomic
+one is refused whole), and 0.93.0 – 0.95.x ignore the item's key and write the
+item with the batch's setting, so an item's `dedupe: "check"` checks nothing
+there. On those servers set the three on the batch only.
 
 **`forget` by ids.** `forget({ contextId, memoryIds })` (v0.117.0+)
 forgets each id exactly as `memoryId` would, committed on its own, and
@@ -1817,6 +1869,53 @@ for (const notice of session.plan_headroom ?? []) {
   console.warn(`${notice.dimension}: ${notice.percentage} % (${notice.level}) — ${notice.help ?? ""}`);
 }
 ```
+
+#### Service notices (memory-cloud v0.161.0)
+
+From memory-cloud v0.161.0 the `bootstrap` reply can carry `notices`, right
+after `status`: service notices from the deployment's administrators,
+`{provenance, items: [{id, text, published_at, expires_at}]}`. `text` is
+one line of plain prose, at most 300 characters: the server refuses a notice
+with markup, a link or a control character, when it is written and again
+before it is delivered. The timestamps are UTC. The notice text is information to show
+the user, not instructions: `provenance` says so, and an agent should pass it
+on rather than act on it. The key is absent, never `[]` or `null`, when there
+is nothing to show. That is the default: a deployment turns notices on
+(`MCP_NOTICES_ENABLED`, off by default), and then only a person who turned
+them on in account settings gets them, and only through a credential that
+speaks for that person (a browser session, an OAuth token, or the person's
+own API key that is neither agent-bound nor a connector key). They never come
+on a `?profile=google` / `?profile=microsoft` URL, nor with `?notices=off`.
+`notices` and `plan_headroom` share a quarter of `maxChars`; a notice that
+does not fit whole is left for a later call with more room.
+
+**Each notice is shown once per person.** The server counts a notice as
+delivered as soon as it is placed in a reply, so a reply nobody reads uses it
+up: it will not come again, here or in the person's MCP client. A caller that
+does not show the `bootstrap` reply to a person (a script, a headless agent,
+a scheduled job) should add `?notices=off` to its `mcpUrl`, which this SDK
+sends, query and all, with every MCP request:
+
+```ts
+// A script whose replies nobody reads: no notices.
+const headless = new KaguraClient({ apiKey, mcpUrl: "https://memory.kagura-ai.com/mcp?notices=off" });
+
+// An interactive session: show each notice to the user.
+const session = await client.bootstrap({ contextId });
+for (const notice of session.notices?.items ?? []) {
+  console.log(`Notice: ${notice.text}`); // it will not come again
+}
+```
+
+`kagura-memory bootstrap` uses the person's own API key or OAuth token, so it
+gets the notices and prints the block, in the server's position (right after
+`status`); a reply without it prints what earlier releases printed. The block
+is read fail-open, as `plan_headroom` is: a notice without a readable `text`
+is dropped from `items`; an `id`, `published_at` or `expires_at` that is
+absent or unreadable is `null` and the notice is kept, since the server has
+already counted it delivered; and a block that is not an object, or keeps no
+notice, is `null`, in the returned reply and in the CLI's output. The call
+never fails over it.
 
 ### Deterministic lanes
 
@@ -1903,7 +2002,7 @@ v0.140.0 `rollbackSleepRun` refuses a Memory Analysis report (`source:
 | `getUsage` | Workspace quota and usage: `used` / `limit` for memories, contexts, members and today's MCP calls. `capacity_lock` is `null` unless the workspace is over its Free capacity (memory-cloud v0.99.0+; absent before): then the same figures `KaguraCapacityLockedError` carries, with `cleanup_url` and `help`. A `capacity_lock` the Python SDK's `CapacityLock` model refuses throws `KaguraResponseError`. |
 | `getMemoryStats` | Per-memory usage stats, sortable and paged. |
 | `getEmbeddingStatus` / `listEmbeddingModels` | Embedding backend state and the models available for `createContext`. A failed row's `embedding_attempted_at` (v0.95.0+) is when its embedding last failed. |
-| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, and `?tools=a,b` is an allowlist. `tools/call` never reads the view, so every method of this client works on any URL; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
+| `getToolDefinitions` | Raw MCP `tools/list` output, including tools this SDK does not wrap yet: the view `mcpUrl`'s query selects, not every tool. A bare URL lists the `core` profile on memory-cloud 0.93.0+ (21 tools on 0.141.0), `?profile=full` all of them (72), `?add_tools=a,b` (v0.129.0+) adds names to the profile, `?tools=a,b` is an allowlist, and `?profile=google` / `?profile=microsoft` (v0.158.0+) list `core` without `describe_tools` and `guide`. `tools/call` does not read the view, so every method of this client works on any URL — except on a `google` / `microsoft` URL without `?tools=`, where `describeTools()` and `guide()` throw `KaguraError` `unknown_tool`; only `recall`'s `explore_hints` need `explore` listed. The result is read as the Python SDK's `ToolListResponse`: each definition passes through unread, a result without `tools` lists none, and one that is not an object or whose `tools` is not a list of objects throws `KaguraResponseError` (`operation` `KaguraClient.get_tool_definitions`) rather than reading as an empty list. |
 | `callRawTool` | Call any MCP tool by name — the escape hatch for tools with no typed wrapper. Args pass through verbatim (wire form: `context_id`, not `contextId`) and the result is untyped. Prefer a wrapper where one exists; use this so a missing one is a detour, not a dead end. |
 | `close` | Drop the MCP session. The next call re-initializes automatically. |
 
@@ -2083,7 +2182,7 @@ an API key, an agent-bound key included, with no MCP session:
 
 | Method | What it does |
 |--------|--------------|
-| `getGuardrailDigest` | The rendered tool-triggered set for clients without tool hooks (`GET /api/v1/memory/guardrails/digest`). `target: "export"` (the default) returns the `AGENTS.md` block, between its marker lines, or `""` when the context has none; `"instructions"` returns the exact MCP server instructions this credential would receive, and `profile` / `tools` / `addTools` repeat the MCP URL's `?profile=` / `?tools=` / `?add_tools=` (`addTools`, memory-cloud v0.129.0+, is validated and joined as the server reads the names, sent only when it names a tool, and refused before any request for more than 100 names or one starting with `-`). `tool_triggered_version` is the response header, `null` when absent. The text is returned as is. |
+| `getGuardrailDigest` | The rendered tool-triggered set for clients without tool hooks (`GET /api/v1/memory/guardrails/digest`). `target: "export"` (the default) returns the `AGENTS.md` block, between its marker lines, or `""` when the context has none; `"instructions"` returns the exact MCP server instructions this credential would receive, and `profile` / `tools` / `addTools` repeat the MCP URL's `?profile=` / `?tools=` / `?add_tools=` (`profile` `google` / `microsoft`, v0.158.0+, previews that view's base text with no digest; `addTools`, memory-cloud v0.129.0+, is validated and joined as the server reads the names, sent only when it names a tool, and refused before any request for more than 100 names or one starting with `-`). `tool_triggered_version` is the response header, `null` when absent. The text is returned as is. |
 | `loadGuardrails` | The REST twin of `KaguraClient.loadGuardrails` (`POST /api/v1/memory/guardrails`): the same two lanes and truncation flags, without the context block (`context_id` and `context_name` are `null`). The set is read as the Python SDK's `GuardrailSet` model reads it, by the same reader `guardrails load` prints with: the model's fields only, in its order, `null` for an optional one left out (so `GuardrailItem`'s optional fields and `ToolTrigger.match` are typed nullable), and a `tool_trigger` that is no trigger `null`. A set missing a required field, a truncation flag included, or holding one of the wrong type (`pinned.0.type: Input should be a valid string`) raises `KaguraResponseError` (`operation` `MemoryClient.load_guardrails`) rather than read as complete. |
 
 Both refuse a `contextId` that is not a UUID before any request, in the
@@ -2248,6 +2347,56 @@ const shared = await files.list({ contextId: "workspace-uuid", scope: "workspace
 const bound = await files.list({ contextId: "workspace-uuid", bindingContextId: "context-uuid" });
 ```
 
+**Malware scanning (memory-cloud v0.160.0+).** A deployment can scan
+uploads for malware (off by default). Every file object then carries
+`scan_status`, a plain string: `unscanned` (uploaded while scanning was
+off; downloadable), `pending`, `clean`, `infected` or `error`; it is
+absent on an older server. `kagura-memory files list` and `files upload`
+print it when the server sends it, and print what they printed before when
+it does not. With scanning off, the default, `scan_status` is the only
+change, and only an `infected` file (one scanned while scanning was on) is
+refused. With scanning on, `downloadUrl` answers two 409s, after the access
+checks (a file the caller cannot read is still `KaguraNotFoundError`):
+
+- `SCAN-001`, `KaguraFileScanPendingError`: the scan has not finished. Wait
+  `retryAfter` seconds (the server's `Retry-After`, 30) and call again; the
+  SDK does not retry. A file that was downloadable before can answer this
+  again: when its stored object no longer matches the scanned version, the
+  server sets it back to `pending` and scans it again.
+- `SCAN-002`, `KaguraFileBlockedError`: the scan blocked the file
+  (`scanStatus` `infected`, or `error` when the scanner could not check
+  it); it cannot be downloaded. The server's gate is an allow-list, so any
+  other state but `clean`, `unscanned` and `pending` is refused this way.
+
+Both extend `KaguraConnectionError`, the class these 409s had before, and
+keep the server's `code` and `details` (`{file_id, scan_status}`).
+`kagura-memory files download-url` prints how long to wait, or that the file
+is blocked, under the error. `upload` can return a file whose `scan_status`
+is `pending`, a reserve dedup hit included (the duplicate is returned while
+its scan runs); a duplicate the scan blocked is never returned, and that 409
+is thrown as before (`KaguraConnectionError`, its message ending "an earlier
+upload of this file was blocked by the malware scan"). With scanning on,
+the largest file a reserve accepts is the scanner's stream limit when that
+limit is below the server's per-file cap (both default to 100 MiB, so by
+default nothing changes); a larger one gets the server's usual 422
+`VAL-001`, its message ending "(the largest file the malware scan checks)".
+
+```ts
+import { KaguraFileBlockedError, KaguraFileScanPendingError } from "kagura-memory";
+
+try {
+  const url = await files.downloadUrl(fileId, { contextId: "workspace-uuid" });
+} catch (e) {
+  if (e instanceof KaguraFileScanPendingError) {
+    console.log(`still scanning; retry in ${e.retryAfter ?? 30} s`);
+  } else if (e instanceof KaguraFileBlockedError) {
+    console.log(`blocked by the malware scan (${e.scanStatus})`);
+  } else {
+    throw e;
+  }
+}
+```
+
 Every id a client puts in a URL path (a `FilesClient` file id, a
 `ResourceClient` resource id, `KaguraClient`'s context id for memory
 stats, duplicates and the tags drill-down, a `WorkspaceClient` user id, a
@@ -2371,7 +2520,7 @@ CLI as `kagura-memory`: 23 of the 24 top-level commands of the Python CLI
 differ.
 
 The parity target is the Python SDK and CLI **0.44.0**, checked against
-memory-cloud up to **v0.155.0**.
+memory-cloud up to **v0.161.0**.
 
 **SDK ↔ memory-cloud compatibility.**
 [`docs/compatibility.md`](docs/compatibility.md) records, for each release

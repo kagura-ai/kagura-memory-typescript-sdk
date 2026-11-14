@@ -144,14 +144,20 @@ const GUARDRAILS: FlagSpec = {
 /**
  * Python's `_TOOL_PROFILE_HELP` and `_ADD_TOOLS_HELP` (python-sdk#300), the
  * floors and names memory-cloud's: `core` is the bare URL's listing from
- * v0.93.0 (memory-cloud#1849), `add_tools` v0.129.0 (#2354).
+ * v0.93.0 (memory-cloud#1849), `add_tools` v0.129.0 (#2354). `google` and
+ * its alias `microsoft` (v0.158.0, memory-cloud#2773 / #2778) list `core`
+ * without `describe_tools` and `guide`, which `tools/call` then refuses
+ * (`unknown_tool`) and `add_tools` cannot bring back (`_profiles.py`,
+ * `GOOGLE_EXCLUDED_TOOLS` / `GOOGLE_VIEW_PROFILES`). The text differs from
+ * Python 0.44.0's from here on (docs/cli-help-differences.md, #150).
  */
 const TOOL_PROFILE_HELP =
   "Add ?profile=NAME to the upstream MCP URL (server v0.73.0+): the tools tools/list shows. Without it " +
-  "memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); 'full' lists every tool (72). The server knows " +
-  "only these two (case-sensitive) and fails tools/list for any other name. A profile is a view, not an " +
-  "authorization boundary: tools/call reaches an unlisted tool too. A ?tools= allowlist already on the URL " +
-  "wins over it.";
+  "memory-cloud 0.93.0+ lists 'core' (21 tools on 0.141.0); 'full' lists every tool (72); 'google' and " +
+  "'microsoft' (server v0.158.0+) list core without describe_tools and guide. The server knows only these " +
+  "four (case-sensitive) and fails tools/list for any other name. A profile is a view, not an " +
+  "authorization boundary: tools/call reaches an unlisted tool too, except that google and microsoft " +
+  "refuse describe_tools and guide (unknown_tool). A ?tools= allowlist already on the URL wins over it.";
 const ADD_TOOLS_HELP =
   "Add ?add_tools= to the upstream MCP URL (server v0.129.0+): tools listed on top of the profile, e.g. " +
   "explore, which recall's explore_hints need (or --tool-profile full). Comma-separated, may repeat. The " +

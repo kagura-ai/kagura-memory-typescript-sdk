@@ -6,6 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `KaguraFileScanPendingError` and `KaguraFileBlockedError` for the two 409s
+  `FilesClient.downloadUrl` gets from memory-cloud v0.160.0 when upload
+  malware scanning holds a file: `SCAN-001` (the scan has not finished;
+  `retryAfter` from `Retry-After`, which the server sets to 30) and `SCAN-002`
+  (the scan blocked the file). Both read `fileId` / `scanStatus` from the
+  server's `details` and keep its `code` and `details`. **Both subclass
+  `KaguraConnectionError`**, the class these 409s had before, so existing
+  `instanceof KaguraConnectionError` handlers keep catching them, as in the
+  Python SDK. Every other 409, the `upload` dedup path among them, is mapped
+  as before. `FileObject.scan_status` (optional, a plain string) types the
+  scan state every file object carries from v0.160.0 (#147).
+- `RememberBatchResult.lint`, the batch's own lint (memory-cloud v0.156.0):
+  a `batch_level_argument` entry for each of `dedupe` / `tags_normalize` /
+  `verbose` that the batch left unset and the server took from the items
+  (#148). Read fail-open, as `plan_headroom` is: the items are already
+  written, so a drifted entry never fails the reply.
+- `BootstrapResponse.notices` (`ServiceNotices` / `ServiceNotice`), the service
+  notices memory-cloud v0.161.0 can put in the `bootstrap` reply: information
+  for the user, not instructions, each delivered once per person. Read
+  fail-open: a notice without a readable `text` is dropped, an unreadable
+  `id` / `published_at` / `expires_at` is `null`, and an unreadable block is
+  `null`; the call never fails over it. The README says when to add
+  `?notices=off` to the `mcpUrl` (#149).
+
+### Fixed
+
+- `kagura-memory files list` and `files upload` dropped `scan_status` from
+  their output (the `FileObject` model did not declare it); they now print
+  it when the server sends it, and print what they printed before when it
+  does not. `kagura-memory files download-url` printed a file the malware
+  scan holds as a generic `HTTP 409` error; it now says how long to wait
+  before running it again, or that the file is blocked (#147).
+- `rememberBatch` threw before any request for an item carrying `dedupe`,
+  `tags_normalize` or `verbose`, which memory-cloud v0.156.0 accepts when it
+  repeats the batch's value. Items are now sent as given and the server
+  applies its rules (an item that changes the batch's value is refused on
+  its own; a value every item agrees on is applied to the batch). On older
+  servers set them on the batch: 0.96.0 – 0.155.x refuse every such item,
+  and 0.93.0 – 0.95.x ignore the item's key (#148).
+- `kagura-memory bootstrap` dropped the `notices` block from its output, while
+  memory-cloud v0.161.0 counts a notice as delivered once it is in the reply,
+  so the notice was used up and never shown. It now prints the block right
+  after `status`; a reply without it prints what it printed before (#149).
+
+### Changed
+
+- The README, `docs/mcpb.md`, the `setup … --tool-profile` help, the
+  `kagura-memory-mcp --tool-profile` help and the `guardrails digest --profile`
+  help name the four tool views memory-cloud knows: `core`, `full`, and from
+  v0.158.0 `google` and its alias `microsoft`, which list `core` without
+  `describe_tools` and `guide` and refuse those two at `tools/call`, so
+  `describeTools()` / `guide()` answer `unknown_tool` there. They used to say
+  the server knows only `core` and `full` and that every method works on any
+  URL. A `google` / `microsoft` digest preview is that view's base text with no
+  digest. The `guardrails digest` help now differs from Python 0.44.0's and is
+  listed in `docs/cli-help-differences.md`. README and `docs/compatibility.md`
+  say this release is checked against memory-cloud up to 0.161.0, with a table
+  of what 0.156.0 – 0.161.0 changed for this SDK. No SDK behaviour changes
+  (#150).
+- File upload descriptions (the package description, the README, doc
+  comments) no longer name the storage backend; they say file storage, the
+  object store or the presigned URL. So does the `KaguraIntegrityError`
+  message of a rejected upload PUT ("… most commonly a storage BadDigest …"),
+  which matches the Python SDK 0.47.0's word for word (#151).
+
 ## [0.18.1] - 2026-11-10
 
 One fix that 0.18.0's check of memory-cloud 0.153.0 missed, matching the

@@ -117,6 +117,7 @@ import type {
   ToolDescriptions,
 } from "./models.js";
 import {
+  BATCH_LINT_ENTRY,
   BOOTSTRAP_RESPONSE,
   CHANGES_SINCE_RESPONSE,
   FORGET_BATCH_RESULT,
@@ -126,6 +127,9 @@ import {
   readableEntries,
   REMEMBER_BATCH_RESULT,
   REVISIONS_PAGE,
+  readablePairs,
+  SERVICE_NOTICE,
+  SERVICE_NOTICE_LENIENT_KEYS,
   SESSION_ROLLBACK_RESULT,
   SESSION_ROLLBACK_SUMMARY,
   TOOL_DESCRIPTIONS,
@@ -1123,8 +1127,26 @@ export interface ListMatchingOptions {
  * fails that item (`invalid_argument`; a whole atomic batch is refused).
  * `summary`, `content` and `type` are required: an item without one fails
  * (`missing_fields`) on every server since v0.93.0. An item may repeat the
- * batch's `context_id` but name no other; `dedupe`, `tags_normalize` and
- * `verbose` are set on the batch, never on an item.
+ * batch's `context_id` but name no other.
+ *
+ * `dedupe`, `tags_normalize` and `verbose` are batch-level: set them on
+ * {@link RememberBatchOptions}. An item that carries one is sent as given,
+ * and memory-cloud v0.156.0+ (#2753) decides on it, comparing JSON type and
+ * value after `remember`'s string coercion (`"true"` equals `true`, `1` does
+ * not): an item that repeats the value set on the batch is accepted, and
+ * one that differs from it is refused (`invalid_argument`, that item only).
+ * When the batch does not set the key and every otherwise accepted item
+ * that carries it agrees on one valid value, the server applies that value
+ * to the whole batch and says so in the reply's top-level `lint`
+ * (`batch_level_argument`); when those items disagree, or agree on an
+ * invalid value, every item that carries the key is refused.
+ *
+ * Older servers: memory-cloud 0.96.0 – 0.155.x refuse every item that
+ * carries one of the three (`invalid_argument` per item: a non-atomic
+ * batch writes the other items, an atomic one is refused whole), and
+ * 0.93.0 – 0.95.x ignore the item's key and write the item with the
+ * batch's setting, so an item's `dedupe: "check"` checks nothing there. On
+ * those servers set them on {@link RememberBatchOptions} instead.
  */
 export interface RememberBatchItem {
   summary: string;
@@ -1585,14 +1607,15 @@ function detailsWithToolTrigger(
   return { ...(details ?? {}), tool_trigger: toolTrigger };
 }
 
-/** A reply {@link withReadablePlanHeadroom} changed → the reply as the server sent it. */
+/** A reply a fail-open read rewrote → the reply as the server sent it. */
 const SENT_REPLIES = new WeakMap<object, ToolResult>();
 
 /**
  * The reply `result` was made from, as the server sent it: `result` itself
- * unless a fail-open read dropped `plan_headroom` entries from it. For the
- * `kagura-memory` CLI's `remember` / `update-memory`, which print the reply
- * as the Python CLI prints its SDK's unchecked dict. Internal: not
+ * unless a fail-open read rewrote it (dropped `plan_headroom` or `lint`
+ * entries, or nulled an unreadable `notices` or `guardrails` block). For
+ * the `kagura-memory` CLI's `remember` / `update-memory`, which print the
+ * reply as the Python CLI prints its SDK's unchecked dict. Internal: not
  * exported from the package entry point.
  */
 export function sentReply(result: object): ToolResult {
@@ -1600,33 +1623,91 @@ export function sentReply(result: object): ToolResult {
 }
 
 /**
- * `reply` with its `plan_headroom` (memory-cloud v0.142.0+, #2615) read
- * fail-open, as the Python SDK's `PlanHeadroom` field type reads it: the
- * notice is advisory, so an entry `PlanHeadroomNotice` cannot read is
- * dropped, and a value that is not a list, or keeps no entry, is left out.
- * A list that reads whole is returned as sent, and so is a reply without
- * the key. A reply it changes keeps the one sent for {@link sentReply}.
+ * `out`, a rewrite of `reply`, registered for {@link sentReply} with the
+ * reply as the server sent it: `reply`'s own sent reply when `reply` is
+ * itself a rewrite, so a chain of fail-open reads keeps the original.
+ */
+function rewritten(reply: ToolResult, out: ToolResult): ToolResult {
+  SENT_REPLIES.set(out, sentReply(reply));
+  return out;
+}
+
+/**
+ * `reply` with its list `key` read fail-open, as the Python SDK's
+ * `PlanHeadroom` field type reads `plan_headroom` (memory-cloud v0.142.0+,
+ * #2615) and as this SDK reads `remember_batch`'s top-level `lint`
+ * (v0.156.0+, #2753): an entry `model` cannot read is dropped, and a value
+ * that is not a list, or keeps no entry, is left out. A list that reads
+ * whole is returned as sent, and so is a reply without the key. A reply it
+ * changes keeps the one sent for {@link sentReply}.
  *
  * @param read The reply's model reading, when the caller has one
- *   (`readModel` of a model whose `plan_headroom` is a `failOpenList`): a
+ *   (`readModel` of a model whose `key` is a `failOpenList` of `model`): a
  *   list as long as the one sent says every entry reads, `null` that none
  *   does, so the entries are read again only when some were dropped.
  */
-function withReadablePlanHeadroom(reply: ToolResult, operation: string, read?: Record<string, unknown>): ToolResult {
-  if (!Object.prototype.hasOwnProperty.call(reply, "plan_headroom")) return reply;
-  const sent = reply.plan_headroom;
-  const modelRead = read?.plan_headroom as unknown[] | null | undefined;
+function withReadableFailOpenList(
+  reply: ToolResult,
+  key: string,
+  model: Model,
+  operation: string,
+  read?: Record<string, unknown>,
+): ToolResult {
+  if (!Object.prototype.hasOwnProperty.call(reply, key)) return reply;
+  const sent = reply[key];
+  const modelRead = read?.[key] as unknown[] | null | undefined;
   if (Array.isArray(sent) && Array.isArray(modelRead) && modelRead.length === sent.length) return reply;
-  const notices = modelRead === null ? undefined : readableEntries(sent, PLAN_HEADROOM_NOTICE, operation);
-  if (notices !== undefined && notices.length === (sent as unknown[]).length) return reply;
+  const entries = modelRead === null ? undefined : readableEntries(sent, model, operation);
+  if (entries !== undefined && entries.length === (sent as unknown[]).length) return reply;
   const out: ToolResult = { ...reply };
-  if (notices === undefined) {
-    delete out.plan_headroom;
+  if (entries === undefined) {
+    delete out[key];
   } else {
-    out.plan_headroom = notices;
+    out[key] = entries;
   }
-  SENT_REPLIES.set(out, reply);
-  return out;
+  return rewritten(reply, out);
+}
+
+/**
+ * `reply` with its `notices` block (memory-cloud v0.161.0+, #2762) read
+ * fail-open, as `plan_headroom` is: a notice without a readable `text` is
+ * dropped from `items`, a notice's `id`, `published_at` or `expires_at`
+ * that is absent or unreadable is `null` (the notice is kept: the server
+ * has already counted it delivered), and a block the model cannot read (no
+ * object, no readable notice) is `null`. The notices are returned as sent
+ * otherwise, and a block that reads whole is the block as sent, as is a
+ * reply without the key. A reply it changes keeps the one sent for
+ * {@link sentReply}.
+ *
+ * @param read The reply's `BOOTSTRAP_RESPONSE` reading: its `notices` is
+ *   `null` for an unreadable block, else the block with the notices that
+ *   read, so they are read again only when some were dropped.
+ */
+function withReadableNotices(reply: ToolResult, read: Record<string, unknown>): ToolResult {
+  if (!Object.prototype.hasOwnProperty.call(reply, "notices")) return reply;
+  const block = read.notices as { items: Record<string, unknown>[] } | null | undefined;
+  if (block === null || block === undefined) {
+    return rewritten(reply, { ...reply, notices: null });
+  }
+  const sent = reply.notices as Record<string, unknown>;
+  const sentItems = sent.items as unknown[];
+  // Every notice read: the model's reads line up with the notices sent.
+  const pairs: Array<[unknown, Record<string, unknown>]> =
+    block.items.length === sentItems.length
+      ? sentItems.map((entry, index) => [entry, block.items[index]!])
+      : (readablePairs(sentItems, SERVICE_NOTICE, "bootstrap") ?? []);
+  let changed = pairs.length !== sentItems.length;
+  const items = pairs.map(([entry, entryRead]) => {
+    const notice = { ...(entry as Record<string, unknown>) };
+    for (const key of SERVICE_NOTICE_LENIENT_KEYS) {
+      if (entryRead[key] === null && notice[key] !== null) {
+        notice[key] = null;
+        changed = true;
+      }
+    }
+    return notice;
+  });
+  return changed ? rewritten(reply, { ...reply, notices: { ...sent, items } }) : reply;
 }
 
 /** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
@@ -2001,10 +2082,14 @@ const BOOTSTRAP_COMPONENTS: readonly BootstrapComponentName[] = ["pinned", "upco
 const BOOTSTRAP_FORMATS: readonly BootstrapFormat[] = ["full", "index"];
 /** `bootstrap`'s own `max_chars` floor (server `BOOTSTRAP_INDEX_MIN_CHARS`, v0.115.0+); `format: "full"` keeps 10,000. */
 const BOOTSTRAP_MIN_CHARS = 2_000;
-/** `remember_batch` items (server `MAX_BATCH_ITEMS`). */
+/**
+ * `remember_batch` items (server `MAX_BATCH_ITEMS`). The batch-level keys an
+ * item may carry (server `_BATCH_LEVEL`: `dedupe`, `tags_normalize`,
+ * `verbose`) are not checked here: memory-cloud v0.156.0+ (#2753) decides on
+ * them with a type-strict rule after `remember`'s string coercion, which a
+ * local copy would drift from.
+ */
 const BATCH_MAX_ITEMS = 50;
-/** The `remember` arguments set once, on the batch, never per item (server `_BATCH_LEVEL`). */
-const BATCH_LEVEL_KEYS = ["dedupe", "tags_normalize", "verbose"] as const;
 /** `forget({ memoryIds })` ids per call (server `FORGET_MAX_IDS`). */
 const FORGET_MAX_IDS = 50;
 /** `describe_tools` names / `guide` topics per call (server `MAX_NAMES` / `MAX_TOPICS`). */
@@ -2108,10 +2193,11 @@ function checkedBootstrapInclude(include: unknown): string[] {
 /**
  * Refuse a `rememberBatch` `items` list before any request — the Python
  * SDK's `_checked_batch_items`, with its messages. Per-item rules the
- * server reports per item (a missing `summary`, an unknown key) stay the
- * server's. Refused here: not 1-50 items, an item that is no object, the
- * batch-level keys, an item `context_id` other than the batch's, and the
- * tag cap {@link KaguraClient.remember} also checks.
+ * server reports per item (a missing `summary`, an unknown key, a
+ * batch-level `dedupe` / `tags_normalize` / `verbose` it does not accept)
+ * stay the server's. Refused here: not 1-50 items, an item that is no
+ * object, an item `context_id` other than the batch's, and the tag cap
+ * {@link KaguraClient.remember} also checks.
  */
 function checkedBatchItems(items: unknown, contextId: string): Record<string, unknown>[] {
   if (!Array.isArray(items)) {
@@ -2123,13 +2209,6 @@ function checkedBatchItems(items: unknown, contextId: string): Record<string, un
   items.forEach((item: unknown, index) => {
     if (!isRecord(item)) {
       throw new Error(`items[${index}] must be a dict, got ${pyTypeName(item)}`);
-    }
-    const batchLevel = BATCH_LEVEL_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(item, key));
-    if (batchLevel.length > 0) {
-      throw new Error(
-        `items[${index}] carries ${batchLevel.join(", ")}: set dedupe / tags_normalize / verbose ` +
-          "on rememberBatch itself, not on an item",
-      );
     }
     if (Object.prototype.hasOwnProperty.call(item, "context_id") && item.context_id !== contextId) {
       throw new Error(
@@ -2916,7 +2995,12 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `RememberResult` types
     // every key optional, since `{}` (an empty tool result) comes back too.
-    return withReadablePlanHeadroom(await this.callToolChecked("remember", args), "remember") as RememberResult;
+    return withReadableFailOpenList(
+      await this.callToolChecked("remember", args),
+      "plan_headroom",
+      PLAN_HEADROOM_NOTICE,
+      "remember",
+    ) as RememberResult;
   }
 
   /**
@@ -4009,7 +4093,10 @@ export class KaguraClient {
   /**
    * Call tools/list to get available MCP tool definitions (names,
    * descriptions, parameter schemas): the view the MCP URL's query selects
-   * (`core` for a bare URL on memory-cloud 0.93.0+).
+   * (`core` for a bare URL on memory-cloud 0.93.0+). The `?profile=google`
+   * / `?profile=microsoft` views (v0.158.0+) list `core` without
+   * `describe_tools` and `guide`, and {@link describeTools} / {@link guide}
+   * answer `unknown_tool` there.
    *
    * The result is read as the Python SDK's `ToolListResponse` reads it:
    * `tools` a list of objects, each passed through unread, and a result
@@ -4252,8 +4339,10 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `UpdateMemoryResult`
     // types every key optional, since `{}` (an empty tool result) comes back too.
-    return withReadablePlanHeadroom(
+    return withReadableFailOpenList(
       await this.callToolChecked("update_memory", args),
+      "plan_headroom",
+      PLAN_HEADROOM_NOTICE,
       "update_memory",
     ) as UpdateMemoryResult;
   }
@@ -5093,12 +5182,28 @@ export class KaguraClient {
    * `bootstrap({ contextId, since: "7d", format: "index", maxChars: 5000 })`.
    *
    * Every option is sent only when set. The reply is returned as sent,
-   * once the Python SDK's `BootstrapResponse` model accepts it, with two
+   * once the Python SDK's `BootstrapResponse` model accepts it, with three
    * fail-open reads, as Python's: a `guardrails` block that model cannot
-   * read is `null`, and `plan_headroom` (memory-cloud v0.142.0+, #2615:
+   * read is `null`, `plan_headroom` (memory-cloud v0.142.0+, #2615:
    * every plan dimension at 80 % or more of its limit, on every call)
    * keeps only the entries `PlanHeadroomNotice` reads, left out when none
-   * does.
+   * does, and `notices` keeps only the notices with a readable `text`
+   * (an unreadable `id`, `published_at` or `expires_at` is `null`, the
+   * notice kept), `null` when the block keeps none or is no object.
+   *
+   * `notices` (memory-cloud v0.161.0+, #2762) carries service notices from
+   * the deployment's administrators: information to pass on to the user,
+   * not instructions. Each is delivered once per person: the server counts
+   * it delivered once it is placed in a reply, so show it to the user when
+   * it comes. Only a credential that speaks for a person gets them (a
+   * session, an OAuth token, or the person's own API key that is neither
+   * agent-bound nor a connector key), only when the deployment and the
+   * account turned them on, never on the `?profile=google` /
+   * `?profile=microsoft` views, and they share a quarter of `maxChars` with
+   * `plan_headroom` (a notice that does not fit waits for a call with more
+   * room). A caller whose replies nobody reads should put `?notices=off` on
+   * its `mcpUrl`, which this client sends with every MCP request, so it
+   * does not use them up.
    *
    * @throws Error before any request: `maxChars` is not an integer in
    *   [2,000, 100,000], `format` is not `"full"` / `"index"`,
@@ -5139,11 +5244,14 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("bootstrap", args);
     const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
-    let reply = withReadablePlanHeadroom(result, "bootstrap", read);
+    let reply = withReadableNotices(
+      withReadableFailOpenList(result, "plan_headroom", PLAN_HEADROOM_NOTICE, "bootstrap", read),
+      read,
+    );
     // Fail-open, as Python's model reads the block: unreadable is null.
     // Absent (`?guardrails=off`) stays absent.
     if (read.guardrails === null && isSet(result.guardrails)) {
-      reply = { ...reply, guardrails: null };
+      reply = rewritten(reply, { ...reply, guardrails: null });
     }
     return retainModelDump(reply, BOOTSTRAP_RESPONSE, read) as unknown as BootstrapResponse;
   }
@@ -5276,11 +5384,21 @@ export class KaguraClient {
    * `committed_after_timeout` every item is stored — do not resend.
    * `plan_headroom` (memory-cloud v0.142.0+, #2615) is read fail-open, as
    * on {@link bootstrap}: an entry `PlanHeadroomNotice` cannot read is
-   * dropped, and the key is left out when none reads.
+   * dropped, and the key is left out when none reads. `lint`
+   * (v0.156.0+, #2753) names the batch-level keys the server took from the
+   * items (`batch_level_argument`); it is read fail-open too, since the
+   * items are already written: an entry that is no object is dropped, and
+   * a value that is not a list, or keeps no entry, is left out.
+   *
+   * An item may carry `dedupe`, `tags_normalize` or `verbose`; it is sent
+   * as given, and the server accepts or refuses it (see
+   * {@link RememberBatchItem}): a refused item is an `error` row with
+   * `invalid_argument` (on memory-cloud 0.96.0 – 0.155.x every such item;
+   * 0.93.0 – 0.95.x ignore the key instead), and with `atomic: true` it
+   * refuses the whole batch (`batch_refused` below).
    *
    * @throws Error before any request: `items` is not a list of 1-50
-   *   objects, an item carries `dedupe`, `tags_normalize` or `verbose`
-   *   (batch-level here) or a `context_id` other than the batch's, or an
+   *   objects, an item carries a `context_id` other than the batch's, or an
    *   item's `tags` break the 50-tag / 100-character cap.
    * @throws KaguraQuotaError when an atomic batch did not fit the daily
    *   quota (`quota_exceeded`; nothing was written, a smaller batch may
@@ -5316,7 +5434,13 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("remember_batch", args);
     const read = readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
-    return withReadablePlanHeadroom(result, "remember_batch", read) as unknown as RememberBatchResult;
+    return withReadableFailOpenList(
+      withReadableFailOpenList(result, "plan_headroom", PLAN_HEADROOM_NOTICE, "remember_batch", read),
+      "lint",
+      BATCH_LINT_ENTRY,
+      "remember_batch",
+      read,
+    ) as unknown as RememberBatchResult;
   }
 
   /**
@@ -5325,10 +5449,15 @@ export class KaguraClient {
    * Calls the `describe_tools` MCP tool (memory-cloud v0.93.0+, #1849). A
    * profile only shapes `tools/list`: this client can call every tool, but
    * a model behind a mainstream MCP client can call listed tools only, so
-   * the reply says which URL query lists more.
+   * the reply says which URL query lists more. The exception is the
+   * `?profile=google` / `?profile=microsoft` views (memory-cloud v0.158.0+),
+   * which refuse this tool at `tools/call`.
    *
    * @throws Error if `names` is not a list of strings or holds more than
    *   20 names, before any request.
+   * @throws KaguraError with `code` `"unknown_tool"` on a `?profile=google`
+   *   / `?profile=microsoft` MCP URL (memory-cloud v0.158.0+, without a
+   *   `?tools=` allowlist, which wins over the profile).
    * @throws KaguraResponseError when the reply does not match the model
    *   (`operation` `"describe_tools"`).
    */
@@ -5352,13 +5481,18 @@ export class KaguraClient {
    * walkthroughs the short tool descriptions leave out — how to read a
    * reply, when to pick one tool over another, the write rules. A caller
    * error's `help` often names a topic (`'Manual: guide(["<tool>"])'`).
-   * Static text, nothing caller-specific.
+   * Static text, nothing caller-specific. The `?profile=google` /
+   * `?profile=microsoft` views (memory-cloud v0.158.0+) refuse this tool at
+   * `tools/call`, and their error envelopes name no manual.
    *
    * @param topics Up to 20 tool names (`"recall"`) or `"<tool>.<section>"`
    *   topics. Omit for the server's `["index"]`, which lists them all.
    *   Unknown names come back in `unknown`, not thrown.
    * @throws Error if `topics` is not a list of strings or holds more than
    *   20 names, before any request.
+   * @throws KaguraError with `code` `"unknown_tool"` on a `?profile=google`
+   *   / `?profile=microsoft` MCP URL (memory-cloud v0.158.0+, without a
+   *   `?tools=` allowlist).
    * @throws KaguraResponseError when the reply does not match the model
    *   (`operation` `"guide"`).
    */

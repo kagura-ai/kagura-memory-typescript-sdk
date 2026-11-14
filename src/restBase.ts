@@ -28,6 +28,8 @@ import {
   KaguraAuthError,
   KaguraConnectionError,
   KaguraError,
+  KaguraFileBlockedError,
+  KaguraFileScanPendingError,
   KaguraNotFoundError,
   KaguraQuotaError,
 } from "./errors.js";
@@ -39,6 +41,7 @@ import {
   insufficientScopeFrom,
   responseRetryAfter,
   REST_GATE_CODES,
+  retryAfterSeconds,
   sanitizeServerDetail,
   SDK_VERSION,
   serviceUnavailableFrom,
@@ -312,6 +315,11 @@ function jsonTypeName(value: unknown): string {
  *   `details.reason === "version_conflict"`, v0.113.0+, #2043) →
  *   {@link KaguraVersionConflictError}, whatever the status and before
  *   every hook
+ * - a download the malware scan holds (`409 SCAN-001`, memory-cloud
+ *   v0.160.0+, #565) → {@link KaguraFileScanPendingError} with `retryAfter`
+ *   from `Retry-After`, and one it blocked (`409 SCAN-002`) →
+ *   {@link KaguraFileBlockedError}; both are {@link KaguraConnectionError}s,
+ *   the class such a 409 had before
  * - other statuses → {@link KaguraConnectionError}, e.g. the files API's
  *   sha256 dedup `409 RES-002` (no `reason`)
  * - transport errors → {@link KaguraConnectionError}
@@ -616,6 +624,10 @@ export class KaguraRestClient {
     if (conflict !== null) {
       return conflict;
     }
+    const scan = this.fileScanRefusal(response, fields);
+    if (scan !== null) {
+      return scan;
+    }
     const status = response.status;
     if (status === 401) {
       return this.error401(response, context);
@@ -739,6 +751,38 @@ export class KaguraRestClient {
       sanitizeServerDetail(this.errorBody(response).detail) ?? `HTTP ${response.status}`,
       fields[1],
     );
+  }
+
+  /**
+   * A download the malware scan holds → its typed error; `null` for any
+   * other response (the Python SDK's `_file_scan_error`, its #337).
+   *
+   * From memory-cloud v0.160.0 (#565), with upload scanning on,
+   * `GET /api/v1/files/{id}/download-url` answers `409 SCAN-001` while the
+   * file's scan is pending (`Retry-After: 30`) and `409 SCAN-002` once the
+   * scan blocked it, each with `details` `{file_id, scan_status}`; an
+   * `infected` file is refused with scanning off too. Read by status and
+   * code only, so a 404 stays {@link KaguraNotFoundError} (the server
+   * checks access first) and the files API's dedup `409 RES-002` stays the
+   * generic error `FilesClient.upload` reads its `existing_file` from. The
+   * message is `HTTP 409: ` and the server's own, scrubbed of credential
+   * markers; {@link request} keeps the code and `details` on the error.
+   *
+   * @param fields The body's decoded `[code, details]` ({@link mapStatusError}'s).
+   */
+  protected fileScanRefusal(response: RestResponse, fields: ServerErrorFields | null): KaguraError | null {
+    if (response.status !== 409 || fields === null) {
+      return null;
+    }
+    const code = fields[0];
+    if (code !== "SCAN-001" && code !== "SCAN-002") {
+      return null;
+    }
+    const detail = sanitizeServerDetail(this.errorBody(response).detail);
+    const message = detail ? `HTTP 409: ${detail}` : "HTTP 409";
+    return code === "SCAN-001"
+      ? new KaguraFileScanPendingError(message, { retryAfter: retryAfterSeconds(response.headers) })
+      : new KaguraFileBlockedError(message);
   }
 
   /** Any other status → `HTTP <status>: <detail>` connection error. */

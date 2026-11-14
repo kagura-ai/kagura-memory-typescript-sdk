@@ -1,5 +1,5 @@
 /**
- * `kagura-memory files …` — R2 uploads with sha256 integrity binding.
+ * `kagura-memory files …` — file uploads with sha256 integrity binding.
  *
  * These are REST rather than MCP, so they build a `FilesClient` instead of
  * a `KaguraClient` — from the one credential the chain resolves, with the
