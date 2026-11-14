@@ -29,7 +29,7 @@
 import { describe, expect, it } from "vitest";
 
 import { runCli, type CliDeps } from "../src/cli/run.js";
-import { KaguraClient } from "../src/client.js";
+import { KaguraClient, sentReply } from "../src/client.js";
 
 import {
   KaguraConnectionError,
@@ -675,5 +675,70 @@ describe("bootstrap: the service notices block (memory-cloud v0.161.0+, #149)", 
         expect(request.url).toBe(mcpUrl);
       }
     }
+  });
+});
+
+describe("sentReply keeps the reply as sent through every fail-open rewrite (#148, #149)", () => {
+  // The CLI prints sentReply(result), the reply as the server sent it, as the
+  // Python CLI prints its SDK's unchecked dict; each rewrite must keep it.
+  const headroom = { dimension: "memories", level: "warning", used: 80, limit: 100, percentage: 80.5 };
+  const lintEntry = { code: "batch_level_argument", hint: "Set it once.", subject: "verbose" };
+  const batchReply = (extra: Record<string, unknown>): Record<string, unknown> => ({
+    status: "success",
+    results: [written(0, M1)],
+    count: 1,
+    succeeded: 1,
+    candidates: 0,
+    failed: 0,
+    skipped: 0,
+    ...extra,
+  });
+
+  it.each([
+    ["an unreadable lint entry", { lint: ["x", lintEntry] }, { lint: [lintEntry] }],
+    ["an unreadable lint", { lint: "x" }, {}],
+    ["an unreadable plan_headroom entry", { plan_headroom: [headroom, "bad"] }, { plan_headroom: [headroom] }],
+    [
+      "both, chained",
+      { plan_headroom: [headroom, "bad"], lint: ["x", lintEntry] },
+      { plan_headroom: [headroom], lint: [lintEntry] },
+    ],
+    ["both dropped whole, chained", { plan_headroom: "bad", lint: [5] }, {}],
+  ])("rememberBatch with %s", async (_name, sent, kept) => {
+    const reply = batchReply(sent);
+    const result = await makeClient(batchServer(reply)).rememberBatch({ contextId: CTX, items: [ITEM] });
+    expect(result).toEqual(batchReply(kept));
+    expect(sentReply(result)).toEqual(reply);
+  });
+
+  const badNotices = {
+    provenance: PROVENANCE,
+    items: [{ ...NOTICE, text: 5 }, NOTICE_2, { ...NOTICE, published_at: "soon" }],
+  };
+  it.each([
+    ["unreadable notices", { notices: badNotices }],
+    ["an unreadable notices block", { notices: "x" }],
+    ["unreadable notices and plan_headroom, chained", { notices: badNotices, plan_headroom: [headroom, 7] }],
+    [
+      "unreadable notices, plan_headroom and guardrails, chained",
+      { notices: "x", plan_headroom: [7], guardrails: "bad" },
+    ],
+    ["an unreadable guardrails block after plan_headroom", { plan_headroom: [headroom, 7], guardrails: "bad" }],
+  ])("bootstrap with %s", async (_name, extra) => {
+    const reply = { ...bootstrapReply(), ...extra };
+    const server = new FakeServer();
+    server.toolTexts.bootstrap = JSON.stringify(reply);
+    const result = await makeClient(server).bootstrap({ contextId: CTX });
+    expect(result).not.toEqual(reply);
+    expect(sentReply(result)).toEqual(reply);
+  });
+
+  it("bootstrap keeps the reads of a block whose notices all read", async () => {
+    const reply = { ...bootstrapReply({ provenance: PROVENANCE, items: [{ ...NOTICE, id: 7 }, NOTICE_2] }) };
+    const server = new FakeServer();
+    server.toolTexts.bootstrap = JSON.stringify(reply);
+    const result = await makeClient(server).bootstrap({ contextId: CTX });
+    expect(result.notices?.items).toEqual([{ ...NOTICE, id: null }, NOTICE_2]);
+    expect(sentReply(result)).toEqual(reply);
   });
 });

@@ -1607,14 +1607,15 @@ function detailsWithToolTrigger(
   return { ...(details ?? {}), tool_trigger: toolTrigger };
 }
 
-/** A reply {@link withReadablePlanHeadroom} changed → the reply as the server sent it. */
+/** A reply a fail-open read rewrote → the reply as the server sent it. */
 const SENT_REPLIES = new WeakMap<object, ToolResult>();
 
 /**
  * The reply `result` was made from, as the server sent it: `result` itself
- * unless a fail-open read dropped `plan_headroom` entries from it. For the
- * `kagura-memory` CLI's `remember` / `update-memory`, which print the reply
- * as the Python CLI prints its SDK's unchecked dict. Internal: not
+ * unless a fail-open read rewrote it (dropped `plan_headroom` or `lint`
+ * entries, or nulled an unreadable `notices` or `guardrails` block). For
+ * the `kagura-memory` CLI's `remember` / `update-memory`, which print the
+ * reply as the Python CLI prints its SDK's unchecked dict. Internal: not
  * exported from the package entry point.
  */
 export function sentReply(result: object): ToolResult {
@@ -1622,59 +1623,49 @@ export function sentReply(result: object): ToolResult {
 }
 
 /**
- * `reply` with its `plan_headroom` (memory-cloud v0.142.0+, #2615) read
- * fail-open, as the Python SDK's `PlanHeadroom` field type reads it: the
- * notice is advisory, so an entry `PlanHeadroomNotice` cannot read is
- * dropped, and a value that is not a list, or keeps no entry, is left out.
- * A list that reads whole is returned as sent, and so is a reply without
- * the key. A reply it changes keeps the one sent for {@link sentReply}.
- *
- * @param read The reply's model reading, when the caller has one
- *   (`readModel` of a model whose `plan_headroom` is a `failOpenList`): a
- *   list as long as the one sent says every entry reads, `null` that none
- *   does, so the entries are read again only when some were dropped.
+ * `out`, a rewrite of `reply`, registered for {@link sentReply} with the
+ * reply as the server sent it: `reply`'s own sent reply when `reply` is
+ * itself a rewrite, so a chain of fail-open reads keeps the original.
  */
-function withReadablePlanHeadroom(reply: ToolResult, operation: string, read?: Record<string, unknown>): ToolResult {
-  if (!Object.prototype.hasOwnProperty.call(reply, "plan_headroom")) return reply;
-  const sent = reply.plan_headroom;
-  const modelRead = read?.plan_headroom as unknown[] | null | undefined;
-  if (Array.isArray(sent) && Array.isArray(modelRead) && modelRead.length === sent.length) return reply;
-  const notices = modelRead === null ? undefined : readableEntries(sent, PLAN_HEADROOM_NOTICE, operation);
-  if (notices !== undefined && notices.length === (sent as unknown[]).length) return reply;
-  const out: ToolResult = { ...reply };
-  if (notices === undefined) {
-    delete out.plan_headroom;
-  } else {
-    out.plan_headroom = notices;
-  }
-  SENT_REPLIES.set(out, reply);
+function rewritten(reply: ToolResult, out: ToolResult): ToolResult {
+  SENT_REPLIES.set(out, sentReply(reply));
   return out;
 }
 
 /**
- * `reply` (a `remember_batch` success) with its top-level `lint`
- * (memory-cloud v0.156.0+, #2753) read fail-open: the items are already
- * written, so a drifted lint must never fail the reply, which a caller
- * would answer by resending and duplicating them. An entry that is no
- * object is dropped, and a value that is not a list, or keeps no entry, is
- * left out. A list that reads whole is returned as sent, and so is a reply
- * without the key.
+ * `reply` with its list `key` read fail-open, as the Python SDK's
+ * `PlanHeadroom` field type reads `plan_headroom` (memory-cloud v0.142.0+,
+ * #2615) and as this SDK reads `remember_batch`'s top-level `lint`
+ * (v0.156.0+, #2753): an entry `model` cannot read is dropped, and a value
+ * that is not a list, or keeps no entry, is left out. A list that reads
+ * whole is returned as sent, and so is a reply without the key. A reply it
+ * changes keeps the one sent for {@link sentReply}.
  *
- * @param read The reply's `REMEMBER_BATCH_RESULT` reading.
+ * @param read The reply's model reading, when the caller has one
+ *   (`readModel` of a model whose `key` is a `failOpenList` of `model`): a
+ *   list as long as the one sent says every entry reads, `null` that none
+ *   does, so the entries are read again only when some were dropped.
  */
-function withReadableBatchLint(reply: ToolResult, read: Record<string, unknown>): ToolResult {
-  if (!Object.prototype.hasOwnProperty.call(reply, "lint")) return reply;
-  const sent = reply.lint;
-  const modelRead = read.lint as unknown[] | null | undefined;
+function withReadableFailOpenList(
+  reply: ToolResult,
+  key: string,
+  model: Model,
+  operation: string,
+  read?: Record<string, unknown>,
+): ToolResult {
+  if (!Object.prototype.hasOwnProperty.call(reply, key)) return reply;
+  const sent = reply[key];
+  const modelRead = read?.[key] as unknown[] | null | undefined;
   if (Array.isArray(sent) && Array.isArray(modelRead) && modelRead.length === sent.length) return reply;
-  const entries = modelRead === null ? undefined : readableEntries(sent, BATCH_LINT_ENTRY, "remember_batch");
+  const entries = modelRead === null ? undefined : readableEntries(sent, model, operation);
+  if (entries !== undefined && entries.length === (sent as unknown[]).length) return reply;
   const out: ToolResult = { ...reply };
   if (entries === undefined) {
-    delete out.lint;
+    delete out[key];
   } else {
-    out.lint = entries;
+    out[key] = entries;
   }
-  return out;
+  return rewritten(reply, out);
 }
 
 /**
@@ -1685,19 +1676,26 @@ function withReadableBatchLint(reply: ToolResult, read: Record<string, unknown>)
  * has already counted it delivered), and a block the model cannot read (no
  * object, no readable notice) is `null`. The notices are returned as sent
  * otherwise, and a block that reads whole is the block as sent, as is a
- * reply without the key.
+ * reply without the key. A reply it changes keeps the one sent for
+ * {@link sentReply}.
  *
  * @param read The reply's `BOOTSTRAP_RESPONSE` reading: its `notices` is
- *   `null` for an unreadable block.
+ *   `null` for an unreadable block, else the block with the notices that
+ *   read, so they are read again only when some were dropped.
  */
 function withReadableNotices(reply: ToolResult, read: Record<string, unknown>): ToolResult {
   if (!Object.prototype.hasOwnProperty.call(reply, "notices")) return reply;
-  if (read.notices === null || read.notices === undefined) {
-    return { ...reply, notices: null };
+  const block = read.notices as { items: Record<string, unknown>[] } | null | undefined;
+  if (block === null || block === undefined) {
+    return rewritten(reply, { ...reply, notices: null });
   }
   const sent = reply.notices as Record<string, unknown>;
   const sentItems = sent.items as unknown[];
-  const pairs = readablePairs(sentItems, SERVICE_NOTICE, "bootstrap") ?? [];
+  // Every notice read: the model's reads line up with the notices sent.
+  const pairs: Array<[unknown, Record<string, unknown>]> =
+    block.items.length === sentItems.length
+      ? sentItems.map((entry, index) => [entry, block.items[index]!])
+      : (readablePairs(sentItems, SERVICE_NOTICE, "bootstrap") ?? []);
   let changed = pairs.length !== sentItems.length;
   const items = pairs.map(([entry, entryRead]) => {
     const notice = { ...(entry as Record<string, unknown>) };
@@ -1709,7 +1707,7 @@ function withReadableNotices(reply: ToolResult, read: Record<string, unknown>): 
     }
     return notice;
   });
-  return changed ? { ...reply, notices: { ...sent, items } } : reply;
+  return changed ? rewritten(reply, { ...reply, notices: { ...sent, items } }) : reply;
 }
 
 /** `reference`'s selectable fields (server `_REFERENCE_FIELDS`), in the server's order. */
@@ -2997,7 +2995,12 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `RememberResult` types
     // every key optional, since `{}` (an empty tool result) comes back too.
-    return withReadablePlanHeadroom(await this.callToolChecked("remember", args), "remember") as RememberResult;
+    return withReadableFailOpenList(
+      await this.callToolChecked("remember", args),
+      "plan_headroom",
+      PLAN_HEADROOM_NOTICE,
+      "remember",
+    ) as RememberResult;
   }
 
   /**
@@ -4336,8 +4339,10 @@ export class KaguraClient {
     }
     // The reply as sent, as Python returns its dict: `UpdateMemoryResult`
     // types every key optional, since `{}` (an empty tool result) comes back too.
-    return withReadablePlanHeadroom(
+    return withReadableFailOpenList(
       await this.callToolChecked("update_memory", args),
+      "plan_headroom",
+      PLAN_HEADROOM_NOTICE,
       "update_memory",
     ) as UpdateMemoryResult;
   }
@@ -5239,11 +5244,14 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("bootstrap", args);
     const read = readModel(result, BOOTSTRAP_RESPONSE, "bootstrap");
-    let reply = withReadableNotices(withReadablePlanHeadroom(result, "bootstrap", read), read);
+    let reply = withReadableNotices(
+      withReadableFailOpenList(result, "plan_headroom", PLAN_HEADROOM_NOTICE, "bootstrap", read),
+      read,
+    );
     // Fail-open, as Python's model reads the block: unreadable is null.
     // Absent (`?guardrails=off`) stays absent.
     if (read.guardrails === null && isSet(result.guardrails)) {
-      reply = { ...reply, guardrails: null };
+      reply = rewritten(reply, { ...reply, guardrails: null });
     }
     return retainModelDump(reply, BOOTSTRAP_RESPONSE, read) as unknown as BootstrapResponse;
   }
@@ -5426,8 +5434,11 @@ export class KaguraClient {
     }
     const result = await this.callToolChecked("remember_batch", args);
     const read = readModel(result, REMEMBER_BATCH_RESULT, "remember_batch");
-    return withReadableBatchLint(
-      withReadablePlanHeadroom(result, "remember_batch", read),
+    return withReadableFailOpenList(
+      withReadableFailOpenList(result, "plan_headroom", PLAN_HEADROOM_NOTICE, "remember_batch", read),
+      "lint",
+      BATCH_LINT_ENTRY,
+      "remember_batch",
       read,
     ) as unknown as RememberBatchResult;
   }

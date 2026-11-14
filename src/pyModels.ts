@@ -298,7 +298,7 @@ function readOrNull(operation: string, model: Model, raw: unknown): Record<strin
  * The entries of `value` that `model` reads, each as `[index, read]` in
  * order, or `undefined` where a `failOpenList` field reads `null`: `value`
  * is not a list, or no entry reads. Python's `_plan_headroom_or_none`,
- * shared by that reader kind (the reads) and {@link readableEntries} (the
+ * shared by that reader kind (the reads) and {@link readablePairs} (the
  * entries as sent).
  */
 function readableReads(
@@ -316,13 +316,26 @@ function readableReads(
 }
 
 /**
- * What a `failOpenList` field keeps of `value`, as sent: the entries
- * `model` reads, or `undefined` where the field reads `null` (`value` is
- * not a list, or no entry reads). For the client, which returns a reply as
- * sent once its model accepted it.
+ * The entries of `value` that `model` reads, each as `[entry as sent, its
+ * read]`, or `undefined` where a `failOpenList` field reads `null` (`value`
+ * is not a list, or no entry reads): for the client, which returns such
+ * entries as sent but may need what each read as.
+ */
+export function readablePairs(
+  value: unknown,
+  model: Model,
+  operation: string,
+): Array<[sent: unknown, read: Record<string, unknown>]> | undefined {
+  return readableReads(value, model, operation)?.map(([index, read]) => [(value as unknown[])[index], read]);
+}
+
+/**
+ * What a `failOpenList` field keeps of `value`, as sent: the entries of
+ * {@link readablePairs}, or `undefined` where the field reads `null`. For
+ * the client, which returns a reply as sent once its model accepted it.
  */
 export function readableEntries(value: unknown, model: Model, operation: string): unknown[] | undefined {
-  return readableReads(value, model, operation)?.map(([index]) => (value as unknown[])[index]);
+  return readablePairs(value, model, operation)?.map(([sent]) => sent);
 }
 
 function readFields(r: ResponseReader, model: Model, raw: unknown, at: Loc): Record<string, unknown> | undefined {
@@ -1110,22 +1123,13 @@ export const SERVICE_NOTICE: Model = {
   ],
 };
 
-/** The {@link SERVICE_NOTICE} fields that read `null` when absent or unreadable. */
-export const SERVICE_NOTICE_LENIENT_KEYS: readonly string[] = ["id", "published_at", "expires_at"];
-
 /**
- * The entries of `value` that `model` reads, each as `[entry as sent, its
- * read]`, or `undefined` when `value` is not a list or no entry reads: for
- * the client, which returns such entries as sent but must know what each
- * read as.
+ * The {@link SERVICE_NOTICE} fields that read `null` when absent or
+ * unreadable: those of an `orNull` kind.
  */
-export function readablePairs(
-  value: unknown,
-  model: Model,
-  operation: string,
-): Array<[sent: unknown, read: Record<string, unknown>]> | undefined {
-  return readableReads(value, model, operation)?.map(([index, read]) => [(value as unknown[])[index], read]);
-}
+export const SERVICE_NOTICE_LENIENT_KEYS: readonly string[] = SERVICE_NOTICE.fields
+  .filter((field) => typeof field.kind === "object" && "orNull" in field.kind)
+  .map((field) => field.key);
 
 /**
  * `bootstrap`'s `notices` block (memory-cloud v0.161.0+, #2762): a notice
