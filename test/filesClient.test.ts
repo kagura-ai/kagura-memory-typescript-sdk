@@ -205,9 +205,13 @@ describe("upload error paths", () => {
     };
     server.routes[uploadUrl] = { status: 400, body: "<Error>BadDigest</Error>" };
     const client = makeClient(server);
-    await expect(
-      client.upload({ contextId: WS, source: bytes, filename: "a.bin" }),
-    ).rejects.toBeInstanceOf(KaguraIntegrityError);
+    const err = await client.upload({ contextId: WS, source: bytes, filename: "a.bin" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraIntegrityError);
+    // The Python SDK 0.47.0 message, word for word; it names no storage backend.
+    expect((err as Error).message).toBe(
+      "Object store rejected upload with HTTP 400 — most commonly a storage BadDigest (body sha256 did not " +
+        "match the presigned PUT binding). Verify that the SDK is computing sha256 over the exact bytes being PUT.",
+    );
   });
 
   it("returns the existing FileObject on a 409 dedup hit", async () => {

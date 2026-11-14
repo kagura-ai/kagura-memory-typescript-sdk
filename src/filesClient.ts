@@ -452,7 +452,7 @@ export class FilesClient extends KaguraRestClient {
     }
     if (response.status === 400) {
       throw new KaguraIntegrityError(
-        "Object store rejected upload with HTTP 400 — most commonly R2 " +
+        "Object store rejected upload with HTTP 400 — most commonly a storage " +
           "BadDigest (body sha256 did not match the presigned PUT binding). " +
           "Verify that the SDK is computing sha256 over the exact bytes being PUT.",
       );
