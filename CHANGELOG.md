@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-14
+
+Catches up with memory-cloud 0.156.0 – 0.161.0 (malware scan refusals on
+downloads, batch-level keys on `rememberBatch` items, service notices in
+`bootstrap`, the google / microsoft tool views), matching the Python SDK 0.47.0.
+
 ### Added
 
 - `KaguraFileScanPendingError` and `KaguraFileBlockedError` for the two 409s
@@ -3560,7 +3566,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.16.0...v0.17.0
