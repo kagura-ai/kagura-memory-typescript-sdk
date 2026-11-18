@@ -3874,9 +3874,13 @@ export class KaguraClient {
    * workspace with `listContexts({ nameContains, includeDetails: true })`,
    * or read one context in full with {@link getContextInfo}.
    *
-   * `count` is workspace quota usage, not the number returned — that is
-   * `total`. When the caller can see no context at all, `hint` says how
-   * to create one or get access.
+   * From memory-cloud v0.169.0 the workspace comes from the workspace-scoped
+   * API key, the workspace in the MCP URL, or the user's current workspace,
+   * in that order. `count` is the number of visible contexts before filtering
+   * from v0.170.0 onward, and workspace quota usage on earlier servers.
+   * `total` is this page's size. `can_create` and the response `limit` are
+   * workspace-wide. `hint` can explain an empty directory or a full workspace
+   * with fewer visible contexts than its limit.
    *
    * Since server v0.82.0 (memory-cloud#1743) the directory is paged: 100
    * contexts a page by default (20 with `includeDetails` and no
@@ -4420,18 +4424,19 @@ export class KaguraClient {
   }
 
   /**
-   * Create a new context in the current workspace.
+   * Create a new context in the workspace selected by the MCP connection.
    *
    * Checks the workspace's context limit first, with a one-row
    * {@link listContexts} page, and throws without calling `create_context`
    * when `can_create` is false — unless `limit` is 0, which is how the server reports that it could
    * not read the quota; `create_context` then decides.
-   * That error comes from the SDK, not the server: it carries
-   * `quotaType: "contexts"` with `current` / `limit`, but `gate` and the
-   * plan fields stay `null` because `list_contexts` does not send them. A
-   * `null` `requiredPlan` there means the plan is unknown, not that no plan
-   * lifts the cap. The server's own refusal, which names the plan that
-   * lifts it, only arrives when a concurrent create gets past the check.
+   * The SDK pre-check error carries `quotaType: "contexts"` with
+   * `current` / `limit`. When `can_create` is
+   * false and `count` is below `limit`, `current` is `null`. On v0.170.0+
+   * a reported `current` can be a lower bound because `count` is visibility-based.
+   * `gate` and the plan fields stay `null` because `list_contexts` omits
+   * them. A concurrent create can still exhaust the quota after the
+   * pre-check, in which case the server may identify the plan that lifts it.
    *
    * @throws KaguraQuotaError when the workspace context limit is reached.
    * @throws KaguraFeatureNotAvailableError for a shared context (`isPrivate: false`) on a
@@ -4456,18 +4461,18 @@ export class KaguraClient {
       // produces "null/null" in the message; a real 0 is preserved.
       const count = contexts.count ?? null;
       const limit = contexts.limit ?? null;
-      // The quotaType/current/limit the server's own refusal would carry.
-      // Its gate and plan fields are not in list_contexts, so they stay
-      // null: this is the SDK's inference, not the server's gate block.
-      // The Python SDK keeps the same pre-check, with no plan fields either.
+      // A full workspace with fewer visible contexts than its cap (v0.170.0+).
+      const usageUnknown = typeof count === "number" && typeof limit === "number" && count < limit;
+      const message = usageUnknown
+        ? `Context limit of ${limit} reached. Contexts you cannot see count toward this limit.`
+        : `Context limit reached (${count === null ? "?" : String(count)}/` +
+          `${limit === null ? "?" : String(limit)}).`;
       throw new KaguraQuotaError(
-        `Context limit reached (${count === null ? "?" : String(count)}/` +
-          `${limit === null ? "?" : String(limit)}). ` +
-          "Delete unused contexts or upgrade your plan.",
+        `${message} Delete unused contexts or upgrade your plan.`,
         null,
         {
           quotaType: "contexts",
-          current: typeof count === "number" ? count : null,
+          current: typeof count === "number" && !usageUnknown ? count : null,
           limit: typeof limit === "number" ? limit : null,
         },
       );

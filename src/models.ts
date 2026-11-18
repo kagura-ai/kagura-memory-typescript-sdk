@@ -356,11 +356,14 @@ export interface ContextListItem {
  * Response from `list_contexts`: the contexts the caller can see, most
  * recently used first.
  *
- * `count` is the workspace's quota usage and never tracks `name_contains`;
- * the number of items returned is `total` (server v0.73.0+). `limit` and
- * `can_create` are absent when the caller has no current workspace.
- * `hint` (server v0.75.0+) appears only when the caller can see no context
- * at all, and says how to create one or get access.
+ * From server v0.169.0 the workspace is selected by the workspace-scoped
+ * API key, then the MCP URL, then the user's current workspace. `count` is
+ * the visible context count from v0.170.0 onward and workspace quota usage
+ * on older servers. It is independent of `name_contains` and pagination.
+ * `total` is the number of items on this page (v0.73.0+). `limit` and
+ * `can_create` describe the whole workspace and can be absent without one.
+ * `hint` can explain how to get access or create a context (v0.75.0+) or
+ * why a workspace is full when fewer than `limit` contexts are visible (v0.170.0+).
  *
  * Since server v0.82.0 (memory-cloud#1743) the directory is paged: 100
  * contexts a page by default (20 with `include_details` and no
