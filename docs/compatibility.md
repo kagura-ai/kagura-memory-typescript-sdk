@@ -1,5 +1,34 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.19.1
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.170.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).
+
+From memory-cloud 0.169.0, `listContexts` lists the workspace bound to the
+connection. A workspace-scoped API key takes precedence, followed by the
+workspace in the MCP URL and then the user's current workspace.
+From 0.170.0 `count` is the number of contexts visible to the caller before
+name filtering or paging. Earlier releases returned workspace quota usage.
+`total` is the page size. Use `can_create` to check capacity against the
+workspace-wide `limit`. `hint` can also explain why the workspace is full
+when the caller sees fewer contexts than that limit.
+[Workspace selection](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.169.0)
+· [Visible context count](https://github.com/kagura-ai/memory-cloud/issues/2891)
+
+`createContext` still uses `can_create` for the pre-check. When a full
+workspace returns `count < limit`, the error reports the limit and sets
+`KaguraQuotaError.current` to `null`. When `count >= limit` the existing
+numeric error is preserved. On 0.170.0+ that number can be a lower bound
+for workspace usage. A quota lookup failure (`limit: 0`) still lets the
+server decide.
+
+Comparing the server tags v0.161.0 and v0.170.0 showed identical MCP input
+schemas and 60 added REST operations with zero removals. The new opt-in
+sync and public MCP management routes are outside the SDK surface.
+Existing SDK errors preserve server details for feed-managed write refusals.
+The quota behavior is verified with mocked MCP responses.
+[Server comparison](https://github.com/kagura-ai/memory-cloud/compare/v0.161.0...v0.170.0)
+
 ## 0.19.0
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.161.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

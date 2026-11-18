@@ -1479,16 +1479,36 @@ describe("createContext quota pre-check", () => {
     );
   });
 
-  it("carries the counts but no gate or plan fields, which list_contexts does not send (#40)", async () => {
+  it.each([0, 3])("does not report %i visible contexts as quota usage in a full workspace", async (count) => {
     const server = new FakeServer();
-    server.toolResults.list_contexts = { can_create: false, count: 5, limit: 5 };
+    server.toolResults.list_contexts = { can_create: false, count, limit: 25 };
+    const client = makeClient(server);
+
+    const error = await client.createContext({ name: "new" }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(KaguraQuotaError);
+    expect(error).toMatchObject({
+      message: "Context limit of 25 reached. Contexts you cannot see count toward this limit. " +
+        "Delete unused contexts or upgrade your plan.",
+      quotaType: "contexts",
+      current: null,
+      limit: 25,
+    });
+    expect(server.requests.some(
+      (r) => (r.body?.params as { name?: string })?.name === "create_context",
+    )).toBe(false);
+  });
+
+  it.each([5, 7])("carries the counts for usage %i at or above the limit (#40)", async (count) => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = { can_create: false, count, limit: 5 };
     const client = makeClient(server);
     const err = (await client
       .createContext({ name: "new" })
       .catch((e: unknown) => e)) as KaguraQuotaError;
     expect(err).toBeInstanceOf(KaguraQuotaError);
     expect(err.quotaType).toBe("contexts");
-    expect(err.current).toBe(5);
+    expect(err.current).toBe(count);
     expect(err.limit).toBe(5);
     // The pre-check is the SDK's inference, not a server gate block, so the
     // plan is unknown here, which the docs must not read as "no plan lifts it".
