@@ -23,8 +23,8 @@ import {
   LIST_CONTEXTS_MAX_LIMIT,
   normalizeNameContains,
 } from "../../client.js";
-import { excMessage } from "../../errors.js";
-import { normalizeUuid, pyStrip } from "../../pyCompat.js";
+import { pyStrip, uuidOrNone } from "../../pyCompat.js";
+import { pyRepr } from "../../python.js";
 import { formatJson } from "../output.js";
 import { CliError, CliUsageError, optionalRanged, pairedFlag, parseChoice } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -81,18 +81,19 @@ const WORKSPACE_ID: FlagSpec = {
 };
 
 /**
- * `--workspace-id`: a workspace UUID, sent canonically, as `setup claude
- * --context` reads its UUID. The server reads a blank `workspace_id` as
- * none and lists the connection's workspace, and refuses anything else
- * that is not a UUID, so both are usage errors here (exit 2).
+ * `--workspace-id`: a workspace UUID, trimmed and sent canonically — the
+ * Python CLI 0.49.0's `_workspace_id_option`, in its words (the value as
+ * given). The server reads a blank `workspace_id` as none and lists the
+ * connection's workspace, and refuses anything else that is not a UUID,
+ * so both are usage errors here (exit 2).
  */
 function parseWorkspaceId(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  try {
-    return normalizeUuid(pyStrip(raw), "--workspace-id");
-  } catch (e) {
-    throw new CliUsageError(`Invalid value for '--workspace-id': ${excMessage(e)}`);
+  const canonical = uuidOrNone(pyStrip(raw));
+  if (canonical === null) {
+    throw new CliUsageError(`Invalid value for '--workspace-id': ${pyRepr(raw)} is not a valid workspace UUID.`);
   }
+  return canonical;
 }
 
 /**

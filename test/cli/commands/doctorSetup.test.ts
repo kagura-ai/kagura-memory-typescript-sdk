@@ -2088,6 +2088,19 @@ describe("setup claude --notices off (#154)", () => {
     expect(entry().url).toBe("https://x.test/mcp?notices=off");
   });
 
+  it.each([
+    ["https://x.test/mcp?notices=%20Off", true],
+    ["https://x.test/mcp?notices=on&notices=off", false],
+    ["https://x.test/mcp?notices=", false],
+  ])("a re-run reads the old entry's %s by the server's first-value rule", async (url, noted) => {
+    expect(await runCli(claude("--mcp-url", url), harness({}).deps)).toBe(0);
+    const again = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp"), again.deps)).toBe(0);
+    const notes = notesOf(again).join("\n");
+    if (noted) expect(notes).toContain("--notices off");
+    else expect(notes).not.toContain("--notices");
+  });
+
   it.each([["on"], [""]])("refuses --notices %j with exit 2, writing nothing", async (value) => {
     const h = harness({});
     expect(await runCli(claude("--notices", value), h.deps)).toBe(2);

@@ -44,6 +44,7 @@ import {
 
 const CTX = "c0ffee00-0000-4000-8000-000000000001";
 const WS = "0b5a1c3e-8f2d-4e6a-9c7b-1d2e3f4a5b6c";
+const WS2 = "22222222-3333-4444-8555-666666666666";
 
 /** `update_search_config`'s declared arguments at memory-cloud v0.176.0 (before `fusion`). */
 const SEARCH_CONFIG_ARGS_0176 = [
@@ -121,6 +122,13 @@ describe("updateSearchConfig({ fusion }) (memory-cloud v0.178.0, #2980)", () => 
       bm25_weight: 0.2,
     });
     expect(server.toolCallArgs(1)).not.toHaveProperty("fusion");
+
+    // null is unset, as for every other option.
+    await client.updateSearchConfig({
+      contextId: CTX,
+      fusion: null as unknown as string,
+    });
+    expect(server.toolCallArgs(2)).toEqual({ context_id: CTX });
   });
 
   it("leaves the value to the server: a newer or unknown one is sent unchecked", async () => {
@@ -374,7 +382,8 @@ describe("listContexts({ workspaceId }) (memory-cloud v0.177.0, #2972)", () => {
     const client = makeClient(server);
     for (const blank of ["", "   "]) {
       await expect(client.listContexts({ workspaceId: blank })).rejects.toThrow(
-        "workspaceId must not be blank",
+        "workspaceId is blank: the server would list the connection's workspace; pass a " +
+          "workspace id from listWorkspaces() or omit it",
       );
     }
     expect(server.requests.filter((r) => r.body?.method === "tools/call")).toEqual([]);
@@ -644,13 +653,13 @@ describe("CLI", () => {
       const h = harness();
       expect(await runCli(["context", "list", "--workspace-id", value], h.deps)).toBe(2);
       expect(h.err.join("\n")).toContain(
-        `Invalid value for '--workspace-id': --workspace-id must be a UUID, got '${value.trim()}'`,
+        `Invalid value for '--workspace-id': '${value}' is not a valid workspace UUID.`,
       );
       expect(h.server.requests).toEqual([]);
     },
   );
 
-  it("workspace list widens NAME to the longest name by display width, a CJK character two columns", async () => {
+  it("workspace list sizes NAME by display width, a CJK character or an emoji two columns", async () => {
     const h = harness();
     const long = "A workspace name longer than the column";
     h.server.toolResults.list_workspaces = {
@@ -658,18 +667,35 @@ describe("CLI", () => {
       workspaces: [
         { id: WS, name: long, role: "owner", current: true, usable: true },
         { id: CTX, name: "開発チーム", role: "member", current: false, usable: true },
+        // U+1F680 (W) and U+00E9 (neutral, one column).
+        { id: WS2, name: "\u{1F680}Launch é", role: "viewer", current: false, usable: true },
       ],
-      total: 2,
+      total: 3,
     };
     expect(await runCli(["workspace", "list"], h.deps)).toBe(0);
-    const width = long.length; // 39 columns, above the 24 minimum
+    const width = long.length; // 39 columns
     expect(h.out.join("\n")).toBe(
       [
         `${"ID".padEnd(36)} ${"NAME".padEnd(width)} ROLE    CURRENT USABLE`,
         `${WS} ${long} owner   yes     yes`,
         // 5 wide characters take 10 columns.
         `${CTX} 開発チーム${" ".repeat(width - 10)} member  -       yes`,
+        // The rocket takes 2 columns, "Launch é" 8.
+        `${WS2} \u{1F680}Launch é${" ".repeat(width - 10)} viewer  -       yes`,
       ].join("\n"),
+    );
+  });
+
+  it("workspace list's NAME column is as wide as its widest name, at least the header, as Python's", async () => {
+    const h = harness();
+    h.server.toolResults.list_workspaces = {
+      status: "success",
+      workspaces: [{ id: WS, name: "A", role: "owner", current: true, usable: true }],
+      total: 1,
+    };
+    expect(await runCli(["workspace", "list"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toBe(
+      [`${"ID".padEnd(36)} NAME ROLE    CURRENT USABLE`, `${WS} A    owner   yes     yes`].join("\n"),
     );
   });
 
@@ -680,9 +706,9 @@ describe("CLI", () => {
     expect(h.server.toolCallArgs(0)).toEqual({});
     expect(h.out.join("\n")).toBe(
       [
-        `${"ID".padEnd(36)} ${"NAME".padEnd(24)} ROLE    CURRENT USABLE`,
-        `${WS} ${"Home".padEnd(24)} owner   yes     yes`,
-        `11111111-2222-4333-8444-555555555555 ${"Team".padEnd(24)} viewer  -       no (workspace_suspended)`,
+        `${"ID".padEnd(36)} NAME ROLE    CURRENT USABLE`,
+        `${WS} Home owner   yes     yes`,
+        `11111111-2222-4333-8444-555555555555 Team viewer  -       no (workspace_suspended)`,
       ].join("\n"),
     );
   });

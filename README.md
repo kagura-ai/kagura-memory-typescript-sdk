@@ -252,7 +252,8 @@ owner key; a connector key is refused) and prints one row per workspace: `ID`, `
 `CURRENT` (the connection's workspace) and `USABLE` (`yes`, or `no` with
 the reason: `workspace_suspended`, `feature_not_available`), or with
 `--json` the Python SDK model's dump, as the Python CLI 0.49.0 prints both;
-the NAME column widens to the longest name, counting a CJK character as two
+the NAME column is as wide as the longest name (at least the header),
+counting an East Asian wide or fullwidth character (CJK, most emoji) as two
 columns, so no name is cut. `--workspace-id` must be a UUID (exit 2).
 **`context search-config --fusion auto|rrf|weighted`** (v0.178.0+) sets
 how hybrid recall fuses its two legs; any other value is a usage error

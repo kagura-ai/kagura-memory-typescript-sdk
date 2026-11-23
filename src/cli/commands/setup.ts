@@ -49,6 +49,7 @@ import {
   baseUrlFromMcp,
   mcpQueryToolView,
   mcpUrlGuardrailsOff,
+  mcpUrlNoticesOff,
   mcpUrlQueryValues,
   mcpUrlToolView,
   mcpUrlWithQuery,
@@ -1477,7 +1478,7 @@ function queryFlags(entry: Record<string, unknown>): Map<string, string> {
     ["--tool-profile", view.profile ?? ""],
     ["--add-tools", view.addTools.join(",")],
     ["--context", pyStrip(query.get("context") ?? "")],
-    ["--notices", pyStrip(query.get("notices") ?? "").toLowerCase() === "off" ? "off" : ""],
+    ["--notices", mcpUrlNoticesOff(entry.url) ? "off" : ""],
     [TOOLS_KEY, (view.tools ?? []).join(",")],
   ];
   for (const [flag, value] of settings) if (value) found.set(flag, value);

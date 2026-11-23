@@ -3955,9 +3955,10 @@ export class KaguraClient {
     if (typeof options.workspaceId === "string" && pyStrip(options.workspaceId) === "") {
       // The server reads "" as no argument: it would list the connection's
       // workspace, not the one asked for.
+      // The Python SDK 0.49.0's words, with this SDK's names.
       throw new Error(
-        "workspaceId must not be blank: omit it to list the connection's workspace, or pass a " +
-          "workspace id from listWorkspaces()",
+        "workspaceId is blank: the server would list the connection's workspace; pass a " +
+          "workspace id from listWorkspaces() or omit it",
       );
     }
     let limit: number | undefined;
@@ -4938,7 +4939,7 @@ export class KaguraClient {
     if (isSet(options.llmSelectorEnabled)) {
       args.llm_selector_enabled = options.llmSelectorEnabled;
     }
-    if (options.fusion !== undefined) {
+    if (isSet(options.fusion)) {
       args.fusion = options.fusion;
     }
     const result = await this.callToolChecked("update_search_config", args);
