@@ -76,6 +76,8 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory context list --stats",
     // Added in the Python CLI 0.44.0 (#89), recorded from it.
     "    kagura-memory context list --limit 50 --cursor 50",
+    // Added in the Python CLI 0.49.0 (python-sdk#350, #154 here).
+    "    kagura-memory context list --workspace-id WS_UUID",
   ]],
   ["context search-config", [
     "  Examples:",
@@ -85,6 +87,8 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     // From the Python CLI 0.44.0 (python-sdk #302).
     "    kagura-memory context search-config CTX_UUID --content-chunks",
     "    kagura-memory context search-config CTX_UUID --no-llm-selector",
+    // Added in the Python CLI 0.49.0 (python-sdk#350, #154 here).
+    "    kagura-memory context search-config CTX_UUID --fusion rrf",
   ]],
   ["context update", [
     "  Examples:",
@@ -310,6 +314,12 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "      --details '{\"location\": {\"lat\": 35.68, \"lon\": 139.76}, \"client\": \"acme\"}'",
     "    kagura-memory update-memory -m MEM_UUID --merge-details \\",
     "      --location \"35.68,139.76,Tokyo HQ\"",
+  ]],
+  // The Python CLI 0.49.0's (python-sdk#350, #154 here).
+  ["workspace list", [
+    "  Examples:",
+    "    kagura-memory workspace list",
+    "    kagura-memory workspace list --json",
   ]],
   ["workspace invite create", [
     "  Example:",

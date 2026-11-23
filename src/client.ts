@@ -37,6 +37,7 @@ import {
   versionConflictError,
 } from "./http.js";
 import type {
+  AccountWorkspaceList,
   Agent,
   AgentBinding,
   AgentBootstrapResponse,
@@ -117,6 +118,7 @@ import type {
   ToolDescriptions,
 } from "./models.js";
 import {
+  ACCOUNT_WORKSPACE_LIST,
   BATCH_LINT_ENTRY,
   BOOTSTRAP_RESPONSE,
   CHANGES_SINCE_RESPONSE,
@@ -696,6 +698,16 @@ export interface ListContextsOptions {
    * refused with `invalid_argument`.
    */
   limit?: number;
+  /**
+   * List another workspace the account is a member of (an `id` from
+   * {@link KaguraClient.listWorkspaces}) instead of the connection's, under
+   * the account's role there; a `context_id` from it works in the other
+   * tools. Sent as `workspace_id` only when set, as given (the server takes
+   * a UUID; `""` reads as unset there, anything else is
+   * `invalid_argument`). Memory-cloud v0.177.0+ (#2972); an older server
+   * refuses it as an unknown argument (`invalid_argument`).
+   */
+  workspaceId?: string;
 }
 
 export interface CreateContextOptions {
@@ -970,6 +982,21 @@ export interface UpdateSearchConfigOptions {
    * when set.
    */
   llmSelectorEnabled?: boolean;
+  /**
+   * How a hybrid recall over this context fuses its semantic and keyword
+   * legs (memory-cloud v0.178.0+, #2980): `"auto"` (the default) is
+   * `"weighted"` when the context's weights are not 0.6 / 0.4, else the
+   * deployment's `HYBRID_FUSION`; `"rrf"` (reciprocal rank fusion, the
+   * weights unused) suits conversation and work history; `"weighted"` (the
+   * weighted blend) with a higher `semanticWeight` suits documents and
+   * manuals. A recall over several contexts follows the first one's. Sent
+   * only when set, as given: the value is not checked locally, and the
+   * server refuses one it does not know with `invalid_search_config`. A
+   * server before v0.178.0 has no such argument and refuses the call with
+   * `invalid_argument` (`unknown_arguments` in the envelope), changing
+   * nothing. `config.fusion_effective` says what recall now uses.
+   */
+  fusion?: string;
 }
 
 export interface RecordMeasurementOptions {
@@ -3893,10 +3920,30 @@ export class KaguraClient {
    * The envelope's `limit` is the plan's context maximum, not the page
    * size option of the same name.
    *
+   * From memory-cloud v0.177.0 (#2972) `workspaceId` names the listed
+   * workspace instead: the caller must be a member of it, its slot must be
+   * active and the account must hold a seat on its plan. For a workspace
+   * other than the connection's, `count` / `total` describe that workspace,
+   * `limit` and `can_create` are absent ({@link createContext} creates in
+   * the connection's workspace), and an empty listing's `hint` says that
+   * contexts there are created from a connection to it (`/mcp/w/<id>`).
+   * Naming the connection's own workspace answers as without it. The reply
+   * may also carry `other_workspaces` (how many other usable workspaces the
+   * account has) and `workspaces_hint` (see {@link ListContextsResponse}).
+   *
    * @throws Error before any request if `limit` is not an integer in
    *   1-200, or is above 20 with `includeDetails` and no non-blank
    *   `nameContains` (the server refuses that page with
    *   `validation_error`).
+   * @throws KaguraPermissionError when `workspaceId` names a workspace the
+   *   caller is not a member of (or a deleted one), or under a
+   *   workspace-scoped API key any workspace but the key's: the same
+   *   `permission_denied` for each (`requiredRole` `"viewer"`).
+   * @throws KaguraFeatureNotAvailableError when the account has no seat on
+   *   that workspace's plan (`feature_not_available`).
+   * @throws KaguraError with `code` `"workspace_suspended"` for a workspace
+   *   whose slot is suspended, or `"invalid_argument"` for a `workspaceId`
+   *   that is not a UUID or one sent to a server before v0.177.0.
    */
   async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
     const nameContains = normalizeNameContains(options.nameContains);
@@ -3929,8 +3976,41 @@ export class KaguraClient {
     if (limit !== undefined) {
       args.limit = limit;
     }
+    if (options.workspaceId !== undefined) {
+      args.workspace_id = options.workspaceId;
+    }
     const result = await this.callToolChecked("list_contexts", args);
     return result as unknown as ListContextsResponse;
+  }
+
+  /**
+   * List the workspaces the account is a member of, with its role in each.
+   *
+   * Calls the `list_workspaces` MCP tool (memory-cloud v0.177.0+, #2972)
+   * with no arguments. Each {@link AccountWorkspace} carries `id`, `name`,
+   * `role` (the account's role there), `current` (this connection's
+   * workspace) and `usable`: whether `listContexts({ workspaceId: id })`
+   * lists it now, with `reason` (`workspace_suspended` or
+   * `feature_not_available`, the code that call would answer) when it is
+   * not. Pass an `id` as {@link listContexts}' `workspaceId`.
+   *
+   * The tool is in the `full` profile only, so a bare `/mcp` URL (`core`)
+   * does not list it in `tools/list`; like every tool it is callable from
+   * any URL, which is what this method does. With a workspace-scoped API
+   * key only the key's workspace is listed. It answers while the
+   * connection's workspace is suspended (the slot gate and the daily MCP
+   * call limit do not apply to it), so it is how an account finds a usable
+   * workspace then.
+   *
+   * @throws KaguraError with `code` `"unknown_tool"` on a server before
+   *   v0.177.0, which has no such tool.
+   * @throws KaguraResponseError when the reply does not match the model
+   *   (`operation` `"list_workspaces"`).
+   */
+  async listWorkspaces(): Promise<AccountWorkspaceList> {
+    const result = await this.callToolChecked("list_workspaces", {});
+    const read = readModel(result, ACCOUNT_WORKSPACE_LIST, "list_workspaces");
+    return retainModelDump(result, ACCOUNT_WORKSPACE_LIST, read) as unknown as AccountWorkspaceList;
   }
 
   /**
@@ -4432,7 +4512,9 @@ export class KaguraClient {
    * not read the quota; `create_context` then decides.
    * The SDK pre-check error carries `quotaType: "contexts"` with
    * `current` / `limit`. When `can_create` is
-   * false and `count` is below `limit`, `current` is `null`. On v0.170.0+
+   * false and `count` is below `limit`, `current` is `null` and the message
+   * says the workspace is at its limit and that contexts the caller cannot
+   * see count toward it. On v0.170.0+
    * a reported `current` can be a lower bound because `count` is visibility-based.
    * `gate` and the plan fields stay `null` because `list_contexts` omits
    * them. A concurrent create can still exhaust the quota after the
@@ -4463,12 +4545,14 @@ export class KaguraClient {
       const limit = contexts.limit ?? null;
       // A full workspace with fewer visible contexts than its cap (v0.170.0+).
       const usageUnknown = typeof count === "number" && typeof limit === "number" && count < limit;
+      // The Python SDK 0.48.0's words for each case (#347 there).
       const message = usageUnknown
-        ? `Context limit of ${limit} reached. Contexts you cannot see count toward this limit.`
+        ? `This workspace is at its limit of ${limit} contexts; contexts you cannot see (for example ` +
+          "ones private to other members) count toward it. Delete unused contexts or upgrade the plan."
         : `Context limit reached (${count === null ? "?" : String(count)}/` +
-          `${limit === null ? "?" : String(limit)}).`;
+          `${limit === null ? "?" : String(limit)}). Delete unused contexts or upgrade your plan.`;
       throw new KaguraQuotaError(
-        `${message} Delete unused contexts or upgrade your plan.`,
+        message,
         null,
         {
           quotaType: "contexts",
@@ -4777,17 +4861,25 @@ export class KaguraClient {
    * owner or a workspace owner/admin. Omitted fields keep their current
    * values. Read the stored `*_enabled` flag in `config`, never the
    * `*_effective` one, before writing it back: echoing an effective
-   * `false` would turn the setting off.
+   * `false` would turn the setting off. The same goes for `fusion`
+   * (v0.178.0+): read `fusion`, never `fusion_effective`, whose resolved
+   * value would pin the setting and drop `auto`.
    *
    * The result echoes the whole configuration after the update under
    * `config`. That is the only place the reinforce and routing fields
    * come back: {@link getContextInfo}'s `search_config` leaves them out.
    *
    * @throws KaguraPermissionError when the caller may not write to the
-   *   context, and also when the context does not exist or the caller
-   *   cannot see it: the server answers every access failure here with
-   *   `permission_denied`, never `context_not_found`, and sends no
-   *   `required_role`, so `requiredRole` is `null` whatever the cause.
+   *   context (`requiredRole` is `null`), or may not change
+   *   `contentChunksEnabled` / `llmSelectorEnabled` (`requiredRole`
+   *   `"owner"`).
+   * @throws KaguraNotFoundError when the context does not exist or the
+   *   caller cannot reach it (`context_not_found`, memory-cloud v0.126.0+;
+   *   older servers answered `permission_denied`).
+   * @throws KaguraError with `code` `"invalid_search_config"` for a value
+   *   the server refuses (weights that do not sum to 1.0, an unknown
+   *   `fusion`), or `"invalid_argument"` for `fusion` on a server before
+   *   v0.178.0.
    */
   async updateSearchConfig(
     options: UpdateSearchConfigOptions,
@@ -4828,6 +4920,9 @@ export class KaguraClient {
     }
     if (isSet(options.llmSelectorEnabled)) {
       args.llm_selector_enabled = options.llmSelectorEnabled;
+    }
+    if (options.fusion !== undefined) {
+      args.fusion = options.fusion;
     }
     const result = await this.callToolChecked("update_search_config", args);
     return result as ToolResult & { config: SearchConfig };

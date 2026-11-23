@@ -945,10 +945,13 @@ export const ROLLBACK_RESULT: Model = {
 
 /** A model's defaults as one object: what a `default_factory=Model` field holds. */
 function defaultsOf(model: Model): Record<string, unknown> {
-  return Object.fromEntries(model.fields.map((field) => [field.key, field.default!()]));
+  // A field read only when sent has no default, and is no key of the defaults.
+  return Object.fromEntries(
+    model.fields.filter((field) => field.omitWhenAbsent !== true).map((field) => [field.key, field.default!()]),
+  );
 }
 
-const SEARCH_CONFIG: Model = {
+export const SEARCH_CONFIG: Model = {
   name: "SearchConfig",
   fields: [
     optional("semantic_weight", "float", 0.6),
@@ -972,6 +975,10 @@ const SEARCH_CONFIG: Model = {
     optional("llm_selector_in_use", nullable("int")),
     optional("llm_selector_disabled_reason", nullable("str")),
     optional("llm_selector_can_change", nullable("bool")),
+    // memory-cloud v0.178.0 (#2980): plain strings, so a newer value passes;
+    // left out when absent, so an older server's reply dumps as before.
+    whenSent("fusion", nullable("str")),
+    whenSent("fusion_effective", nullable("str")),
   ],
 };
 
@@ -1277,6 +1284,28 @@ export const FORGET_BATCH_RESULT: Model = {
     required("skipped", "int"),
     required("failed", "int"),
     optional("session_id", nullable("str")),
+  ],
+};
+
+const ACCOUNT_WORKSPACE: Model = {
+  name: "AccountWorkspace",
+  fields: [
+    required("id", "str"),
+    required("name", "str"),
+    required("role", "str"),
+    required("current", "bool"),
+    required("usable", "bool"),
+    optional("reason", nullable("str")),
+  ],
+};
+
+/** A `list_workspaces` reply (memory-cloud v0.177.0+, #2972), as Python's `AccountWorkspaceList` reads it. */
+export const ACCOUNT_WORKSPACE_LIST: Model = {
+  name: "AccountWorkspaceList",
+  fields: [
+    optional("status", "str", "success"),
+    required("workspaces", listOf({ model: ACCOUNT_WORKSPACE })),
+    optional("total", nullable("int")),
   ],
 };
 

@@ -1,5 +1,127 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.20.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.178.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0; the new surfaces follow the Python SDK 0.48.0 and 0.49.0).
+
+### What memory-cloud 0.162.0 – 0.178.0 changed for this SDK
+
+The server source and schema fixtures at each tag were compared with this SDK
+([#154](https://github.com/kagura-ai/kagura-memory-typescript-sdk/issues/154)).
+From `v0.170.0` to `v0.176.0` the MCP tool definitions and the MCP tool schema
+fixture are unchanged, and the OpenAPI snapshot grew from 437 to 447 REST
+operations with none removed, no schema removed and no property removed or made
+required. From `v0.176.0` to `v0.178.0` the REST operations are the same 447;
+the MCP schema adds the tool `list_workspaces`, `list_contexts`'
+`workspace_id` and `update_search_config`'s `fusion`, and nothing is removed.
+0.161.0 – 0.170.0 was compared for 0.19.1 (identical MCP input schemas, 60 REST
+operations added, none removed). The changes this SDK acts on are covered by
+contract tests with mocked transports; no call was made through this SDK to a
+live server for this release.
+
+Per-surface floors: **0.161.0** `?notices=off` (`kagura-memory-mcp --notices
+off`, `kagura-memory setup claude|codex|hermes|openclaw --notices off`);
+**0.170.0** `createContext`'s pre-check wording for a full workspace with unseen
+contexts; **0.177.0** `listWorkspaces()`, `listContexts({ workspaceId })`,
+`ListContextsResponse.other_workspaces` / `workspaces_hint`, `kagura-memory
+workspace list` and `context list --workspace-id`; **0.178.0**
+`updateSearchConfig({ fusion })`, `SearchConfig.fusion` / `fusion_effective`
+and `context search-config --fusion`.
+
+| Server | Change | This SDK |
+|---|---|---|
+| 0.161.0 | `?notices=off` on the MCP URL keeps service notices out of `bootstrap` replies (first `notices` value, trimmed, any case; [memory-cloud#2762](https://github.com/kagura-ai/memory-cloud/issues/2762)) | `kagura-memory-mcp --notices off` and `setup … --notices off` write it (below) |
+| 0.162.0 | a service notice may name plans and then goes only to a `bootstrap` whose context is in a workspace on one of them | the `notices` block keeps its shape; passes through |
+| 0.163.0 | an anonymous public MCP endpoint whose workspace budget is used up answers `usage_budget_exhausted` with `retry_after_seconds` (`MCP_PUBLIC_USAGE_BUDGET_ENABLED`, off by default) | a plain `KaguraError` with that `code`; the field stays in the envelope |
+| 0.164.0 | a write to a feed-managed context answers `409` `SYNC-LOCKED` with `details.management_mode` (`SYNC_MANAGED_ENABLED`, off by default); MCP answers `conflict` beside `management_mode`, or the tool's own code | REST: `KaguraConnectionError` with `code` `SYNC-LOCKED` and the server's `details`; MCP: `KaguraError` with the code |
+| 0.166.0 | a NUL character in a text id or filter is `422` `VAL-001` before any statement runs ([memory-cloud#2857](https://github.com/kagura-ai/memory-cloud/issues/2857)) | the server's validation error passes through |
+| 0.169.0 / 0.170.0 | `list_contexts` lists the connection's workspace; `count` is the visible contexts ([memory-cloud#2884](https://github.com/kagura-ai/memory-cloud/issues/2884), [memory-cloud#2891](https://github.com/kagura-ai/memory-cloud/issues/2891)) | documented in 0.19.1; `createContext`'s message now in the Python SDK 0.48.0's words (below) |
+| 0.171.0 | `create_edge` / `update_edge` / `delete_edge` on a `supersedes` edge of a feed-managed context, and single resource ingest to a feed target, answer `409` `SYNC-LOCKED`; resource ingest refuses `event_metadata` with `sync_run_id` or `installation_generation` (`422`) | pass through |
+| 0.172.0 | workspace slot suspension (off by default): REST `403` `SLOT-001` with `details.gate` `workspace_slot`, MCP `workspace_suspended`; `/api/v1/workspace/embedding-status`, `/api/v1/system/embedding/models` and MCP `get_usage` need workspace membership; a workspace-scoped API key whose owner is not a member of its workspace answers `401` | REST: the generic `HTTP 403: <detail>` mapping with `code` `SLOT-001`; MCP: `KaguraError` `workspace_suspended`; pass through |
+| 0.173.0 | connector keys call only `recall`, `remember`, `create_edge`, `reference`, `update_memory`, `list_edges`, `delete_edge`, `forget` and `get_context_info`; every other tool and every REST route answers `AUTH-204` | the SDK's permission errors; pass through |
+| 0.174.0 / 0.175.0 | a hybrid recall, and a routed one, answer from keyword search with `degraded: true` when the self-hosted inference server or the embedding is unavailable | already typed (`degraded`, `degraded_reason`) |
+| 0.175.0 | `reference`'s `memory_not_found` may carry `similar_ids: [{memory_id, summary, summary_cut?}]` ([memory-cloud#2959](https://github.com/kagura-ai/memory-cloud/issues/2959)) | `KaguraNotFoundError`; the envelope field is kept, not typed |
+| 0.173.2 / 0.175.0 / 0.172.0 | `GET /api/v1/resources/{id}/schema`'s field `description` defaults to `""`; `/api/v1/system/info` adds `kagura_public_return_url` and `features.workspace_slots` | read as before (`description` is always sent; `getServerInfo` keeps the new keys) |
+| 0.176.0 | `HYBRID_FUSION` (`weighted`, `rrf`, `keyword_floor`) chooses the deployment's fusion ([memory-cloud#2958](https://github.com/kagura-ai/memory-cloud/issues/2958)) | no reply shape changes; `fusion_effective` may read `keyword_floor` (below) |
+| 0.177.0 | `list_workspaces`, `list_contexts(workspace_id)`, `other_workspaces` / `workspaces_hint` ([memory-cloud#2972](https://github.com/kagura-ai/memory-cloud/issues/2972)) | `listWorkspaces()`, `listContexts({ workspaceId })`, `workspace list`, `context list --workspace-id` (below) |
+| 0.178.0 | per-context `fusion` on `update_search_config`; `fusion` / `fusion_effective` in its `config` and in `get_context_info`'s `search_config` ([memory-cloud#2980](https://github.com/kagura-ai/memory-cloud/issues/2980)) | `updateSearchConfig({ fusion })`, `SearchConfig.fusion` / `fusion_effective`, `context search-config --fusion` (below) |
+
+**Per-context fusion (0.178.0).** `updateSearchConfig({ fusion })` sends
+`fusion` only when set, as given: the value is not checked locally. `auto` (the
+default, also for a context that never set it) is `weighted` when the context's
+weights are not 0.6 / 0.4, else the deployment's `HYBRID_FUSION`; `rrf`
+(reciprocal rank fusion, the weights unused) suits conversation and work
+history; `weighted` with a higher `semanticWeight` suits documents and manuals.
+A recall over several contexts follows the first one's. The server validates the
+value with the same model as REST and refuses another one with
+`invalid_search_config` (`backend/src/mcp_server/tools/search_config.py`); a
+server before 0.178.0 refuses the argument with `invalid_argument` and
+`unknown_arguments: ["fusion"]`, changing nothing (`find_unknown_arguments`,
+from 0.82.0). Both `update_search_config`'s `config` and `get_context_info`'s
+`search_config` carry `fusion` (stored) and `fusion_effective` (what recall uses:
+`weighted`, `rrf` or the deployment's `keyword_floor`). `SearchConfig` types
+both as optional strings, so a newer value passes; the `SearchConfig` model in
+`src/pyModels.ts` reads them only when sent, so an older server's reply reads
+and dumps as before. Read `fusion`, never `fusion_effective`, before writing the
+setting back. `kagura-memory context search-config --fusion auto|rrf|weighted`
+checks the choice locally (exit 2 otherwise), as the Python CLI 0.49.0 does. The
+`updateSearchConfig` notes also now say that a missing or unreachable context
+answers `context_not_found` (`KaguraNotFoundError`, from memory-cloud 0.126.0);
+they said `permission_denied`.
+
+**`list_workspaces` and `list_contexts(workspace_id)` (0.177.0).**
+`listWorkspaces()` calls `list_workspaces` with no arguments and returns
+`AccountWorkspaceList` (`status`, `workspaces: [{id, name, role, current,
+usable, reason?}]`, `total`), checked by the model of the same name, as in the
+Python SDK 0.49.0; `reason` is the code `list_contexts(workspace_id=<id>)` would
+answer: `workspace_suspended` or `feature_not_available`. The tool is in the
+`full` profile only, callable from any URL; a workspace-scoped API key sees only
+its workspace; it is exempt from the slot gate and from the daily MCP call
+limit, so it answers while the connection's workspace is suspended
+(`backend/src/mcp_server/tools/workspaces.py`, `_slot_gate.py`). A server before
+0.177.0 answers `unknown_tool`. `listContexts({ workspaceId })` sends
+`workspace_id` only when set, as given (`""` reads as unset on the server; a
+non-UUID is `invalid_argument`, as is the argument on an older server). A
+workspace the caller is not a member of, a deleted one, and under a
+workspace-scoped key any but the key's answer `permission_denied` (`your_role:
+"not_a_member"`, `required_role: "viewer"`; `KaguraPermissionError`); a
+suspended one `workspace_suspended`; one without a seat for the account
+`feature_not_available` (`KaguraFeatureNotAvailableError`). For a workspace other
+than the connection's, `count` / `total` describe that workspace, `limit` and
+`can_create` are absent (`create_context` creates in the connection's
+workspace), and an empty listing gets a hint saying contexts there are created
+from a connection to it (`/mcp/w/<id>`). Every `list_contexts` reply may carry
+`other_workspaces`, the account's usable workspaces besides the listed one
+(present only when there are any; never under a workspace-scoped key), and
+`workspaces_hint`, a fixed text the `google` / `microsoft` views leave out.
+`kagura-memory workspace list` prints the Python CLI 0.49.0's table, or with
+`--json` the model's dump; it uses the usual credential chain, not the owner
+key the rest of `workspace` needs.
+
+**`createContext` (0.170.0).** When the pre-check's `count` and `limit` are both
+numbers and `count` is below `limit`, the `KaguraQuotaError` now reads, as the
+Python SDK 0.48.0's: "This workspace is at its limit of `<limit>` contexts;
+contexts you cannot see (for example ones private to other members) count
+toward it. Delete unused contexts or upgrade the plan." `current` is `null`, as
+in 0.19.1. Otherwise the message and `current` are unchanged.
+
+**`--notices off` (0.161.0).** `kagura-memory-mcp --notices off` sets
+`?notices=off` on the upstream URL at run time (never in the credentials file;
+no environment variable). `kagura-memory setup claude|codex|hermes|openclaw
+--notices off` writes it into the entry's URL, last in the query, and for Hermes
+and OpenClaw too: the notices come in a tool reply, not in MCP instructions.
+Setup never writes it unasked: a notice is delivered once per person, so only an
+entry no person reads (a scheduled job, CI) should turn them off. A `setup
+claude` re-run without the flag drops it and says so, as for the other query
+flags; a `?notices=off` in `--mcp-url` is kept. The plugin `server_url` that
+`setup claude` prints never carries it. Any value but `off` (any case, trimmed)
+is refused before anything is written or started (exit 2).
+
+**Not wrapped.** The workspace slot routes (`/api/v1/me/workspace-slots`), the
+sync installation publication-domain routes, the share-key list by context, the
+`eligible_for` filter of `/api/v1/me/workspaces`, the OIDC `ui_locales`
+parameter and the `/internal` routes. `MIN_SERVER_VERSION` stays **0.75.0**.
+
 ## 0.19.1
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.170.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0).

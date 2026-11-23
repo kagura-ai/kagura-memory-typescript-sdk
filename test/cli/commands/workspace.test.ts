@@ -1257,18 +1257,17 @@ describe("a user id of ., .. or nothing", () => {
 // ---------------------------------------------------------------------------
 
 describe("help", () => {
-  it("lists workspace at the root, and its two groups", async () => {
+  it("lists workspace at the root, and its list command and two groups", async () => {
     const root = harness();
     expect(await runCli(["--help"], root.deps)).toBe(0);
-    expect(root.out.join("\n")).toMatch(
-      /^ {2}workspace +Workspace administration \(owner API key required, server\.\.\.$/m,
-    );
+    expect(root.out.join("\n")).toMatch(/^ {2}workspace +Workspaces: list yours \(any credential\), and administer\.\.\.$/m);
 
     const h = harness();
     expect(await runCli(["workspace", "--help"], h.deps)).toBe(0);
     const text = h.out.join("\n");
     expect(text).toMatch(/^ {2}invite +Manage workspace invitations\.$/m);
     expect(text).toMatch(/^ {2}member +Manage workspace members\.$/m);
+    expect(text).toMatch(/^ {2}list +List the workspaces your account is a member of/m);
   });
 
   it.each([

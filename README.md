@@ -35,7 +35,7 @@ runtime dependencies — the one optional peer dependency, for
 unless you ask for it.
 
 Targets memory-cloud **v0.75.0** (`MIN_SERVER_VERSION`) and is checked
-against memory-cloud up to **v0.170.0**; the Python SDK 0.44.0, its
+against memory-cloud up to **v0.178.0**; the Python SDK 0.44.0, its
 parity target, is checked up to v0.142.0 (v0.143.0 changes nothing a
 client sees), and its own `MIN_SERVER_VERSION` stays at an advisory
 0.17.1. `checkServerVersion()` warns, and never throws, on an older
@@ -173,7 +173,7 @@ npx kagura-memory --help
 | `resource` | `tokens {list,create,update,revoke}` `list` `setup` `schema` `stats` `indexer-status` `events` `ingest` `ingest-batch` `import` |
 | `secret` | `keygen` `list` `put` `get` `grant` `revoke` `rotate` `delete` `pubkeys` `approve` `audit-verify` `exec` |
 | `setup` | `claude` `codex` `hermes` `openclaw` |
-| `workspace` | `member {list,add,set-role,remove}` `invite {create,list,revoke}` |
+| `workspace` | `list` `member {list,add,set-role,remove}` `invite {create,list,revoke}` |
 | other | `config show` `doctor` |
 
 ```bash
@@ -191,6 +191,8 @@ npx kagura-memory update-memory -m MEM_UUID --add-tag status:done --remove-tag s
   --details-patch '{"status": "done"}' --expected-version 3   # partial edits (v0.140.0+), guarded (v0.113.0+)
 npx kagura-memory update-memory -m MEM_UUID --accept-supersede-candidate   # shadow the suggested older memory (v0.126.0+)
 npx kagura-memory context search-config CTX_UUID --content-chunks --no-llm-selector   # owner only (v0.110.0+ / v0.115.0+)
+npx kagura-memory context search-config CTX_UUID --fusion rrf   # hybrid fusion: auto, rrf or weighted (v0.178.0+)
+npx kagura-memory workspace list   # your workspaces; then context list --workspace-id WS_UUID (v0.177.0+)
 npx kagura-memory bootstrap --since 7d --format index --max-chars 5000   # open a session (v0.93.0+; index/--max-chars < 10000 v0.115.0+)
 npx kagura-memory changes 2026-11-04T09:00:00Z --by-me   # what you wrote since then (v0.93.0+; --by-me v0.114.0+)
 npx kagura-memory list --filters '{"type": "task", "details.status": "open"}' --order-by created_at   # exact filters, a total, no ranking
@@ -240,7 +242,19 @@ used contexts; when more follow, its stderr line names the
 ```bash
 npx kagura-memory context list --limit 50
 npx kagura-memory context list --limit 50 --cursor 50   # the next_cursor of the page before
+npx kagura-memory context list --workspace-id WS_UUID   # another workspace of yours (v0.177.0+)
 ```
+
+**`context list --workspace-id`** (memory-cloud v0.177.0+) lists another
+workspace the account is a member of, an id from **`workspace list`**,
+which calls the MCP tool `list_workspaces` with the usual credential (no
+owner key) and prints one row per workspace: `ID`, `NAME`, `ROLE`,
+`CURRENT` (the connection's workspace) and `USABLE` (`yes`, or `no` with
+the reason: `workspace_suspended`, `feature_not_available`), or with
+`--json` the Python SDK model's dump, as the Python CLI 0.49.0 prints both.
+**`context search-config --fusion auto|rrf|weighted`** (v0.178.0+) sets
+how hybrid recall fuses its two legs; any other value is a usage error
+(exit 2).
 
 **`update-memory --merge-details`** (and `--details-patch`, a patch you
 write yourself) sends `--details` / `--location` as one `details_patch`
@@ -400,8 +414,8 @@ URL likewise from `--mcp-url`, else that file's `mcp_url`, else
 reads it. It never takes them from `~/.kagura.json`, nor, with
 `--project-dir`, from the current directory's `.kagura.json`: those are
 another project's credentials. `.kagura.json` gets the URL as given; the
-parameters that `--guardrails`, `--tool-profile`, `--add-tools` and
-`--context` set go on the entry's URL only. A plain-HTTP URL to a host other than localhost is refused,
+parameters that `--guardrails`, `--tool-profile`, `--add-tools`,
+`--context` and `--notices` set go on the entry's URL only. A plain-HTTP URL to a host other than localhost is refused,
 whichever of the three it came from, before anything is written or run
 (exit 1, `Connection failed: MCP URL must use HTTPS for security …`, the
 Python CLI's words, whose connection test refuses it).
@@ -597,16 +611,24 @@ allowlist already on the URL wins over both, which gets a warning.
 `--context CONTEXT_ID` (`setup claude`; v0.114.0+) names the connection's
 default context: context-scoped tools called without `context_id` run in
 it, an explicit `context_id` wins, and the default is checked like one,
-so it never widens access; unlike `--context-id`, it must be a UUID. On
-codex, hermes and openclaw a `?profile=` or `?add_tools=` already in
+so it never widens access; unlike `--context-id`, it must be a UUID.
+`--notices off` (every harness; v0.161.0+) puts `?notices=off` on the URL,
+so `bootstrap` replies carry no service notices. Each notice is delivered
+once per person, so only an entry no person reads (a scheduled job, CI)
+should turn them off; setup never writes it unasked. `off` is the only
+value the server reads (any case), and any other is refused (exit 2).
+Unlike a `--guardrails` context it is written for Hermes and OpenClaw too,
+since the notices come in a tool reply; the plugin `server_url` that
+`setup claude` prints never carries it. On
+codex, hermes and openclaw a `?profile=`, `?add_tools=` or `?notices=` already in
 `--mcp-url` is kept when the flag is absent, and Codex's `--guardrails`
 preview repeats the entry's view (`--profile` / `--tools` /
 `--add-tools`), so its truncation note names a tool the entry lists. The
 keys go at the end of the query in Python's order (`guardrails`,
-`profile`, `add_tools`, `context`), replacing any value already there,
+`profile`, `add_tools`, `context`, `notices`), replacing any value already there,
 with commas left literal, as the Python CLI writes them. A `setup claude`
-run that leaves out a `guardrails`, `profile`, `add_tools` or `context`
-value the entry it replaces had, or its `?tools=` allowlist (which goes
+run that leaves out a `guardrails`, `profile`, `add_tools`, `context` or
+`notices=off` value the entry it replaces had, or its `?tools=` allowlist (which goes
 back on `--mcp-url`), says so in a note, reading the old URL as the
 server does: the first value of each key, trimmed; a blank one, or a
 `?tools=` naming no tool, is left out, as the Python CLI 0.44.0 does.
@@ -1107,7 +1129,7 @@ when `KAGURA_PROFILE` is set and still overrides the new default; an
 unknown name exits 1 and lists the stored profiles, and a missing or
 extra argument is a usage error (exit 2).
 
-**`workspace` and the `auth` key commands** (memory-cloud v0.42.0+)
+**`workspace member|invite` and the `auth` key commands** (memory-cloud v0.42.0+)
 manage a workspace's members, invitations and member API keys:
 `workspace member list|add|set-role|remove`, `workspace invite
 create|list|revoke`, and `auth create-key|list-keys|revoke-key`, which
@@ -1549,7 +1571,7 @@ unknown, not that no plan lifts it. That covers an older server, and
 `createContext`'s own context-limit check, which reads a one-row
 `listContexts({ limit: 1 })` page and so fills in only `quotaType`,
 `current` and `limit`. When the workspace is full but `count` is below
-`limit`, `current` is `null`. From memory-cloud v0.170.0 a numeric `current`
+`limit`, `current` is `null` and the message, as the Python SDK 0.48.0's, says the workspace is at its limit and that contexts the caller cannot see count toward it. From memory-cloud v0.170.0 a numeric `current`
 from the pre-check can be a lower bound because `count` includes only visible
 contexts.
 
@@ -1897,7 +1919,8 @@ delivered as soon as it is placed in a reply, so a reply nobody reads uses it
 up: it will not come again, here or in the person's MCP client. A caller that
 does not show the `bootstrap` reply to a person (a script, a headless agent,
 a scheduled job) should add `?notices=off` to its `mcpUrl`, which this SDK
-sends, query and all, with every MCP request:
+sends, query and all, with every MCP request (`kagura-memory-mcp --notices
+off` and `kagura-memory setup … --notices off` write it for an MCP host):
 
 ```ts
 // A script whose replies nobody reads: no notices.
@@ -1949,13 +1972,14 @@ the counterpart to `recall`'s probabilistic search.
 
 | Method | What it does |
 |--------|--------------|
-| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. From v0.169.0 the connection selects the workspace by scoped API key, MCP URL, then current workspace. From v0.170.0 `count` is the visible count before filtering, and older servers report quota usage. `total` is the page size. `can_create` and the response `limit` describe workspace-wide capacity. `hint` can explain an empty directory or a full workspace with hidden contexts. From v0.82.0 the directory is paged — 100 contexts a page, 20 with `includeDetails` and no `nameContains` — with `has_more` / `next_cursor`: pass `next_cursor` back as `cursor` for the next page, with the same `nameContains`. `limit` sets the page size, 1-200; more than 20 with `includeDetails` and no non-blank `nameContains` throws before any request, as the server would refuse it. Servers before v0.82.0 ignore `limit` and `cursor` and return every context. `nameContains` is sent trimmed, and not at all when blank. There is no `maxChars`: the page's 20,000-character budget is fixed, and a v0.82.0+ server refuses an argument `list_contexts` does not declare. The envelope's `limit` is the plan's context maximum, not the page size. |
+| `listContexts` | The contexts you can see, most recently used first, as a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at`; server v0.73.0+). `nameContains` filters (server v0.73.0+; older servers ignore it and return every context); `includeSummary` (capped at 300 chars), `includeDetails` (full `summary` + `embedding_model`) and `includeStats` (`memory_count`) add fields. From v0.169.0 the connection selects the workspace by scoped API key, MCP URL, then current workspace. From v0.170.0 `count` is the visible count before filtering, and older servers report quota usage. `total` is the page size. `can_create` and the response `limit` describe workspace-wide capacity. `hint` can explain an empty directory or a full workspace with hidden contexts. From v0.82.0 the directory is paged — 100 contexts a page, 20 with `includeDetails` and no `nameContains` — with `has_more` / `next_cursor`: pass `next_cursor` back as `cursor` for the next page, with the same `nameContains`. `limit` sets the page size, 1-200; more than 20 with `includeDetails` and no non-blank `nameContains` throws before any request, as the server would refuse it. Servers before v0.82.0 ignore `limit` and `cursor` and return every context. `nameContains` is sent trimmed, and not at all when blank. There is no `maxChars`: the page's 20,000-character budget is fixed, and a v0.82.0+ server refuses an argument `list_contexts` does not declare. The envelope's `limit` is the plan's context maximum, not the page size. `workspaceId` (v0.177.0+, sent only when set) lists another workspace the account is a member of instead of the connection's: then `count` / `total` describe that workspace, `limit` and `can_create` are absent, and an empty listing's `hint` says contexts there are created from a connection to it (`/mcp/w/<id>`). A workspace the caller is not a member of (or, under a workspace-scoped API key, any but the key's) throws `KaguraPermissionError` (`permission_denied`); a suspended one `KaguraError` `workspace_suspended`; one where the account has no seat `KaguraFeatureNotAvailableError`; a non-UUID, or the option on an older server, `invalid_argument`. From v0.177.0 the reply also carries `other_workspaces` (how many other usable workspaces the account has, when there are any; never under a workspace-scoped key) and `workspaces_hint` (left out on the `google` / `microsoft` views). |
+| `listWorkspaces` | The workspaces the account is a member of (MCP `list_workspaces`, memory-cloud v0.177.0+), typed `AccountWorkspaceList`: `workspaces: [{id, name, role, current, usable, reason?}]` and `total`. `usable` says whether `listContexts({ workspaceId })` lists it now, `reason` why not (`workspace_suspended`, `feature_not_available`). The tool is in the `full` profile only but callable from any URL; a workspace-scoped API key sees only its workspace; it answers while the connection's workspace is suspended and is exempt from the daily MCP call limit. An older server throws `KaguraError` `unknown_tool`; a reply the model cannot read, `KaguraResponseError`. |
 | `createContext` | New context. Throws `KaguraQuotaError` when the workspace limit is reached. The SDK checks `can_create` from a one-row `listContexts({ limit: 1 })` page first. When `count` is below the workspace limit, the pre-check error reports the limit and sets `current` to `null`. Its `gate` and plan fields are `null`. Also throws `KaguraFeatureNotAvailableError` for a shared one (`isPrivate: false`) on a plan without shared contexts (server v0.75.0+). `embeddingModel` cannot be changed through the API afterwards (an operator can migrate it server-side, v0.66.0+). `resourceId` is deprecated and no longer sent, since the server ignores it: set it with `updateContext`, or use `setupResource`. |
-| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed; its `provenance` (v0.79.0+) labels the items as notes context editors stored, not operator instructions. `search_config` carries `llm_selector_enabled` / `llm_selector_effective` (v0.115.0+). |
+| `getContextInfo` | Metadata plus, by default, a memory-count breakdown. On server v0.74.0+ also a trimmed `guardrails` block: absent when the MCP URL carries `?guardrails=off`, `null` when the server's read failed; its `provenance` (v0.79.0+) labels the items as notes context editors stored, not operator instructions. `search_config` carries `llm_selector_enabled` / `llm_selector_effective` (v0.115.0+) and `fusion` / `fusion_effective` (v0.178.0+). |
 | `updateContext` | Change display name, summary, usage guide, visibility, lock. `isPublic: true` is plan-gated and throws `KaguraFeatureNotAvailableError` on a plan without public contexts. |
 | `deleteContext` | Delete by id. Locked contexts are refused. |
 | `mergeContexts` | Move memories between contexts. Both must share an embedding model and workspace. |
-| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). The weights and reranker settings need context editor or above; a context that does not exist, or that the caller cannot see, also throws `KaguraPermissionError`. Returns the whole updated `config`, the only place the reinforce and routing fields come back; it also carries the content-chunk state (`content_chunks_enabled`, `_effective`, `_supported`, `_can_change`, `_disabled_reason`, `_in_use`, `_limit`, `_backfill_pending`, and `embedding_provider`; v0.110.0–v0.113.0) and the recall LLM selector's (`llm_selector_*`, v0.115.0+). `contentChunksEnabled` (v0.110.0+; on, memory content — not only summaries — goes to the embedding and rerank providers) and `llmSelectorEnabled` (v0.115.0+) turn them on or off; both need the context owner or a workspace owner/admin, and where the deployment gates them by plan, the plan's feature and a free slot (`KaguraFeatureNotAvailableError` / `KaguraQuotaError`). Write back the stored `*_enabled` flag, never `*_effective`. |
+| `updateSearchConfig` | Hybrid-search weights (must sum to 1.0 ±0.01), reranking (`useRerank`, which a `recall` that omits it follows) and the reranker (`voyage`, `cohere` or `self_hosted`), reinforce re-rank (`reinforceEnabled`, `reinforceMaxBoost`, `reinforceRequireHostArbitration`) and query routing (`routingMode`). `fusion` (v0.178.0+, sent only when set, not checked locally) picks how hybrid recall fuses its two legs: `auto` (the default: `weighted` when the weights are not 0.6 / 0.4, else the deployment's `HYBRID_FUSION`), `rrf` (suits conversation and work history) or `weighted` (with a higher `semanticWeight`, suits documents and manuals); the server refuses another value with `invalid_search_config`, and a server before v0.178.0 refuses the argument with `invalid_argument`. The weights and reranker settings need context editor or above (`KaguraPermissionError`); a context that does not exist, or that the caller cannot reach, throws `KaguraNotFoundError` (`context_not_found`, v0.126.0+; older servers answered `permission_denied`). Returns the whole updated `config`, the only place the reinforce and routing fields come back; it also carries the content-chunk state (`content_chunks_enabled`, `_effective`, `_supported`, `_can_change`, `_disabled_reason`, `_in_use`, `_limit`, `_backfill_pending`, and `embedding_provider`; v0.110.0–v0.113.0) and the recall LLM selector's (`llm_selector_*`, v0.115.0+) and from v0.178.0 `fusion` with `fusion_effective`, the fusion recall resolves it to (`weighted`, `rrf` or the deployment's `keyword_floor`). `contentChunksEnabled` (v0.110.0+; on, memory content — not only summaries — goes to the embedding and rerank providers) and `llmSelectorEnabled` (v0.115.0+) turn them on or off; both need the context owner or a workspace owner/admin, and where the deployment gates them by plan, the plan's feature and a free slot (`KaguraFeatureNotAvailableError` / `KaguraQuotaError`). Write back the stored `*_enabled` flag and `fusion`, never `*_effective` / `fusion_effective`. |
 | `setupResource` | Context + resource entity + ingestion token in one transaction. The returned token is plaintext and shown once. The context is named `name`, or `resourceId` when that is omitted. `summary` is deprecated and no longer sent, since the server ignores it: set it afterwards with `updateContext`. Plan-gated: throws `KaguraFeatureNotAvailableError` on a plan without resources. |
 
 ### Agent run-state
@@ -2523,7 +2547,7 @@ CLI as `kagura-memory`: 23 of the 24 top-level commands of the Python CLI
 differ.
 
 The parity target is the Python SDK and CLI **0.44.0**, checked against
-memory-cloud up to **v0.170.0**.
+memory-cloud up to **v0.178.0**.
 
 **SDK ↔ memory-cloud compatibility.**
 [`docs/compatibility.md`](docs/compatibility.md) records, for each release

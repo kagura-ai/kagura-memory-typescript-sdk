@@ -5,6 +5,7 @@ import {
   mcpUrlToolView,
   mcpUrlWithQuery,
   normalizeGuardrails,
+  normalizeNotices,
   normalizeToolProfile,
   parseMcpUrl,
   readAddToolsFlag,
@@ -50,6 +51,10 @@ Connect a stdio MCP host to Kagura Cloud using an OAuth profile.
                        of the profile, e.g. explore; may repeat, at most 100
   --context CONTEXT_ID Set ?context= (server v0.114.0+): the default context
                        for tools called without context_id
+  --notices off        Set ?notices=off (server v0.161.0+): bootstrap replies
+                       carry no service notices. A notice is delivered once per
+                       person, so only a headless connection, one no person
+                       reads, should turn them off
   --session-id NAME    Send Kagura-Session-Id on every upstream request (server
                        v0.114.0+; default: $KAGURA_MCP_SESSION_ID): 1-128
                        letters, digits, '.', '_' or '-'
@@ -103,9 +108,9 @@ function sessionId(value: string): string {
 
 /**
  * The upstream URL query (`--guardrails`, `--tool-profile`, `--add-tools`,
- * `--context`) and the session id (`--session-id`, else
+ * `--context`, `--notices`) and the session id (`--session-id`, else
  * {@link SESSION_ENV}), validated as Python's `kagura-mcp` validates them
- * (python-sdk#258, #300). An invalid flag stops the proxy; an invalid
+ * (python-sdk#258, #300, #342). An invalid flag stops the proxy; an invalid
  * variable may come from the ambient environment, so it is ignored with a
  * warning rather than taking every Kagura tool down with it.
  *
@@ -123,6 +128,7 @@ function upstreamOptions(
   const added = readAddToolsFlag(addToolsRaw);
   if ("problem" in added) throw invalid("add-tools", added.problem);
   const context = checked("context", values.context, (v) => normalizeUuid(pyStrip(v), "context"));
+  const notices = checked("notices", values.notices, normalizeNotices);
   let session = checked("session-id", values["session-id"], sessionId);
   const fromEnv = pyStrip(env[SESSION_ENV] ?? "");
   if (session === undefined && fromEnv) {
@@ -133,7 +139,7 @@ function upstreamOptions(
     }
   }
   return {
-    query: { guardrails, profile, addTools: added.names.length > 0 ? added.names : undefined, context },
+    query: { guardrails, profile, addTools: added.names.length > 0 ? added.names : undefined, context, notices },
     sessionId: session,
   };
 }
@@ -176,6 +182,7 @@ export async function runProxy(argv: string[], io: ProxyIo): Promise<number> {
         { name: "tool-profile", type: "value" },
         { name: "add-tools", type: "multiple" },
         { name: "context", type: "value" },
+        { name: "notices", type: "value" },
         { name: "session-id", type: "value" },
         { name: "help" },
         { name: "version" },

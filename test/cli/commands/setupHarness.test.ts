@@ -1150,6 +1150,26 @@ describe("setup hermes", () => {
     expect(h.err.join("\n")).toContain(`url: "${MCP_URL}?profile=core&add_tools=explore,list_edges"`);
   });
 
+  // Python 0.48.0's `--notices off` (python-sdk#342): written for every
+  // harness, Hermes and OpenClaw included, since the notices come in the
+  // bootstrap reply, not in MCP instructions.
+  it.each(["codex", "hermes", "openclaw"])("%s --notices off puts ?notices=off last on the URL", async (name) => {
+    const h = harness({});
+    expect(
+      await runCli(setup(name, "--tool-profile", "core", "--notices", " Off ", "-y", "--dry-run"), h.deps),
+    ).toBe(0);
+    expect(report(h).mcp_url).toBe(`${MCP_URL}?profile=core&notices=off`);
+  });
+
+  it("keeps a ?notices= already in --mcp-url without the flag, and refuses any value but off", async () => {
+    const h = harness({});
+    expect(await runCli(["setup", "hermes", "--mcp-url", `${MCP_URL}?notices=off`, "-y", "--dry-run"], h.deps)).toBe(0);
+    expect(report(h).mcp_url).toBe(`${MCP_URL}?notices=off`);
+    const bad = harness({});
+    expect(await runCli(setup("codex", "--notices", "on", "--dry-run"), bad.deps)).toBe(2);
+    expect(bad.err.join("\n")).toContain("Invalid value for '--notices': notices must be 'off', got 'on'");
+  });
+
   it("describes itself and --guardrails in Python's words", async () => {
     const h = harness({});
     expect(await runCli(["setup", "hermes", "--help"], h.deps)).toBe(0);

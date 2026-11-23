@@ -71,6 +71,14 @@ const CURSOR: FlagSpec = {
     "is ignored (memory-cloud 0.82.0+).",
 };
 
+const WORKSPACE_ID: FlagSpec = {
+  name: "workspace-id",
+  type: "value",
+  help:
+    "List another workspace you are a member of (an id from 'kagura-memory workspace list'); " +
+    "default: the connection's (memory-cloud 0.177.0+).",
+};
+
 /**
  * The stderr line after a cut `list_contexts` page (memory-cloud v0.82.0+,
  * #1743) — the Python CLI 0.44.0's `_page_footer`, word for word.
@@ -117,7 +125,8 @@ const list: Command = {
     "    kagura-memory context list\n" +
     "    kagura-memory context list --name-contains auth --summary\n" +
     "    kagura-memory context list --stats\n" +
-    "    kagura-memory context list --limit 50 --cursor 50",
+    "    kagura-memory context list --limit 50 --cursor 50\n" +
+    "    kagura-memory context list --workspace-id WS_UUID",
   spec: {
     flags: [
       NAME_CONTAINS,
@@ -126,6 +135,7 @@ const list: Command = {
       { name: "stats", type: "switch", help: "Add memory_count per context" },
       LIMIT,
       CURSOR,
+      WORKSPACE_ID,
     ],
   },
   run: async (deps, args) => {
@@ -156,6 +166,7 @@ const list: Command = {
       ...(args.flags.has("stats") ? { includeStats: true } : {}),
       ...(cursor !== undefined ? { cursor } : {}),
       ...(limit !== undefined ? { limit } : {}),
+      ...(args.values["workspace-id"] !== undefined ? { workspaceId: args.values["workspace-id"] } : {}),
     };
     return runClientCommand(deps, undefined, (client) => client.listContexts(options), {
       needsContext: false,
@@ -296,6 +307,16 @@ const RERANKER: FlagSpec = {
   help: "Reranker provider (self_hosted: the deployment's keyless local reranker)",
 };
 
+const FUSION_CHOICES = ["auto", "rrf", "weighted"] as const;
+const FUSION: FlagSpec = {
+  name: "fusion",
+  type: "value",
+  metavar: `[${FUSION_CHOICES.join("|")}]`,
+  help:
+    "How hybrid recall fuses its two legs: auto (default), rrf (conversation and work history) or " +
+    "weighted (documents; raise --semantic) (server v0.178.0+)",
+};
+
 const searchConfig: Command = {
   summary: "Update search configuration for a context.",
   args: "CONTEXT_ID",
@@ -310,6 +331,7 @@ const searchConfig: Command = {
       "context search-config CTX_UUID --rerank --reranker self_hosted",
       "context search-config CTX_UUID --content-chunks",
       "context search-config CTX_UUID --no-llm-selector",
+      "context search-config CTX_UUID --fusion rrf",
     ),
   spec: {
     flags: [
@@ -341,6 +363,7 @@ const searchConfig: Command = {
           "(server v0.115.0+)",
       },
       { name: "no-llm-selector", type: "switch", help: "Turn the recall LLM selector off" },
+      FUSION,
     ],
   },
   run: async (deps, args) => {
@@ -371,6 +394,9 @@ const searchConfig: Command = {
       ["--llm-selector", "--no-llm-selector"],
     );
 
+    const rawFusion = args.values.fusion;
+    const fusion = rawFusion === undefined ? undefined : parseChoice(FUSION, rawFusion, FUSION_CHOICES);
+
     const patch = {
       ...(semanticWeight !== undefined ? { semanticWeight } : {}),
       ...(bm25Weight !== undefined ? { bm25Weight } : {}),
@@ -380,6 +406,7 @@ const searchConfig: Command = {
       ...(rerankerModel !== undefined ? { rerankerModel } : {}),
       ...(contentChunksEnabled !== undefined ? { contentChunksEnabled } : {}),
       ...(llmSelectorEnabled !== undefined ? { llmSelectorEnabled } : {}),
+      ...(fusion !== undefined ? { fusion } : {}),
     };
     if (Object.keys(patch).length === 0) {
       throw new CliError("At least one option is required");

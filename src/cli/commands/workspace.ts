@@ -4,7 +4,10 @@
  * Python CLI's `workspace` group and of the three commands `cli.py`
  * attaches to its `auth` group.
  *
- * Every one of them runs through {@link runWorkspaceCommand}, the port of
+ * `workspace list` (the Python CLI 0.49.0's, memory-cloud v0.177.0+) is the
+ * one exception: it calls the MCP tool `list_workspaces` through the usual
+ * client credential chain. Every other one runs through
+ * {@link runWorkspaceCommand}, the port of
  * `_run_workspace_command`: the workspace comes from the same credential
  * source as the key (#115), and the client is built from exactly that
  * credential. The server accepts only the workspace OWNER's static API key
@@ -20,6 +23,8 @@
  */
 
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "../../models.js";
+import { modelDumpOf } from "../../modelDumpView.js";
+import { ACCOUNT_WORKSPACE_LIST } from "../../pyModels.js";
 import { normalizeUuid } from "../../pyCompat.js";
 import {
   ResponseReader,
@@ -38,6 +43,7 @@ import {
   type CommandGroup,
 } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
+import { formatDumpsJson } from "../modelDump.js";
 import { formatJson } from "../output.js";
 import {
   CliError,
@@ -51,6 +57,7 @@ import {
   type Param,
 } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
+import { runClientCommand } from "../runClientCommand.js";
 
 // ---------------------------------------------------------------------------
 // The runner
@@ -521,9 +528,64 @@ const INVITE_GROUP: CommandGroup = {
   commands: { create: inviteCreate, list: inviteList, revoke: inviteRevoke },
 };
 
+// ---------------------------------------------------------------------------
+// workspace list
+// ---------------------------------------------------------------------------
+
+/**
+ * The `workspace list` table — the Python CLI 0.49.0's `_workspaces_table`:
+ * one row per workspace, `yes` / `-` under CURRENT, and under USABLE `yes`,
+ * or `no` with the reason in parentheses.
+ */
+export function workspacesTable(result: unknown): string {
+  const lines = [`${pad("ID", 36)} ${pad("NAME", 24)} ${pad("ROLE", 7)} ${pad("CURRENT", 7)} USABLE`];
+  const rows = (result as { workspaces?: unknown }).workspaces;
+  for (const ws of Array.isArray(rows) ? (rows as Record<string, unknown>[]) : []) {
+    let usable = ws.usable === true ? "yes" : "no";
+    if (typeof ws.reason === "string" && ws.reason !== "") usable += ` (${ws.reason})`;
+    const text = (value: unknown): string => (typeof value === "string" ? value : "");
+    lines.push(
+      `${pad(text(ws.id), 36)} ${pad(text(ws.name), 24)} ${pad(text(ws.role), 7)} ` +
+        `${pad(ws.current === true ? "yes" : "-", 7)} ${usable}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * `workspace list`: the MCP tool `list_workspaces` (memory-cloud v0.177.0+,
+ * #2972) through the usual client credential chain, not the owner-key
+ * runner the rest of this group uses.
+ */
+const workspaceList: Command = {
+  summary: "List the workspaces your account is a member of (memory-cloud 0.177.0+).",
+  description:
+    "  Calls the MCP tool list_workspaces with the configured credential (no owner\n" +
+    "  key needed): your role in each, the connection's workspace (CURRENT), and\n" +
+    "  whether 'kagura-memory context list --workspace-id ID' can list it now\n" +
+    "  (USABLE, with the reason when not). A workspace-scoped API key sees only its\n" +
+    "  own workspace.\n\n" +
+    "  Examples:\n" +
+    "    kagura-memory workspace list\n" +
+    "    kagura-memory workspace list --json",
+  spec: { flags: [JSON_OUTPUT] },
+  run: async (deps, args) => {
+    rejectExtraArgs(args);
+    const json = args.flags.has("json");
+    return runClientCommand(deps, undefined, (client) => client.listWorkspaces(), {
+      needsContext: false,
+      format: json
+        ? (result) => formatDumpsJson(modelDumpOf(result, ACCOUNT_WORKSPACE_LIST, "list_workspaces"))
+        : workspacesTable,
+    });
+  },
+};
+
 export const WORKSPACE_GROUP: CommandGroup = {
-  summary: "Workspace administration (owner API key required, server v0.42.0+).",
-  commands: { member: MEMBER_GROUP, invite: INVITE_GROUP },
+  summary:
+    "Workspaces: list yours (any credential), and administer members and invitations (owner API key " +
+    "required, server v0.42.0+).",
+  commands: { list: workspaceList, member: MEMBER_GROUP, invite: INVITE_GROUP },
 };
 
 // ---------------------------------------------------------------------------
