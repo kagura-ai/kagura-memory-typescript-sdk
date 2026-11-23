@@ -6,6 +6,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Catches up with memory-cloud 0.162.0 – 0.178.0 (per-context hybrid fusion,
+`list_workspaces` and `list_contexts(workspace_id)`, `--notices off`),
+matching the Python SDK 0.48.0 and 0.49.0 (#154).
+
+### Added
+
+- `updateSearchConfig({ fusion })` (memory-cloud v0.178.0): how hybrid recall
+  fuses its two legs, `auto` (the default: `weighted` when the weights are not
+  0.6 / 0.4, else the deployment's `HYBRID_FUSION`), `rrf` (conversation and
+  work history) or `weighted` (documents and manuals, with a higher semantic
+  weight). Sent only when set, as given; the server refuses an unknown value
+  with `invalid_search_config`, and a server before v0.178.0 refuses the
+  argument with `invalid_argument`. `SearchConfig.fusion` (stored) and
+  `fusion_effective` (what recall uses, `keyword_floor` included), both plain
+  optional strings, from `updateSearchConfig`'s `config` and `getContextInfo`'s
+  `search_config`; read `fusion`, never `fusion_effective`, before writing it
+  back. `kagura-memory context search-config --fusion auto|rrf|weighted` (#154).
+- `listWorkspaces()` (memory-cloud v0.177.0): the MCP tool `list_workspaces`,
+  typed `AccountWorkspaceList` / `AccountWorkspace` (`id`, `name`, `role`,
+  `current`, `usable`, `reason`), as the Python SDK 0.49.0 names them. A server
+  before v0.177.0 answers `unknown_tool`. `kagura-memory workspace list`
+  prints the Python CLI 0.49.0's table (`--json`: the model's dump) with the
+  usual credential, no owner key (#154).
+- `listContexts({ workspaceId })` (memory-cloud v0.177.0): lists another
+  workspace the account is a member of, sent as `workspace_id` only when set.
+  A non-member is `KaguraPermissionError`, a workspace without a seat
+  `KaguraFeatureNotAvailableError`, a suspended one `workspace_suspended`.
+  `ListContextsResponse.other_workspaces` and `workspaces_hint` type the
+  pointer every reply may carry. `kagura-memory context list --workspace-id`
+  (#154).
+- `kagura-memory-mcp --notices off` and `kagura-memory setup
+  claude|codex|hermes|openclaw --notices off` put `?notices=off` on the MCP URL
+  (memory-cloud v0.161.0), so `bootstrap` replies carry no service notices: for
+  a connection no person reads. Never written unasked; any value but `off` is
+  refused (exit 2). A `setup claude` re-run without it says it was dropped, as
+  for the other query flags (#154).
+
+### Changed
+
+- `createContext`'s pre-check error for a full workspace whose visible
+  `count` is below its `limit` now uses the Python SDK 0.48.0's words: "This
+  workspace is at its limit of N contexts; contexts you cannot see (for
+  example ones private to other members) count toward it. Delete unused
+  contexts or upgrade the plan." `current` stays `null` (#154).
+- The `kagura-memory workspace` group's summary says `workspace list` needs no
+  owner key, as the Python CLI 0.49.0's does.
+- README and `docs/compatibility.md` say this release is checked against
+  memory-cloud up to 0.178.0, with a table of what 0.162.0 – 0.178.0 changed
+  for this SDK and each surface's floor. `docs/cli-help-differences.md` lists
+  the new options and the `workspace list` page, which Python 0.44.0 lacks
+  (#154).
+
+### Fixed
+
+- The `updateSearchConfig` notes said a missing or unreachable context throws
+  `KaguraPermissionError`; memory-cloud v0.126.0+ answers `context_not_found`
+  (`KaguraNotFoundError`). Docs only (#154).
+
 ## [0.19.1] - 2026-11-18
 
 ### Fixed
