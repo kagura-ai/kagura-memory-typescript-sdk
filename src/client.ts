@@ -703,9 +703,12 @@ export interface ListContextsOptions {
    * {@link KaguraClient.listWorkspaces}) instead of the connection's, under
    * the account's role there; a `context_id` from it works in the other
    * tools. Sent as `workspace_id` only when set, as given (the server takes
-   * a UUID; `""` reads as unset there, anything else is
-   * `invalid_argument`). Memory-cloud v0.177.0+ (#2972); an older server
-   * refuses it as an unknown argument (`invalid_argument`).
+   * a UUID and refuses anything else with `invalid_argument`). A blank value
+   * (`""` or whitespace only) throws before any request: the server reads
+   * `""` as no argument and would list the connection's workspace instead.
+   * Memory-cloud v0.177.0+ (#2972). A server from v0.82.0 to v0.176.x
+   * refuses it as an unknown argument (`invalid_argument`); one before
+   * v0.82.0 ignores it and lists the connection's workspace.
    */
   workspaceId?: string;
 }
@@ -992,9 +995,10 @@ export interface UpdateSearchConfigOptions {
    * manuals. A recall over several contexts follows the first one's. Sent
    * only when set, as given: the value is not checked locally, and the
    * server refuses one it does not know with `invalid_search_config`. A
-   * server before v0.178.0 has no such argument and refuses the call with
-   * `invalid_argument` (`unknown_arguments` in the envelope), changing
-   * nothing. `config.fusion_effective` says what recall now uses.
+   * server from v0.82.0 to v0.177.x has no such argument and refuses the
+   * call with `invalid_argument` (`unknown_arguments` in the envelope),
+   * changing nothing; one before v0.82.0 ignores it, answers success and
+   * stores no fusion. `config.fusion_effective` says what recall now uses.
    */
   fusion?: string;
 }
@@ -3934,7 +3938,7 @@ export class KaguraClient {
    * @throws Error before any request if `limit` is not an integer in
    *   1-200, or is above 20 with `includeDetails` and no non-blank
    *   `nameContains` (the server refuses that page with
-   *   `validation_error`).
+   *   `validation_error`), or if `workspaceId` is blank.
    * @throws KaguraPermissionError when `workspaceId` names a workspace the
    *   caller is not a member of (or a deleted one), or under a
    *   workspace-scoped API key any workspace but the key's: the same
@@ -3943,10 +3947,19 @@ export class KaguraClient {
    *   that workspace's plan (`feature_not_available`).
    * @throws KaguraError with `code` `"workspace_suspended"` for a workspace
    *   whose slot is suspended, or `"invalid_argument"` for a `workspaceId`
-   *   that is not a UUID or one sent to a server before v0.177.0.
+   *   that is not a UUID or one sent to a server from v0.82.0 to v0.176.x
+   *   (a server before v0.82.0 ignores it).
    */
   async listContexts(options: ListContextsOptions = {}): Promise<ListContextsResponse> {
     const nameContains = normalizeNameContains(options.nameContains);
+    if (typeof options.workspaceId === "string" && pyStrip(options.workspaceId) === "") {
+      // The server reads "" as no argument: it would list the connection's
+      // workspace, not the one asked for.
+      throw new Error(
+        "workspaceId must not be blank: omit it to list the connection's workspace, or pass a " +
+          "workspace id from listWorkspaces()",
+      );
+    }
     let limit: number | undefined;
     if (isSet(options.limit)) {
       limit = validateIntRange("limit", options.limit, 1, LIST_CONTEXTS_MAX_LIMIT);
@@ -3976,7 +3989,7 @@ export class KaguraClient {
     if (limit !== undefined) {
       args.limit = limit;
     }
-    if (options.workspaceId !== undefined) {
+    if (isSet(options.workspaceId)) {
       args.workspace_id = options.workspaceId;
     }
     const result = await this.callToolChecked("list_contexts", args);
@@ -4000,10 +4013,14 @@ export class KaguraClient {
    * key only the key's workspace is listed. It answers while the
    * connection's workspace is suspended (the slot gate and the daily MCP
    * call limit do not apply to it), so it is how an account finds a usable
-   * workspace then.
+   * workspace then. It needs no owner key, but a connector key may not call
+   * it (memory-cloud v0.173.0+ lets one call only the connector worker's
+   * tools).
    *
    * @throws KaguraError with `code` `"unknown_tool"` on a server before
    *   v0.177.0, which has no such tool.
+   * @throws KaguraPermissionError under a connector key (`permission_denied`,
+   *   `error_code` `AUTH-204` in `details`).
    * @throws KaguraResponseError when the reply does not match the model
    *   (`operation` `"list_workspaces"`).
    */
@@ -4878,8 +4895,8 @@ export class KaguraClient {
    *   older servers answered `permission_denied`).
    * @throws KaguraError with `code` `"invalid_search_config"` for a value
    *   the server refuses (weights that do not sum to 1.0, an unknown
-   *   `fusion`), or `"invalid_argument"` for `fusion` on a server before
-   *   v0.178.0.
+   *   `fusion`), or `"invalid_argument"` for `fusion` on a server from
+   *   v0.82.0 to v0.177.x (one before v0.82.0 ignores it).
    */
   async updateSearchConfig(
     options: UpdateSearchConfigOptions,

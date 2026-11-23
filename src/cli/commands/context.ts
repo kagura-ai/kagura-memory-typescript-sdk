@@ -23,7 +23,8 @@ import {
   LIST_CONTEXTS_MAX_LIMIT,
   normalizeNameContains,
 } from "../../client.js";
-import { pyStrip } from "../../pyCompat.js";
+import { excMessage } from "../../errors.js";
+import { normalizeUuid, pyStrip } from "../../pyCompat.js";
 import { formatJson } from "../output.js";
 import { CliError, CliUsageError, optionalRanged, pairedFlag, parseChoice } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
@@ -78,6 +79,21 @@ const WORKSPACE_ID: FlagSpec = {
     "List another workspace you are a member of (an id from 'kagura-memory workspace list'); " +
     "default: the connection's (memory-cloud 0.177.0+).",
 };
+
+/**
+ * `--workspace-id`: a workspace UUID, sent canonically, as `setup claude
+ * --context` reads its UUID. The server reads a blank `workspace_id` as
+ * none and lists the connection's workspace, and refuses anything else
+ * that is not a UUID, so both are usage errors here (exit 2).
+ */
+function parseWorkspaceId(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  try {
+    return normalizeUuid(pyStrip(raw), "--workspace-id");
+  } catch (e) {
+    throw new CliUsageError(`Invalid value for '--workspace-id': ${excMessage(e)}`);
+  }
+}
 
 /**
  * The stderr line after a cut `list_contexts` page (memory-cloud v0.82.0+,
@@ -141,6 +157,7 @@ const list: Command = {
   run: async (deps, args) => {
     // click converts the options before it looks for extra arguments.
     const limit = optionalRanged(args, LIMIT);
+    const workspaceId = parseWorkspaceId(args.values["workspace-id"]);
     rejectExtraArgs(args);
     // The filter as the server reads it, by the rule `listContexts` applies:
     // stripped the Python way, and a blank one (`--name-contains=`
@@ -166,7 +183,7 @@ const list: Command = {
       ...(args.flags.has("stats") ? { includeStats: true } : {}),
       ...(cursor !== undefined ? { cursor } : {}),
       ...(limit !== undefined ? { limit } : {}),
-      ...(args.values["workspace-id"] !== undefined ? { workspaceId: args.values["workspace-id"] } : {}),
+      ...(workspaceId !== undefined ? { workspaceId } : {}),
     };
     return runClientCommand(deps, undefined, (client) => client.listContexts(options), {
       needsContext: false,

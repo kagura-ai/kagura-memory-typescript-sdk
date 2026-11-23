@@ -1260,7 +1260,7 @@ describe("help", () => {
   it("lists workspace at the root, and its list command and two groups", async () => {
     const root = harness();
     expect(await runCli(["--help"], root.deps)).toBe(0);
-    expect(root.out.join("\n")).toMatch(/^ {2}workspace +Workspaces: list yours \(any credential\), and administer\.\.\.$/m);
+    expect(root.out.join("\n")).toMatch(/^ {2}workspace +Workspaces: list yours \(no owner key needed\), and\.\.\.$/m);
 
     const h = harness();
     expect(await runCli(["workspace", "--help"], h.deps)).toBe(0);

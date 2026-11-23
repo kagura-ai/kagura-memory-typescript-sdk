@@ -429,7 +429,10 @@ export interface AccountWorkspace {
   name: string;
   /** The account's role there (`owner` / `admin` / `member` / `viewer`; a plain string). */
   role: string;
-  /** Whether it is this connection's workspace (the `/mcp/w/<id>` one, else the account's current one). */
+  /**
+   * Whether it is this connection's workspace: a workspace-scoped API key's,
+   * else the `/mcp/w/<id>` one, else the account's current one.
+   */
   current: boolean;
   /** Whether `listContexts({ workspaceId: id })` lists it now. */
   usable: boolean;

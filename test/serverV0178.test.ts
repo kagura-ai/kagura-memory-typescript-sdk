@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import { runCli, type CliDeps } from "../src/cli/run.js";
 import {
   KaguraError,
+  KaguraFeatureNotAvailableError,
   KaguraPermissionError,
   KaguraQuotaError,
   KaguraResponseError,
@@ -298,6 +299,35 @@ describe("listWorkspaces (memory-cloud v0.177.0, #2972)", () => {
     expect(bare.status).toBe("success");
   });
 
+  it("reads a reply with keys a newer server adds, top level and per item", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_workspaces = {
+      ...WORKSPACES_REPLY,
+      next_cursor: null,
+      workspaces: [{ ...WORKSPACES_REPLY.workspaces[0], plan: "pro" }],
+      total: 1,
+    };
+    const result = await makeClient(server).listWorkspaces();
+    expect(result.workspaces[0]!.id).toBe(WS);
+    expect(result.total).toBe(1);
+  });
+
+  it("a connector key is refused with permission_denied (AUTH-204, v0.173.0+)", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_workspaces = {
+      status: "error",
+      error: "permission_denied",
+      message: "This connector key cannot call list_workspaces.",
+      error_code: "AUTH-204",
+      help: "This connection authenticates with a connector key, ...",
+    };
+    const err = await makeClient(server)
+      .listWorkspaces()
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KaguraPermissionError);
+    expect((err as KaguraError).details.error_code).toBe("AUTH-204");
+  });
+
   it("a server before v0.177.0 answers unknown_tool", async () => {
     const server = new FakeServer();
     server.toolResults.list_workspaces = {
@@ -339,6 +369,17 @@ describe("listContexts({ workspaceId }) (memory-cloud v0.177.0, #2972)", () => {
     });
   });
 
+  it("throws on a blank workspaceId before any request: the server would list the connection's workspace", async () => {
+    const server = new FakeServer();
+    const client = makeClient(server);
+    for (const blank of ["", "   "]) {
+      await expect(client.listContexts({ workspaceId: blank })).rejects.toThrow(
+        "workspaceId must not be blank",
+      );
+    }
+    expect(server.requests.filter((r) => r.body?.method === "tools/call")).toEqual([]);
+  });
+
   it("types other_workspaces and workspaces_hint", async () => {
     const server = new FakeServer();
     server.toolResults.list_contexts = {
@@ -374,6 +415,64 @@ describe("listContexts({ workspaceId }) (memory-cloud v0.177.0, #2972)", () => {
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(KaguraPermissionError);
     expect((err as KaguraPermissionError).requiredRole).toBe("viewer");
+  });
+
+  it("another workspace's reply passes through: no limit / can_create, its own empty hint", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = {
+      status: "success",
+      contexts: [],
+      count: 0,
+      total: 0,
+      has_more: false,
+      next_cursor: null,
+      hint: `No contexts of that workspace are visible to you. ... (/mcp/w/${WS}) ...`,
+      other_workspaces: 1,
+    };
+    const result = await makeClient(server).listContexts({ workspaceId: WS });
+    expect(server.toolCallArgs(0)).toEqual({ workspace_id: WS });
+    expect(result).not.toHaveProperty("limit");
+    expect(result).not.toHaveProperty("can_create");
+    expect(result.hint).toContain(`/mcp/w/${WS}`);
+    expect(result.other_workspaces).toBe(1);
+  });
+
+  it("the google / microsoft views send other_workspaces without workspaces_hint", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = {
+      status: "success",
+      contexts: [],
+      count: 0,
+      total: 0,
+      limit: 25,
+      can_create: true,
+      other_workspaces: 1,
+    };
+    const result = await makeClient(server).listContexts();
+    expect(result.other_workspaces).toBe(1);
+    expect(result).not.toHaveProperty("workspaces_hint");
+  });
+
+  it("a suspended workspace is workspace_suspended, one without a seat feature_not_available", async () => {
+    const server = new FakeServer();
+    server.toolResults.list_contexts = {
+      status: "error",
+      error: "workspace_suspended",
+      message: "This workspace is suspended.",
+      help: "...",
+    };
+    const client = makeClient(server);
+    const suspended = await client.listContexts({ workspaceId: WS }).catch((e: unknown) => e);
+    expect(suspended).toBeInstanceOf(KaguraError);
+    expect((suspended as KaguraError).code).toBe("workspace_suspended");
+
+    server.toolResults.list_contexts = {
+      status: "error",
+      error: "feature_not_available",
+      message: "You have no seat on this workspace's plan.",
+    };
+    const unseated = await client.listContexts({ workspaceId: WS }).catch((e: unknown) => e);
+    expect(unseated).toBeInstanceOf(KaguraFeatureNotAvailableError);
   });
 });
 
@@ -532,6 +631,46 @@ describe("CLI", () => {
     expect(h.server.toolCallArgs(0)).toEqual({ workspace_id: WS });
     expect(await runCli(["context", "list"], h.deps)).toBe(0);
     expect(h.server.toolCallArgs(1)).toEqual({});
+    // Sent canonically, as setup claude --context writes its UUID.
+    expect(
+      await runCli(["context", "list", "--workspace-id", ` ${WS.toUpperCase()} `], h.deps),
+    ).toBe(0);
+    expect(h.server.toolCallArgs(2)).toEqual({ workspace_id: WS });
+  });
+
+  it.each([[""], ["  "], ["not-a-uuid"]])(
+    "context list --workspace-id %j is a usage error (exit 2), with no request",
+    async (value) => {
+      const h = harness();
+      expect(await runCli(["context", "list", "--workspace-id", value], h.deps)).toBe(2);
+      expect(h.err.join("\n")).toContain(
+        `Invalid value for '--workspace-id': --workspace-id must be a UUID, got '${value.trim()}'`,
+      );
+      expect(h.server.requests).toEqual([]);
+    },
+  );
+
+  it("workspace list widens NAME to the longest name by display width, a CJK character two columns", async () => {
+    const h = harness();
+    const long = "A workspace name longer than the column";
+    h.server.toolResults.list_workspaces = {
+      status: "success",
+      workspaces: [
+        { id: WS, name: long, role: "owner", current: true, usable: true },
+        { id: CTX, name: "開発チーム", role: "member", current: false, usable: true },
+      ],
+      total: 2,
+    };
+    expect(await runCli(["workspace", "list"], h.deps)).toBe(0);
+    const width = long.length; // 39 columns, above the 24 minimum
+    expect(h.out.join("\n")).toBe(
+      [
+        `${"ID".padEnd(36)} ${"NAME".padEnd(width)} ROLE    CURRENT USABLE`,
+        `${WS} ${long} owner   yes     yes`,
+        // 5 wide characters take 10 columns.
+        `${CTX} 開発チーム${" ".repeat(width - 10)} member  -       yes`,
+      ].join("\n"),
+    );
   });
 
   it("workspace list calls list_workspaces and prints a table, as the Python CLI 0.49.0 does", async () => {

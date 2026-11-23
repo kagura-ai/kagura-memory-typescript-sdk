@@ -6,7 +6,8 @@
  *
  * `workspace list` (the Python CLI 0.49.0's, memory-cloud v0.177.0+) is the
  * one exception: it calls the MCP tool `list_workspaces` through the usual
- * client credential chain. Every other one runs through
+ * client credential chain (no owner key; a connector key is refused).
+ * Every other one runs through
  * {@link runWorkspaceCommand}, the port of
  * `_run_workspace_command`: the workspace comes from the same credential
  * source as the key (#115), and the client is built from exactly that
@@ -533,19 +534,51 @@ const INVITE_GROUP: CommandGroup = {
 // ---------------------------------------------------------------------------
 
 /**
+ * East Asian Wide and Fullwidth code points (Hangul Jamo, CJK, kana, Hangul
+ * syllables, compatibility and fullwidth forms, the wide emoji blocks and the
+ * supplementary ideograph planes): two terminal columns each.
+ */
+const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f],
+  [0x1f900, 0x1f9ff], [0x20000, 0x2fffd], [0x30000, 0x3fffd],
+];
+
+/** The terminal columns `value` takes: a wide or fullwidth code point counts 2, any other 1. */
+export function displayWidth(value: string): number {
+  let width = 0;
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!;
+    width += WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1;
+  }
+  return width;
+}
+
+/** `value` padded with spaces to `width` terminal columns, never cut. */
+function padDisplay(value: string, width: number): string {
+  return value + " ".repeat(Math.max(0, width - displayWidth(value)));
+}
+
+/**
  * The `workspace list` table — the Python CLI 0.49.0's `_workspaces_table`:
  * one row per workspace, `yes` / `-` under CURRENT, and under USABLE `yes`,
- * or `no` with the reason in parentheses.
+ * or `no` with the reason in parentheses. The NAME column is 24 columns
+ * wide, or as wide as the widest name, measured in terminal columns (a CJK
+ * character takes two), so no name is cut and every row lines up.
  */
 export function workspacesTable(result: unknown): string {
-  const lines = [`${pad("ID", 36)} ${pad("NAME", 24)} ${pad("ROLE", 7)} ${pad("CURRENT", 7)} USABLE`];
   const rows = (result as { workspaces?: unknown }).workspaces;
-  for (const ws of Array.isArray(rows) ? (rows as Record<string, unknown>[]) : []) {
+  const items = Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+  const text = (value: unknown): string => (typeof value === "string" ? value : "");
+  let nameWidth = 24;
+  for (const ws of items) nameWidth = Math.max(nameWidth, displayWidth(text(ws.name)));
+  const lines = [`${pad("ID", 36)} ${padDisplay("NAME", nameWidth)} ${pad("ROLE", 7)} ${pad("CURRENT", 7)} USABLE`];
+  for (const ws of items) {
     let usable = ws.usable === true ? "yes" : "no";
     if (typeof ws.reason === "string" && ws.reason !== "") usable += ` (${ws.reason})`;
-    const text = (value: unknown): string => (typeof value === "string" ? value : "");
     lines.push(
-      `${pad(text(ws.id), 36)} ${pad(text(ws.name), 24)} ${pad(text(ws.role), 7)} ` +
+      `${pad(text(ws.id), 36)} ${padDisplay(text(ws.name), nameWidth)} ${pad(text(ws.role), 7)} ` +
         `${pad(ws.current === true ? "yes" : "-", 7)} ${usable}`,
     );
   }
@@ -583,7 +616,7 @@ const workspaceList: Command = {
 
 export const WORKSPACE_GROUP: CommandGroup = {
   summary:
-    "Workspaces: list yours (any credential), and administer members and invitations (owner API key " +
+    "Workspaces: list yours (no owner key needed), and administer members and invitations (owner API key " +
     "required, server v0.42.0+).",
   commands: { list: workspaceList, member: MEMBER_GROUP, invite: INVITE_GROUP },
 };
