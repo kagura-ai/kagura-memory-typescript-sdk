@@ -17,8 +17,9 @@ matching the Python SDK 0.48.0 and 0.49.0 (#154).
   0.6 / 0.4, else the deployment's `HYBRID_FUSION`), `rrf` (conversation and
   work history) or `weighted` (documents and manuals, with a higher semantic
   weight). Sent only when set, as given; the server refuses an unknown value
-  with `invalid_search_config`, and a server before v0.178.0 refuses the
-  argument with `invalid_argument`. `SearchConfig.fusion` (stored) and
+  with `invalid_search_config`; a server from v0.82.0 to v0.177.x refuses the
+  argument with `invalid_argument`, and one before v0.82.0 ignores it (success,
+  nothing stored). `SearchConfig.fusion` (stored) and
   `fusion_effective` (what recall uses, `keyword_floor` included), both plain
   optional strings, from `updateSearchConfig`'s `config` and `getContextInfo`'s
   `search_config`; read `fusion`, never `fusion_effective`, before writing it
@@ -28,11 +29,16 @@ matching the Python SDK 0.48.0 and 0.49.0 (#154).
   `current`, `usable`, `reason`), as the Python SDK 0.49.0 names them. A server
   before v0.177.0 answers `unknown_tool`. `kagura-memory workspace list`
   prints the Python CLI 0.49.0's table (`--json`: the model's dump) with the
-  usual credential, no owner key (#154).
+  usual credential, no owner key; a connector key is refused (`AUTH-204`)
+  (#154).
 - `listContexts({ workspaceId })` (memory-cloud v0.177.0): lists another
-  workspace the account is a member of, sent as `workspace_id` only when set.
-  A non-member is `KaguraPermissionError`, a workspace without a seat
-  `KaguraFeatureNotAvailableError`, a suspended one `workspace_suspended`.
+  workspace the account is a member of, sent as `workspace_id` only when set;
+  a blank one throws before any request (the server would read it as none and
+  list the connection's workspace), and `--workspace-id` must be a UUID (exit
+  2). A non-member is `KaguraPermissionError`, a workspace without a seat
+  `KaguraFeatureNotAvailableError`, a suspended one `workspace_suspended`; a
+  server from v0.82.0 to v0.176.x refuses the argument (`invalid_argument`),
+  one before v0.82.0 ignores it and lists the connection's workspace.
   `ListContextsResponse.other_workspaces` and `workspaces_hint` type the
   pointer every reply may carry. `kagura-memory context list --workspace-id`
   (#154).

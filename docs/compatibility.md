@@ -38,7 +38,7 @@ and `context search-config --fusion`.
 | 0.169.0 / 0.170.0 | `list_contexts` lists the connection's workspace; `count` is the visible contexts ([memory-cloud#2884](https://github.com/kagura-ai/memory-cloud/issues/2884), [memory-cloud#2891](https://github.com/kagura-ai/memory-cloud/issues/2891)) | documented in 0.19.1; `createContext`'s message now in the Python SDK 0.48.0's words (below) |
 | 0.171.0 | `create_edge` / `update_edge` / `delete_edge` on a `supersedes` edge of a feed-managed context, and single resource ingest to a feed target, answer `409` `SYNC-LOCKED`; resource ingest refuses `event_metadata` with `sync_run_id` or `installation_generation` (`422`) | pass through |
 | 0.172.0 | workspace slot suspension (off by default): REST `403` `SLOT-001` with `details.gate` `workspace_slot`, MCP `workspace_suspended`; `/api/v1/workspace/embedding-status`, `/api/v1/system/embedding/models` and MCP `get_usage` need workspace membership; a workspace-scoped API key whose owner is not a member of its workspace answers `401` | REST: the generic `HTTP 403: <detail>` mapping with `code` `SLOT-001`; MCP: `KaguraError` `workspace_suspended`; pass through |
-| 0.173.0 | connector keys call only `recall`, `remember`, `create_edge`, `reference`, `update_memory`, `list_edges`, `delete_edge`, `forget` and `get_context_info`; every other tool and every REST route answers `AUTH-204` | the SDK's permission errors; pass through |
+| 0.173.0 | connector keys call only `recall`, `remember`, `create_edge`, `reference`, `update_memory`, `list_edges`, `delete_edge`, `forget` and `get_context_info`; every other tool (`list_workspaces` and `list_contexts` included) and every REST route answers `AUTH-204` | the SDK's permission errors; pass through |
 | 0.174.0 / 0.175.0 | a hybrid recall, and a routed one, answer from keyword search with `degraded: true` when the self-hosted inference server or the embedding is unavailable | already typed (`degraded`, `degraded_reason`) |
 | 0.175.0 | `reference`'s `memory_not_found` may carry `similar_ids: [{memory_id, summary, summary_cut?}]` ([memory-cloud#2959](https://github.com/kagura-ai/memory-cloud/issues/2959)) | `KaguraNotFoundError`; the envelope field is kept, not typed |
 | 0.173.2 / 0.175.0 / 0.172.0 | `GET /api/v1/resources/{id}/schema`'s field `description` defaults to `""`; `/api/v1/system/info` adds `kagura_public_return_url` and `features.workspace_slots` | read as before (`description` is always sent; `getServerInfo` keeps the new keys) |
@@ -55,9 +55,10 @@ history; `weighted` with a higher `semanticWeight` suits documents and manuals.
 A recall over several contexts follows the first one's. The server validates the
 value with the same model as REST and refuses another one with
 `invalid_search_config` (`backend/src/mcp_server/tools/search_config.py`); a
-server before 0.178.0 refuses the argument with `invalid_argument` and
+server from 0.82.0 to 0.177.x refuses the argument with `invalid_argument` and
 `unknown_arguments: ["fusion"]`, changing nothing (`find_unknown_arguments`,
-from 0.82.0). Both `update_search_config`'s `config` and `get_context_info`'s
+from 0.82.0), and one before 0.82.0 drops it unread: the call succeeds and
+stores no fusion. Both `update_search_config`'s `config` and `get_context_info`'s
 `search_config` carry `fusion` (stored) and `fusion_effective` (what recall uses:
 `weighted`, `rrf` or the deployment's `keyword_floor`). `SearchConfig` types
 both as optional strings, so a newer value passes; the `SearchConfig` model in
@@ -80,8 +81,12 @@ its workspace; it is exempt from the slot gate and from the daily MCP call
 limit, so it answers while the connection's workspace is suspended
 (`backend/src/mcp_server/tools/workspaces.py`, `_slot_gate.py`). A server before
 0.177.0 answers `unknown_tool`. `listContexts({ workspaceId })` sends
-`workspace_id` only when set, as given (`""` reads as unset on the server; a
-non-UUID is `invalid_argument`, as is the argument on an older server). A
+`workspace_id` only when set, as given; a blank one (`""` or whitespace) throws
+before any request, since the server reads `""` as unset and would list the
+connection's workspace, and `context list --workspace-id` must be a UUID (exit
+2). A non-UUID is `invalid_argument`, as is the argument on a server from
+0.82.0 to 0.176.x; one before 0.82.0 ignores it and lists the connection's
+workspace. A
 workspace the caller is not a member of, a deleted one, and under a
 workspace-scoped key any but the key's answer `permission_denied` (`your_role:
 "not_a_member"`, `required_role: "viewer"`; `KaguraPermissionError`); a
@@ -96,7 +101,8 @@ from a connection to it (`/mcp/w/<id>`). Every `list_contexts` reply may carry
 `workspaces_hint`, a fixed text the `google` / `microsoft` views leave out.
 `kagura-memory workspace list` prints the Python CLI 0.49.0's table, or with
 `--json` the model's dump; it uses the usual credential chain, not the owner
-key the rest of `workspace` needs.
+key the rest of `workspace` needs. A connector key may not call
+`list_workspaces` or `list_contexts` (`permission_denied`, `AUTH-204`; 0.173.0).
 
 **`createContext` (0.170.0).** When the pre-check's `count` and `limit` are both
 numbers and `count` is below `limit`, the `KaguraQuotaError` now reads, as the
