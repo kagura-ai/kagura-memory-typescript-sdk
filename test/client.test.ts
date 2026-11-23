@@ -1488,8 +1488,8 @@ describe("createContext quota pre-check", () => {
 
     expect(error).toBeInstanceOf(KaguraQuotaError);
     expect(error).toMatchObject({
-      message: "Context limit of 25 reached. Contexts you cannot see count toward this limit. " +
-        "Delete unused contexts or upgrade your plan.",
+      message: "This workspace is at its limit of 25 contexts; contexts you cannot see (for example ones " +
+        "private to other members) count toward it. Delete unused contexts or upgrade the plan.",
       quotaType: "contexts",
       current: null,
       limit: 25,

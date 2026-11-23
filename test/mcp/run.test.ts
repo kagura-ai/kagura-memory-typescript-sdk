@@ -276,6 +276,13 @@ describe("upstream URL query and session id flags (#83)", () => {
     expect(requests.map((r) => r.url)).toEqual([url, url]);
   });
 
+  // Python 0.48.0's `kagura-mcp --notices off` (python-sdk#342; memory-cloud v0.161.0).
+  it("--notices off puts ?notices=off last on the upstream URL, in any case", async () => {
+    const { requests } = await proxied(["--context", U, "--notices", " OFF "]);
+    const url = `${SERVER}?context=${U}&notices=off`;
+    expect(requests.map((r) => r.url)).toEqual([url, url]);
+  });
+
   it("replaces a value already in --server's query and keeps the rest", async () => {
     const { requests, errors } = await proxied([
       "--server", `${SERVER}?context=old&keep=1`,
@@ -340,6 +347,8 @@ describe("upstream URL query and session id flags (#83)", () => {
     [["--context", "nope"], "Invalid value for --context: context must be a UUID, got 'nope'"],
     [["--context="], "Invalid value for --context: context must be a UUID, got ''"],
     [["--guardrails", "on"], "Invalid value for --guardrails: guardrails must be 'off' or a context UUID, got 'on'"],
+    [["--notices", "on"], "Invalid value for --notices: notices must be 'off', got 'on'"],
+    [["--notices="], "Invalid value for --notices: notices must be 'off', got ''"],
     [["--tool-profile="], "Invalid value for --tool-profile: tool_profile must not be empty"],
     [["--tool-profile=-x"], "Invalid value for --tool-profile: tool_profile cannot start with '-': '-x'"],
     // Trimmed, then checked: Python 0.44.0's kagura-mcp says
@@ -373,7 +382,7 @@ describe("upstream URL query and session id flags (#83)", () => {
     const s = io();
     expect(await runProxy(["--help"], s.deps)).toBe(0);
     const help = s.output.join("");
-    for (const flag of ["--guardrails off|CONTEXT_ID", "--tool-profile NAME", "--add-tools NAME[,NAME...]", "--context CONTEXT_ID", "--session-id NAME"]) {
+    for (const flag of ["--guardrails off|CONTEXT_ID", "--tool-profile NAME", "--add-tools NAME[,NAME...]", "--context CONTEXT_ID", "--notices off", "--session-id NAME"]) {
       expect(help).toContain(flag);
     }
     expect(help).toContain(`$${SESSION_ENV}`);

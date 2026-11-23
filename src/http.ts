@@ -215,6 +215,36 @@ export function mcpUrlGuardrailsOff(url: McpUrl): boolean {
 }
 
 /**
+ * Whether the URL's first `notices` value is `off`, in any case and
+ * trimmed — Python's `mcp_url_notices_off`, as memory-cloud's
+ * `notices_off_in_url` (v0.161.0+, memory-cloud#2762) reads it: such a URL
+ * keeps service notices out of the `bootstrap` reply, and no other value
+ * means anything to the server.
+ */
+export function mcpUrlNoticesOff(url: McpUrl): boolean {
+  const first = queryParam(url, "notices");
+  return first !== undefined && pyStrip(first).toLowerCase() === "off";
+}
+
+/**
+ * Validate a `?notices=` value: only `off` — Python's `normalize_notices`.
+ *
+ * memory-cloud (v0.161.0+, memory-cloud#2762) leaves service notices out
+ * of the `bootstrap` reply when the URL's first `notices` value is `off`
+ * (trimmed, any case) and ignores any other value, so anything else is a
+ * typo and is refused here. Only a headless connection, one no person
+ * reads, should turn notices off: a notice is delivered once per person,
+ * and a connection that leaves them on uses them up.
+ *
+ * @returns `"off"`.
+ * @throws Error `notices must be 'off', got '…'`, in the Python SDK's words.
+ */
+export function normalizeNotices(value: string): string {
+  if (pyStrip(value).toLowerCase() !== "off") throw new Error(`notices must be 'off', got ${pyRepr(value)}`);
+  return "off";
+}
+
+/**
  * Drop `key` from the URL's query, every occurrence, keeping the other
  * parameters as written and leaving no bare `?` behind — Python's
  * `mcp_url_without_query_param`. Names compare decoded; a URL without the
@@ -379,6 +409,12 @@ export interface McpUrlQuery {
   addTools?: readonly string[] | undefined;
   /** `?context=`: the connection's default context, a context UUID written canonically (v0.114.0+). */
   context?: string | undefined;
+  /**
+   * `?notices=`: only `off` (any case, trimmed; {@link normalizeNotices}),
+   * written `off`: `bootstrap` replies then carry no service notices
+   * (v0.161.0+). For a headless connection only.
+   */
+  notices?: string | undefined;
 }
 
 /**
@@ -388,7 +424,7 @@ export interface McpUrlQuery {
  *
  * A key being set loses every earlier value of it (the server reads only
  * the first it finds) and goes at the end, in the order `guardrails`,
- * `profile`, `tools`, `add_tools`, `context`. Every other parameter is
+ * `profile`, `tools`, `add_tools`, `context`, `notices`. Every other parameter is
  * kept as written; an unset key is left alone, and with nothing to set the
  * URL comes back as written. A URL it rewrites is rebuilt as Python's is
  * ({@link joinUrl}), the values form-encoded with commas kept literal.
@@ -404,8 +440,8 @@ export interface McpUrlQuery {
  *
  * @throws Error `guardrails` is neither `off` nor a context UUID
  *   ({@link normalizeGuardrails}), `profile` is blank or starts with `-`, a
- *   tool name starts with `-` or a list names more than 100, or `context`
- *   is not a UUID.
+ *   tool name starts with `-` or a list names more than 100, `context`
+ *   is not a UUID, or `notices` is not `off`.
  * @throws TypeError `tools` / `addTools` is not an array of strings.
  */
 export function mcpUrlWithQuery(
@@ -424,6 +460,7 @@ export function mcpUrlWithQuery(
   const added = updates.addTools !== undefined ? normalizeAddTools(updates.addTools) : "";
   if (added) set.push(["add_tools", added]);
   if (updates.context !== undefined) set.push(["context", normalizeUuid(updates.context, "context")]);
+  if (updates.notices !== undefined) set.push(["notices", normalizeNotices(updates.notices)]);
   if (set.length === 0) return typeof url === "string" ? url : url.url;
   const keys = set.map(([key]) => key);
   const { base, params, fragment } = parseMcpUrl(url);

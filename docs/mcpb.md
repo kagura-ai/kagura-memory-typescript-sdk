@@ -80,6 +80,14 @@ default for tools called without `context_id`; an explicit one wins. Older
 servers ignore parameters they do not know. An invalid value stops the proxy
 (exit 2).
 
+`--notices off` (memory-cloud v0.161.0+) sets `?notices=off` on the upstream URL
+at run time, last in the query, as the Python CLI 0.48.0's `kagura-mcp --notices
+off` does: `bootstrap` replies then carry no service notices. A notice is
+delivered once per person, so only a headless connection, one no person reads,
+should turn them off; an interactive MCP host should leave them on, which is the
+default. `off` is the only value the server reads (any case); any other stops
+the proxy (exit 2). There is no environment variable for it.
+
 `--session-id NAME` (default: `$KAGURA_MCP_SESSION_ID`; memory-cloud v0.114.0+)
 sends `Kagura-Session-Id: NAME` on every upstream request, so the server records
 the writes under that session for `changes_since`. It takes 1-128 letters,

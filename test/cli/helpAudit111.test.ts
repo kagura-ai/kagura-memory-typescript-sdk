@@ -16,12 +16,30 @@ function registered(): Map<string, Command | CommandGroup> {
   return result;
 }
 
+/**
+ * Commands newer than Python 0.44.0, so absent from its oracle: each one's
+ * complete output is fixed in the exception fixture instead
+ * (docs/cli-help-differences.md). `workspace list` is the Python CLI
+ * 0.49.0's (#154).
+ */
+const NEWER_THAN_ORACLE = ["workspace list"];
+
 describe("every CLI help page against Python 0.44.0 / Click 8.3.3 (#111)", () => {
   const commands = registered();
   it("covers every registered command and every documented exception", () => {
     const supported = oracle.filter(page => page.path !== "ingest").map(page => page.path);
-    expect([...commands.keys()].sort()).toEqual(supported.sort());
+    expect([...commands.keys()].sort()).toEqual([...supported, ...NEWER_THAN_ORACLE].sort());
     expect(Object.keys(exceptions).every(path => commands.has(path))).toBe(true);
+  });
+
+  it.each(NEWER_THAN_ORACLE)("%s --help (newer than the oracle)", async path => {
+    const out: string[] = [];
+    const code = await runCli([...path.split(" "), "--help"], {
+      write: (s: string) => out.push(s), writeError: () => {},
+    } as unknown as CliDeps);
+    expect(code).toBe(0);
+    expect(oracle.some(page => page.path === path)).toBe(false);
+    expect(terminalText(out)).toBe((exceptions as Record<string, string>)[path]);
   });
 
   it.each(oracle.filter(page => page.path !== "ingest"))("$path --help", async page => {

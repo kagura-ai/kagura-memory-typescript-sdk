@@ -11,6 +11,7 @@ import { KaguraClient, MIN_SERVER_VERSION, type KaguraClientOptions } from "../.
 import { KaguraAuthError } from "../../../src/errors.js";
 import type { ExecOptions, ExecResult } from "../../../src/cli/exec.js";
 import { classifyMcpEntry, holdsCredential, unsetHeaderVars } from "../../../src/cli/commands/setup.js";
+import { pluginServerUrl } from "../../../src/cli/commands/harnessConfig.js";
 import { runCli, type CliDeps } from "../../../src/cli/run.js";
 import { loadConfig, type KaguraConfig } from "../../../src/config.js";
 import { FakeServer, makeClient } from "../../fakeServer.js";
@@ -2060,6 +2061,60 @@ describe("setup claude --guardrails and --tool-profile", () => {
 // entry each writes is compared instead, recorded from the Python SDK
 // 0.44.0's `_static_token_entry(token, mcp_url_with_query(…))` for the
 // same flags.
+// Python 0.48.0's `setup claude --notices off` (python-sdk#342; memory-cloud
+// v0.161.0, #2762): `?notices=off` last on the entry's URL, never unasked.
+describe("setup claude --notices off (#154)", () => {
+  const mcpJson = () => path.join(sandbox, ".mcp.json");
+  const entry = () => readJson(mcpJson()).mcpServers["kagura-memory"];
+  const notesOf = (h: Harness): string[] => JSON.parse(h.out.join("\n")).notes as string[];
+
+  it("writes ?notices=off after the other query keys, and nothing without the flag", async () => {
+    const h = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp", "--context", CONTEXT, "--notices", "OFF"), h.deps)).toBe(0);
+    expect(entry().url).toBe(`https://x.test/mcp?context=${CONTEXT}&notices=off`);
+    expect(readJson(path.join(sandbox, ".kagura.json")).mcp_url).toBe("https://x.test/mcp");
+    const again = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp"), again.deps)).toBe(0);
+    expect(entry().url).toBe("https://x.test/mcp");
+    expect(notesOf(again)).toContain(
+      `Note: the previous project-scope entry also had --context ${CONTEXT} and --notices off, which this run ` +
+        "left out; re-run with them to keep them.",
+    );
+  });
+
+  it("keeps a ?notices=off written in --mcp-url", async () => {
+    const h = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp?notices=off"), h.deps)).toBe(0);
+    expect(entry().url).toBe("https://x.test/mcp?notices=off");
+  });
+
+  it.each([
+    ["https://x.test/mcp?notices=%20Off", true],
+    ["https://x.test/mcp?notices=on&notices=off", false],
+    ["https://x.test/mcp?notices=", false],
+  ])("a re-run reads the old entry's %s by the server's first-value rule", async (url, noted) => {
+    expect(await runCli(claude("--mcp-url", url), harness({}).deps)).toBe(0);
+    const again = harness({});
+    expect(await runCli(claude("--mcp-url", "https://x.test/mcp"), again.deps)).toBe(0);
+    const notes = notesOf(again).join("\n");
+    if (noted) expect(notes).toContain("--notices off");
+    else expect(notes).not.toContain("--notices");
+  });
+
+  it.each([["on"], [""]])("refuses --notices %j with exit 2, writing nothing", async (value) => {
+    const h = harness({});
+    expect(await runCli(claude("--notices", value), h.deps)).toBe(2);
+    expect(diagnosticBodies(h.err)).toContain(
+      `Error: Invalid value for '--notices': notices must be 'off', got '${value}'`,
+    );
+    expect(fs.existsSync(mcpJson())).toBe(false);
+  });
+
+  it("the plugin server_url never carries it", () => {
+    expect(pluginServerUrl(`https://x.test/mcp?guardrails=off&notices=off`)).toBe("https://x.test/mcp?guardrails=off");
+  });
+});
+
 describe("setup claude --add-tools and --context (#83)", () => {
   const mcpJson = () => path.join(sandbox, ".mcp.json");
   const entry = () => readJson(mcpJson()).mcpServers["kagura-memory"];

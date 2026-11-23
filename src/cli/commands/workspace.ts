@@ -4,7 +4,11 @@
  * Python CLI's `workspace` group and of the three commands `cli.py`
  * attaches to its `auth` group.
  *
- * Every one of them runs through {@link runWorkspaceCommand}, the port of
+ * `workspace list` (the Python CLI 0.49.0's, memory-cloud v0.177.0+) is the
+ * one exception: it calls the MCP tool `list_workspaces` through the usual
+ * client credential chain (no owner key; a connector key is refused).
+ * Every other one runs through
+ * {@link runWorkspaceCommand}, the port of
  * `_run_workspace_command`: the workspace comes from the same credential
  * source as the key (#115), and the client is built from exactly that
  * credential. The server accepts only the workspace OWNER's static API key
@@ -20,6 +24,8 @@
  */
 
 import type { MemberAPIKey, WorkspaceInvitation, WorkspaceMember } from "../../models.js";
+import { modelDumpOf } from "../../modelDumpView.js";
+import { ACCOUNT_WORKSPACE_LIST } from "../../pyModels.js";
 import { normalizeUuid } from "../../pyCompat.js";
 import {
   ResponseReader,
@@ -38,6 +44,7 @@ import {
   type CommandGroup,
 } from "../command.js";
 import { pairWorkspaceCredential } from "../credentialSource.js";
+import { formatDumpsJson } from "../modelDump.js";
 import { formatJson } from "../output.js";
 import {
   CliError,
@@ -51,6 +58,7 @@ import {
   type Param,
 } from "../parse.js";
 import type { FlagSpec } from "../parseArgs.js";
+import { runClientCommand } from "../runClientCommand.js";
 
 // ---------------------------------------------------------------------------
 // The runner
@@ -521,9 +529,134 @@ const INVITE_GROUP: CommandGroup = {
   commands: { create: inviteCreate, list: inviteList, revoke: inviteRevoke },
 };
 
+// ---------------------------------------------------------------------------
+// workspace list
+// ---------------------------------------------------------------------------
+
+/**
+ * The East Asian Wide (W) and Fullwidth (F) code points, as inclusive
+ * ranges in code point order: two terminal columns each, every other code
+ * point one — what Python's `unicodedata.east_asian_width(ch) in ("W", "F")`
+ * answers, which the Python CLI 0.49.0's `_display_width` counts. Generated
+ * from Python 3.12's `unicodedata` (Unicode 15.0.0) by a one-off script
+ * that walks U+0000-U+10FFFF and joins the runs.
+ */
+const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x1100, 0x115f], [0x231a, 0x231b], [0x2329, 0x232a], [0x23e9, 0x23ec], [0x23f0, 0x23f0],
+  [0x23f3, 0x23f3], [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
+  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be], [0x26c4, 0x26c5],
+  [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea], [0x26f2, 0x26f3], [0x26f5, 0x26f5],
+  [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728],
+  [0x274c, 0x274c], [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55],
+  [0x2e80, 0x2e99], [0x2e9b, 0x2ef3], [0x2f00, 0x2fd5], [0x2ff0, 0x2ffb], [0x3000, 0x303e],
+  [0x3041, 0x3096], [0x3099, 0x30ff], [0x3105, 0x312f], [0x3131, 0x318e], [0x3190, 0x31e3],
+  [0x31f0, 0x321e], [0x3220, 0x3247], [0x3250, 0x4dbf], [0x4e00, 0xa48c], [0xa490, 0xa4c6],
+  [0xa960, 0xa97c], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe52],
+  [0xfe54, 0xfe66], [0xfe68, 0xfe6b], [0xff01, 0xff60], [0xffe0, 0xffe6], [0x16fe0, 0x16fe4],
+  [0x16ff0, 0x16ff1], [0x17000, 0x187f7], [0x18800, 0x18cd5], [0x18d00, 0x18d08],
+  [0x1aff0, 0x1aff3], [0x1aff5, 0x1affb], [0x1affd, 0x1affe], [0x1b000, 0x1b122],
+  [0x1b132, 0x1b132], [0x1b150, 0x1b152], [0x1b155, 0x1b155], [0x1b164, 0x1b167],
+  [0x1b170, 0x1b2fb], [0x1f004, 0x1f004], [0x1f0cf, 0x1f0cf], [0x1f18e, 0x1f18e],
+  [0x1f191, 0x1f19a], [0x1f200, 0x1f202], [0x1f210, 0x1f23b], [0x1f240, 0x1f248],
+  [0x1f250, 0x1f251], [0x1f260, 0x1f265], [0x1f300, 0x1f320], [0x1f32d, 0x1f335],
+  [0x1f337, 0x1f37c], [0x1f37e, 0x1f393], [0x1f3a0, 0x1f3ca], [0x1f3cf, 0x1f3d3],
+  [0x1f3e0, 0x1f3f0], [0x1f3f4, 0x1f3f4], [0x1f3f8, 0x1f43e], [0x1f440, 0x1f440],
+  [0x1f442, 0x1f4fc], [0x1f4ff, 0x1f53d], [0x1f54b, 0x1f54e], [0x1f550, 0x1f567],
+  [0x1f57a, 0x1f57a], [0x1f595, 0x1f596], [0x1f5a4, 0x1f5a4], [0x1f5fb, 0x1f64f],
+  [0x1f680, 0x1f6c5], [0x1f6cc, 0x1f6cc], [0x1f6d0, 0x1f6d2], [0x1f6d5, 0x1f6d7],
+  [0x1f6dc, 0x1f6df], [0x1f6eb, 0x1f6ec], [0x1f6f4, 0x1f6fc], [0x1f7e0, 0x1f7eb],
+  [0x1f7f0, 0x1f7f0], [0x1f90c, 0x1f93a], [0x1f93c, 0x1f945], [0x1f947, 0x1f9ff],
+  [0x1fa70, 0x1fa7c], [0x1fa80, 0x1fa88], [0x1fa90, 0x1fabd], [0x1fabf, 0x1fac5],
+  [0x1face, 0x1fadb], [0x1fae0, 0x1fae8], [0x1faf0, 0x1faf8], [0x20000, 0x2fffd],
+  [0x30000, 0x3fffd],
+];
+
+/** Whether `cp` is in {@link WIDE_RANGES}: a binary search. */
+function isWide(cp: number): boolean {
+  let lo = 0;
+  let hi = WIDE_RANGES.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [first, last] = WIDE_RANGES[mid]!;
+    if (cp < first) hi = mid - 1;
+    else if (cp > last) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
+/** The terminal columns `value` takes — Python's `_display_width`: a W or F code point counts 2, any other 1. */
+export function displayWidth(value: string): number {
+  let width = 0;
+  for (const ch of value) width += isWide(ch.codePointAt(0)!) ? 2 : 1;
+  return width;
+}
+
+/** `value` padded with spaces to `width` terminal columns, never cut. */
+function padDisplay(value: string, width: number): string {
+  return value + " ".repeat(Math.max(0, width - displayWidth(value)));
+}
+
+/**
+ * The `workspace list` table — the Python CLI 0.49.0's `_workspaces_table`:
+ * one row per workspace, `yes` / `-` under CURRENT, and under USABLE `yes`,
+ * or `no` with the reason in parentheses. The NAME column is as wide as the
+ * widest name in terminal columns, at least the header's four (a wide
+ * character takes two), so no name is cut and every row lines up.
+ */
+export function workspacesTable(result: unknown): string {
+  const rows = (result as { workspaces?: unknown }).workspaces;
+  const items = Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+  const text = (value: unknown): string => (typeof value === "string" ? value : "");
+  let nameWidth = displayWidth("NAME");
+  for (const ws of items) nameWidth = Math.max(nameWidth, displayWidth(text(ws.name)));
+  const lines = [`${pad("ID", 36)} ${padDisplay("NAME", nameWidth)} ${pad("ROLE", 7)} ${pad("CURRENT", 7)} USABLE`];
+  for (const ws of items) {
+    let usable = ws.usable === true ? "yes" : "no";
+    if (typeof ws.reason === "string" && ws.reason !== "") usable += ` (${ws.reason})`;
+    lines.push(
+      `${pad(text(ws.id), 36)} ${padDisplay(text(ws.name), nameWidth)} ${pad(text(ws.role), 7)} ` +
+        `${pad(ws.current === true ? "yes" : "-", 7)} ${usable}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * `workspace list`: the MCP tool `list_workspaces` (memory-cloud v0.177.0+,
+ * #2972) through the usual client credential chain, not the owner-key
+ * runner the rest of this group uses.
+ */
+const workspaceList: Command = {
+  summary: "List the workspaces your account is a member of (memory-cloud 0.177.0+).",
+  description:
+    "  Calls the MCP tool list_workspaces with the configured credential (no owner\n" +
+    "  key needed): your role in each, the connection's workspace (CURRENT), and\n" +
+    "  whether 'kagura-memory context list --workspace-id ID' can list it now\n" +
+    "  (USABLE, with the reason when not). A workspace-scoped API key sees only its\n" +
+    "  own workspace.\n\n" +
+    "  Examples:\n" +
+    "    kagura-memory workspace list\n" +
+    "    kagura-memory workspace list --json",
+  spec: { flags: [JSON_OUTPUT] },
+  run: async (deps, args) => {
+    rejectExtraArgs(args);
+    const json = args.flags.has("json");
+    return runClientCommand(deps, undefined, (client) => client.listWorkspaces(), {
+      needsContext: false,
+      format: json
+        ? (result) => formatDumpsJson(modelDumpOf(result, ACCOUNT_WORKSPACE_LIST, "list_workspaces"))
+        : workspacesTable,
+    });
+  },
+};
+
 export const WORKSPACE_GROUP: CommandGroup = {
-  summary: "Workspace administration (owner API key required, server v0.42.0+).",
-  commands: { member: MEMBER_GROUP, invite: INVITE_GROUP },
+  summary:
+    "Workspaces: list yours (no owner key needed), and administer members and invitations (owner API key " +
+    "required, server v0.42.0+).",
+  commands: { list: workspaceList, member: MEMBER_GROUP, invite: INVITE_GROUP },
 };
 
 // ---------------------------------------------------------------------------

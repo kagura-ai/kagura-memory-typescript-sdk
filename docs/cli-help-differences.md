@@ -25,7 +25,8 @@ The audit test also checks that no registered command escapes this comparison.
 | `auth revoke-key` | Usage/description wording. |
 | `auth status` | Usage/description wording. |
 | `auth token` | Usage/description wording. |
-| `context search-config` | option text, metavar, default wording, or switch grouping: `--rerank`, `--no-rerank`, `--content-chunks`, `--no-content-chunks`, `--llm-selector`, `--no-llm-selector`, `--rerank / --no-rerank`, `--content-chunks / --no-content-chunks`, `--llm-selector / --no-llm-selector`. |
+| `context list` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--workspace-id TEXT` (#154). |
+| `context search-config` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--fusion [auto\|rrf\|weighted]` (#154), `--rerank`, `--no-rerank`, `--content-chunks`, `--no-content-chunks`, `--llm-selector`, `--no-llm-selector`, `--rerank / --no-rerank`, `--content-chunks / --no-content-chunks`, `--llm-selector / --no-llm-selector`. |
 | `context update` | option text, metavar, default wording, or switch grouping: `--lock`, `--unlock`, `--lock / --unlock`. |
 | `edge create` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--type TEXT`, `--weight FLOAT`, `--confidence FLOAT`. |
 | `edge list` | option text, metavar, default wording, or switch grouping: `--min-weight FLOAT`. |
@@ -57,12 +58,14 @@ The audit test also checks that no registered command escapes this comparison.
 | `secret put` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--to PUBKEY_ID`, `--from-file PATH`, `--profile TEXT`, `--to TEXT`, `--from-file FILE`. |
 | `secret revoke` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--to PUBKEY_ID`, `--to TEXT`. |
 | `secret rotate` | option text, metavar, default wording, or switch grouping: `--from-file PATH`, `--profile TEXT`, `--from-file FILE`. |
-| `setup claude` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--mcp-url URL`, `-c, --context-id TEXT`, `--profile TEXT`, `--project-dir DIR`, `-y, --non-interactive`, `--guardrails off\|CONTEXT_ID`, `--tool-profile NAME`, `--scope [project\|user]`, `--context CONTEXT_ID`, `--session-hook`, `--no-session-hook`, `--sync-hook`, `--no-sync-hook`, `--commands`, `--no-commands`, `--no-auto-context`, `--mcp-url TEXT`, `--context-id TEXT`, `--project-dir TEXT`, `--session-hook / --no-session-hook`, `--sync-hook / --no-sync-hook`, `--commands / --no-commands`. |
-| `setup codex` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--profile TEXT`, `-c, --context-id TEXT`, `--guardrails off\|CONTEXT_ID`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
-| `setup hermes` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--profile TEXT`, `-c, --context-id TEXT`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--agents-md [PATH]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
-| `setup openclaw` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--profile TEXT`, `-c, --context-id TEXT`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--agents-md [PATH]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
+| `setup claude` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--notices off` (#154), `--mcp-url URL`, `-c, --context-id TEXT`, `--profile TEXT`, `--project-dir DIR`, `-y, --non-interactive`, `--guardrails off\|CONTEXT_ID`, `--tool-profile NAME`, `--scope [project\|user]`, `--context CONTEXT_ID`, `--session-hook`, `--no-session-hook`, `--sync-hook`, `--no-sync-hook`, `--commands`, `--no-commands`, `--no-auto-context`, `--mcp-url TEXT`, `--context-id TEXT`, `--project-dir TEXT`, `--session-hook / --no-session-hook`, `--sync-hook / --no-sync-hook`, `--commands / --no-commands`. |
+| `setup codex` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--notices off` (#154), `--profile TEXT`, `-c, --context-id TEXT`, `--guardrails off\|CONTEXT_ID`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
+| `setup hermes` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--notices off` (#154), `--profile TEXT`, `-c, --context-id TEXT`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--agents-md [PATH]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
+| `setup openclaw` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--notices off` (#154), `--profile TEXT`, `-c, --context-id TEXT`, `--tool-profile NAME`, `--add-tools NAME[,NAME...]`, `--agents-md [PATH]`, `--url-form`, `--mcp-url URL`, `--api-key-env VAR`, `-y, --non-interactive`, `--api-key TEXT`, `--project-dir DIR`, `--context-id TEXT`, `--mcp-url TEXT`. |
 | `sleep history` | option text, metavar, default wording, or switch grouping: `--limit INTEGER RANGE`. |
+| `workspace` | Usage/description wording; subcommand list or summaries (`list`, #154). |
 | `workspace invite revoke` | Usage/description wording. |
+| `workspace list` | Not in Python 0.44.0 (the Python CLI 0.49.0's command, #154); its complete output is fixed in the exception fixture. |
 | `workspace member add` | Usage/description wording. |
 
 The `--tool-profile NAME` text of the four `setup` pages and the `--profile
@@ -71,6 +74,13 @@ from v0.158.0 (`full`, `core`, `google`, `microsoft`) and say that the
 `google` / `microsoft` views refuse `describe_tools` and `guide` at
 `tools/call` and preview no digest; Python 0.44.0 names `full` and `core`
 only (#150).
+
+The options and the command of memory-cloud 0.161.0 – 0.178.0 (#154) are
+the Python CLI 0.48.0's and 0.49.0's, which the 0.44.0 oracle predates:
+`setup … --notices off`, `context list --workspace-id`, `context
+search-config --fusion` and `workspace list`, whose summary also changes the
+`workspace` group's. The audit test lists `workspace list` as newer than the
+oracle and checks its page against the exception fixture.
 
 In particular, setup describes the Node integration actually installed:
 Python's hooks, slash commands and Python-process entry forms are not promised.

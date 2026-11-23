@@ -49,9 +49,11 @@ import {
   baseUrlFromMcp,
   mcpQueryToolView,
   mcpUrlGuardrailsOff,
+  mcpUrlNoticesOff,
   mcpUrlQueryValues,
   mcpUrlToolView,
   mcpUrlWithQuery,
+  normalizeNotices,
   normalizeGuardrails,
   normalizeToolProfile,
   parseMcpUrl,
@@ -173,6 +175,25 @@ const ADD_TOOLS: FlagSpec = {
   type: "multiple",
   metavar: "NAME[,NAME...]",
   help: `${ADD_TOOLS_HELP} A re-run without it drops an earlier list.`,
+};
+/**
+ * Python 0.48.0's `_NOTICES_HELP` (python-sdk#342): memory-cloud v0.161.0
+ * (#2762) leaves service notices out of the `bootstrap` reply when the URL's
+ * first `notices` value is `off`; setup writes it only when asked.
+ */
+const NOTICES_HELP =
+  "Add ?notices=off to the upstream MCP URL (server v0.161.0+): bootstrap replies carry no service notices. A " +
+  "notice is delivered once per person, so only a headless connection, one no person reads, should turn them off. " +
+  "'off' is the only value; without it notices stay on.";
+const NOTICES: FlagSpec = {
+  name: "notices",
+  type: "value",
+  metavar: "off",
+  help: `${NOTICES_HELP} A re-run without it drops an earlier --notices off; a ?notices=off written in the MCP URL itself stays.`,
+};
+const HARNESS_NOTICES: FlagSpec = {
+  ...NOTICES,
+  help: `${NOTICES_HELP} A ?notices= already in --mcp-url is kept without it.`,
 };
 const DEFAULT_CONTEXT: FlagSpec = {
   name: "context",
@@ -555,6 +576,20 @@ function parseToolProfile(raw: string | undefined): string | undefined {
 }
 
 /**
+ * `--notices`: only `off`, in any case and trimmed — Python 0.48.0's
+ * `_notices_option`. memory-cloud ignores any other value, so a typo
+ * would read as success here and change nothing there.
+ */
+function parseNotices(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  try {
+    return normalizeNotices(raw);
+  } catch (e) {
+    throw new CliUsageError(`Invalid value for '--notices': ${excMessage(e)}`);
+  }
+}
+
+/**
  * `--context`: a context UUID, written canonically — Python's
  * `_default_context_option`. memory-cloud refuses every call that relies
  * on any other value (`invalid_context_id_format`), so it is refused here.
@@ -610,6 +645,8 @@ interface SetupInput {
   addTools: string[] | undefined;
   /** `--context`, the default context: a canonical UUID; undefined when absent. */
   defaultContext: string | undefined;
+  /** `--notices`: `off`; undefined when absent, which keeps notices on. */
+  notices: string | undefined;
   /**
    * The project's `.kagura.json`, read before anything is written or run,
    * so one this cannot parse stops the command with nothing changed.
@@ -644,6 +681,7 @@ function resolveInput(args: ParsedArgs): SetupInput {
   const guardrails = parseGuardrails(args.values.guardrails);
   const toolProfile = parseToolProfile(args.values["tool-profile"]);
   const addTools = parseAddTools(args.many["add-tools"]);
+  const notices = parseNotices(args.values.notices);
   const defaultContext = parseDefaultContext(args.values.context);
   const apiKey = args.values["api-key"];
   const profile = args.values.profile;
@@ -699,6 +737,7 @@ function resolveInput(args: ParsedArgs): SetupInput {
     toolProfile,
     addTools,
     defaultContext,
+    notices,
     kagura,
     secrets: knownKeys(apiKey, own("api_key")),
   };
@@ -814,7 +853,7 @@ function writeKaguraJson(input: SetupInput): string {
   const kagura = { ...input.kagura };
   kagura.api_key = input.apiKey;
   // As given, as Python writes it: --guardrails, --tool-profile,
-  // --add-tools and --context belong to the harness entry, not to this
+  // --add-tools, --context and --notices belong to the harness entry, not to this
   // bin (its own calls name their context), and baseUrlFromMcp finds the
   // REST base in the path, so a query the user gave does no harm here.
   kagura.mcp_url = input.baseUrl;
@@ -1390,9 +1429,9 @@ function refuseShadowedEntry(
 
 /**
  * Python's `_QUERY_FLAGS`: the flags that set `?guardrails=` / `?profile=`
- * / `?add_tools=` / `?context=` on the upstream URL.
+ * / `?add_tools=` / `?context=` / `?notices=` on the upstream URL.
  */
-const QUERY_FLAGS = ["--guardrails", "--tool-profile", "--add-tools", "--context"] as const;
+const QUERY_FLAGS = ["--guardrails", "--tool-profile", "--add-tools", "--context", "--notices"] as const;
 
 /**
  * Python's `_TOOLS_KEY`: the key {@link queryFlags} reports an http entry's
@@ -1408,7 +1447,9 @@ const TOOLS_KEY = "?tools=";
  * of a repeated flag, as the proxy reads it, except `--add-tools`, whose
  * values add up. From an http entry's URL as the server reads it: the
  * first value of a repeated key wins, even a blank one, and is trimmed;
- * the tool view is read by {@link mcpQueryToolView}. A blank value is left
+ * the tool view is read by {@link mcpQueryToolView}, and `notices` is
+ * reported only when it is `off` (any case), the one value the server
+ * reads ({@link mcpUrlNoticesOff}). A blank value is left
  * out: setup refuses one, so it is no flag to re-run with. The URL's
  * `?tools=` allowlist, the view key the server reads first, is reported
  * too, under {@link TOOLS_KEY}; one naming no tool, which the server
@@ -1437,6 +1478,7 @@ function queryFlags(entry: Record<string, unknown>): Map<string, string> {
     ["--tool-profile", view.profile ?? ""],
     ["--add-tools", view.addTools.join(",")],
     ["--context", pyStrip(query.get("context") ?? "")],
+    ["--notices", mcpUrlNoticesOff(entry.url) ? "off" : ""],
     [TOOLS_KEY, (view.tools ?? []).join(",")],
   ];
   for (const [flag, value] of settings) if (value) found.set(flag, value);
@@ -1556,6 +1598,7 @@ async function runClaude(deps: CliDeps, args: ParsedArgs): Promise<number> {
     profile: input.toolProfile,
     addTools: input.addTools,
     context: input.defaultContext,
+    notices: input.notices,
   });
   // At user scope the entry goes on `claude mcp add-json`'s command line,
   // so it names the variable Claude Code reads the key from instead; a
@@ -1732,6 +1775,12 @@ interface HarnessInput {
   /** `--add-tools`, every value's names in one normalized list; undefined when absent. */
   addTools: string[] | undefined;
   /**
+   * `--notices`: `off`; undefined when absent. Written for every harness,
+   * unlike a `--guardrails` context: the notices come in the `bootstrap`
+   * reply, not in MCP instructions.
+   */
+  notices: string | undefined;
+  /**
    * `--agents-md`: undefined when absent, `""` for the harness's default
    * file, else the path as given.
    */
@@ -1872,6 +1921,7 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
   const guardrails = parseGuardrails(args.values.guardrails);
   const toolProfile = parseToolProfile(args.values["tool-profile"]);
   const addTools = parseAddTools(args.many["add-tools"]);
+  const notices = parseNotices(args.values.notices);
   const agentsMd = parseAgentsMd(args.values["agents-md"]);
   // Then Python's _check_flags, in its order, each a usage error. The
   // --profile refusal (exit 1) comes last, so that `--profile p
@@ -1969,6 +2019,7 @@ function resolveHarnessInput(deps: CliDeps, args: ParsedArgs, harness: HarnessNa
     guardrails,
     toolProfile,
     addTools,
+    notices,
     agentsMd,
     exportContext: flagContext ?? (guardrails !== undefined && guardrails !== "off" ? guardrails : undefined),
     contextGiven: flagContext !== undefined ? rawContext : undefined,
@@ -2888,7 +2939,7 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
   notes.push(...toolsAllowlistWarning(given, input.toolProfile, input.addTools));
   const url = mcpUrlWithQuery(
     given,
-    { guardrails, profile: input.toolProfile, addTools: input.addTools },
+    { guardrails, profile: input.toolProfile, addTools: input.addTools, notices: input.notices },
     { guardrailsAsIs: placeholder },
   );
   // Read for the guardrails lane and the digest preview: split once.
@@ -2981,7 +3032,7 @@ async function runCodex(deps: CliDeps, args: ParsedArgs): Promise<number> {
  * A first `guardrails` value of `off`, the one the server reads, is kept
  * as asked, alone and with a warning of its own: it takes away the one
  * lane left. The flag's `off` never gets here: it is refused. The tool
- * view (`--tool-profile`, `--add-tools`) goes on last, after the warning
+ * view (`--tool-profile`, `--add-tools`) and `--notices` go on last, after the warning
  * that a `?tools=` allowlist overrides it, in Python's order.
  */
 function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
@@ -3013,7 +3064,12 @@ function urlForNoInstructions(input: HarnessInput, notes: string[]): string {
         "default) and the AGENTS.md export (--agents-md).",
     );
   }
-  return mcpUrlWithQuery(url, { guardrails, profile: input.toolProfile, addTools: input.addTools });
+  return mcpUrlWithQuery(url, {
+    guardrails,
+    profile: input.toolProfile,
+    addTools: input.addTools,
+    notices: input.notices,
+  });
 }
 
 /** The full case folds `toLowerCase` lacks that yield ASCII: ß, long s and the Latin ligatures. */
@@ -3454,7 +3510,7 @@ const claude: Command = {
       "setup claude --no-auto-context  # always show full context list",
     ),
   spec: {
-    flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ADD_TOOLS, DEFAULT_CONTEXT, ...PYTHON_ONLY_FLAGS],
+    flags: [...COMMON_FLAGS, GUARDRAILS, SCOPE, TOOL_PROFILE, ADD_TOOLS, NOTICES, DEFAULT_CONTEXT, ...PYTHON_ONLY_FLAGS],
   },
   run: (deps, args) => runClaude(deps as CliDeps, args),
 };
@@ -3513,6 +3569,7 @@ const codex: Command = {
       CODEX_GUARDRAILS,
       HARNESS_TOOL_PROFILE,
       HARNESS_ADD_TOOLS,
+      HARNESS_NOTICES,
       agentsMd(
         "Also write the context's tool guardrail export block into PATH (default ~/.codex/AGENTS.md, " +
           "or AGENTS.override.md when it exists). Rarely needed: the digest already arrives in the MCP " +
@@ -3588,6 +3645,7 @@ const hermes: Command = {
       guardrailsNotWritten("Hermes"),
       HARNESS_TOOL_PROFILE,
       HARNESS_ADD_TOOLS,
+      HARNESS_NOTICES,
       agentsMd(
         "Write the context's tool guardrail export block into PATH (default: the context file Hermes loads " +
           "from here: the nearest .hermes.md or HERMES.md up to the git root, else this directory's AGENTS " +
@@ -3651,6 +3709,7 @@ const openclaw: Command = {
       guardrailsNotWritten("OpenClaw"),
       HARNESS_TOOL_PROFILE,
       HARNESS_ADD_TOOLS,
+      HARNESS_NOTICES,
       agentsMd(
         "Write the context's tool guardrail export block into PATH (default AGENTS.md in the workspace " +
           "OpenClaw loads every session: $OPENCLAW_WORKSPACE_DIR, else workspace/ in $OPENCLAW_STATE_DIR " +

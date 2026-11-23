@@ -196,7 +196,9 @@ export interface UsageInfo {
  * than the field, or a surface that does not send it. At memory-cloud
  * v0.142.0 `getContextInfo` sends `llm_selector_enabled` /
  * `llm_selector_effective` only; `updateSearchConfig` returns both
- * `*_enabled` / `*_effective` pairs in its `config`.
+ * `*_enabled` / `*_effective` pairs in its `config`. From memory-cloud
+ * v0.178.0 (#2980) both replies also carry `fusion` and `fusion_effective`
+ * (absent from an older server).
  */
 export interface SearchConfig {
   /** @default 0.6 */
@@ -269,6 +271,22 @@ export interface SearchConfig {
   llm_selector_disabled_reason?: string | null;
   /** Whether the caller may change it. */
   llm_selector_can_change?: boolean | null;
+  /**
+   * The stored hybrid fusion choice (memory-cloud v0.178.0+, #2980):
+   * `auto` (the default, also for a context that never set it), `rrf` or
+   * `weighted`. Typed `string`, so a newer value passes; absent from an
+   * older server. Sent by `updateSearchConfig`'s `config` and
+   * `getContextInfo`'s `search_config`.
+   */
+  fusion?: string | null;
+  /**
+   * The fusion a hybrid recall over this context uses now: the stored
+   * `rrf` / `weighted`, or for `auto` `weighted` when the weights are not
+   * 0.6 / 0.4 and else the deployment's `HYBRID_FUSION` (`weighted`, `rrf`
+   * or `keyword_floor`). Read `fusion`, never this, before writing the
+   * setting back: echoing a resolved value would pin it and drop `auto`.
+   */
+  fusion_effective?: string | null;
 }
 
 /** Context metadata returned by `get_context_info`. */
@@ -386,6 +404,58 @@ export interface ListContextsResponse {
   /** The `cursor` that returns the next page; `null` on the last one (server v0.82.0+). */
   next_cursor?: string | null;
   hint?: string;
+  /**
+   * How many usable workspaces the account has besides the listed one (not
+   * a suspended one, nor one without a seat; memory-cloud v0.177.0+,
+   * #2972). Present only when there are any; absent under a
+   * workspace-scoped API key and when the server could not count them.
+   */
+  other_workspaces?: number;
+  /**
+   * A fixed text beside `other_workspaces` naming `list_workspaces` and
+   * `listContexts({ workspaceId })` (v0.177.0+). The `?profile=google` /
+   * `?profile=microsoft` views send the count without it.
+   */
+  workspaces_hint?: string;
+}
+
+/**
+ * One workspace of {@link AccountWorkspaceList} (memory-cloud v0.177.0+,
+ * #2972), as the Python SDK's `AccountWorkspace` reads it.
+ */
+export interface AccountWorkspace {
+  /** The workspace UUID: pass it as `listContexts({ workspaceId })`. */
+  id: string;
+  name: string;
+  /** The account's role there (`owner` / `admin` / `member` / `viewer`; a plain string). */
+  role: string;
+  /**
+   * Whether it is this connection's workspace: a workspace-scoped API key's,
+   * else the `/mcp/w/<id>` one, else the account's current one.
+   */
+  current: boolean;
+  /** Whether `listContexts({ workspaceId: id })` lists it now. */
+  usable: boolean;
+  /**
+   * The error code that call would answer when `usable` is false:
+   * `workspace_suspended` (the workspace slot is suspended) or
+   * `feature_not_available` (no seat on its plan); a plain string, so a
+   * newer reason passes. `null` when usable (the server leaves it out).
+   */
+  reason?: string | null;
+}
+
+/**
+ * The `list_workspaces` reply (memory-cloud v0.177.0+, #2972), as the
+ * Python SDK's `AccountWorkspaceList` reads it: the workspaces the account
+ * is a member of (deleted ones left out), by name.
+ */
+export interface AccountWorkspaceList {
+  /** @default "success" */
+  status?: string;
+  workspaces: AccountWorkspace[];
+  /** The number listed. */
+  total?: number | null;
 }
 
 // ---------------------------------------------------------------------------
