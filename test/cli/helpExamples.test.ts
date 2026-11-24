@@ -183,6 +183,7 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory recall \"project context\" --trusted-only --verbosity full",
     "    kagura-memory recall \"deploy runbook\" --full 1 --max-chars 40000",
     "    kagura-memory recall \"release notes\" --full 0",
+    "    kagura-memory recall \"where the team meets\" --order date",
   ]],
   ["reference", [
     "  Examples:",

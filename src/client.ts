@@ -64,6 +64,9 @@ import type {
   RecallResponse,
   // Referenced only from JSDoc {@link} on the recall options.
   RecallResult,
+  // Referenced only from JSDoc {@link} on RecallOptions.order.
+  RecallDateSource,
+  RecallOrder,
   RecallVerbosity,
   ReferenceField,
   ReferenceResponse,
@@ -419,6 +422,10 @@ export interface RecallOptions {
    * history {@link RememberOptions.supersedes} preserves actually
    * readable — audit and "previous versions of this fact" views. It also
    * turns off `folded`: every version comes back as its own row.
+   *
+   * Omitted and `false` stay off the wire, except that `false` is sent with
+   * {@link RecallOptions.order} set, since `order: "date"` includes
+   * superseded rows unless told not to.
    */
   includeSuperseded?: boolean;
   /**
@@ -492,6 +499,22 @@ export interface RecallOptions {
    * as the day after it. Sent as `filters.event_before`.
    */
   eventBefore?: string;
+  /**
+   * `"relevance"` or `"date"` (memory-cloud v0.182.0+, #3004). Omit it for
+   * the relevance-ranked reply served before; it is sent only when set.
+   *
+   * `"date"` runs the same search (query, filters, `k`, `searchMode`,
+   * rerank, `contextIds`) and returns the results oldest first — for how
+   * something changed over time. Each row then carries `date`
+   * (`YYYY-MM-DD`, UTC) and `date_source` (`"event"` / `"observed"` /
+   * `"created"`, see {@link RecallDateSource}), the reply carries
+   * `order: "date"`, ties keep relevance order, and superseded rows are
+   * included (labelled `superseded_by`, nothing folded) unless
+   * `includeSuperseded: false`. `confidence`, `full` and `maxChars` still
+   * follow relevance rank. A server from v0.82.0 that predates it refuses
+   * it (`KaguraError`, `invalid_argument`); an older one ignores it.
+   */
+  order?: RecallOrder;
 }
 
 export interface UpdateMemoryOptions {
@@ -3133,8 +3156,18 @@ export class KaguraClient {
     if (options.includeExploreHints) {
       args.include_explore_hints = true;
     }
+    const { order } = options;
     if (options.includeSuperseded) {
       args.include_superseded = true;
+    } else if (options.includeSuperseded === false && isSet(order)) {
+      // #3004: order "date" includes superseded rows unless told not to.
+      args.include_superseded = false;
+    }
+    if (isSet(order)) {
+      if (order !== "relevance" && order !== "date") {
+        throw new Error(`order must be 'relevance' or 'date', got ${pyRepr(order)}`);
+      }
+      args.order = order;
     }
     const { verbosity, full, maxChars } = options;
     if (isSet(verbosity)) {

@@ -22,7 +22,13 @@ import {
   type UpdateMemoryOptions,
 } from "../../client.js";
 import { excMessage, KaguraError } from "../../errors.js";
-import type { DedupeMode, RecallResponse, RecallVerbosity, UpdateMemoryResult } from "../../models.js";
+import type {
+  DedupeMode,
+  RecallOrder,
+  RecallResponse,
+  RecallVerbosity,
+  UpdateMemoryResult,
+} from "../../models.js";
 import { pyStrip } from "../../pyCompat.js";
 import { pyTruthy } from "../../python.js";
 import { MAX_CHARS_MAX, MAX_CHARS_MIN, RECALL_FULL_MAX } from "../../responseBudget.js";
@@ -264,6 +270,17 @@ const VERBOSITY: FlagSpec = {
     "Result detail (server v0.108.0+). compact, the server default: 160-character " +
     "summaries without tags; full: uncut summaries, tags, context_summary and scope.",
 };
+const ORDERS: readonly RecallOrder[] = ["relevance", "date"];
+
+/** Python CLI `--order` (memory-cloud v0.182.0+, #3004); sent only when given, never retried without. */
+const ORDER: FlagSpec = {
+  name: "order",
+  type: "value",
+  metavar: "[relevance|date]",
+  help:
+    "relevance (the server default) or date: the same results oldest first, each " +
+    "with date and date_source, superseded rows included (server v0.182.0+).",
+};
 const FULL: FlagSpec = {
   range: { min: 0, max: RECALL_FULL_MAX, rangeLabel: `0<=x<=${RECALL_FULL_MAX}`, integer: true, },
   name: "full",
@@ -387,7 +404,8 @@ const recall: Command = {
     "  only when given. A server from v0.82.0 that predates one of them refuses it\n" +
     "  (invalid_argument); the command then retries once without the ones the\n" +
     "  server lists as refused (all three it sent when the reply does not list\n" +
-    "  them) and says so on stderr.\n\n" +
+    "  them) and says so on stderr. --order is sent only when given and never\n" +
+    "  retried without: an older server's refusal is the error.\n\n" +
     examples(
       'recall "FastAPI dependency injection"',
       'recall "OAuth2 implementation" -k 10',
@@ -396,6 +414,7 @@ const recall: Command = {
       'recall "project context" --trusted-only --verbosity full',
       'recall "deploy runbook" --full 1 --max-chars 40000',
       'recall "release notes" --full 0',
+      'recall "where the team meets" --order date',
     ),
   spec: {
     flags: [
@@ -423,6 +442,7 @@ const recall: Command = {
       VERBOSITY,
       FULL,
       MAX_CHARS,
+      ORDER,
     ],
   },
   run: async (deps, args) => {
@@ -449,6 +469,8 @@ const recall: Command = {
     if (rawMaxChars !== undefined) {
       shape.maxChars = parseRanged(MAX_CHARS, rawMaxChars);
     }
+    const rawOrder = args.values.order;
+    const order = rawOrder !== undefined ? parseChoice(ORDER, rawOrder, ORDERS) : undefined;
     return runClientCommand(deps, args.values["context-id"], (client, contextId) =>
       recallWithShapeFallback(
         deps.writeError,
@@ -460,6 +482,7 @@ const recall: Command = {
             ...(useRerank !== undefined ? { useRerank } : {}),
             ...(trustedOnly ? { filters: { trust_tier: "trusted" } } : {}),
             ...shapeArgs,
+            ...(order !== undefined ? { order } : {}),
           }),
         shape,
       ),

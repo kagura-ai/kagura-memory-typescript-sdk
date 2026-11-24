@@ -1326,6 +1326,22 @@ export interface RecallNearbyResponse {
 export type RecallVerbosity = "compact" | "full";
 
 /**
+ * Valid `recall` `order` values (memory-cloud v0.182.0+, #3004; request
+ * side). `"relevance"` is the server default and the reply as before;
+ * `"date"` returns the same results oldest first, each row with `date` and
+ * `date_source`, and `order: "date"` on the reply.
+ */
+export type RecallOrder = "relevance" | "date";
+
+/**
+ * `date_source` of a `recall({ order: "date" })` row (memory-cloud
+ * v0.182.0+, #3004): where its `date` came from — the event's own day
+ * (`event_start`), else the day the fact was stated (`observed_at`), else
+ * the day it was stored (`created_at`).
+ */
+export type RecallDateSource = "event" | "observed" | "created";
+
+/**
  * `recall`'s relevance verdict, the reply's first key: read `level` before
  * the hits. `"none"` / `"low"` mean probably not stored here; `"high"` /
  * `"moderate"` that the hits are worth reading — the content is still the
@@ -1441,9 +1457,22 @@ export interface RecallSelector {
  *   `spans` when the LLM selector cut it to passages, v0.115.0+),
  *   `observed_at` (v0.127.0+), `superseded_by`, `contradicts`,
  *   `supersede_candidate` and `folded` (v0.114.0+).
+ * - `order: "date"` only (v0.182.0+, #3004): `date` and `date_source`,
+ *   right after `memory_id`.
  */
 export interface RecallResult {
   memory_id: string;
+  /**
+   * The row's day, `YYYY-MM-DD` in UTC — under `order: "date"` only
+   * (v0.182.0+, #3004); absent otherwise.
+   */
+  date?: string;
+  /**
+   * Where `date` came from (`"event"`, `"observed"` or `"created"`) — under
+   * `order: "date"` only (v0.182.0+); absent otherwise. A value a newer
+   * server adds passes through as sent.
+   */
+  date_source?: RecallDateSource;
   /** The uncut summary on `verbosity: "full"`, else at most 160 characters. */
   summary: string;
   /** `true` when `summary` is a cut head (compact only). */
@@ -1509,6 +1538,11 @@ export interface RecallResponse {
   status: string;
   results: RecallResult[];
   count: number;
+  /**
+   * `"date"` when the rows are oldest first (`order: "date"`, v0.182.0+,
+   * #3004); absent otherwise.
+   */
+  order?: "date";
   /** The LLM selector's report (v0.115.0+). */
   selector?: RecallSelector;
   /** Rows that kept their content after `maxChars` took some (v0.114.0+). */

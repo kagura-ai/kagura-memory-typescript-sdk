@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `recall({ order })` (memory-cloud v0.182.0 or later, memory-cloud#3004):
+  `"relevance"` (the server default) or `"date"`, typed `RecallOrder`. With
+  `"date"` the same search comes back oldest first, each row with `date`
+  (`YYYY-MM-DD`, UTC) and `date_source` (`RecallDateSource`: `"event"`,
+  `"observed"` or `"created"`), and the reply with `order: "date"`;
+  superseded rows are included unless `includeSuperseded: false`, which is
+  now sent when `order` is set. Sent only when set, so a default call's
+  request is unchanged; another value throws before any request; a server
+  from v0.82.0 that predates it refuses it with `invalid_argument`. Typed as
+  optional `RecallResult.date` / `date_source` and `RecallResponse.order`,
+  absent otherwise. `kagura-memory recall --order relevance|date`, as the
+  Python CLI's, sent only when given and never dropped by the shape-flag
+  retry.
+
 ## [0.20.0] - 2026-11-23
 
 Catches up with memory-cloud 0.162.0 – 0.178.0 (per-context hybrid fusion,
