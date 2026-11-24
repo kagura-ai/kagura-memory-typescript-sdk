@@ -64,7 +64,8 @@ import type {
   RecallResponse,
   // Referenced only from JSDoc {@link} on the recall options.
   RecallResult,
-  // Referenced only from JSDoc {@link} on RecallOptions.order.
+  // RecallDateSource is referenced only from JSDoc {@link} on
+  // RecallOptions.order; RecallOrder is that option's type.
   RecallDateSource,
   RecallOrder,
   RecallVerbosity,
