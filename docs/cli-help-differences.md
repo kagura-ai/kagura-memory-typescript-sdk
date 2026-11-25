@@ -37,7 +37,7 @@ The audit test also checks that no registered command escapes this comparison.
 | `guardrails digest` | option text, metavar, default wording, or switch grouping: `--profile TEXT`. |
 | `ingest` | Python's optional URL/local-file ingest command is not implemented in this SDK; it is absent from the root list. |
 | `list` | option text, metavar, default wording, or switch grouping: `--order-by [updated_at\|created_at\|importance\|observed_at\|event_start]`, `--order-by [updated_at\|created_at\|importance\|observed_at]`. |
-| `recall` | option text, metavar, default wording, or switch grouping: `-k INTEGER`, `--rerank`, `--no-rerank`, `--rerank / --no-rerank`. |
+| `recall` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--order [relevance\|date]` (memory-cloud#3004), `-k INTEGER`, `--rerank`, `--no-rerank`, `--rerank / --no-rerank`. |
 | `remember` | option text, metavar, default wording, or switch grouping: `-t, --type TEXT`, `-i, --importance FLOAT`. |
 | `resource events` | Usage/description wording; option text, metavar, default wording, or switch grouping: `-l, --limit INTEGER RANGE`, `--op [upsert\|delete]`, `-V, --version INTEGER`, `--since TEXT`. |
 | `resource indexer-status` | Usage/description wording. |
@@ -81,6 +81,11 @@ the Python CLI 0.48.0's and 0.49.0's, which the 0.44.0 oracle predates:
 search-config --fusion` and `workspace list`, whose summary also changes the
 `workspace` group's. The audit test lists `workspace list` as newer than the
 oracle and checks its page against the exception fixture.
+
+`recall --order [relevance|date]` (memory-cloud v0.182.0, #3004) is the
+Python CLI's option of the same name, also newer than the oracle; its help
+text, the description sentence about it and the `--order date` example are
+fixed in the exception fixture.
 
 In particular, setup describes the Node integration actually installed:
 Python's hooks, slash commands and Python-process entry forms are not promised.

@@ -572,3 +572,32 @@ describe("refusedShapeArgs / unknownArguments", () => {
     expect(unknownArguments(undefined)).toBeUndefined();
   });
 });
+
+describe("kagura-memory recall --order (memory-cloud v0.182.0, #3004)", () => {
+  it.each([
+    [["--order", "date"], { order: "date" }],
+    [["--order", "relevance"], { order: "relevance" }],
+    [["--order", "date", "--full", "0"], { full: 0, order: "date" }],
+  ])("%j reaches the wire as %j", async (flags, wire) => {
+    const h = harness();
+    expect(await runCli(["recall", "q", ...flags], h.deps)).toBe(0);
+    expect(sentCalls(h.server)).toEqual([{ query: "q", k: 5, context_id: CTX, ...wire }]);
+  });
+
+  it("refuses another value as a usage error, before anything is sent", async () => {
+    const h = harness();
+    expect(await runCli(["recall", "q", "--order", "newest"], h.deps)).toBe(2);
+    expect(sentCalls(h.server)).toEqual([]);
+    expect(h.err.join("\n")).toContain(
+      "Error: Invalid value for '--order': 'newest' is not one of 'relevance', 'date'.",
+    );
+  });
+
+  it("does not retry without --order: an older server's refusal is the error", async () => {
+    const refused = { ...REPLIES.REFUSE_113, unknown_arguments: ["order"] };
+    const h = harness([refused]);
+    expect(await runCli(["recall", "q", "--order", "date", "--full", "0"], h.deps)).toBe(1);
+    expect(sentCalls(h.server)).toHaveLength(1);
+    expect(h.err.join("\n")).not.toContain("note:");
+  });
+});
