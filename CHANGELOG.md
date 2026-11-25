@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-25
+
+Date-ordered recall for memory-cloud 0.182.0, matching the Python SDK
+0.50.0.
+
 ### Added
 
 - `recall({ order })` (memory-cloud v0.182.0 or later, memory-cloud#3004):
@@ -3658,7 +3663,8 @@ Initial release — a TypeScript port of the
 - Dual ESM + CJS builds with bundled `.d.ts`; zero runtime dependencies;
   Node.js >= 18.
 
-[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/kagura-ai/kagura-memory-typescript-sdk/compare/v0.18.1...v0.19.0

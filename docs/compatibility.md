@@ -1,5 +1,49 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.21.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.182.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0; the new surface follows the Python SDK 0.50.0).
+
+### What memory-cloud 0.179.0 – 0.182.0 changed for this SDK
+
+The server source and schema fixtures at `v0.178.0` and `v0.182.0` were
+compared with this SDK
+([#157](https://github.com/kagura-ai/kagura-memory-typescript-sdk/pull/157)).
+The OpenAPI snapshot adds one REST operation (a sync-installation
+publication-text route) and removes none; no schema and no property is
+removed. The MCP tool schema fixture adds `recall`'s `order` and
+`create_context`'s `workspace_id` (0.182.0) and removes nothing. The changes
+this SDK acts on are covered by contract tests with mocked transports; no call
+was made through this SDK to a live server for this release.
+
+Per-surface floor: **0.182.0** `recall({ order })`, `RecallResult.date` /
+`date_source`, `RecallResponse.order` and `recall --order`.
+
+| Server | Change | This SDK |
+|---|---|---|
+| 0.179.0 | BM25 keyword weighting, normalized forms and a synonym file | no reply shape changes |
+| 0.181.0 | resource-indexed memories are persistent and exempt from Sleep; public MCP endpoint text | no reply shape changes; `public_mcp_endpoint_live` on a context is not typed |
+| 0.182.0 | `recall` takes `order`: `relevance` (default) or `date` ([memory-cloud#3004](https://github.com/kagura-ai/memory-cloud/issues/3004)) | `recall({ order })` and `recall --order` (below) |
+| 0.182.0 | a connection's default context binds its workspace; on an unbound connection `list_contexts` lists every member workspace (items carry `workspace: {id, name}`, `skipped_workspaces`, no `limit` / `can_create`), `create_context` takes `workspace_id` and answers `workspace_required` when ambiguous; a call counts in the workspace of the context it names ([memory-cloud#3000](https://github.com/kagura-ai/memory-cloud/issues/3000), [memory-cloud#3001](https://github.com/kagura-ai/memory-cloud/issues/3001), [memory-cloud#3002](https://github.com/kagura-ai/memory-cloud/issues/3002)) | pass through; with no `can_create` the `createContext` pre-check leaves the decision to the server; `workspace_required` is a `KaguraError` |
+
+**Date order (0.182.0).** `recall({ order })` takes `"relevance"` (the
+default, the reply as before) or `"date"` (`RecallOrder`), checked locally
+(another value throws before any request) and sent only when set, so a call
+without it sends what it sent before. With `"date"` the server runs the same
+search and returns the results oldest first; each row carries `date`
+(`YYYY-MM-DD`, UTC) and `date_source` (`RecallDateSource`: `event`, `observed`
+or `created`), ties keep relevance order, and the reply carries `order:
+"date"`; `confidence`, `full` and `maxChars` still follow relevance rank. Date
+order includes superseded rows unless `include_superseded` is `false`, so
+`includeSuperseded: false` is sent when `order` is set. A server from 0.82.0 to
+0.181.x refuses `order` with `invalid_argument`; one before 0.82.0 ignores it.
+`kagura-memory recall --order relevance|date` checks the choice locally (exit
+2), is sent only when given and is never dropped by the shape-flag retry.
+
+**Not wrapped.** `createContext({ workspaceId })` (0.182.0), the
+sync-installation publication-text route and the `/internal` routes.
+`MIN_SERVER_VERSION` stays **0.75.0**.
+
 ## 0.20.0
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.178.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0; the new surfaces follow the Python SDK 0.48.0 and 0.49.0).
