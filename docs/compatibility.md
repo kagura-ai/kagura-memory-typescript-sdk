@@ -1,5 +1,63 @@
 # SDK ↔ memory-cloud Compatibility
 
+## 0.22.0
+
+**Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.184.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0; the new surface follows the Python SDK 0.51.0).
+
+### What memory-cloud 0.183.0 – 0.184.0 changed for this SDK
+
+The server source and schema fixtures at `v0.182.0` and `v0.184.0` were
+compared with this SDK
+([#159](https://github.com/kagura-ai/kagura-memory-typescript-sdk/pull/159)).
+The OpenAPI snapshot adds no REST operation and removes none; it adds one
+schema (`SlotServiceResponse`), `services` on `SlotWorkspaceResponse`,
+`user_facts_lane` on the context search config (response, update and export
+schemas) and `user_facts` on `RecallResponse`, and removes no schema and no
+property. The MCP tool schema fixture adds `update_search_config`'s
+`user_facts_lane` (0.184.0) and removes nothing. In the tool definitions,
+`remember` and `recall` gain reworded descriptions and the `recall` and
+`update_search_config` return lines name `user_facts` and
+`user_facts_lane`. The changes this SDK acts on are covered by contract tests
+with mocked transports; no call was made through this SDK to a live server
+for this release.
+
+Per-surface floor: **0.184.0** `RecallResponse.user_facts`,
+`SearchConfig.user_facts_lane`, `updateSearchConfig({ userFactsLane })` and
+`context search-config --user-facts-lane / --no-user-facts-lane`.
+
+| Server | Change | This SDK |
+|---|---|---|
+| 0.183.0 | `GET /api/v1/me/workspace-slots` (and the selection save) lists each workspace's integration services in force, `workspaces[].services` (`[{name, valid_until}]`) ([memory-cloud#3010](https://github.com/kagura-ai/memory-cloud/issues/3010)); the resource indexer runs a held-back resource at the first tick its limit allows ([memory-cloud#3009](https://github.com/kagura-ai/memory-cloud/issues/3009)) | not wrapped (this SDK does not call the workspace-slots route); no reply shape changes |
+| 0.184.0 | user facts lane: with `user_facts_lane` on in a context's search config, `recall` also returns up to two of the context's `fact` memories not already in `results`, under `user_facts` ([memory-cloud#3014](https://github.com/kagura-ai/memory-cloud/issues/3014)) | `RecallResponse.user_facts`, `SearchConfig.user_facts_lane`, `updateSearchConfig({ userFactsLane })` and the CLI flags (below) |
+| 0.184.0 | `remember` says to store each thing a user states about themselves as its own `fact` memory; `recall` says what `order='date'` returns ([memory-cloud#3013](https://github.com/kagura-ai/memory-cloud/issues/3013), [memory-cloud#3015](https://github.com/kagura-ai/memory-cloud/issues/3015)) | pass through: tool descriptions only, no argument or reply shape changes |
+
+**User facts lane (0.184.0).** `RecallResponse.user_facts` carries the
+lane's rows: `RecallResult` rows with their dates, kept apart from `results`
+(never merged, not counted in `count`), with `content` under the rule `full`
+sets for `results` (dropped from them too when the reply would not otherwise
+fit `maxChars`). The key is present, possibly empty, when the lane ran, and
+absent, never `null`, when it did not: the lane is off, the call filters by
+`type`, uses `order: "date"` or `contextIds`, the reply is `degraded`, the
+lane failed on the server, or the server predates it. `SearchConfig` gains
+`user_facts_lane` (`updateSearchConfig`'s `config`, `getContextInfo`'s
+`search_config`), left out of the model dump when the server does not send
+it. `updateSearchConfig({ userFactsLane })` sets it, sent only when set
+(`false` turns the lane off), so a call without it sends what it sent
+before; a server from 0.82.0 to 0.183.x refuses the argument with
+`invalid_argument`, one before 0.82.0 ignores it. `kagura-memory context
+search-config --user-facts-lane / --no-user-facts-lane` sets it (giving both
+is a usage error, exit 2; without either nothing is sent), and
+`kagura-memory recall` prints `user_facts`, when the server sends it, after
+`results`.
+
+**Passed through with no SDK change.** The reworded `remember` and `recall`
+tool descriptions (0.184.0) and the indexer timing fix (0.183.0): no
+argument and no reply shape changes.
+
+**Not wrapped.** The workspace-slots route and its `services` field
+(0.183.0), the context export's `user_facts_lane`, and the `/internal`
+routes. `MIN_SERVER_VERSION` stays **0.75.0**.
+
 ## 0.21.0
 
 **Min memory-cloud:** 0.75.0 — checked against memory-cloud up to **0.182.0** (parity target: the Python SDK and CLI 0.44.0, checked up to 0.142.0; the new surface follows the Python SDK 0.50.0).
