@@ -1025,6 +1025,18 @@ export interface UpdateSearchConfigOptions {
    * stores no fusion. `config.fusion_effective` says what recall now uses.
    */
   fusion?: string;
+  /**
+   * The user facts lane (memory-cloud v0.184.0+, #3014; off by default):
+   * with it on, a recall of this context also runs one fixed search over
+   * its `fact` memories about the user (health and physical limits,
+   * circumstances, constraints, needs) and returns up to two not already in
+   * `results` under {@link RecallResponse.user_facts}. Skipped when the
+   * recall filters by `type`, uses `order: "date"` or `contextIds`. Same
+   * role as the other search settings. Sent only when set — `false` turns
+   * it off; a server from v0.82.0 that predates it refuses it with
+   * `invalid_argument`.
+   */
+  userFactsLane?: boolean;
 }
 
 export interface RecordMeasurementOptions {
@@ -4906,8 +4918,9 @@ export class KaguraClient {
 
   /**
    * Update a context's search configuration: hybrid weights, reranker,
-   * reinforce re-rank, query routing, content chunks (v0.110.0+) and the
-   * recall LLM selector (v0.115.0+). Weights must sum to 1.0 (±0.01). The
+   * reinforce re-rank, query routing, content chunks (v0.110.0+), the
+   * recall LLM selector (v0.115.0+), fusion (v0.178.0+) and the user facts
+   * lane (v0.184.0+). Weights must sum to 1.0 (±0.01). The
    * weights, `fetchFactor` and the reranker settings need context editor or
    * above; `contentChunksEnabled` and `llmSelectorEnabled` need the context
    * owner or a workspace owner/admin. Omitted fields keep their current
@@ -4975,6 +4988,9 @@ export class KaguraClient {
     }
     if (isSet(options.fusion)) {
       args.fusion = options.fusion;
+    }
+    if (isSet(options.userFactsLane)) {
+      args.user_facts_lane = options.userFactsLane;
     }
     const result = await this.callToolChecked("update_search_config", args);
     return result as ToolResult & { config: SearchConfig };

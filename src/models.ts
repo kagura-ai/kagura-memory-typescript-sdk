@@ -197,8 +197,9 @@ export interface UsageInfo {
  * v0.142.0 `getContextInfo` sends `llm_selector_enabled` /
  * `llm_selector_effective` only; `updateSearchConfig` returns both
  * `*_enabled` / `*_effective` pairs in its `config`. From memory-cloud
- * v0.178.0 (#2980) both replies also carry `fusion` and `fusion_effective`
- * (absent from an older server).
+ * v0.178.0 (#2980) both replies also carry `fusion` and `fusion_effective`,
+ * and from v0.184.0 (#3014) `user_facts_lane` (each absent from an older
+ * server).
  */
 export interface SearchConfig {
   /** @default 0.6 */
@@ -287,6 +288,14 @@ export interface SearchConfig {
    * setting back: echoing a resolved value would pin it and drop `auto`.
    */
   fusion_effective?: string | null;
+  /**
+   * The user facts lane switch (memory-cloud v0.184.0+, #3014; `false` by
+   * default): with it on, a recall of this context also returns up to two
+   * `fact` memories about the user under {@link RecallResponse.user_facts}.
+   * Absent from an older server. Sent by `updateSearchConfig`'s `config`
+   * and `getContextInfo`'s `search_config`.
+   */
+  user_facts_lane?: boolean | null;
 }
 
 /** Context metadata returned by `get_context_info`. */
@@ -1543,6 +1552,20 @@ export interface RecallResponse {
    * #3004); absent otherwise.
    */
   order?: "date";
+  /**
+   * The context's user facts lane (memory-cloud v0.184.0+, #3014): up to
+   * two `fact` memories about the user that matter for an answer but rank
+   * low for the question, in the {@link RecallResult} shape (with their
+   * dates; `content` under the rule `full` sets for `results`, though the
+   * server drops it from these rows too when the reply would not otherwise
+   * fit `maxChars`, which `full_applied` does not report). Never also in
+   * `results`, and not counted in `count`. Present — possibly empty — when
+   * the lane ran; absent (never `null`) when it did not: the context's
+   * `user_facts_lane` is off, the call filters by `type`, uses
+   * `order: "date"` or `contextIds`, the reply is `degraded`, the lane
+   * failed, or the server predates it.
+   */
+  user_facts?: RecallResult[];
   /** The LLM selector's report (v0.115.0+). */
   selector?: RecallSelector;
   /** Rows that kept their content after `maxChars` took some (v0.114.0+). */

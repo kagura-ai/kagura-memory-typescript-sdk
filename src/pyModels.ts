@@ -979,6 +979,8 @@ export const SEARCH_CONFIG: Model = {
     // left out when absent, so an older server's reply dumps as before.
     whenSent("fusion", nullable("str")),
     whenSent("fusion_effective", nullable("str")),
+    // memory-cloud v0.184.0 (#3014); left out when absent, as the fusion pair.
+    whenSent("user_facts_lane", nullable("bool")),
   ],
 };
 
