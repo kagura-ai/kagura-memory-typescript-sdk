@@ -360,7 +360,9 @@ describe("CLI", () => {
     expect(help).toContain("--no-user-facts-lane");
   });
 
-  it("recall prints user_facts as the server sent it, after results", async () => {
+  // A pass-through check: the CLI prints the reply unchanged, so the key
+  // order below is the fixture's (which mirrors the server's envelope).
+  it("recall prints the reply unchanged, user_facts included", async () => {
     const h = harness();
     h.server.toolResults.recall = LANE_REPLY;
     expect(await runCli(["recall", "carry bags upstairs"], h.deps)).toBe(0);

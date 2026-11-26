@@ -1556,12 +1556,14 @@ export interface RecallResponse {
    * The context's user facts lane (memory-cloud v0.184.0+, #3014): up to
    * two `fact` memories about the user that matter for an answer but rank
    * low for the question, in the {@link RecallResult} shape (with their
-   * dates; `content` under the rule `full` sets for `results`). Never also
-   * in `results`, and not counted in `count`. Present — possibly empty —
-   * when the lane ran; absent (never `null`) when it did not: the
-   * context's `user_facts_lane` is off, the call filters by `type`, uses
-   * `order: "date"` or `contextIds`, the reply is `degraded`, or the server
-   * predates it.
+   * dates; `content` under the rule `full` sets for `results`, though the
+   * server drops it from these rows too when the reply would not otherwise
+   * fit `maxChars`, which `full_applied` does not report). Never also in
+   * `results`, and not counted in `count`. Present — possibly empty — when
+   * the lane ran; absent (never `null`) when it did not: the context's
+   * `user_facts_lane` is off, the call filters by `type`, uses
+   * `order: "date"` or `contextIds`, the reply is `degraded`, the lane
+   * failed, or the server predates it.
    */
   user_facts?: RecallResult[];
   /** The LLM selector's report (v0.115.0+). */

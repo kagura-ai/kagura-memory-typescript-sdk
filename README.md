@@ -1740,11 +1740,13 @@ facts lane, which its owner or an editor turns on with
 memories about the user (health and physical limits, circumstances,
 constraints, needs) that matter for an answer but rank low for the question.
 They are `RecallResult` rows with their dates, carry `content` under the
-rule `full` sets for `results`, are never also in `results` and are not
-counted in `count`. The key is present (possibly empty) when the lane ran
-and absent, never `null`, when it did not: the lane is off, the call filters
-by `type`, uses `order: "date"` or `contextIds`, the reply is `degraded`, or
-the server predates it.
+rule `full` sets for `results` (the server drops it from them too when the
+reply would not otherwise fit `maxChars`; `full_applied` counts `results`
+only), are never also in `results` and are not counted in `count`. The key
+is present (possibly empty) when the lane ran and absent, never `null`, when
+it did not: the lane is off, the call filters by `type`, uses
+`order: "date"` or `contextIds`, the reply is `degraded`, the lane failed,
+or the server predates it.
 
 ```ts
 const reply = await client.recall({ contextId, query: "how do I carry these bags upstairs" });

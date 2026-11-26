@@ -11,8 +11,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The user facts lane (memory-cloud v0.184.0 or later, memory-cloud#3014).
   `RecallResponse.user_facts`: the context's lane rows, `RecallResult`
   rows kept apart from `results` (never merged, not counted in `count`),
-  with `content` under the rule `full` sets for `results`; present
-  (possibly empty) when the lane ran, absent otherwise. `SearchConfig` gains
+  with `content` under the rule `full` sets for `results` (dropped from
+  them too when the reply would not otherwise fit `maxChars`); present
+  (possibly empty) when the lane ran, absent otherwise (also when the lane
+  failed on the server). `SearchConfig` gains
   `user_facts_lane` (`updateSearchConfig`'s `config`, `getContextInfo`'s
   `search_config`; left out of the model dump when the server does not send
   it), and `updateSearchConfig({ userFactsLane })` sets it, sent only when
