@@ -350,6 +350,7 @@ const searchConfig: Command = {
       "context search-config CTX_UUID --content-chunks",
       "context search-config CTX_UUID --no-llm-selector",
       "context search-config CTX_UUID --fusion rrf",
+      "context search-config CTX_UUID --user-facts-lane",
     ),
   spec: {
     flags: [
@@ -382,6 +383,14 @@ const searchConfig: Command = {
       },
       { name: "no-llm-selector", type: "switch", help: "Turn the recall LLM selector off" },
       FUSION,
+      {
+        name: "user-facts-lane",
+        type: "switch",
+        help:
+          "Let recall also return up to two 'fact' memories about the user under " +
+          "user_facts (server v0.184.0+)",
+      },
+      { name: "no-user-facts-lane", type: "switch", help: "Turn the user facts lane off" },
     ],
   },
   run: async (deps, args) => {
@@ -412,6 +421,12 @@ const searchConfig: Command = {
       ["--llm-selector", "--no-llm-selector"],
     );
 
+    const userFactsLane = pairedFlag(
+      args.flags.has("user-facts-lane"),
+      args.flags.has("no-user-facts-lane"),
+      ["--user-facts-lane", "--no-user-facts-lane"],
+    );
+
     const rawFusion = args.values.fusion;
     const fusion = rawFusion === undefined ? undefined : parseChoice(FUSION, rawFusion, FUSION_CHOICES);
 
@@ -425,6 +440,7 @@ const searchConfig: Command = {
       ...(contentChunksEnabled !== undefined ? { contentChunksEnabled } : {}),
       ...(llmSelectorEnabled !== undefined ? { llmSelectorEnabled } : {}),
       ...(fusion !== undefined ? { fusion } : {}),
+      ...(userFactsLane !== undefined ? { userFactsLane } : {}),
     };
     if (Object.keys(patch).length === 0) {
       throw new CliError("At least one option is required");

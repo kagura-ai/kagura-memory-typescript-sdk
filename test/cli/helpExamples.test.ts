@@ -89,6 +89,8 @@ const PYTHON_EXAMPLES: ReadonlyArray<readonly [string, readonly string[]]> = [
     "    kagura-memory context search-config CTX_UUID --no-llm-selector",
     // Added in the Python CLI 0.49.0 (python-sdk#350, #154 here).
     "    kagura-memory context search-config CTX_UUID --fusion rrf",
+    // The user facts lane switch (memory-cloud v0.184.0, #3014).
+    "    kagura-memory context search-config CTX_UUID --user-facts-lane",
   ]],
   ["context update", [
     "  Examples:",

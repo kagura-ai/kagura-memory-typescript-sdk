@@ -26,7 +26,7 @@ The audit test also checks that no registered command escapes this comparison.
 | `auth status` | Usage/description wording. |
 | `auth token` | Usage/description wording. |
 | `context list` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--workspace-id TEXT` (#154). |
-| `context search-config` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--fusion [auto\|rrf\|weighted]` (#154), `--rerank`, `--no-rerank`, `--content-chunks`, `--no-content-chunks`, `--llm-selector`, `--no-llm-selector`, `--rerank / --no-rerank`, `--content-chunks / --no-content-chunks`, `--llm-selector / --no-llm-selector`. |
+| `context search-config` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--fusion [auto\|rrf\|weighted]` (#154), `--user-facts-lane`, `--no-user-facts-lane` (memory-cloud#3014), `--rerank`, `--no-rerank`, `--content-chunks`, `--no-content-chunks`, `--llm-selector`, `--no-llm-selector`, `--rerank / --no-rerank`, `--content-chunks / --no-content-chunks`, `--llm-selector / --no-llm-selector`. |
 | `context update` | option text, metavar, default wording, or switch grouping: `--lock`, `--unlock`, `--lock / --unlock`. |
 | `edge create` | Usage/description wording; option text, metavar, default wording, or switch grouping: `--type TEXT`, `--weight FLOAT`, `--confidence FLOAT`. |
 | `edge list` | option text, metavar, default wording, or switch grouping: `--min-weight FLOAT`. |
@@ -81,6 +81,11 @@ the Python CLI 0.48.0's and 0.49.0's, which the 0.44.0 oracle predates:
 search-config --fusion` and `workspace list`, whose summary also changes the
 `workspace` group's. The audit test lists `workspace list` as newer than the
 oracle and checks its page against the exception fixture.
+
+`context search-config --user-facts-lane / --no-user-facts-lane`
+(memory-cloud v0.184.0, #3014) turn the context's user facts lane on or off,
+also newer than the oracle; their help text and the `--user-facts-lane`
+example are fixed in the exception fixture.
 
 `recall --order [relevance|date]` (memory-cloud v0.182.0, #3004) is the
 Python CLI's option of the same name, also newer than the oracle; its help
